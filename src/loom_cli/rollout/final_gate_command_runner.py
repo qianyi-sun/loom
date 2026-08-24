@@ -22,7 +22,10 @@ _TIMEOUTS = {
     "final.protected-apply": 3600,
     "final.convergence": 1200,
     "final.drift": 300,
-    "final.smoke": 900,
+    # The smoke executor owns a 900s terminal wait and each bounded HTTP call
+    # may consume another 30s. Preserve enough outer-process time to emit its
+    # normalized timeout evidence and close cleanly after the inner deadline.
+    "final.smoke": 1200,
     "final.browser": 900,
     "final.summary": 300,
 }
