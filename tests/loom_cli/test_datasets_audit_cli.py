@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -519,3 +520,76 @@ async def test_bundle_audit_classifies_fail_closed_verification_errors(
         "download_error",
         "invalid_checksum",
     ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_audit_bounds_parallel_prefix_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeResult:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
+            checksum = "16a403788376dab79be41cca07d9f2135b2cb9e0834235b38e394731e6418f84"
+            return [
+                (
+                    f"bench/task-{index}",
+                    checksum,
+                    f"s3://bucket/task-{index}/",
+                    "bench",
+                    None,
+                )
+                for index in range(17)
+            ]
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> FakeResult:
+            return FakeResult()
+
+    class TrackingObjectStore:
+        active = 0
+        max_active = 0
+
+        async def download_prefix(
+            self,
+            *,
+            bucket: str,
+            prefix: str,
+            out_dir: Path,
+        ) -> int:
+            assert bucket == "bucket"
+            assert prefix.startswith("task-")
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "task.toml").write_bytes(b"task\n")
+                return 1
+            finally:
+                self.active -= 1
+
+    monkeypatch.setattr(benchmark_readiness, "create_async_engine", lambda _url: FakeEngine())
+    monkeypatch.setattr(
+        benchmark_readiness,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    store = TrackingObjectStore()
+
+    report = await benchmark_readiness.run_bundle_presence_audit(
+        db_url="postgresql://x/y",
+        object_store=store,
+    )
+
+    assert report.verified == 17
+    assert report.failed == 0
+    assert 1 < store.max_active <= 8
