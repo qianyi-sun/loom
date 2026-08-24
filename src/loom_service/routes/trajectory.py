@@ -50,6 +50,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 
 from loom.db.schema import Trial, TrialEvent
+from loom.trajectory.object_identity import resolve_trajectory_object_key
 from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
 from loom_listen.self_test import notify_round_trip
 from loom_service.auth_guards import (
@@ -85,8 +86,24 @@ _DEFAULT_SSE_POLL_INTERVAL_SEC = 1.5
 _DEFAULT_SSE_MAX_CONNECTION_SEC = 600.0
 
 
-def _key(team_id: UUID, trial_id: UUID) -> str:
-    return f"{team_id}/{trial_id}/events.jsonl"
+def _key(trial: Trial, *, expected_bucket: str) -> str:
+    index = trial.trajectory_index if isinstance(trial.trajectory_index, dict) else {}
+    try:
+        return resolve_trajectory_object_key(
+            uri=index.get("trajectory_uri"),
+            expected_bucket=expected_bucket,
+            team_id=trial.team_id,
+            trial_id=trial.id,
+            filename="events.jsonl",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "trajectory_object_identity_invalid",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 async def _load_trial(session: Any, trial_id: UUID, ctx: Any) -> Trial:
@@ -213,7 +230,7 @@ async def list_events(
     try:
         obj = client.get_object(
             Bucket=settings.trajectories_bucket,
-            Key=_key(trial.team_id, trial.id),
+            Key=_key(trial, expected_bucket=settings.trajectories_bucket),
         )
     except ClientError as exc:
         # A missing object means the trial hasn't written a first event
@@ -273,7 +290,7 @@ async def download_trajectory(
         return stream_object_response(
             client=request.app.state.minio_client,
             bucket=settings.trajectories_bucket,
-            key=_key(trial.team_id, trial.id),
+            key=_key(trial, expected_bucket=settings.trajectories_bucket),
             filename=f"{trial.id}-events.jsonl",
             artifact_kind="trajectory",
             media_type="application/x-ndjson",
@@ -334,7 +351,7 @@ async def _read_events_with_minio_fallback(
             _read_events_after_seq,
             minio_client,
             bucket=bucket,
-            key=_key(trial.team_id, trial.id),
+            key=_key(trial, expected_bucket=bucket),
             after_seq=after_seq, limit=limit,
         )
         if legacy:

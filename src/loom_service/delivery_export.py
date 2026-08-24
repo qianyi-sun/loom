@@ -27,6 +27,10 @@ from loom.data_lifecycle_registry import (
 )
 from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial, TrialResourceUsage
 from loom.resource_usage_store import resource_usage_response, row_to_report
+from loom.trajectory.object_identity import (
+    TrajectoryObjectFilename,
+    resolve_trajectory_object_key,
+)
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
     parse_trajectory_events,
@@ -224,15 +228,31 @@ def _object_ref_for_trial(
 ) -> ObjectRef:
     index = trial.trajectory_index if isinstance(trial.trajectory_index, dict) else {}
     uri_key = "trajectory_uri" if kind == "trajectory" else "atif_uri"
-    parsed = None
-    raw_uri = index.get(uri_key)
-    if isinstance(raw_uri, str):
-        parsed = _parse_s3_uri(raw_uri)
-    if parsed is None:
-        filename = "events.jsonl" if kind == "trajectory" else "atif.json"
-        parsed = (trajectories_bucket, f"{trial.team_id}/{trial.id}/{filename}")
-    bucket, key = parsed
-    return ObjectRef(kind=kind, trial_id=trial.id, bucket=bucket, key=key)
+    filename: TrajectoryObjectFilename = (
+        "events.jsonl" if kind == "trajectory" else "atif.json"
+    )
+    try:
+        key = resolve_trajectory_object_key(
+            uri=index.get(uri_key),
+            expected_bucket=trajectories_bucket,
+            team_id=trial.team_id,
+            trial_id=trial.id,
+            filename=filename,
+        )
+    except ValueError as exc:
+        raise InvalidDeliveryBatchFamilyError(
+            {
+                "message": str(exc),
+                "trial_id": str(trial.id),
+                "object_kind": kind,
+            }
+        ) from exc
+    return ObjectRef(
+        kind=kind,
+        trial_id=trial.id,
+        bucket=trajectories_bucket,
+        key=key,
+    )
 
 
 def _model_info(batch: Batch) -> tuple[str | None, str | None]:

@@ -114,6 +114,85 @@ async def test_trajectory_download_proxies_object_through_service(
     assert b'"kind": "trial_start"' in r.content
 
 
+async def test_trajectory_download_uses_attempt_scoped_persisted_uri(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_id = traj_setup
+    key = f"{team_id}/{trial_id}/attempts/2/events.jsonl"
+    attempt_body = (
+        json.dumps({
+            "kind": "trial_end",
+            "trial_id": str(trial_id),
+            "seq": 0,
+            "marker": "attempt-two",
+        }) + "\n"
+    ).encode()
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.trajectories_bucket,
+        Key=key,
+        Body=attempt_body,
+    )
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://{app.state.settings.trajectories_bucket}/{key}"
+                ),
+            })
+        )
+    engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        response = await ac.get(
+            f"/api/v1/trials/{trial_id}/trajectory/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.content == attempt_body
+
+
+async def test_trajectory_download_rejects_cross_bucket_persisted_uri(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_id = traj_setup
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://foreign/{team_id}/{trial_id}/attempts/2/events.jsonl"
+                ),
+            })
+        )
+    engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        response = await ac.get(
+            f"/api/v1/trials/{trial_id}/trajectory/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 409
+
+
 async def test_trajectory_download_falls_back_to_postgres_events(
     traj_setup: tuple[FastAPI, str, UUID, UUID],
     postgres_url: str,
@@ -663,6 +742,47 @@ async def test_events_falls_back_to_minio_for_legacy_trial(
     # MinIO seed: 5 events with seqs 0..4.
     assert [e["seq"] for e in body["events"]] == [0, 1, 2, 3, 4]
     assert body["next_after_seq"] == 4
+
+
+async def test_events_minio_fallback_uses_attempt_scoped_persisted_uri(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_id = traj_setup
+    key = f"{team_id}/{trial_id}/attempts/3/events.jsonl"
+    event = {
+        "kind": "trial_end",
+        "trial_id": str(trial_id),
+        "seq": 9,
+        "marker": "attempt-three",
+    }
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.trajectories_bucket,
+        Key=key,
+        Body=(json.dumps(event) + "\n").encode(),
+    )
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://{app.state.settings.trajectories_bucket}/{key}"
+                ),
+            })
+        )
+    engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.get(
+            f"/api/v1/trials/{trial_id}/events",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["events"] == [event]
 
 
 async def test_stream_serves_postgres_events_for_terminal_trial(

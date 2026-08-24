@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import FastAPI
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import LlmCall, Task, Trial
@@ -32,6 +32,44 @@ async def test_atif_download_proxies_object_through_service(
     assert r.status_code == 200
     assert "location" not in r.headers
     assert r.json()["trial_id"] == "x"
+
+
+async def test_atif_download_uses_attempt_scoped_persisted_uri(
+    traj_setup: tuple[FastAPI, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_id = traj_setup
+    key = f"{team_id}/{trial_id}/attempts/2/atif.json"
+    attempt_body = b'{"version":"1.7","marker":"attempt-two"}'
+    app.state.minio_client.put_object(
+        Bucket=app.state.settings.trajectories_bucket,
+        Key=key,
+        Body=attempt_body,
+    )
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "atif_uri": f"s3://{app.state.settings.trajectories_bucket}/{key}",
+            })
+        )
+    engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+        follow_redirects=False,
+    ) as ac:
+        response = await ac.get(
+            f"/api/v1/trials/{trial_id}/atif",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.content == attempt_body
 
 
 async def test_atif_unknown_trial_404(
