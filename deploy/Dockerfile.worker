@@ -14,6 +14,7 @@ COPY packages ./packages
 # in the same layer removes Git's unused Perl runtime from the final image.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends git && \
+    pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     pip install --no-cache-dir -e ./packages/loom-benchmarks && \

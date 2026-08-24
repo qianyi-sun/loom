@@ -17,9 +17,27 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.benchmark_readiness import (
+    BUNDLE_VERIFICATION_KIND,
+    BUNDLE_VERIFICATION_SCHEMA_VERSION,
+)
 from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
+_BUNDLE_VERIFICATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "verification_kind",
+        "s3_tasks",
+        "verified",
+        "failed",
+        "checksum_mismatches",
+        "verification_errors",
+        "failures",
+        "missing",
+        "missing_sources",
+    }
+)
 
 _REMOTE_WORKER_ENV_SCRIPT = r"""
 import json
@@ -79,13 +97,11 @@ class KubernetesServiceTarget:
     container: str = "loom-service"
 
 
-def _int(value: Any) -> int:
-    if isinstance(value, bool) or value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+def _required_counter(values: Mapping[str, Any], key: str, *, label: str) -> int:
+    value = values.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise HfBoundaryEvidenceError(f"{label} counter {key!r} must be a nonnegative integer")
+    return value
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -197,15 +213,102 @@ def compose_boundary_evidence(
     """
 
     audit_item = _audit_item(audit_report, benchmark_id)
+    bundle_verification = _mapping(audit_report.get("bundle_presence"))
+    if set(bundle_verification) != _BUNDLE_VERIFICATION_KEYS:
+        raise HfBoundaryEvidenceError(
+            "audit does not use the required full-bundle verification contract",
+        )
+    bundle_tasks = bundle_verification.get("s3_tasks")
+    bundle_verified = bundle_verification.get("verified")
+    bundle_failed = bundle_verification.get("failed")
+    bundle_checksum_mismatches = bundle_verification.get("checksum_mismatches")
+    bundle_verification_errors = bundle_verification.get("verification_errors")
+    bundle_missing = bundle_verification.get("missing")
+    if (
+        bundle_verification.get("schema_version") != BUNDLE_VERIFICATION_SCHEMA_VERSION
+        or bundle_verification.get("verification_kind") != BUNDLE_VERIFICATION_KIND
+    ):
+        raise HfBoundaryEvidenceError(
+            "audit does not use the required full-bundle verification contract",
+        )
+    if (
+        isinstance(bundle_tasks, bool)
+        or not isinstance(bundle_tasks, int)
+        or isinstance(bundle_verified, bool)
+        or not isinstance(bundle_verified, int)
+        or isinstance(bundle_failed, bool)
+        or not isinstance(bundle_failed, int)
+        or isinstance(bundle_checksum_mismatches, bool)
+        or not isinstance(bundle_checksum_mismatches, int)
+        or isinstance(bundle_verification_errors, bool)
+        or not isinstance(bundle_verification_errors, int)
+        or isinstance(bundle_missing, bool)
+        or not isinstance(bundle_missing, int)
+        or bundle_tasks <= 0
+        or bundle_verified != bundle_tasks
+        or bundle_failed != 0
+        or bundle_checksum_mismatches != 0
+        or bundle_verification_errors != 0
+        or bundle_verification.get("failures") != []
+        or bundle_missing != 0
+        or bundle_verification.get("missing_sources") != []
+    ):
+        raise HfBoundaryEvidenceError(
+            "audit bundle verification is incomplete or contains failures",
+        )
     source_counts = _mapping(source_summary.get("source_counts"))
     sample_task = _mapping(source_summary.get("sample_task"))
     tags = _mapping(sample_task.get("tags"))
     config = _mapping(sample_task.get("config"))
     task_environment = _mapping(config.get("environment"))
     worker_summary = _mapping(worker_boundary.get("summary"))
+    raw_tasks = _required_counter(audit_item, "raw_task_count", label="audit")
+    valid_tasks = _required_counter(audit_item, "valid_task_config_count", label="audit")
+    total_sources = _required_counter(
+        source_counts,
+        "total_task_sources",
+        label="source summary",
+    )
+    internal_sources = _required_counter(
+        source_counts,
+        "internal_s3_sources",
+        label="source summary",
+    )
+    non_internal_count = _required_counter(
+        source_counts,
+        "non_internal_sources",
+        label="source summary",
+    )
+    artifact_contract_classified_tasks = _required_counter(
+        source_counts,
+        "artifact_contract_classified_tasks",
+        label="source summary",
+    )
+    apd5_required_artifact_contract_tasks = _required_counter(
+        source_counts,
+        "apd5_required_artifact_contract_tasks",
+        label="source summary",
+    )
+    non_internal_rows = source_summary.get("non_internal_sources")
+    if not isinstance(non_internal_rows, list):
+        raise HfBoundaryEvidenceError("source summary non_internal_sources must be a list")
     non_internal = _non_internal_sources(source_summary)
-    total_sources = _int(source_counts.get("total_task_sources"))
-    internal_sources = _int(source_counts.get("internal_s3_sources"))
+    if (
+        raw_tasks <= 0
+        or not (
+            raw_tasks
+            == valid_tasks
+            == total_sources
+            == internal_sources
+            == bundle_tasks
+            == bundle_verified
+        )
+        or non_internal_count != 0
+        or non_internal
+    ):
+        raise HfBoundaryEvidenceError(
+            "full-bundle count binding is incomplete or inconsistent",
+        )
     worker_hf_token_present = bool(
         worker_summary.get("env_file_hf_token_present_hosts")
         or worker_summary.get("hosts_with_container_hf_token_present")
@@ -216,24 +319,22 @@ def compose_boundary_evidence(
         raise HfBoundaryEvidenceError(
             "sample task tags must include hf_repo_id and hf_revision",
         )
-    valid_task_config_count = audit_item.get("valid_task_config_count")
-    runnable_tasks = _int(
-        audit_item.get("raw_task_count")
-        if valid_task_config_count is None
-        else valid_task_config_count
-    )
-
     return {
         "schema_version": 1,
         "environment": environment,
         "benchmark_id": benchmark_id,
+        "bundle_verification": {
+            "schema_version": BUNDLE_VERIFICATION_SCHEMA_VERSION,
+            "verification_kind": BUNDLE_VERIFICATION_KIND,
+            "s3_tasks": bundle_tasks,
+            "verified": bundle_verified,
+            "failed": bundle_failed,
+        },
         "catalog": {
-            "runnable_tasks": runnable_tasks,
-            "artifact_contract_classified_tasks": _int(
-                source_counts.get("artifact_contract_classified_tasks"),
-            ),
-            "apd5_required_artifact_contract_tasks": _int(
-                source_counts.get("apd5_required_artifact_contract_tasks"),
+            "runnable_tasks": valid_tasks,
+            "artifact_contract_classified_tasks": artifact_contract_classified_tasks,
+            "apd5_required_artifact_contract_tasks": (
+                apd5_required_artifact_contract_tasks
             ),
             "requires_caps": {
                 "cpu_arch": str(task_environment.get("cpu_arch") or ""),
@@ -827,12 +928,7 @@ def _load_or_collect_audit(
             if not isinstance(data, dict):
                 raise HfBoundaryEvidenceError("audit renderer returned non-object JSON")
             if bundle is not None:
-                data["bundle_presence"] = {
-                    "s3_tasks": bundle.s3_tasks,
-                    "verified": bundle.verified,
-                    "missing": bundle.missing,
-                    "missing_sources": bundle.missing_sources,
-                }
+                data["bundle_presence"] = bundle.to_dict()
             return data
 
         return asyncio.run(_run())

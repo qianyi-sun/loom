@@ -13,6 +13,7 @@ COPY src/loom_capacity_guard ./src/loom_capacity_guard
 COPY src/loom_capacity_manager ./src/loom_capacity_manager
 COPY src/loom_capacity_pool_controller ./src/loom_capacity_pool_controller
 COPY src/loom_capacity_pool_executor ./src/loom_capacity_pool_executor
+COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY scripts/ops/capacity_executor_release.py /release-tools/capacity_executor_release.py
 COPY scripts/ops/capacity_executor_release.py /release-inputs/installer/capacity_executor_release.py
 COPY scripts/ops/install_capacity_executor.py /release-inputs/installer/install_capacity_executor.py
@@ -56,7 +57,8 @@ with tarfile.open(archive, "r:gz") as bundle:
 pathlib.Path("/usr/local/bin/uv").chmod(0o555)
 PY
 
-RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+RUN uv export --frozen --no-dev --no-emit-project --no-emit-workspace \
+      --format requirements-txt \
       --output-file /release-inputs/requirements.lock && \
     python -m pip download --only-binary=:all: --require-hashes \
       --dest /release-inputs/wheelhouse \
@@ -70,6 +72,29 @@ RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
     python -m pip install --no-index --no-deps \
       /tmp/build-requirements/setuptools-79.0.1-py3-none-any.whl && \
     python -m pip wheel --no-build-isolation --no-deps \
+      --wheel-dir /release-inputs/wheelhouse \
+      ./packages/loom-bundle-checksum
+
+RUN python - <<'PY'
+import hashlib
+from pathlib import Path
+import tomllib
+
+package_root = Path("packages/loom-bundle-checksum")
+version = tomllib.loads((package_root / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
+wheelhouse = Path("/release-inputs/wheelhouse")
+wheels = sorted(wheelhouse.glob("loom_bundle_checksum-*.whl"))
+if len(wheels) != 1:
+    raise SystemExit("expected exactly one loom-bundle-checksum wheel")
+digest = hashlib.sha256(wheels[0].read_bytes()).hexdigest()
+lock_path = Path("/release-inputs/requirements.lock")
+with lock_path.open("a", encoding="utf-8") as lock_file:
+    lock_file.write(f"loom-bundle-checksum=={version} --hash=sha256:{digest}\n")
+PY
+
+RUN python -m pip wheel --no-build-isolation --no-deps \
       --wheel-dir /release-inputs/wheelhouse .
 
 RUN install -d -m 0555 /opt/loom-capacity-executor-release/payload && \

@@ -297,7 +297,7 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "Also verify internal s3:// task bundle prefixes in object storage "
-            "by reading each mirrored task.toml."
+            "by downloading each complete bundle and comparing its canonical checksum."
         ),
     )
     p.add_argument(
@@ -1280,25 +1280,24 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     if args.as_json:
         payload = json.loads(render_readiness_json(items))
         if bundle_report is not None:
-            payload["bundle_presence"] = {
-                "s3_tasks": bundle_report.s3_tasks,
-                "verified": bundle_report.verified,
-                "missing": bundle_report.missing,
-                "missing_sources": bundle_report.missing_sources,
-            }
+            payload["bundle_presence"] = bundle_report.to_dict()
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(render_readiness_table(items))
         if bundle_report is not None:
             print(
-                "bundle_presence "
+                "bundle_verification "
                 f"s3_tasks={bundle_report.s3_tasks} "
                 f"verified={bundle_report.verified} "
-                f"missing={bundle_report.missing}",
+                f"failed={bundle_report.failed} "
+                f"checksum_mismatches={bundle_report.checksum_mismatches} "
+                f"verification_errors={bundle_report.verification_errors}",
             )
-            for source in bundle_report.missing_sources[:10]:
-                print(f"  missing {source}")
-    if bundle_report is not None and bundle_report.missing > 0:
+            for failure in bundle_report.failures[:10]:
+                print(f"  {failure.reason} {failure.task_id} source={failure.source}")
+            if bundle_report.failed > 10:
+                print(f"  ... {bundle_report.failed - 10} additional failures omitted")
+    if bundle_report is not None and bundle_report.failed > 0:
         return 1
     return 0
 

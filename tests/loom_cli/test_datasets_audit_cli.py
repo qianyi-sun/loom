@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,11 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom_cli.benchmark_readiness import (
+        BundlePresenceReport,
+        BundleVerificationFailure,
+    )
+
     stores: list[dict[str, object]] = []
 
     class FakeObjectStore:
@@ -238,20 +244,21 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     async def fake_run_audit(**_kwargs: Any) -> list[BenchmarkReadinessItem]:
         return [_item()]
 
-    async def fake_bundle_audit(**kwargs: Any) -> Any:
+    async def fake_bundle_audit(**kwargs: Any) -> BundlePresenceReport:
         assert kwargs["benchmark"] is None
         assert kwargs["db_url"] == "postgresql://x/y"
         assert kwargs["object_store"] is not None
-        return type(
-            "BundlePresenceReport",
-            (),
-            {
-                "s3_tasks": 2,
-                "verified": 1,
-                "missing": 1,
-                "missing_sources": ["s3://loom-benchmarks/fake/missing/"],
-            },
-        )()
+        return BundlePresenceReport(
+            s3_tasks=2,
+            verified=1,
+            failures=(
+                BundleVerificationFailure(
+                    task_id="fake-bench/missing",
+                    source="s3://loom-benchmarks/fake/missing/",
+                    reason="download_error",
+                ),
+            ),
+        )
 
     monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
     monkeypatch.setattr(datasets_cmd, "run_bundle_presence_audit", fake_bundle_audit, raising=False)
@@ -282,25 +289,106 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
         }
     ]
     out = capsys.readouterr().out
-    assert "bundle_presence" in out
+    assert "bundle_verification" in out
     assert "s3_tasks=2" in out
-    assert "missing=1" in out
+    assert "failed=1" in out
+    assert "verification_errors=1" in out
+
+
+def test_audit_verify_bundles_fails_on_checksum_mismatch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_benchmark_tool.audit_cmd import AuditResult
+    from loom_cli.benchmark_readiness import (
+        BundlePresenceReport,
+        BundleVerificationFailure,
+    )
+
+    class FakeObjectStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    async def fake_run_audit(**_kwargs: Any) -> list[AuditResult]:
+        return []
+
+    async def fake_bundle_audit(**_kwargs: Any) -> BundlePresenceReport:
+        return BundlePresenceReport(
+            s3_tasks=2,
+            verified=1,
+            failures=(
+                BundleVerificationFailure(
+                    task_id="fake-bench/mismatch",
+                    source="s3://loom-benchmarks/fake/mismatch/",
+                    reason="checksum_mismatch",
+                    expected_checksum="a" * 64,
+                    actual_checksum="b" * 64,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
+    monkeypatch.setattr(datasets_cmd, "run_bundle_presence_audit", fake_bundle_audit)
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "fake-bench",
+            "--db-url",
+            "postgresql://x/y",
+            "--verify-bundles",
+            "--minio-endpoint",
+            "http://target-minio:9000",
+            "--minio-access-key",
+            "target-access",
+            "--minio-secret-key",
+            "target-secret",
+        ]
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "bundle_verification" in out
+    assert "failed=1" in out
+    assert "checksum_mismatches=1" in out
+    assert "checksum_mismatch fake-bench/mismatch" in out
 
 
 @pytest.mark.asyncio
-async def test_bundle_presence_audit_checks_internal_task_toml(
+async def test_bundle_audit_hashes_complete_bundles_and_includes_tasksets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom.trajectory.storage import FakeObjectStore
+
     class FakeEngine:
         async def dispose(self) -> None:
             return None
 
     class FakeResult:
-        def all(self) -> list[tuple[str, str]]:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
             return [
-                ("fake-bench/present", "s3://loom-benchmarks/fake/present/"),
-                ("fake-bench/missing", "s3://loom-benchmarks/fake/missing/"),
-                ("fake-bench/hf", "hf://PRHW/loom-benchmark-fake@rev/task/"),
+                (
+                    "fake-bench/match",
+                    "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d",
+                    "s3://loom-benchmarks/fake/match/",
+                    "fake-bench",
+                    None,
+                ),
+                (
+                    "fake-bench/mismatch",
+                    "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d",
+                    "s3://loom-benchmarks/fake/mismatch/",
+                    "fake-bench",
+                    None,
+                ),
+                (
+                    "task-set/task",
+                    "2e6df2a07b91ca4c82475a570ddfe571f97db243859d86f317f67320d204a532",
+                    "s3://loom-benchmarks/task-set/task/",
+                    None,
+                    "task-set",
+                ),
             ]
 
     class FakeSession:
@@ -313,12 +401,6 @@ async def test_bundle_presence_audit_checks_internal_task_toml(
         async def execute(self, _statement: object) -> FakeResult:
             return FakeResult()
 
-    class FakeObjectStore:
-        async def get_object(self, *, bucket: str, key: str) -> bytes:
-            if (bucket, key) == ("loom-benchmarks", "fake/present/task.toml"):
-                return b"task"
-            raise KeyError(f"s3://{bucket}/{key}")
-
     monkeypatch.setattr(
         benchmark_readiness,
         "create_async_engine",
@@ -330,12 +412,184 @@ async def test_bundle_presence_audit_checks_internal_task_toml(
         lambda *_args, **_kwargs: lambda: FakeSession(),
     )
 
+    store = FakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake/match/instruction.md"): b"alpha\n",
+            ("loom-benchmarks", "fake/match/task.toml"): b"task\n",
+            ("loom-benchmarks", "fake/mismatch/instruction.md"): b"beta\n",
+            ("loom-benchmarks", "fake/mismatch/task.toml"): b"task\n",
+            ("loom-benchmarks", "task-set/task/task.toml"): b"taskset\n",
+        },
+    )
     report = await benchmark_readiness.run_bundle_presence_audit(
         db_url="postgresql://x/y",
-        object_store=FakeObjectStore(),
+        object_store=store,
     )
 
-    assert report.s3_tasks == 2
-    assert report.verified == 1
-    assert report.missing == 1
-    assert report.missing_sources == ["s3://loom-benchmarks/fake/missing/"]
+    assert report.s3_tasks == 3
+    assert report.verified == 2
+    assert report.failed == 1
+    assert report.checksum_mismatches == 1
+    assert report.verification_errors == 0
+    assert [failure.to_dict() for failure in report.failures] == [
+        {
+            "actual_checksum": (
+                "5b1601fabcc6a8facb84b16ae5a6c5fcdd1daa776f49eaaf7638a56bdc79c59c"
+            ),
+            "expected_checksum": (
+                "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d"
+            ),
+            "reason": "checksum_mismatch",
+            "source": "s3://loom-benchmarks/fake/mismatch/",
+            "task_id": "fake-bench/mismatch",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_audit_classifies_fail_closed_verification_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.trajectory.storage import FakeObjectStore
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeResult:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
+            checksum = "a" * 64
+            return [
+                ("bench/invalid-source", checksum, "s3://bucket", "bench", None),
+                ("bench/empty", checksum, "s3://bucket/empty/", "bench", None),
+                ("bench/no-config", checksum, "s3://bucket/no-config/", "bench", None),
+                ("bench/download", checksum, "s3://bucket/download/", "bench", None),
+                ("bench/invalid-checksum", "not-a-sha", "s3://bucket/invalid/", "bench", None),
+            ]
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> FakeResult:
+            return FakeResult()
+
+    class FailingObjectStore(FakeObjectStore):
+        async def download_prefix(
+            self,
+            *,
+            bucket: str,
+            prefix: str,
+            out_dir: Path,
+        ) -> int:
+            if prefix == "download/":
+                raise KeyError("object store unavailable")
+            return await super().download_prefix(
+                bucket=bucket,
+                prefix=prefix,
+                out_dir=out_dir,
+            )
+
+    monkeypatch.setattr(benchmark_readiness, "create_async_engine", lambda _url: FakeEngine())
+    monkeypatch.setattr(
+        benchmark_readiness,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    store = FailingObjectStore(
+        objects={
+            ("bucket", "no-config/instruction.md"): b"missing config\n",
+            ("bucket", "invalid/task.toml"): b"task\n",
+        }
+    )
+
+    report = await benchmark_readiness.run_bundle_presence_audit(
+        db_url="postgresql://x/y",
+        object_store=store,
+    )
+
+    assert report.verified == 0
+    assert report.failed == 5
+    assert [failure.reason for failure in report.failures] == [
+        "download_error",
+        "empty_bundle",
+        "invalid_checksum",
+        "invalid_source",
+        "missing_task_toml",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_audit_bounds_parallel_prefix_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeResult:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
+            checksum = "16a403788376dab79be41cca07d9f2135b2cb9e0834235b38e394731e6418f84"
+            return [
+                (
+                    f"bench/task-{index}",
+                    checksum,
+                    f"s3://bucket/task-{index}/",
+                    "bench",
+                    None,
+                )
+                for index in range(17)
+            ]
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> FakeResult:
+            return FakeResult()
+
+    class TrackingObjectStore:
+        active = 0
+        max_active = 0
+
+        async def download_prefix(
+            self,
+            *,
+            bucket: str,
+            prefix: str,
+            out_dir: Path,
+        ) -> int:
+            assert bucket == "bucket"
+            assert prefix.startswith("task-")
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "task.toml").write_bytes(b"task\n")
+                return 1
+            finally:
+                self.active -= 1
+
+    monkeypatch.setattr(benchmark_readiness, "create_async_engine", lambda _url: FakeEngine())
+    monkeypatch.setattr(
+        benchmark_readiness,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    store = TrackingObjectStore()
+
+    report = await benchmark_readiness.run_bundle_presence_audit(
+        db_url="postgresql://x/y",
+        object_store=store,
+    )
+
+    assert report.verified == 17
+    assert report.failed == 0
+    assert 1 < store.max_active <= 8
