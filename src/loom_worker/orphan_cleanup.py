@@ -37,8 +37,27 @@ _NON_TERMINAL_FALLBACK_SEC: float = 24 * 60 * 60
 
 
 def _trial_id_from_filename(path: Path) -> UUID | None:
+    name = path.name
+    attempt_suffix = ".events.jsonl"
+    if name.endswith(attempt_suffix):
+        trial_and_attempt = name.removesuffix(attempt_suffix)
+        trial_text, separator, raw_attempt = trial_and_attempt.rpartition(
+            ".attempt-",
+        )
+        if not separator:
+            return None
+        try:
+            attempt_count = int(raw_attempt)
+        except ValueError:
+            return None
+        if attempt_count <= 0 or str(attempt_count) != raw_attempt:
+            return None
+        try:
+            return UUID(trial_text)
+        except ValueError:
+            return None
     try:
-        return UUID(path.stem)
+        return UUID(name.removesuffix(".jsonl"))
     except ValueError:
         return None
 

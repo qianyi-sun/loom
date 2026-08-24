@@ -10,6 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from loom.trajectory.atif import project_to_atif
+from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.storage import ObjectStore
 
@@ -31,6 +32,7 @@ async def finalize_trajectory_with_metadata(
     agent_name: str,
     agent_version: str,
     bucket: str = "trajectories",
+    attempt_count: int | None = None,
 ) -> FinalizedTrajectory:
     """Project, upload, and return exact immutable-object evidence."""
     reader = TrajectoryReader(local_path)
@@ -40,7 +42,12 @@ async def finalize_trajectory_with_metadata(
         agent_name=agent_name,
         agent_version=agent_version,
     )
-    key = f"{team_id}/{trial_id}/atif.json"
+    key = TrajectoryObjectIdentity(
+        bucket=bucket,
+        team_id=team_id,
+        trial_id=trial_id,
+        attempt_count=attempt_count,
+    ).atif_key
     body = atif.model_dump_json(indent=2).encode("utf-8")
     uri = await store.put_object(bucket=bucket, key=key, body=body)
     return FinalizedTrajectory(
@@ -60,6 +67,7 @@ async def finalize_trajectory(
     agent_name: str,
     agent_version: str,
     bucket: str = "trajectories",
+    attempt_count: int | None = None,
 ) -> str:
     """Project events to ATIF v1.7 and upload. Returns the ATIF object URI."""
     finalized = await finalize_trajectory_with_metadata(
@@ -71,5 +79,6 @@ async def finalize_trajectory(
         agent_name=agent_name,
         agent_version=agent_version,
         bucket=bucket,
+        attempt_count=attempt_count,
     )
     return finalized.uri

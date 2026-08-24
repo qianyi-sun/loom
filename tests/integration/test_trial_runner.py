@@ -141,6 +141,64 @@ async def test_runner_invokes_run_and_reports_states(  # type: ignore[no-untyped
     assert ("succeeded", None) in state_calls
 
 
+async def test_runner_scopes_trajectory_and_atif_to_claim_attempt(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    async def fake_state_patch(
+        _state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    handler = command_table_handler(
+        {
+            "chmod +x /workspace/solution/solve.sh && /workspace/solution/solve.sh": (
+                ExecResult(
+                    return_code=0,
+                    stdout=b"hello\n",
+                    stderr=b"",
+                    truncated=False,
+                    duration_sec=0.05,
+                )
+            ),
+        }
+    )
+    trial_id = uuid4()
+    team_id = uuid4()
+    store = FakeObjectStore()
+    root = tmp_path / "trajectories"
+    runner = LocalTrialRunner(
+        trial_id=trial_id,
+        team_id=team_id,
+        attempt_count=2,
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=_driver_factory(handler),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir,
+            trial_id=trial_id,
+        ),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=store,
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=root,
+        state_patch_callback=fake_state_patch,
+    )
+
+    result = await runner.run()
+
+    prefix = f"{team_id}/{trial_id}/attempts/2"
+    assert result.trajectory_uri == f"s3://trajectories/{prefix}/events.jsonl"
+    assert result.atif_uri == f"s3://trajectories/{prefix}/atif.json"
+    assert ("trajectories", f"{prefix}/events.jsonl") in store.objects
+    assert ("trajectories", f"{prefix}/atif.json") in store.objects
+    assert (root / f"{trial_id}.attempt-2.events.jsonl").is_file()
+
+
 async def test_runner_uses_fresh_verifier_driver_for_private_workspace_policy(
     hello_task: Path,
     tmp_path: Path,

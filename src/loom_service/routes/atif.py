@@ -24,6 +24,7 @@ from sqlalchemy import select
 from loom.db.schema import Trial
 from loom.models.trajectory import TrajectoryEvent
 from loom.trajectory.atif import project_to_atif
+from loom.trajectory.object_identity import resolve_trajectory_object_key
 from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
@@ -47,6 +48,26 @@ _ATIF_EVENTS_UNAVAILABLE = (
     "atif projection unavailable from stored trajectory events; "
     "trajectory events are downloadable"
 )
+
+
+def _atif_key(trial: Trial, *, expected_bucket: str) -> str:
+    index = trial.trajectory_index if isinstance(trial.trajectory_index, dict) else {}
+    try:
+        return resolve_trajectory_object_key(
+            uri=index.get("atif_uri"),
+            expected_bucket=expected_bucket,
+            team_id=trial.team_id,
+            trial_id=trial.id,
+            filename="atif.json",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "trajectory_object_identity_invalid",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 def _projection_metadata(trial: Trial) -> tuple[str, str, str]:
@@ -143,7 +164,7 @@ async def download_atif(
         return stream_object_response(
             client=request.app.state.minio_client,
             bucket=settings.trajectories_bucket,
-            key=f"{trial.team_id}/{trial.id}/atif.json",
+            key=_atif_key(trial, expected_bucket=settings.trajectories_bucket),
             filename=f"{trial.id}-atif.json",
             artifact_kind="atif",
             media_type="application/json",

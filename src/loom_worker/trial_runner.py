@@ -25,6 +25,7 @@ from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.trajectory.cp_event_sink import CpEventSink
+from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
 from loom.trial.trial import Trial, TrialContext
 from loom.trial.workspace import WorkspaceStagingPolicy
@@ -91,6 +92,7 @@ class LocalTrialRunner:
 
     local_trajectory_root: Path
     state_patch_callback: StatePatchCallback
+    attempt_count: int | None = None
     # Must match control-plane + loom-service bucket settings for the
     # environment. Defaults preserve local/dev behavior.
     trajectory_bucket: str = "trajectories"
@@ -264,6 +266,12 @@ class LocalTrialRunner:
             agent.model_switch_plan = self.model_switch_plan
         verifier = self.verifier_factory()
 
+        trajectory_identity = TrajectoryObjectIdentity(
+            bucket=self.trajectory_bucket,
+            team_id=self.team_id,
+            trial_id=self.trial_id,
+            attempt_count=self.attempt_count,
+        )
         ctx = TrialContext(
             trial_id=self.trial_id,
             team_id=self.team_id,
@@ -275,7 +283,10 @@ class LocalTrialRunner:
             agent=agent,
             verifier=verifier,
             object_store=self.object_store,
-            local_trajectory_path=(self.local_trajectory_root / f"{self.trial_id}.jsonl"),
+            local_trajectory_path=trajectory_identity.local_path(
+                self.local_trajectory_root,
+            ),
+            attempt_count=self.attempt_count,
             trajectory_bucket=self.trajectory_bucket,
             artifacts_bucket=self.artifacts_bucket,
             llm_calls_fetcher=self.llm_calls_fetcher,

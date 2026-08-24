@@ -109,3 +109,44 @@ async def test_finalize_returns_exact_object_metadata(
     assert finalized.uri == "s3://trajectories/team/trial-10/atif.json"
     assert finalized.size_bytes == len(body)
     assert finalized.sha256 == hashlib.sha256(body).hexdigest()
+
+
+async def test_finalize_attempt_uploads_immutable_atif_identity(
+    tmp_path: Path,
+    store: FakeObjectStore,
+) -> None:
+    local = tmp_path / "attempt-2-events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local,
+        store=store,
+        bucket="x",
+        key="x",
+        min_part_bytes=0,
+    )
+    trial_uuid = uuid4()
+    async with writer:
+        await writer.append(TrialStartEvent(
+            **_ev(0, trial_uuid),
+            task_id="t",
+            agent_name="oracle",
+            agent_mode="out-of-box",
+        ))
+        await writer.append(TrialEndEvent(
+            **_ev(1, trial_uuid),
+            final_state="succeeded",
+        ))
+
+    finalized = await finalize_trajectory_with_metadata(
+        local_path=local,
+        store=store,
+        team_id="team",
+        trial_id="trial-11",
+        task_id="t",
+        agent_name="oracle",
+        agent_version="1.0",
+        attempt_count=2,
+    )
+
+    key = "team/trial-11/attempts/2/atif.json"
+    assert finalized.uri == f"s3://trajectories/{key}"
+    assert ("trajectories", key) in store.objects

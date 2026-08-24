@@ -1347,7 +1347,10 @@ async def _spawn_trial(
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
-    attempt_count = int(payload.get("attempt_count") or 1)
+    raw_attempt_count = payload.get("attempt_count")
+    if type(raw_attempt_count) is not int or raw_attempt_count <= 0:
+        raise ValueError("attempt_count must be a positive integer")
+    attempt_count = raw_attempt_count
     usage_outbox = resource_usage_outbox or ResourceUsageOutbox(
         settings.trajectory_cache_dir / "resource-usage-outbox",
     )
@@ -1733,6 +1736,7 @@ async def _spawn_trial(
         runner = LocalTrialRunner(
             trial_id=trial_id,
             team_id=team_id,
+            attempt_count=attempt_count,
             task_config=task_config,
             task_checksum=task_checksum,
             task_dir=task_dir,
