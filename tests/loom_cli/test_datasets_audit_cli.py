@@ -229,6 +229,11 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom_cli.benchmark_readiness import (
+        BundlePresenceReport,
+        BundleVerificationFailure,
+    )
+
     stores: list[dict[str, object]] = []
 
     class FakeObjectStore:
@@ -238,20 +243,21 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     async def fake_run_audit(**_kwargs: Any) -> list[BenchmarkReadinessItem]:
         return [_item()]
 
-    async def fake_bundle_audit(**kwargs: Any) -> Any:
+    async def fake_bundle_audit(**kwargs: Any) -> BundlePresenceReport:
         assert kwargs["benchmark"] is None
         assert kwargs["db_url"] == "postgresql://x/y"
         assert kwargs["object_store"] is not None
-        return type(
-            "BundlePresenceReport",
-            (),
-            {
-                "s3_tasks": 2,
-                "verified": 1,
-                "missing": 1,
-                "missing_sources": ["s3://loom-benchmarks/fake/missing/"],
-            },
-        )()
+        return BundlePresenceReport(
+            s3_tasks=2,
+            verified=1,
+            failures=(
+                BundleVerificationFailure(
+                    task_id="fake-bench/missing",
+                    source="s3://loom-benchmarks/fake/missing/",
+                    reason="download_error",
+                ),
+            ),
+        )
 
     monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
     monkeypatch.setattr(datasets_cmd, "run_bundle_presence_audit", fake_bundle_audit, raising=False)
@@ -282,9 +288,10 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
         }
     ]
     out = capsys.readouterr().out
-    assert "bundle_presence" in out
+    assert "bundle_verification" in out
     assert "s3_tasks=2" in out
-    assert "missing=1" in out
+    assert "failed=1" in out
+    assert "verification_errors=1" in out
 
 
 def test_audit_verify_bundles_fails_on_checksum_mismatch(
