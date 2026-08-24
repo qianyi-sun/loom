@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +178,30 @@ def test_audit_prints_json(
     out = capsys.readouterr().out
     assert '"id": "fake-bench"' in out
     assert '"readiness_state": "runnable"' in out
+
+
+def test_general_audit_does_not_require_terminal_bench_package(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_audit(**_kwargs: Any) -> list[BenchmarkReadinessItem]:
+        return [_item()]
+
+    monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
+    monkeypatch.setitem(sys.modules, "loom_benchmark_terminal_bench_2.upstream", None)
+
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "--all",
+            "--db-url",
+            "postgresql://x/y",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    assert '"id": "fake-bench"' in capsys.readouterr().out
 
 
 def test_audit_prints_table(
