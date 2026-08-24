@@ -243,7 +243,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "d29dfdff26d2e4b6c4b15172d31323c46d8861d396fb9e8cc26ed59d4af65d68"
+        "6360fe13e563901ce1dc7214c860fe99c626899930c88a547ffb7d62840c0e75"
     )
 
     identities = {_identity(document) for document in documents}
@@ -308,6 +308,9 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
             assert template_metadata["annotations"]["loom.dev/trusted-release-sha256"] == (
                 rendered.release_sha256
             )
+
+    migration = next(document for document in documents if document["kind"] == "Job")
+    assert migration["metadata"]["labels"]["app"] == "loom-personal-dev-migration"
 
 
 def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resources(
@@ -655,6 +658,32 @@ def test_shadow_workloads_are_inert_immutable_and_exclude_shared_app(tmp_path: P
     }
     assert all(re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image) for image in images)
     assert release.images.personal_dev_builder not in images
+
+
+def test_credential_init_clears_setgid_inherited_from_runtime_emptydir(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    credential_inits = {
+        container["name"]: container["command"][2]
+        for _, pod in _workload_pod_specs(documents)
+        for container in pod.get("initContainers", [])
+        if container["name"].endswith("credential-init")
+    }
+
+    assert set(credential_inits) == {
+        "activation-private-credential-init",
+        "activation-public-credential-init",
+        "management-credential-init",
+    }
+    command_pattern = re.compile(
+        r"install -d -m 0700 "
+        r"(?P<parent>/run/loom-personal-dev/[a-z-]+); "
+        r"chmod 0700 (?P=parent); "
+        r"exec python -m loom\.personal_dev_secret_init --profile [a-z-]+ "
+        r"--source /var/run/[a-z-]+ --destination (?P=parent)/files"
+    )
+    assert all(command_pattern.fullmatch(command) for command in credential_inits.values())
 
 
 def test_minio_admin_bootstraps_base_buckets_before_readiness(tmp_path: Path) -> None:

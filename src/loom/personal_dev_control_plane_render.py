@@ -2199,7 +2199,7 @@ def _migration(
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": _metadata(context, name, namespace="loom-dev"),
+        "metadata": _metadata(context, name, namespace="loom-dev", labels=labels),
         "spec": {
             "backoffLimit": 1,
             "activeDeadlineSeconds": 600,
@@ -2533,6 +2533,7 @@ def _credential_init(
 ) -> dict[str, Any]:
     command = (
         f"install -d -m 0700 {destination_parent}; "
+        f"chmod 0700 {destination_parent}; "
         f"exec python -m loom.personal_dev_secret_init --profile {profile} "
         f"--source {source_path} --destination {destination}"
     )

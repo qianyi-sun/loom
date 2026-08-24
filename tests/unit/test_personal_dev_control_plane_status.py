@@ -1466,6 +1466,20 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
     assert runner.calls[-1][0] == _MANAGER
 
 
+def test_healthy_shadow_accepts_generic_namespace_list_from_kubectl(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    namespaces = runner.responses[_NAMESPACES]
+    assert isinstance(namespaces, dict)
+    namespaces["kind"] = "List"
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
 @pytest.mark.parametrize(
     ("mutation", "blocker"),
     [
