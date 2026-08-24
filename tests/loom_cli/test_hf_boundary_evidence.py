@@ -24,6 +24,7 @@ def _audit_report() -> dict[str, object]:
             {
                 "id": "skilllearnbench",
                 "readiness_state": "runnable",
+                "raw_task_count": 100,
                 "valid_task_config_count": 100,
             }
         ],
@@ -135,6 +136,13 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
     assert evidence["catalog"]["artifact_contract_classified_tasks"] == 100
     assert evidence["catalog"]["apd5_required_artifact_contract_tasks"] == 1
     assert evidence["catalog"]["requires_caps"]["cpu_arch"] == "any"
+    assert evidence["bundle_verification"] == {
+        "schema_version": 2,
+        "verification_kind": "complete_bundle_sha256_of_dir_v1",
+        "s3_tasks": 100,
+        "verified": 100,
+        "failed": 0,
+    }
     assert evidence["runtime_sources"]["total_task_sources"] == 100
     assert evidence["runtime_sources"]["internal_s3_sources"] == 100
     assert evidence["runtime_sources"]["non_internal_sources"] == []
@@ -247,21 +255,63 @@ def test_compose_rejects_internally_inconsistent_bundle_verification() -> None:
         )
 
 
-def test_compose_preserves_explicit_zero_valid_task_count() -> None:
+def test_compose_rejects_zero_valid_task_count() -> None:
     audit = _audit_report()
     audit["items"][0]["valid_task_config_count"] = 0
-    audit["items"][0]["raw_task_count"] = 100
 
-    evidence = compose_boundary_evidence(
-        benchmark_id="skilllearnbench",
-        environment="staging",
-        audit_report=audit,
-        source_summary=_source_summary(),
-        canary_summary=_canary_summary(),
-        worker_boundary=_worker_boundary(),
-    )
+    with pytest.raises(HfBoundaryEvidenceError, match="count binding"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
 
-    assert evidence["catalog"]["runnable_tasks"] == 0
+
+def test_compose_rejects_cross_document_bundle_count_drift() -> None:
+    audit = _audit_report()
+    bundle_presence = audit["bundle_presence"]
+    assert isinstance(bundle_presence, dict)
+    bundle_presence["s3_tasks"] = 1
+    bundle_presence["verified"] = 1
+
+    with pytest.raises(HfBoundaryEvidenceError, match="count binding"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("total_task_sources", "100"),
+        ("internal_s3_sources", 100.0),
+        ("non_internal_sources", False),
+        ("artifact_contract_classified_tasks", "100"),
+    ],
+)
+def test_compose_rejects_malformed_source_counters(key: str, value: object) -> None:
+    source_summary = _source_summary()
+    source_counts = source_summary["source_counts"]
+    assert isinstance(source_counts, dict)
+    source_counts[key] = value
+
+    with pytest.raises(HfBoundaryEvidenceError, match="source summary counter"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=_audit_report(),
+            source_summary=source_summary,
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
 
 
 @pytest.mark.parametrize(

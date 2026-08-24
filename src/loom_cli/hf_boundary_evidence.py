@@ -97,13 +97,11 @@ class KubernetesServiceTarget:
     container: str = "loom-service"
 
 
-def _int(value: Any) -> int:
-    if isinstance(value, bool) or value is None:
-        return 0
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+def _required_counter(values: Mapping[str, Any], key: str, *, label: str) -> int:
+    value = values.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise HfBoundaryEvidenceError(f"{label} counter {key!r} must be a nonnegative integer")
+    return value
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -264,9 +262,53 @@ def compose_boundary_evidence(
     config = _mapping(sample_task.get("config"))
     task_environment = _mapping(config.get("environment"))
     worker_summary = _mapping(worker_boundary.get("summary"))
+    raw_tasks = _required_counter(audit_item, "raw_task_count", label="audit")
+    valid_tasks = _required_counter(audit_item, "valid_task_config_count", label="audit")
+    total_sources = _required_counter(
+        source_counts,
+        "total_task_sources",
+        label="source summary",
+    )
+    internal_sources = _required_counter(
+        source_counts,
+        "internal_s3_sources",
+        label="source summary",
+    )
+    non_internal_count = _required_counter(
+        source_counts,
+        "non_internal_sources",
+        label="source summary",
+    )
+    artifact_contract_classified_tasks = _required_counter(
+        source_counts,
+        "artifact_contract_classified_tasks",
+        label="source summary",
+    )
+    apd5_required_artifact_contract_tasks = _required_counter(
+        source_counts,
+        "apd5_required_artifact_contract_tasks",
+        label="source summary",
+    )
+    non_internal_rows = source_summary.get("non_internal_sources")
+    if not isinstance(non_internal_rows, list):
+        raise HfBoundaryEvidenceError("source summary non_internal_sources must be a list")
     non_internal = _non_internal_sources(source_summary)
-    total_sources = _int(source_counts.get("total_task_sources"))
-    internal_sources = _int(source_counts.get("internal_s3_sources"))
+    if (
+        raw_tasks <= 0
+        or not (
+            raw_tasks
+            == valid_tasks
+            == total_sources
+            == internal_sources
+            == bundle_tasks
+            == bundle_verified
+        )
+        or non_internal_count != 0
+        or non_internal
+    ):
+        raise HfBoundaryEvidenceError(
+            "full-bundle count binding is incomplete or inconsistent",
+        )
     worker_hf_token_present = bool(
         worker_summary.get("env_file_hf_token_present_hosts")
         or worker_summary.get("hosts_with_container_hf_token_present")
@@ -277,24 +319,22 @@ def compose_boundary_evidence(
         raise HfBoundaryEvidenceError(
             "sample task tags must include hf_repo_id and hf_revision",
         )
-    valid_task_config_count = audit_item.get("valid_task_config_count")
-    runnable_tasks = _int(
-        audit_item.get("raw_task_count")
-        if valid_task_config_count is None
-        else valid_task_config_count
-    )
-
     return {
         "schema_version": 1,
         "environment": environment,
         "benchmark_id": benchmark_id,
+        "bundle_verification": {
+            "schema_version": BUNDLE_VERIFICATION_SCHEMA_VERSION,
+            "verification_kind": BUNDLE_VERIFICATION_KIND,
+            "s3_tasks": bundle_tasks,
+            "verified": bundle_verified,
+            "failed": bundle_failed,
+        },
         "catalog": {
-            "runnable_tasks": runnable_tasks,
-            "artifact_contract_classified_tasks": _int(
-                source_counts.get("artifact_contract_classified_tasks"),
-            ),
-            "apd5_required_artifact_contract_tasks": _int(
-                source_counts.get("apd5_required_artifact_contract_tasks"),
+            "runnable_tasks": valid_tasks,
+            "artifact_contract_classified_tasks": artifact_contract_classified_tasks,
+            "apd5_required_artifact_contract_tasks": (
+                apd5_required_artifact_contract_tasks
             ),
             "requires_caps": {
                 "cpu_arch": str(task_environment.get("cpu_arch") or ""),
