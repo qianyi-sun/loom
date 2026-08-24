@@ -104,7 +104,7 @@ class TrajectoryWriter:
 
     async def __aenter__(self) -> TrajectoryWriter:
         self._local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._local_file = await aiofiles.open(self._local_path, "ab")
+        self._local_file = await aiofiles.open(self._local_path, "wb")
         self._upload = await self._store.create_multipart_upload(
             bucket=self._bucket, key=self._key,
         )
