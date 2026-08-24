@@ -399,6 +399,12 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert '--trusted-release-file "$trusted_release"' in normalized
     assert '--trusted-release-sha256 "$trusted_release_sha256"' in normalized
     assert 'sha256sum "$shadow_render"' in runbook
+    assert "python -m loom.personal_dev_storage_lineage_guard" in normalized
+    assert '--current "$shadow_render"' in normalized
+    assert '--previous "$previous_shadow_render"' in normalized
+    assert runbook.index("personal_dev_storage_lineage_guard") < runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" diff --server-side'
+    )
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
     assert "diff_status=0" in runbook
     assert "|| diff_status=$?" in runbook

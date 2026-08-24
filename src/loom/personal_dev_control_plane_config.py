@@ -118,6 +118,8 @@ class _StorageInput(_StrictModel):
     postgres_storage: str
     minio_storage: str
     scanner_cache_storage: str
+    lineage_render_input_sha256: str | None = None
+    lineage_trusted_release_sha256: str | None = None
 
     @field_validator("storage_class_name")
     @classmethod
@@ -132,6 +134,21 @@ class _StorageInput(_StrictModel):
         if _STORAGE.fullmatch(value) is None:
             raise ValueError("storage size is invalid")
         return value
+
+    @field_validator("lineage_render_input_sha256", "lineage_trusted_release_sha256")
+    @classmethod
+    def _storage_lineage_digest_is_valid(cls, value: str | None) -> str | None:
+        if value is not None and (_DIGEST.fullmatch(value) is None or value == "0" * 64):
+            raise ValueError("storage lineage digest is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _storage_lineage_is_complete(self) -> _StorageInput:
+        if (self.lineage_render_input_sha256 is None) != (
+            self.lineage_trusted_release_sha256 is None
+        ):
+            raise ValueError("storage lineage must be completely pinned")
+        return self
 
 
 class _BuilderInput(_StrictModel):
@@ -805,6 +822,8 @@ class PersonalDevControlPlaneStorage:
     postgres_storage: str
     minio_storage: str
     scanner_cache_storage: str
+    lineage_render_input_sha256: str | None
+    lineage_trusted_release_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)

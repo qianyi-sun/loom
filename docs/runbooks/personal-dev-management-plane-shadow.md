@@ -351,6 +351,20 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
     "$live_namespaced_inventory" "$live_cluster_inventory"
 }
 
+assert_forward_storage_lineage_contract() {
+  if test -e "$previous_shadow_render" || test -L "$previous_shadow_render"; then
+    test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
+    test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
+    test "$(stat -c %a "$previous_shadow_render")" = 600
+    test "$(stat -c %h "$previous_shadow_render")" = 1
+    test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = \
+      "$previous_shadow_sha256"
+    uv run --no-sync python -m loom.personal_dev_storage_lineage_guard \
+      --current "$shadow_render" \
+      --previous "$previous_shadow_render"
+  fi
+}
+
 jq -e \
   --arg release "$trusted_release_sha256" \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
@@ -428,8 +442,15 @@ installation also requires no existing package-owned top-level resource. An
 upgrade requires the live, previous-reviewed, and new non-derived resource
 identity sets to match; any identity transition needs a separate cleanup plan
 because server-side apply does not prune absent objects.
+Before asking the API server for a diff, an upgrade also requires the new and
+previous-reviewed PostgreSQL and MinIO `volumeClaimTemplates` to be equivalent
+after canonical structured-YAML comparison. Any immutable claim-template drift
+is a stop condition; never recreate a StatefulSet or PVC to bypass it.
 
 ```bash
+assert_current_shadow_artifacts
+assert_forward_storage_lineage_contract
+assert_forward_identity_contract
 test ! -e "$evidence_dir/server-side-diff.txt"
 diff_status=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
@@ -440,6 +461,7 @@ test "$diff_status" -eq 0 || test "$diff_status" -eq 1
 chmod 0600 "$evidence_dir/server-side-diff.txt"
 
 assert_current_shadow_artifacts
+assert_forward_storage_lineage_contract
 assert_forward_identity_contract
 assert_no_dynamic_namespaces
 assert_zero_capacity
