@@ -402,8 +402,59 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert "python -m loom.personal_dev_storage_lineage_guard" in normalized
     assert '--current "$shadow_render"' in normalized
     assert '--previous "$previous_shadow_render"' in normalized
-    assert runbook.index("personal_dev_storage_lineage_guard") < runbook.index(
-        'kubectl --kubeconfig "$kubeconfig" diff --server-side'
+    assert '--live-inventory "$live_storage_inventory"' in normalized
+    storage_command_start = runbook.index(
+        'live_storage_inventory="$(mktemp',
+    )
+    storage_command_end = runbook.index(
+        "    --namespace loom-dev",
+        storage_command_start,
+    )
+    storage_inventory_command = runbook[storage_command_start:storage_command_end]
+    assert "," not in storage_inventory_command
+    for resource in (
+        "statefulset.apps/loom-dev-postgres",
+        "statefulset.apps/loom-dev-minio",
+        "persistentvolumeclaim/data-loom-dev-postgres-0",
+        "persistentvolumeclaim/data-loom-dev-minio-0",
+        "persistentvolumeclaim/loom-personal-dev-scanner-cache",
+    ):
+        assert resource in storage_inventory_command
+    storage_calls = [
+        match.start()
+        for match in re.finditer(
+            r"^assert_forward_storage_lineage_contract$",
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    diff_calls = [
+        match.start()
+        for match in re.finditer(
+            r'^kubectl --kubeconfig "\$kubeconfig" diff --server-side',
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    apply_calls = [
+        match.start()
+        for match in re.finditer(
+            r'^kubectl --kubeconfig "\$kubeconfig" apply --server-side',
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    assert len(storage_calls) == 4
+    assert len(diff_calls) == len(apply_calls) == 2
+    assert (
+        storage_calls[0]
+        < diff_calls[0]
+        < storage_calls[1]
+        < apply_calls[0]
+        < storage_calls[2]
+        < diff_calls[1]
+        < storage_calls[3]
+        < apply_calls[1]
     )
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
     assert "diff_status=0" in runbook

@@ -1378,16 +1378,20 @@ def _observe_personal_dev_status(
         )
         if not digest_ok:
             blockers.add("resource_digest_drift")
-        if plan is not None and not all(
+        generated_pvc_acceptance_digest_ok = all(
             _acceptance_plan_digest_absent(item)
+            for item in namespaced_items
             if _identity(item) in generated_pvcs
-            else _acceptance_plan_digest_matches(
+        )
+        acceptance_resource_digest_ok = plan is None or all(
+            _acceptance_plan_digest_matches(
                 item,
                 acceptance_plan_sha256=plan.sha256,
             )
             for item in namespaced_items
-            if _identity(item) not in historical_identities
-        ):
+            if _identity(item) not in historical_identities | generated_pvcs
+        )
+        if not generated_pvc_acceptance_digest_ok or not acceptance_resource_digest_ok:
             blockers.add("acceptance_plan_digest_drift")
 
         workload_image_ok = all(

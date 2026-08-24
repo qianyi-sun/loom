@@ -352,6 +352,25 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
 }
 
 assert_forward_storage_lineage_contract() {
+  local -a guard_arguments
+  local live_storage_inventory
+  live_storage_inventory="$(mktemp "$evidence_dir/forward-live-storage.XXXXXX.json")"
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
+    statefulset.apps/loom-dev-postgres \
+    statefulset.apps/loom-dev-minio \
+    persistentvolumeclaim/data-loom-dev-postgres-0 \
+    persistentvolumeclaim/data-loom-dev-minio-0 \
+    persistentvolumeclaim/loom-personal-dev-scanner-cache \
+    --namespace loom-dev \
+    --ignore-not-found \
+    --output=json > "$live_storage_inventory"
+  test "$(stat -c %s "$live_storage_inventory")" -gt 0
+  test "$(stat -c %s "$live_storage_inventory")" -le 4194304
+  chmod 0600 "$live_storage_inventory"
+  guard_arguments=(
+    --current "$shadow_render"
+    --live-inventory "$live_storage_inventory"
+  )
   if test -e "$previous_shadow_render" || test -L "$previous_shadow_render"; then
     test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
     test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
@@ -359,10 +378,11 @@ assert_forward_storage_lineage_contract() {
     test "$(stat -c %h "$previous_shadow_render")" = 1
     test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = \
       "$previous_shadow_sha256"
-    uv run --no-sync python -m loom.personal_dev_storage_lineage_guard \
-      --current "$shadow_render" \
-      --previous "$previous_shadow_render"
+    guard_arguments+=(--previous "$previous_shadow_render")
   fi
+  uv run --no-sync python -m loom.personal_dev_storage_lineage_guard \
+    "${guard_arguments[@]}"
+  rm -f "$live_storage_inventory"
 }
 
 jq -e \
@@ -443,9 +463,13 @@ upgrade requires the live, previous-reviewed, and new non-derived resource
 identity sets to match; any identity transition needs a separate cleanup plan
 because server-side apply does not prune absent objects.
 Before asking the API server for a diff, an upgrade also requires the new and
-previous-reviewed PostgreSQL and MinIO `volumeClaimTemplates` to be equivalent
-after canonical structured-YAML comparison. Any immutable claim-template drift
-is a stop condition; never recreate a StatefulSet or PVC to bypass it.
+previous-reviewed PostgreSQL and MinIO `volumeClaimTemplates`, live
+StatefulSet templates, and generated Bound PVCs to agree after normalization of
+only the documented Kubernetes API defaults and Longhorn binding fields. A
+first installation requires all five exact shared-storage identities to be
+absent. Any immutable claim-template, generated-claim, or forbidden acceptance
+metadata drift is a stop condition; never recreate a StatefulSet or PVC to
+bypass it. The same live guard is rerun immediately before apply.
 
 ```bash
 assert_current_shadow_artifacts
@@ -653,6 +677,7 @@ forbidden_namespaces="$(
 )"
 test -z "$forbidden_namespaces"
 
+assert_forward_storage_lineage_contract
 test ! -e "$evidence_dir/rollback-server-side-diff.txt"
 rollback_diff_status=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
@@ -663,6 +688,7 @@ test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1
 chmod 0600 "$evidence_dir/rollback-server-side-diff.txt"
 assert_current_shadow_artifacts
 assert_previous_shadow_artifacts
+assert_forward_storage_lineage_contract
 assert_forward_identity_contract
 assert_no_dynamic_namespaces
 assert_zero_capacity

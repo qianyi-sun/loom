@@ -1495,6 +1495,25 @@ def test_status_accepts_installed_lineage_digests_on_generated_stateful_claims(
     assert result.blockers == ()
 
 
+def test_shadow_status_rejects_plan_digest_on_generated_stateful_claim(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    generated_claim = next(
+        item
+        for item in _items(runner, _NAMESPACED)
+        if item["kind"] == "PersistentVolumeClaim"
+        and item["metadata"]["name"].startswith("data-")
+    )
+    generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = "a" * 32
+    generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "a" * 64
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "acceptance_plan_digest_drift" in result.blockers
+
+
 def test_acceptance_status_rejects_plan_digest_on_generated_stateful_claim(
     tmp_path: Path,
 ) -> None:
