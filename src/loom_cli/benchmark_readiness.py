@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from loom.db.schema import Task as TaskRow
 from loom.task_image_materialization import canonical_task_checksum
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
+
+_BUNDLE_AUDIT_CONCURRENCY = 8
 
 
 def _load_registry_names() -> set[str]:
@@ -172,6 +175,83 @@ def _parse_s3_source(source: str | None) -> tuple[str, str] | None:
     return bucket, prefix if prefix.endswith("/") else f"{prefix}/"
 
 
+async def _verify_bundle_task(
+    *,
+    task_id: object,
+    checksum: object,
+    source: object,
+    object_store: ObjectStore,
+    semaphore: asyncio.Semaphore,
+) -> BundleVerificationFailure | None:
+    task_id_text = str(task_id)
+    source_text = str(source)
+    try:
+        expected_checksum = canonical_task_checksum(str(checksum))
+    except ValueError:
+        return BundleVerificationFailure(
+            task_id=task_id_text,
+            source=source_text,
+            reason="invalid_checksum",
+        )
+    parsed = _parse_s3_source(source if isinstance(source, str) else None)
+    if parsed is None:
+        return BundleVerificationFailure(
+            task_id=task_id_text,
+            source=source_text,
+            reason="invalid_source",
+            expected_checksum=expected_checksum,
+        )
+    bucket, prefix = parsed
+    async with semaphore:
+        try:
+            with tempfile.TemporaryDirectory(prefix="loom-bundle-audit-") as temp:
+                bundle_dir = Path(temp)
+                downloaded = await object_store.download_prefix(
+                    bucket=bucket,
+                    prefix=prefix,
+                    out_dir=bundle_dir,
+                )
+                if downloaded == 0:
+                    return BundleVerificationFailure(
+                        task_id=task_id_text,
+                        source=source_text,
+                        reason="empty_bundle",
+                        expected_checksum=expected_checksum,
+                    )
+                if not (bundle_dir / "task.toml").is_file():
+                    return BundleVerificationFailure(
+                        task_id=task_id_text,
+                        source=source_text,
+                        reason="missing_task_toml",
+                        expected_checksum=expected_checksum,
+                    )
+                try:
+                    actual_checksum = sha256_of_dir(bundle_dir)
+                except Exception:
+                    return BundleVerificationFailure(
+                        task_id=task_id_text,
+                        source=source_text,
+                        reason="hash_error",
+                        expected_checksum=expected_checksum,
+                    )
+        except Exception:
+            return BundleVerificationFailure(
+                task_id=task_id_text,
+                source=source_text,
+                reason="download_error",
+                expected_checksum=expected_checksum,
+            )
+    if actual_checksum != expected_checksum:
+        return BundleVerificationFailure(
+            task_id=task_id_text,
+            source=source_text,
+            reason="checksum_mismatch",
+            expected_checksum=expected_checksum,
+            actual_checksum=actual_checksum,
+        )
+    return None
+
+
 async def run_bundle_presence_audit(
     *,
     db_url: str,
@@ -201,96 +281,25 @@ async def run_bundle_presence_audit(
     finally:
         await engine.dispose()
 
-    failures: list[BundleVerificationFailure] = []
-    for task_id, checksum, source, _benchmark_id, _task_set_id in task_rows:
-        try:
-            expected_checksum = canonical_task_checksum(str(checksum))
-        except ValueError:
-            failures.append(
-                BundleVerificationFailure(
-                    task_id=str(task_id),
-                    source=str(source),
-                    reason="invalid_checksum",
-                )
+    semaphore = asyncio.Semaphore(_BUNDLE_AUDIT_CONCURRENCY)
+    results = await asyncio.gather(
+        *(
+            _verify_bundle_task(
+                task_id=task_id,
+                checksum=checksum,
+                source=source,
+                object_store=object_store,
+                semaphore=semaphore,
             )
-            continue
-        parsed = _parse_s3_source(source)
-        if parsed is None:
-            failures.append(
-                BundleVerificationFailure(
-                    task_id=str(task_id),
-                    source=str(source),
-                    reason="invalid_source",
-                    expected_checksum=expected_checksum,
-                )
-            )
-            continue
-        bucket, prefix = parsed
-        try:
-            with tempfile.TemporaryDirectory(prefix="loom-bundle-audit-") as temp:
-                bundle_dir = Path(temp)
-                downloaded = await object_store.download_prefix(
-                    bucket=bucket,
-                    prefix=prefix,
-                    out_dir=bundle_dir,
-                )
-                if downloaded == 0:
-                    failures.append(
-                        BundleVerificationFailure(
-                            task_id=str(task_id),
-                            source=str(source),
-                            reason="empty_bundle",
-                            expected_checksum=expected_checksum,
-                        )
-                    )
-                    continue
-                if not (bundle_dir / "task.toml").is_file():
-                    failures.append(
-                        BundleVerificationFailure(
-                            task_id=str(task_id),
-                            source=str(source),
-                            reason="missing_task_toml",
-                            expected_checksum=expected_checksum,
-                        )
-                    )
-                    continue
-                try:
-                    actual_checksum = sha256_of_dir(bundle_dir)
-                except Exception:
-                    failures.append(
-                        BundleVerificationFailure(
-                            task_id=str(task_id),
-                            source=str(source),
-                            reason="hash_error",
-                            expected_checksum=expected_checksum,
-                        )
-                    )
-                    continue
-        except Exception:
-            failures.append(
-                BundleVerificationFailure(
-                    task_id=str(task_id),
-                    source=str(source),
-                    reason="download_error",
-                    expected_checksum=expected_checksum,
-                )
-            )
-            continue
-        if actual_checksum != expected_checksum:
-            failures.append(
-                BundleVerificationFailure(
-                    task_id=str(task_id),
-                    source=str(source),
-                    reason="checksum_mismatch",
-                    expected_checksum=expected_checksum,
-                    actual_checksum=actual_checksum,
-                )
-            )
+            for task_id, checksum, source, _benchmark_id, _task_set_id in task_rows
+        )
+    )
+    failures = tuple(failure for failure in results if failure is not None)
 
     return BundlePresenceReport(
         s3_tasks=len(task_rows),
         verified=len(task_rows) - len(failures),
-        failures=tuple(failures),
+        failures=failures,
     )
 
 
