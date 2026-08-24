@@ -344,12 +344,12 @@ ARM64 and runs as UID/GID 65532.
 Release publication preserves source-accurate, immutable evidence. Each native
 archive is rebuilt from the protected release commit inside the hosted
 `publish` job and is checked by Trivy v0.70.0 using image scanning, OS and
-library vulnerabilities, a `10m0s` timeout, `CRITICAL` severity, exit code 1,
+library vulnerabilities, a `20m0s` timeout, `CRITICAL` severity, exit code 1,
 unfixed findings included, the vulnerability scanner only, and no cache. A
 repository helper writes the fixed config and reviewed ignore file outside the
 checkout before each scan. Fixable findings must be removed by updating the
-image or dependency. The expiring exceptions cover the four unfixed Perl CVEs
-(CVE-2026-13221, CVE-2026-42496, CVE-2026-57433, and CVE-2026-8376) only on
+image or dependency. The expiring exceptions cover the three unfixed CRITICAL
+Perl CVEs (CVE-2026-13221, CVE-2026-42496, and CVE-2026-8376) only on
 the Debian Perl packages required by Debian base runtimes, the agent toolchain,
 and the staging-compatible PostgreSQL 17.4 rehearsal image, CVE-2026-43185
 only on the agent compiler's

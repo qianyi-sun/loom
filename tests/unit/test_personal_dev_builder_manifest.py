@@ -53,6 +53,11 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
 
     pod = job["spec"]["template"]
     assert pod["metadata"]["labels"] | expected_labels == pod["metadata"]["labels"]
+    assert pod["metadata"].get("annotations") == {
+        "dev.gvisor.spec.mount.buildkit-run.options": "rw,rprivate",
+        "dev.gvisor.spec.mount.buildkit-run.share": "pod",
+        "dev.gvisor.spec.mount.buildkit-run.type": "tmpfs",
+    }
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
     assert spec["enableServiceLinks"] is False

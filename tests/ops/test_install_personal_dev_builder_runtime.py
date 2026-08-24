@@ -725,6 +725,7 @@ def _active_config(profile: RuntimeProfile) -> bytes:
         "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
         f"'{profile.handler}']\n"
         f'  runtime_type = "{profile.runtime_type}"\n'
+        f"  pod_annotations = {json.dumps(list(profile.pod_annotations))}\n"
         "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
         f"'{profile.handler}'.options]\n"
         '  TypeUrl = "io.containerd.runsc.v1.options"\n'
@@ -746,6 +747,18 @@ def test_active_verification_requires_exact_generated_containerd_runtime(
         "release": profile.version,
         "state": "active",
     }
+
+    active.write_bytes(
+        _active_config(profile).replace(
+            b'  pod_annotations = ["dev.gvisor.spec.mount.buildkit-run.*"]\n',
+            b"",
+        )
+    )
+    with pytest.raises(
+        PersonalDevBuilderRuntimeInstallError,
+        match="active_runtime_invalid",
+    ):
+        installer.verify_active()
 
     active.write_bytes(
         _active_config(profile).replace(b"io.containerd.runsc.v1", b"io.containerd.runc.v2", 1)

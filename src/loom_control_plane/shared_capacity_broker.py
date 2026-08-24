@@ -16,6 +16,7 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -322,7 +323,7 @@ class SharedCapacityBroker:
 
     def initialize(self) -> None:
         self._prepare_authority()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS broker_meta (
@@ -411,10 +412,10 @@ class SharedCapacityBroker:
     def _connect(self) -> sqlite3.Connection:
         self._validate_authority_file(self.state_db, mode=0o600)
         existing_sidecars = {
-            path for path in self._sqlite_sidecar_paths() if path.exists() or path.is_symlink()
+            path
+            for path in self._sqlite_sidecar_paths()
+            if self._validate_optional_sqlite_sidecar(path, mode=0o600)
         }
-        for path in existing_sidecars:
-            self._validate_authority_file(path, mode=0o600)
         connection = sqlite3.connect(self.state_db, timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -426,10 +427,12 @@ class SharedCapacityBroker:
             if path not in existing_sidecars:
                 try:
                     os.chmod(path, 0o600, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
                 except OSError as exc:
                     connection.close()
                     raise BrokerError("broker SQLite sidecar authority is unsafe") from exc
-            self._validate_authority_file(path, mode=0o600)
+            self._validate_optional_sqlite_sidecar(path, mode=0o600)
         return connection
 
     def _prepare_authority(self) -> None:
@@ -492,6 +495,24 @@ class SharedCapacityBroker:
             or stat.S_IMODE(metadata.st_mode) != mode
         ):
             raise BrokerError("broker authority file has unsafe owner, type, link count, or mode")
+
+    @staticmethod
+    def _validate_optional_sqlite_sidecar(path: Path, *, mode: int) -> bool:
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise BrokerError("broker SQLite sidecar authority is unavailable") from exc
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != mode
+        ):
+            raise BrokerError("broker SQLite sidecar authority is unsafe")
+        return True
 
     def _sqlite_sidecar_paths(self) -> tuple[Path, ...]:
         return tuple(
@@ -777,7 +798,7 @@ class SharedCapacityBroker:
 
     def status(self, *, request_id: str | None = None) -> dict[str, object]:
         self.initialize()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             return self._status_from_connection(connection, request_id=request_id)
 
     def _status_from_connection(

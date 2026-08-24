@@ -119,7 +119,7 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.builder.runtime_class_name == "loom-personal-dev-builder"
     assert profile.builder.runtime_handler == "runsc-personal-dev"
     assert profile.builder.runtime_profile_sha256 == (
-        "880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"
+        "6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"
     )
     assert profile.builder.registry_prefix == "ghcr.io/qianyi-sun/loom-dev"
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
@@ -209,12 +209,12 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
         ),
         lambda text: text.replace(
             "runtime_profile_sha256 = "
-            '"880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"\n',
+            '"6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"\n',
             "",
         ),
         lambda text: text.replace(
             "runtime_profile_sha256 = "
-            '"880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"',
+            '"6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"',
             'runtime_profile_sha256 = "D' + "d" * 63 + '"',
         ),
         lambda text: text.replace('cpu_request = "250m"', 'cpu_request = "3"', 1),

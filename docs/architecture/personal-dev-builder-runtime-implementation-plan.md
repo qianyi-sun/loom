@@ -296,6 +296,7 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
   ]["runtimes"][profile.handler]
   assert runtime == {
       "runtime_type": profile.runtime_type,
+      "pod_annotations": list(profile.pod_annotations),
       "options": {
           "TypeUrl": "io.containerd.runsc.v1.options",
           "ConfigPath": str(profile.runsc_config_path),

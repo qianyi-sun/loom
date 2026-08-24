@@ -254,12 +254,12 @@ archive, and only then loads and pushes it. PR candidate archives may be
 retained for untrusted CI evidence, but the publisher never downloads, loads,
 scans as release, attests, or publishes them. Both untrusted validation and the
 trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
-library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
+library vulnerability types, a `20m0s` timeout, `CRITICAL` severity, exit code
 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
 The trusted scan selects fixed config and a reviewed ignore file generated
 outside the checkout. Fixable findings are remediated in their images first.
-The temporary policy covers the four unfixed Perl CVEs (CVE-2026-13221,
-CVE-2026-42496, CVE-2026-57433, and CVE-2026-8376) only for the Debian Perl
+The temporary policy covers the three unfixed CRITICAL Perl CVEs
+(CVE-2026-13221, CVE-2026-42496, and CVE-2026-8376) only for the Debian Perl
 packages required by Debian base runtimes, the agent toolchain, and the
 staging-compatible PostgreSQL 17.4 rehearsal image, CVE-2026-43185 only for
 the agent compiler's

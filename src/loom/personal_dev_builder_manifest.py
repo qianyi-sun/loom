@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from loom.personal_dev_candidate import (
@@ -22,6 +23,13 @@ _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-personal-dev-builder-controller",
     "app.kubernetes.io/part-of": "loom",
 }
+BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS = MappingProxyType(
+    {
+        "dev.gvisor.spec.mount.buildkit-run.options": "rw,rprivate",
+        "dev.gvisor.spec.mount.buildkit-run.share": "pod",
+        "dev.gvisor.spec.mount.buildkit-run.type": "tmpfs",
+    }
+)
 PUBLIC_EGRESS_IPV4_EXCEPTIONS = (
     "0.0.0.0/8",
     "10.0.0.0/8",
@@ -366,7 +374,10 @@ def personal_dev_builder_manifest_documents(
             "activeDeadlineSeconds": config.active_deadline_seconds,
             "ttlSecondsAfterFinished": config.ttl_seconds_after_finished,
             "template": {
-                "metadata": {"labels": pod_labels},
+                "metadata": {
+                    "annotations": dict(BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS),
+                    "labels": pod_labels,
+                },
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
@@ -537,6 +548,7 @@ def personal_dev_builder_manifest_documents(
 
 
 __all__ = [
+    "BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS",
     "PUBLIC_EGRESS_IPV4_EXCEPTIONS",
     "PUBLIC_EGRESS_IPV6_CIDR",
     "PUBLIC_EGRESS_IPV6_EXCEPTIONS",
