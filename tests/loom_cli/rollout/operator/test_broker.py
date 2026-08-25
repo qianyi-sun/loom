@@ -258,7 +258,8 @@ class CleanupFailingBackup(ObjectLimitBackup):
 
 
 class FakeSystemd:
-    def __init__(self) -> None:
+    def __init__(self, state_root: Path) -> None:
+        self.state_root = state_root
         self.start_count = 0
         self.terminated: list[str] = []
         self.journal = ("token=known-secret\n",)
@@ -281,6 +282,14 @@ class FakeSystemd:
         self.terminated.append(unit_name)
 
     def show(self, unit_name: str):  # type: ignore[no-untyped-def]
+        assert unit_name.startswith("loom-staging-rollout-")
+        return SimpleNamespace(is_running=True) if unit_name in self.visible_units else None
+
+    def show_backup(self, job_path: Path, unit_name: str):  # type: ignore[no-untyped-def]
+        request_id = unit_name.removeprefix("loom-staging-backup-").removesuffix(".service")
+        assert job_path == (
+            self.state_root / "requests" / request_id / "preflight-backup" / "job.json"
+        )
         return SimpleNamespace(is_running=True) if unit_name in self.visible_units else None
 
     def stream_journal(self, unit_name: str, follow: bool):  # type: ignore[no-untyped-def]
@@ -377,7 +386,7 @@ def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
     candidate = FakeCandidate(order)
     selected_backup = backup or FakeBackup(order)
     selected_backup.order = order
-    systemd = FakeSystemd()
+    systemd = FakeSystemd(config.state_root)
     lifecycle = FakeLifecycle(store, systemd, order)
     stdout, stderr = io.StringIO(), io.StringIO()
 
