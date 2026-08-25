@@ -194,11 +194,19 @@ class PersonalDevAcceptanceStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class _ExpectedStatefulSet:
+    name: str
+    ordinals: range
+    claim_templates: tuple[dict[str, Any], ...]
+    claim_template_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ExpectedPodTemplate:
     body: dict[str, Any]
     replicas: int
-    statefulset_name: str | None
-    claim_template_names: tuple[str, ...]
+    statefulset: _ExpectedStatefulSet | None
+    statefulset_uid: str | None
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -334,12 +342,57 @@ def _expected_subset(
     return type(expected) is type(actual) and expected == actual
 
 
+def _expected_statefulset(item: Mapping[str, Any]) -> _ExpectedStatefulSet:
+    metadata = _metadata(item)
+    spec = item.get("spec")
+    if metadata is None or not isinstance(spec, Mapping):
+        raise ValueError("expected StatefulSet is invalid")
+    name = metadata.get("name")
+    replicas = spec.get("replicas")
+    ordinals = spec.get("ordinals")
+    if ordinals is None:
+        start = 0
+    elif isinstance(ordinals, Mapping):
+        start = ordinals.get("start", 0)
+    else:
+        raise ValueError("expected StatefulSet ordinals are invalid")
+    if (
+        not isinstance(name, str)
+        or type(replicas) is not int
+        or not 0 <= replicas <= _MAX_INVENTORY_ITEMS
+        or type(start) is not int
+        or start < 0
+    ):
+        raise ValueError("expected StatefulSet ordinals are invalid")
+
+    claim_templates = spec.get("volumeClaimTemplates", [])
+    if not isinstance(claim_templates, list):
+        raise ValueError("expected StatefulSet claim templates are invalid")
+    validated_templates: list[dict[str, Any]] = []
+    claim_names: list[str] = []
+    for claim in claim_templates:
+        claim_metadata = _metadata(claim) if isinstance(claim, Mapping) else None
+        claim_name = claim_metadata.get("name") if claim_metadata is not None else None
+        if not isinstance(claim, dict) or not isinstance(claim_name, str) or not claim_name:
+            raise ValueError("expected StatefulSet claim templates are invalid")
+        validated_templates.append(claim)
+        claim_names.append(claim_name)
+    if len(set(claim_names)) != len(claim_names):
+        raise ValueError("expected StatefulSet claim templates are invalid")
+    return _ExpectedStatefulSet(
+        name=name,
+        ordinals=range(start, start + replicas),
+        claim_templates=tuple(validated_templates),
+        claim_template_names=tuple(claim_names),
+    )
+
+
 def _pod_matches_expected(
     expected: _ExpectedPodTemplate,
     actual: Mapping[str, Any],
 ) -> bool:
-    statefulset_name = expected.statefulset_name
-    if statefulset_name is None:
+    statefulset = expected.statefulset
+    if statefulset is None:
         return _expected_subset(expected.body, actual)
 
     metadata = _metadata(actual)
@@ -349,12 +402,24 @@ def _pod_matches_expected(
         metadata is None
         or not isinstance(expected_spec, Mapping)
         or not isinstance(actual_spec, Mapping)
+        or expected.statefulset_uid is None
     ):
         return False
     pod_name = metadata.get("name")
     if not isinstance(pod_name, str) or pod_name not in {
-        f"{statefulset_name}-{ordinal}" for ordinal in range(expected.replicas)
+        f"{statefulset.name}-{ordinal}" for ordinal in statefulset.ordinals
     }:
+        return False
+    if metadata.get("ownerReferences") != [
+        {
+            "apiVersion": "apps/v1",
+            "blockOwnerDeletion": True,
+            "controller": True,
+            "kind": "StatefulSet",
+            "name": statefulset.name,
+            "uid": expected.statefulset_uid,
+        }
+    ]:
         return False
 
     expected_volumes = expected_spec.get("volumes", [])
@@ -362,19 +427,20 @@ def _pod_matches_expected(
     if not isinstance(expected_volumes, list) or not isinstance(actual_volumes, list):
         return False
 
-    claim_template_names = set(expected.claim_template_names)
+    claim_template_names = set(statefulset.claim_template_names)
     observed_claim_templates: set[str] = set()
     declared_volumes: list[object] = []
     for volume in actual_volumes:
         if not isinstance(volume, Mapping):
             return False
         name = volume.get("name")
+        if not isinstance(name, str):
+            return False
         if name not in claim_template_names:
             declared_volumes.append(volume)
             continue
         if (
-            not isinstance(name, str)
-            or name in observed_claim_templates
+            name in observed_claim_templates
             or set(volume) != {"name", "persistentVolumeClaim"}
             or volume.get("persistentVolumeClaim") != {"claimName": f"{name}-{pod_name}"}
         ):
@@ -1283,23 +1349,36 @@ def _observe_personal_dev_status(
         live_namespaced = _index_unique(namespaced_items)
         namespaced_observed = len(live_namespaced)
         pods = [item for item in namespaced_items if item.get("kind") == "Pod"]
-        expected_generated_pvcs = {
-            (
-                "v1",
-                "PersistentVolumeClaim",
-                _NAMESPACE,
-                f"{template['metadata']['name']}-{item['metadata']['name']}-0",
-            ): {
-                "metadata": {
-                    "labels": template["metadata"]["labels"],
-                    "annotations": template["metadata"]["annotations"],
-                },
-                "spec": template["spec"],
-            }
+        expected_statefulsets = {
+            identity: _expected_statefulset(item)
             for item in expected_namespaced
             if item.get("kind") == "StatefulSet"
-            for template in item["spec"].get("volumeClaimTemplates", [])
+            if (identity := _identity(item)) is not None
         }
+        expected_generated_pvcs: dict[
+            tuple[str, str, str, str],
+            dict[str, Any],
+        ] = {}
+        for statefulset_contract in expected_statefulsets.values():
+            for claim_template, claim_name in zip(
+                statefulset_contract.claim_templates,
+                statefulset_contract.claim_template_names,
+                strict=True,
+            ):
+                for ordinal in statefulset_contract.ordinals:
+                    identity = (
+                        "v1",
+                        "PersistentVolumeClaim",
+                        _NAMESPACE,
+                        f"{claim_name}-{statefulset_contract.name}-{ordinal}",
+                    )
+                    expected_generated_pvcs[identity] = {
+                        "metadata": {
+                            "labels": claim_template["metadata"]["labels"],
+                            "annotations": claim_template["metadata"]["annotations"],
+                        },
+                        "spec": claim_template["spec"],
+                    }
         generated_pvcs = set(expected_generated_pvcs)
         current_migration_name = next(
             _metadata(item).get("name")  # type: ignore[union-attr]
@@ -1406,33 +1485,25 @@ def _observe_personal_dev_status(
                 or type(replicas) is not int
             ):
                 raise ValueError("expected pod template is invalid")
-            statefulset_name: str | None = None
-            claim_template_names: tuple[str, ...] = ()
+            expected_statefulset: _ExpectedStatefulSet | None = None
+            statefulset_uid: str | None = None
             if item.get("kind") == "StatefulSet":
-                metadata = _metadata(item)
-                claim_templates = item["spec"].get("volumeClaimTemplates", [])
-                if metadata is None or not isinstance(claim_templates, list):
-                    raise ValueError("expected StatefulSet claim templates are invalid")
-                name = metadata.get("name")
-                claim_names: list[str] = []
-                for claim in claim_templates:
-                    claim_metadata = _metadata(claim) if isinstance(claim, Mapping) else None
-                    claim_name = claim_metadata.get("name") if claim_metadata is not None else None
-                    if not isinstance(claim_name, str):
-                        raise ValueError("expected StatefulSet claim templates are invalid")
-                    claim_names.append(claim_name)
-                if not isinstance(name, str) or len(set(claim_names)) != len(claim_names):
-                    raise ValueError("expected StatefulSet claim templates are invalid")
-                statefulset_name = name
-                claim_template_names = tuple(claim_names)
+                identity = _identity(item)
+                if identity is None or identity not in expected_statefulsets:
+                    raise ValueError("expected StatefulSet is invalid")
+                expected_statefulset = expected_statefulsets[identity]
+                live_statefulset = live_expected.get(identity)
+                live_metadata = _metadata(live_statefulset) if live_statefulset else None
+                uid = live_metadata.get("uid") if live_metadata is not None else None
+                statefulset_uid = uid if isinstance(uid, str) and uid else None
             expected_pod_templates[app] = _ExpectedPodTemplate(
                 body={
                     "metadata": template["metadata"],
                     "spec": template["spec"],
                 },
                 replicas=replicas,
-                statefulset_name=statefulset_name,
-                claim_template_names=claim_template_names,
+                statefulset=expected_statefulset,
+                statefulset_uid=statefulset_uid,
             )
         observed_pods: dict[str, list[dict[str, Any]]] = {app: [] for app in expected_pod_templates}
         pod_drift = False
