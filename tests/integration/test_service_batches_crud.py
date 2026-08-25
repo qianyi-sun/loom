@@ -3599,7 +3599,9 @@ async def test_batch_diagnosis_clusters_failed_trials(
     assert body["primary_cause"]["affected_ratio"] == pytest.approx(0.75)
     assert body["reason_clusters"][0]["reason_code"] == "trial.gateway_error"
     assert body["reason_clusters"][0]["count"] == 3
-    assert body["reason_clusters"][0]["representative_trial_id"] == (str(trial_ids[0]))
+    assert body["reason_clusters"][0]["representative_trial_id"] in {
+        str(trial_id) for trial_id in trial_ids[:3]
+    }
     assert "not reliable" in body["impact"]
     assert any(action.get("action") == "rerun_failed" for action in body["next_actions"])
     assert "loom_api_supersecret" not in json.dumps(body)

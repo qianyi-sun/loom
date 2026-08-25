@@ -4,8 +4,8 @@ from decimal import Decimal
 import pytest
 
 from loom.daytona_policy import (
-    BackendPolicySnapshot,
     BackendPolicyRequest,
+    BackendPolicySnapshot,
     DaytonaPriceSnapshot,
     DaytonaResources,
     build_policy_snapshot,
