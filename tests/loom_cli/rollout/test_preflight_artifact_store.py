@@ -319,7 +319,8 @@ def test_store_loads_one_exact_publication_without_rebuild_or_render(tmp_path: P
         browser_report_schema_sha256="2" * 64,
     )
 
-    loaded = store.load_exact(
+    loaded = store.load(
+        bundle_digest=publication.bundle_digest,
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
@@ -392,7 +393,8 @@ def test_store_loads_current_publication_beside_historical_schema_four(
         browser_report_schema_sha256="2" * 64,
     )
 
-    loaded = store.load_exact(
+    loaded = store.load(
+        bundle_digest=current.bundle_digest,
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
@@ -404,33 +406,100 @@ def test_store_loads_current_publication_beside_historical_schema_four(
     assert loaded.publication == current
 
 
-def test_store_rejects_ambiguous_exact_publications(tmp_path: Path) -> None:
+def test_store_loads_evidence_selected_publication_when_identity_is_duplicated(
+    tmp_path: Path,
+) -> None:
     store = PreflightArtifactStore(tmp_path / "state")
     image_tag, images, manifests = _loadable_artifacts()
+    publications = []
     for migration_digest in ("1" * 64, "3" * 64):
-        store.publish(
-            candidate_sha="a" * 40,
-            candidate_tree="f" * 40,
-            mutation_epoch=8,
-            images=images,
-            manifests=manifests,
-            migration=_migration(
-                images,
-                image_tag=image_tag,
+        publications.append(
+            store.publish(
+                candidate_sha="a" * 40,
+                candidate_tree="f" * 40,
+                mutation_epoch=8,
+                images=images,
+                manifests=manifests,
+                migration=_migration(
+                    images,
+                    image_tag=image_tag,
+                    migration_plan_sha256=migration_digest,
+                    migration_target_revision="0066",
+                ),
+                production_defaults=_production_defaults(),
                 migration_plan_sha256=migration_digest,
                 migration_target_revision="0066",
-            ),
-            production_defaults=_production_defaults(),
-            migration_plan_sha256=migration_digest,
-            migration_target_revision="0066",
-            browser_report_schema_sha256="2" * 64,
+                browser_report_schema_sha256="2" * 64,
+            )
         )
 
-    with pytest.raises(PreflightArtifactStoreError, match="ambiguous"):
-        store.load_exact(
+    loaded = store.load(
+        bundle_digest=publications[1].bundle_digest,
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_run=_docker,
+    )
+
+    assert loaded.publication == publications[1]
+
+
+def test_store_digest_lookup_ignores_more_than_256_unrelated_siblings(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    publication = store.publish(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        images=images,
+        manifests=manifests,
+        migration=_migration(images, image_tag=image_tag, migration_target_revision="0066"),
+        production_defaults=_production_defaults(),
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+    for index in range(257):
+        (store.root / f"{index + 1000:064x}").mkdir(mode=0o700)
+    (store.root / "unsafe-sibling").write_text("unrelated\n")
+
+    loaded = store.load(
+        bundle_digest=publication.bundle_digest,
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        image_tag=image_tag,
+        namespace="loom-staging",
+        image_run=_docker,
+    )
+
+    assert loaded.publication == publication
+
+
+def test_store_digest_lookup_rejects_expected_identity_drift(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    image_tag, images, manifests = _loadable_artifacts()
+    publication = store.publish(
+        candidate_sha="a" * 40,
+        candidate_tree="f" * 40,
+        mutation_epoch=8,
+        images=images,
+        manifests=manifests,
+        migration=_migration(images, image_tag=image_tag, migration_target_revision="0066"),
+        production_defaults=_production_defaults(),
+        migration_plan_sha256="1" * 64,
+        migration_target_revision="0066",
+        browser_report_schema_sha256="2" * 64,
+    )
+
+    with pytest.raises(PreflightArtifactStoreError, match="identity drifted"):
+        store.load(
+            bundle_digest=publication.bundle_digest,
             candidate_sha="a" * 40,
             candidate_tree="f" * 40,
-            mutation_epoch=8,
+            mutation_epoch=9,
             image_tag=image_tag,
             namespace="loom-staging",
             image_run=_docker,
@@ -480,7 +549,8 @@ def test_publication_check_is_the_single_tier_one_publication_boundary(tmp_path:
         "production-defaults.plan",
     )
     assert outcome.evidence["production-defaults-digest"] == _production_defaults().artifact_digest
-    loaded = store.load_exact(
+    loaded = store.load(
+        bundle_digest=str(outcome.evidence["bundle-digest"]),
         candidate_sha="a" * 40,
         candidate_tree="f" * 40,
         mutation_epoch=8,
