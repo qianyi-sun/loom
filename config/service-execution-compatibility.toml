@@ -1,0 +1,206 @@
+schema_version = "loom.service-workload-compatibility-policy.v1"
+logical_pool_id = "nebius-cpu"
+execution_class_id = "linux-amd64-cpu-pod-v1"
+
+# Every first-party benchmark entry point must match exactly one policy. The
+# generator fails closed on missing or overlapping rules and expands these
+# family policies into one explicit machine-readable row per benchmark slug.
+
+[[policies]]
+pattern = "aime-*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU task with an in-attempt script verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway/no-network policy"]
+
+[[policies]]
+pattern = "bfcl"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "CPU function-calling evaluation with no host-specialized runtime."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway-only policy"]
+
+[[policies]]
+pattern = "browsecomp"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Browsing tasks need an explicit approved egress allowlist instead of public network access."
+required_changes = ["define per-task egress policy", "pin the attempt image by digest", "declare bounded resources"]
+
+[[policies]]
+pattern = "gaia"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "File and web tasks need explicit artifact and approved-egress mappings."
+required_changes = ["map input files to immutable object artifacts", "define approved egress", "declare bounded resources"]
+
+[[policies]]
+pattern = "gpqa*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU task with an in-attempt script verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway/no-network policy"]
+
+[[policies]]
+pattern = "hendrycks-math"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU task with an in-attempt script verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway/no-network policy"]
+
+[[policies]]
+pattern = "math-500"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU task with an in-attempt script verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway/no-network policy"]
+
+[[policies]]
+pattern = "humaneval"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU code task with a bounded pytest verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and no-network policy"]
+
+[[policies]]
+pattern = "livecodebench"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU code task with a bounded pytest verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and no-network policy"]
+
+[[policies]]
+pattern = "mbpp"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU code task with a bounded pytest verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and no-network policy"]
+
+[[policies]]
+pattern = "mmlu-pro"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Linux/amd64 CPU task with an in-attempt script verifier."
+required_changes = ["materialize a digest-pinned image", "declare CPU, RAM, storage, and gateway/no-network policy"]
+
+[[policies]]
+pattern = "osworld"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "Desktop/GUI host-specialized execution is outside the final CPU Pod service contract."
+required_changes = ["move to a separately accepted desktop execution product or remove from service support"]
+
+[[policies]]
+pattern = "skillflow*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Materialized tasks may carry task-specific scripts, images, and network assumptions that require per-task admission."
+required_changes = ["generate immutable per-task images", "scan every task requirement", "declare bounded resources and egress"]
+
+[[policies]]
+pattern = "skilllearnbench*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "SkillLearnBench task variants need immutable task images and explicit task-specific capability admission."
+required_changes = ["generate immutable per-task images", "map verifier execution", "declare bounded resources and egress"]
+
+[[policies]]
+pattern = "swe-bench"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Instance images and repository setup must be made immutable and Pod-native."
+required_changes = ["replace mutable instance images", "remove Docker-dependent setup", "map verifier to an execution unit"]
+
+[[policies]]
+pattern = "swe-bench-verified"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Instance images and repository setup must be made immutable and Pod-native."
+required_changes = ["replace mutable instance images", "remove Docker-dependent setup", "map verifier to an execution unit"]
+
+[[policies]]
+pattern = "swe-bench-multimodal"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Instance images, multimodal assets, and verifier execution need explicit Pod-native mappings."
+required_changes = ["pin images and assets", "remove Docker-dependent setup", "map verifier to an execution unit"]
+
+[[policies]]
+pattern = "tau2-bench"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Service dependencies must become declared sidecars with health and resource contracts."
+required_changes = ["map services to sidecars", "define readiness and egress", "pin all images by digest"]
+
+[[policies]]
+pattern = "webarena"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "Browser services and network dependencies require explicit sidecar and approved-egress mappings."
+required_changes = ["map services to sidecars", "define readiness and egress", "pin all images by digest"]
+
+[[policies]]
+pattern = "terminal-bench-2"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "The locked benchmark contains task-specific Dockerfiles and native verifiers that must be materialized before Job admission."
+required_changes = ["materialize digest-pinned task images", "map native verifier to a separate execution where required", "scan every task requirement"]
+
+[[additional_workloads]]
+workload_id = "operator-local-task-bundle"
+disposition = "conversion_required"
+owner = "operator"
+reason = "Operator folders are open-ended and require per-task requirement extraction."
+required_changes = ["run strict workload admission for every task", "assign an owner for each rejected class"]
+
+[[additional_workloads]]
+workload_id = "operator-adapter-remap"
+disposition = "conversion_required"
+owner = "operator"
+reason = "A remap inherits adapter code but not immutable task evidence from its source."
+required_changes = ["inherit the adapter policy", "re-run task/image compatibility and provenance checks"]
+
+[[additional_workloads]]
+workload_id = "user-taskset-bundle"
+disposition = "conversion_required"
+owner = "submitting-team"
+reason = "User bundles are unbounded input and cannot receive blanket service compatibility."
+required_changes = ["materialize immutable images", "reject unsupported capabilities before fan-out", "record per-task disposition"]
+
+# Pipeline ResourceProfileV1 rows are also service workload classes. They are
+# expanded from config/resource-profiles.toml and must match exactly one rule.
+
+[[pipeline_profile_policies]]
+pattern = "behavior-export-io"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "The profile is CPU-only but still binds legacy host runtime and physical pool contracts."
+required_changes = ["map the profile to WorkloadRequirementsV1", "materialize an immutable Pod image", "remove physical pool binding"]
+
+[[pipeline_profile_policies]]
+pattern = "behavior-offline-*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "The CPU offline profiles still bind legacy runtime features and execution pools."
+required_changes = ["map the profile to WorkloadRequirementsV1", "materialize an immutable Pod image", "remove physical pool binding"]
+
+[[pipeline_profile_policies]]
+pattern = "behavior-sim-local-*"
+disposition = "unsupported"
+owner = "qianyi-sun"
+reason = "Behavior simulation profiles require NVIDIA GPUs and host runtime features outside the CPU-only service contract."
+required_changes = ["retain in a separately accepted GPU product or remove from service scheduling"]
+
+[[pipeline_profile_policies]]
+pattern = "pipeline-test-cpu-*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "The CPU test profiles are portable candidates but still use physical pool-class identity."
+required_changes = ["map the profile to WorkloadRequirementsV1", "bind an immutable image runtime contract", "remove physical pool binding"]
+
+[[pipeline_profile_policies]]
+pattern = "terminalgen-*"
+disposition = "conversion_required"
+owner = "qianyi-sun"
+reason = "TerminalGen CPU profiles require special host runtime features, cache authority, and physical pools."
+required_changes = ["map the profile to WorkloadRequirementsV1", "replace host features with Pod-native execution", "remove physical pool binding"]

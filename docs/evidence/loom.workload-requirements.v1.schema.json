@@ -1,0 +1,208 @@
+{
+  "$defs": {
+    "ImageMaterialization": {
+      "enum": [
+        "immutable_oci",
+        "task_dockerfile",
+        "mutable_oci",
+        "unspecified"
+      ],
+      "title": "ImageMaterialization",
+      "type": "string"
+    },
+    "IsolationLevel": {
+      "description": "Minimum hostile-code isolation supplied by an execution class.",
+      "enum": [
+        "shared_kernel",
+        "sandboxed_runtime",
+        "dedicated_ephemeral_node"
+      ],
+      "title": "IsolationLevel",
+      "type": "string"
+    },
+    "NetworkAccess": {
+      "enum": [
+        "none",
+        "gateway_only",
+        "approved_allowlist",
+        "unrestricted_public"
+      ],
+      "title": "NetworkAccess",
+      "type": "string"
+    },
+    "VerifierTopology": {
+      "enum": [
+        "in_attempt",
+        "separate_execution"
+      ],
+      "title": "VerifierTopology",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete material capability declaration for one execution unit.",
+  "properties": {
+    "cpu_architecture": {
+      "enum": [
+        "x86_64",
+        "arm64",
+        "any"
+      ],
+      "title": "Cpu Architecture",
+      "type": "string"
+    },
+    "cpu_millis": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Cpu Millis"
+    },
+    "custom_dns": {
+      "title": "Custom Dns",
+      "type": "boolean"
+    },
+    "ephemeral_storage_mib": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ephemeral Storage Mib"
+    },
+    "extra_hosts": {
+      "title": "Extra Hosts",
+      "type": "boolean"
+    },
+    "gpu_count": {
+      "minimum": 0,
+      "title": "Gpu Count",
+      "type": "integer"
+    },
+    "gpu_vendor": {
+      "enum": [
+        "none",
+        "nvidia"
+      ],
+      "title": "Gpu Vendor",
+      "type": "string"
+    },
+    "host_devices": {
+      "title": "Host Devices",
+      "type": "boolean"
+    },
+    "host_network": {
+      "title": "Host Network",
+      "type": "boolean"
+    },
+    "host_path": {
+      "title": "Host Path",
+      "type": "boolean"
+    },
+    "host_specialized": {
+      "title": "Host Specialized",
+      "type": "boolean"
+    },
+    "image_materialization": {
+      "$ref": "#/$defs/ImageMaterialization"
+    },
+    "image_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Image Ref"
+    },
+    "isolation_level": {
+      "$ref": "#/$defs/IsolationLevel"
+    },
+    "memory_mib": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Memory Mib"
+    },
+    "nested_containers": {
+      "title": "Nested Containers",
+      "type": "boolean"
+    },
+    "network_access": {
+      "$ref": "#/$defs/NetworkAccess"
+    },
+    "operating_system": {
+      "enum": [
+        "linux",
+        "windows"
+      ],
+      "title": "Operating System",
+      "type": "string"
+    },
+    "privileged": {
+      "title": "Privileged",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "loom.workload-requirements.v1",
+      "default": "loom.workload-requirements.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sidecar_count": {
+      "minimum": 0,
+      "title": "Sidecar Count",
+      "type": "integer"
+    },
+    "tmpfs": {
+      "title": "Tmpfs",
+      "type": "boolean"
+    },
+    "verifier_topology": {
+      "$ref": "#/$defs/VerifierTopology"
+    }
+  },
+  "required": [
+    "operating_system",
+    "cpu_architecture",
+    "gpu_vendor",
+    "gpu_count",
+    "cpu_millis",
+    "memory_mib",
+    "ephemeral_storage_mib",
+    "isolation_level",
+    "network_access",
+    "image_materialization",
+    "image_ref",
+    "sidecar_count",
+    "verifier_topology",
+    "custom_dns",
+    "extra_hosts",
+    "tmpfs",
+    "privileged",
+    "host_path",
+    "host_network",
+    "nested_containers",
+    "host_devices",
+    "host_specialized"
+  ],
+  "title": "WorkloadRequirementsV1",
+  "type": "object"
+}
