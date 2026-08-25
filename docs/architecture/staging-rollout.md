@@ -19,8 +19,10 @@ loom-staging-rollout --env ENV logs [--follow] REQUEST_ID
 loom-staging-rollout --env ENV resume REQUEST_ID
 loom-staging-rollout --env ENV cancel --reason REASON REQUEST_ID
 loom-staging-rollout --env ENV cleanup-incomplete-backup REQUEST_ID
-loom-staging-rollout --env ENV manifest-ownership {inventory,apply} ...
-loom-staging-rollout --env ENV lifecycle-capacity {inventory,apply} ...
+loom-staging-rollout --env ENV manifest-ownership inventory --artifact-bundle-sha256 DIGEST
+loom-staging-rollout --env ENV manifest-ownership apply --artifact-bundle-sha256 DIGEST --request-id REQUEST_ID --approved-inventory-sha256 SHA256
+loom-staging-rollout --env ENV lifecycle-capacity inventory --artifact-bundle-sha256 DIGEST
+loom-staging-rollout --env ENV lifecycle-capacity apply --artifact-bundle-sha256 DIGEST --approved-plan-sha256 SHA256
 loom-staging-rollout --env ENV backup-recovery {inventory,apply} ...
 loom-staging-rollout --env ENV backup-retention {inventory,apply} ...
 ```
@@ -29,6 +31,12 @@ loom-staging-rollout --env ENV backup-retention {inventory,apply} ...
 arbitrary passthrough argument. The installed policy selects the remote and
 branch, and the broker binds the request to the freshly fetched head. Use
 `--dry-run` to exercise admission and candidate resolution without mutation.
+Passing `preflight`, staged preview, and backup-pending responses include
+`preflight_artifact_bundle_sha256`. Use that secret-free evidence value as
+`DIGEST`; maintenance reopens only that immutable publication and revalidates
+its candidate, tree, mutation epoch, rendered content, images, and approved
+inventory or plan. It never discovers a publication by listing the artifact
+store.
 
 ## Authority and persistence
 

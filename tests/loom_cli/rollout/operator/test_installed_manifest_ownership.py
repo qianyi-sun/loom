@@ -18,6 +18,8 @@ from loom_cli.rollout.operator.installed_manifest_ownership import (
 )
 from loom_cli.rollout.operator.model import CandidateBinding
 
+_BUNDLE = "9" * 64
+
 
 def _config(tmp_path: Path) -> OperatorConfig:
     return OperatorConfig(
@@ -250,7 +252,8 @@ def test_installed_service_binds_exact_publication_and_fixed_commands(
         def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             pass
 
-        def load_exact(self, **kwargs):  # type: ignore[no-untyped-def]
+        def load(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["bundle_digest"] == _BUNDLE
             assert kwargs["candidate_sha"] == "a" * 40
             assert kwargs["candidate_tree"] == "b" * 40
             assert kwargs["mutation_epoch"] == 2
@@ -275,9 +278,11 @@ def test_installed_service_binds_exact_publication_and_fixed_commands(
         service_uid=max(1, os.geteuid()),
         read_mutation_epoch=lambda: 2,
     )
-    inventory = service.inventory(_candidate())
+    inventory = service.inventory(_candidate(), artifact_bundle_sha256=_BUNDLE)
+    assert inventory["artifact_bundle_sha256"] == _BUNDLE
     result = service.apply(
         _candidate(),
+        artifact_bundle_sha256=_BUNDLE,
         request_id="req-manifest-ownership-12345678",
         approved_inventory_sha256=inventory["inventory_sha256"],  # type: ignore[arg-type]
     )
@@ -310,7 +315,7 @@ def test_installed_service_rejects_nonsealed_candidate(tmp_path: Path) -> None:
         read_mutation_epoch=lambda: 2,
     )
     with pytest.raises(ValueError, match="does not match the runner source"):
-        service.inventory(_candidate(sealed=False))
+        service.inventory(_candidate(sealed=False), artifact_bundle_sha256=_BUNDLE)
 
 
 def _merged_config(tmp_path: Path, *, allowed: bool) -> OperatorConfig:
@@ -348,7 +353,7 @@ def test_merged_dev_ownership_denied_without_policy_optin(tmp_path: Path) -> Non
         read_mutation_epoch=lambda: 2,
     )
     with pytest.raises(ValueError, match="not permitted for this runner"):
-        service.inventory(_merged_candidate())
+        service.inventory(_merged_candidate(), artifact_bundle_sha256=_BUNDLE)
 
 
 def test_merged_dev_ownership_rejects_candidate_sha_drift(tmp_path: Path) -> None:
@@ -360,7 +365,10 @@ def test_merged_dev_ownership_rejects_candidate_sha_drift(tmp_path: Path) -> Non
         read_mutation_epoch=lambda: 2,
     )
     with pytest.raises(ValueError, match="not the exact pinned source"):
-        service.inventory(_merged_candidate(resolved_sha="f" * 40))
+        service.inventory(
+            _merged_candidate(resolved_sha="f" * 40),
+            artifact_bundle_sha256=_BUNDLE,
+        )
 
 
 def test_merged_dev_ownership_runs_for_exact_opted_in_candidate(
@@ -379,7 +387,8 @@ def test_merged_dev_ownership_runs_for_exact_opted_in_candidate(
         def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             pass
 
-        def load_exact(self, **kwargs):  # type: ignore[no-untyped-def]
+        def load(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["bundle_digest"] == _BUNDLE
             assert kwargs["candidate_sha"] == "d" * 40
             assert kwargs["candidate_tree"] == "e" * 40
             assert kwargs["mutation_epoch"] == 2
@@ -404,9 +413,10 @@ def test_merged_dev_ownership_runs_for_exact_opted_in_candidate(
         service_uid=max(1, os.geteuid()),
         read_mutation_epoch=lambda: 2,
     )
-    inventory = service.inventory(_merged_candidate())
+    inventory = service.inventory(_merged_candidate(), artifact_bundle_sha256=_BUNDLE)
     result = service.apply(
         _merged_candidate(),
+        artifact_bundle_sha256=_BUNDLE,
         request_id="req-manifest-ownership-12345678",
         approved_inventory_sha256=inventory["inventory_sha256"],  # type: ignore[arg-type]
     )

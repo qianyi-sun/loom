@@ -17,6 +17,7 @@ from loom_cli.rollout.image_readiness import DockerRunner as ImageDockerRunner
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
 from loom_cli.rollout.manifest_readiness import RenderManifest, ServerDryRun
 from loom_cli.rollout.operator.candidate import GitRunner
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
     PreflightArtifactStore,
@@ -107,15 +108,17 @@ class InstalledDeepPreflightComposition:
         candidate: CandidateBinding,
         mutation_epoch: int,
         purpose: RuntimePurpose,
+        artifact_reference: PreflightArtifactReference | None = None,
     ) -> PreflightRuntimeSources:
         """Rebuild one exact source graph; detached mode must load published outputs."""
         if mutation_epoch < 0:
             raise ValueError("installed deep preflight mutation epoch is invalid")
         loaded = None
         if purpose is RuntimePurpose.DETACHED_REHEARSAL:
-            if candidate.resolved_tree is None:
+            if candidate.resolved_tree is None or artifact_reference is None:
                 raise ValueError("detached preflight candidate tree is unavailable")
-            loaded = self.artifact_store.load_exact(
+            loaded = self.artifact_store.load(
+                bundle_digest=artifact_reference.bundle_digest,
                 candidate_sha=candidate.resolved_sha,
                 candidate_tree=candidate.resolved_tree,
                 mutation_epoch=mutation_epoch,
@@ -124,6 +127,9 @@ class InstalledDeepPreflightComposition:
                 image_run=self.image_run,
                 container_registry_push=self.container_registry_push,
             )
+            artifact_reference.require_publication(loaded.publication)
+        elif artifact_reference is not None:
+            raise ValueError("admission preflight cannot consume detached artifact evidence")
         rehearsal_actions, rehearsal_identity = self.rehearsal_factory(
             candidate, mutation_epoch, purpose, loaded
         )

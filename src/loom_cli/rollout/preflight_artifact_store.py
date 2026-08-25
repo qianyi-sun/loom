@@ -346,9 +346,10 @@ class PreflightArtifactStore:
             container_registry=descriptor["container_registry"],
         )
 
-    def load_exact(
+    def load(
         self,
         *,
+        bundle_digest: str,
         candidate_sha: str,
         candidate_tree: str,
         mutation_epoch: int,
@@ -365,29 +366,13 @@ class PreflightArtifactStore:
             or mutation_epoch < 0
         ):
             raise PreflightArtifactStoreError("preflight artifact lookup identity is invalid")
-        _require_private_directory(self.state_root, service_uid=self.service_uid)
-        _require_private_directory(self.root, service_uid=self.service_uid)
-        try:
-            entries = tuple(os.scandir(self.root))
-        except OSError as exc:
-            raise PreflightArtifactStoreError("preflight artifact store is unreadable") from exc
-        if len(entries) > 256 or any(
-            not entry.is_dir(follow_symlinks=False) or _SHA256_RE.fullmatch(entry.name) is None
-            for entry in entries
+        publication = self.read(bundle_digest)
+        if (
+            publication.candidate_sha != candidate_sha
+            or publication.candidate_tree != candidate_tree
+            or publication.mutation_epoch != mutation_epoch
         ):
-            raise PreflightArtifactStoreError("preflight artifact store is unbounded or unsafe")
-        matches = []
-        for entry in entries:
-            publication = self.read(entry.name)
-            if (
-                publication.candidate_sha == candidate_sha
-                and publication.candidate_tree == candidate_tree
-                and publication.mutation_epoch == mutation_epoch
-            ):
-                matches.append(publication)
-        if len(matches) != 1:
-            raise PreflightArtifactStoreError("exact preflight artifact publication is ambiguous")
-        publication = matches[0]
+            raise PreflightArtifactStoreError("preflight artifact lookup identity drifted")
         descriptor_read = read_trusted_file(
             publication.descriptor_path,
             service_uid=self.service_uid,
