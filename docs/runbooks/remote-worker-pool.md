@@ -14,7 +14,9 @@ A worker needs private access to:
 - optional `LOOM_WORKER_SUBPROCESS_GATEWAY_URL` when Docker sandboxes need a
   different Gateway address;
 - `LOOM_WORKER_MINIO_ENDPOINT` for internally mirrored task bundles,
-  trajectories, and artifacts.
+  trajectories, and artifacts;
+- `LOOM_WORKER_TRAJECTORIES_BUCKET` and `LOOM_WORKER_ARTIFACTS_BUCKET`, which
+  must exactly match the connected control plane's environment-scoped buckets.
 
 Keep these endpoints on a private network, VPN, or host allowlist. Do not
 publish the Control Plane, Gateway, or object store to the internet.
@@ -40,9 +42,10 @@ Copy the example outside the repository and restrict it to the service user:
 install -m 0600 deploy/remote-worker.env.example /secure/path/loom-worker.env
 ```
 
-Fill the required endpoints and credentials. Start conservatively with the
-example's `LOOM_WORKER_MAX_CONCURRENT=5`; change it only from measured host
-capacity. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS` unset for a fixed worker.
+Fill the required endpoints, credentials, and exact bucket names. Start
+conservatively with the example's `LOOM_WORKER_MAX_CONCURRENT=5`; change it
+only from measured host capacity. Keep `LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS`
+unset for a fixed worker.
 
 Start the worker from the checkout matching the deployed candidate:
 
