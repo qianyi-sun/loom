@@ -1,13 +1,13 @@
 """Persist Daytona backend policy and scheduler decisions.
 
-Revision ID: 0110
-Revises: 0109
+Revision ID: 0111
+Revises: 0110
 """
 
 from alembic import op
 
-revision = "0110"
-down_revision = "0109"
+revision = "0111"
+down_revision = "0110"
 branch_labels = None
 depends_on = None
 
