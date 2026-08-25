@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,57 @@ def test_installed_final_gate_runner_uses_fixed_argv_and_strict_result(tmp_path:
     )
     assert set(captured[0][1]) == {"HOME", "LANG", "LC_ALL", "PATH", "XDG_RUNTIME_DIR"}
     assert captured[0][2] == 3600
+
+
+def test_final_smoke_outer_timeout_preserves_inner_terminal_evidence(tmp_path: Path) -> None:
+    executable, plan = _files(tmp_path)
+    captured_timeouts: list[int] = []
+
+    def run(
+        argv: Sequence[str],
+        _environment: Mapping[str, str],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        captured_timeouts.append(timeout)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(
+                {
+                    "attestation_digest": "b" * 64,
+                    "blockers": {},
+                    "candidate_sha": "a" * 40,
+                    "check_id": "final.smoke",
+                    "evidence_digest": "c" * 64,
+                    "observed_epoch": 8,
+                    "operation": "apply",
+                    "protected_mutation": True,
+                    "schema_version": 1,
+                },
+                sort_keys=True,
+            ),
+            "",
+        )
+
+    runner = InstalledFinalGateStepRunner(
+        service_uid=os.geteuid(),
+        plan_path=plan,
+        plan_digest="d" * 64,
+        run=run,
+        executable=executable,
+        executable_owner_uid=os.geteuid(),
+    )
+
+    result = runner(
+        "final.smoke",
+        CheckOperation.APPLY,
+        candidate_sha="a" * 40,
+        attestation_digest="b" * 64,
+        mutation_epoch=7,
+    )
+
+    assert result.ready and result.protected_mutation
+    assert captured_timeouts == [1200]
 
 
 def test_installed_final_gate_runner_rejects_wrong_operation_or_output(tmp_path: Path) -> None:
