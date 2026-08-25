@@ -2349,6 +2349,13 @@ def _management_env(
         _literal_env("LOOM_SVC_CONTROL_PLANE_URL", "http://127.0.0.1:9"),
         _literal_env("LOOM_SVC_GATEWAY_URL", "http://127.0.0.1:9"),
         _literal_env("LOOM_SVC_K8S_WORKER_ENABLED", "false"),
+        _literal_env("LOOM_SVC_WORKLOAD_TRUST_MODE", "internal_trusted"),
+        _literal_env("LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED", "false"),
+        _literal_env(
+            "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED",
+            "false",
+        ),
+        _literal_env("LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION", "false"),
         _literal_env("LOOM_SVC_DEV_INSTANCES_ENABLED", "true" if plan is not None else "false"),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED",
@@ -2538,7 +2545,6 @@ def _management_env(
         ),
         _literal_env("LOOM_SVC_TEAM_REGISTRATION_OPEN", "false"),
         _literal_env("LOOM_SVC_AUTH_RETURN_LOGIN_TOKEN", "false"),
-        _literal_env("LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION", "true"),
     ]
 
 

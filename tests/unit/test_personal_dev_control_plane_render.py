@@ -22,6 +22,8 @@ from loom.personal_dev_control_plane_render import (
     render_shadow_personal_dev_control_plane,
 )
 from loom.personal_dev_runtime import parse_personal_dev_acceptance_runtime_binding
+from loom_service.app import _validated_v1_workload_contract
+from loom_service.config import LoomServiceSettings
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
@@ -251,7 +253,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "808586dde5b1f7095196d2579c29aaf3d100d860855d96359fa16e69a91a75c4"
+        "50e1c2b5472d817ba4f0d4bc11e84bb391f018b16496dcb6a45621e46352941a"
     )
 
     identities = {_identity(document) for document in documents}
@@ -510,6 +512,88 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     }
     assert "loom-worker" not in workload_names
     assert "loom-capacity-manager" not in workload_names
+
+
+def _rendered_management_literal_environment(
+    tmp_path: Path,
+    mode: str,
+) -> dict[str, str]:
+    if mode == "shadow":
+        _profile, _release, _rendered, documents = _render(tmp_path)
+    else:
+        _profile, _release, _plan, _shadow, _rendered, documents = (
+            _acceptance_render(tmp_path)
+        )
+    management = next(
+        document
+        for document in documents
+        if _identity(document)
+        == ("Deployment", "loom-dev", "loom-personal-dev-management")
+    )
+    container = next(
+        item
+        for item in management["spec"]["template"]["spec"]["containers"]
+        if item["name"] == "management"
+    )
+    literal_environment = [item for item in container["env"] if "value" in item]
+    environment_names = [item["name"] for item in literal_environment]
+    assert len(environment_names) == len(set(environment_names))
+    return {item["name"]: item["value"] for item in literal_environment}
+
+
+@pytest.mark.parametrize("mode", ["shadow", "acceptance"])
+def test_management_render_satisfies_service_v1_workload_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    environment = _rendered_management_literal_environment(tmp_path, mode)
+    contract_environment_names = (
+        "LOOM_SVC_WORKLOAD_TRUST_MODE",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION",
+    )
+    for name in contract_environment_names:
+        monkeypatch.delenv(name, raising=False)
+        if name in environment:
+            monkeypatch.setenv(name, environment[name])
+
+    settings = LoomServiceSettings(
+        _env_file=None,
+        db_url="postgresql+psycopg://loom:test@postgres.invalid/loom",
+        minio_access_key="test-access-key",
+        minio_secret_key="test-secret-key",
+    )
+    assert _validated_v1_workload_contract(settings).as_manifest() == {
+        "workload_trust_mode": "internal_trusted",
+        "taskset_transforms_enabled": False,
+        "taskset_transform_network_isolated": False,
+        "untrusted_workload_isolation": False,
+    }
+
+
+@pytest.mark.parametrize("mode", ["shadow", "acceptance"])
+def test_management_render_owns_complete_v1_workload_contract(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    environment = _rendered_management_literal_environment(tmp_path, mode)
+
+    assert {
+        name: environment.get(name)
+        for name in (
+            "LOOM_SVC_WORKLOAD_TRUST_MODE",
+            "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED",
+            "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED",
+            "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION",
+        )
+    } == {
+        "LOOM_SVC_WORKLOAD_TRUST_MODE": "internal_trusted",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORMS_ENABLED": "false",
+        "LOOM_SVC_TASKSET_MATERIALIZER_TRANSFORM_NETWORK_ISOLATED": "false",
+        "LOOM_SVC_UNTRUSTED_WORKLOAD_ISOLATION": "false",
+    }
 
 
 def test_management_prepares_and_mounts_only_the_release_bound_scanner_generation(
