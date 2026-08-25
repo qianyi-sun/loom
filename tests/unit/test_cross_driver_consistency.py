@@ -1,7 +1,7 @@
 """Cross-driver byte-equivalent-trajectory test.
 
-Runs the same trivial trial sequence (start → exec → stop) against three
-drivers (DockerDriver mocked, DaytonaDriver mocked, ModalDriver mocked)
+Runs the same trivial trial sequence (start → exec → stop) against two
+drivers (DockerDriver mocked and ModalDriver mocked)
 and asserts the produced event lists match modulo a small set of
 expected drift (timestamps, ids, driver-name field).
 
@@ -162,64 +162,6 @@ async def test_modal_matches_docker_trajectory(
     )
 
 
-async def test_modal_matches_daytona_trajectory(
-    fake_modal: ModuleType,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MODAL_TOKEN_ID", "x")
-    monkeypatch.setenv("MODAL_TOKEN_SECRET", "y")
-    monkeypatch.setenv("DAYTONA_API_KEY", "z")
-    _wire_modal_fakes(fake_modal)
-
-    from loom_drivers.modal.config import ModalConfig
-    from loom_drivers.modal.driver import ModalDriver
-
-    modal_drv = ModalDriver(
-        image="python:3.12-slim",
-        config=ModalConfig.from_env(),
-    )
-    modal_events = await _run_with_driver(modal_drv)
-
-    from loom_drivers.daytona.config import DaytonaConfig
-    from loom_drivers.daytona.driver import DaytonaDriver
-
-    class _PatchedDaytonaDriver(DaytonaDriver):
-        async def start(self, *, options: Any = None) -> None:  # type: ignore[override]
-            self._state = "running"
-
-        async def stop(self, *, delete: bool = True) -> None:  # type: ignore[override]
-            self._state = "stopped"
-
-        async def exec(  # type: ignore[override]
-            self,
-            cmd: str,
-            *,
-            user: Any = None,
-            cwd: Any = None,
-            env: Any = None,
-            timeout_sec: Any = None,
-        ) -> Any:
-            from loom.models.exec import ExecResult
-
-            return ExecResult(
-                return_code=0,
-                stdout=b"hello\n",
-                stderr=b"",
-                truncated=False,
-                duration_sec=0.001,
-            )
-
-    daytona_drv = _PatchedDaytonaDriver(
-        image="python:3.12-slim",
-        config=DaytonaConfig.from_env(),
-    )
-    daytona_events = await _run_with_driver(daytona_drv)
-
-    assert _normalize_events(modal_events) == _normalize_events(
-        daytona_events,
-    )
-
-
 def test_driver_protocol_surface_is_backfilled_across_drivers() -> None:
     """Keep every intentional Driver protocol method implemented by all backends.
 
@@ -255,6 +197,6 @@ def test_driver_protocol_surface_is_backfilled_across_drivers() -> None:
     extra = actual_callable - expected_methods - {"capabilities", "os"}
     assert not extra, (
         f"Driver Protocol grew unexpectedly: extra={extra}. "
-        "Backfill the new method in DockerDriver + DaytonaDriver + "
-        "ModalDriver if intentional, or back out the change."
+        "Backfill the new method in DockerDriver and ModalDriver if "
+        "intentional, or back out the change."
     )

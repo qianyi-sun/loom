@@ -71,6 +71,6 @@ Per-SKU rates live in `src/loom/cost/cloud.py` and must match
 The driver registers each running sandbox in a process-wide WeakSet and
 installs `atexit` + `SIGINT` / `SIGTERM` handlers on first `start()` to
 synchronously terminate any live sandboxes when the process exits. This
-mirrors `loom_drivers.daytona.registry.LiveSandboxRegistry` but uses a
+uses a process-local live-sandbox registry with a
 simpler weak-reference model since Modal's `Sandbox.terminate(wait=False)`
 is a cheap network call.

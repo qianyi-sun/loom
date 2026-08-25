@@ -116,9 +116,6 @@ Domain resolution is backend-specific:
 - **DockerDriver** resolves via `getent ahosts` (IPv4-only), pins
   IPs into `/etc/hosts`, sets iptables default DROP with explicit
   ACCEPT rules per IP/CIDR. Requires `cap_add=["NET_ADMIN"]`.
-- **DaytonaDriver** maps to Daytona's `update_network_settings`,
-  which is CIDR-only. Domains are resolved upstream via in-sandbox
-  `getent ahosts` and promoted to `/32` entries.
 - **FakeDriver** records the policy on `self.network_policy_baseline`;
   no enforcement.
 
@@ -152,20 +149,6 @@ Useful for wiring smoke (the trial completes successfully without
 spending compute), but no real solver work happens. The
 `--backend fake` CLI choice uses this.
 
-### `loom_drivers.daytona.driver.DaytonaDriver`
-
-Cloud Daytona sandboxes. See
-`src/loom_drivers/daytona/` for the full package. Adds:
-- `DaytonaConfig` env loader (`DAYTONA_API_KEY` / `JWT_TOKEN` /
-  `API_URL` / `TARGET`)
-- `DaytonaClient` lifecycle wrapper + tenacity retry on transient
-  `DaytonaError`
-- `LiveSandboxRegistry` + `atexit` + `SIGINT` handlers with 30s
-  teardown budget — Ctrl-C never leaves sandboxes running
-- Optional warm-pool (`LOOM_DAYTONA_WARM_POOL=N`)
-- Cost telemetry via `cloud_compute_records` table when constructed
-  with `trial_id` + `team_id` + `session_factory`
-
 ### Modal
 
 `src/loom_drivers/modal/`. Bridges Modal's sync SDK via
@@ -174,26 +157,25 @@ Snapshot reuse via per-process `modal.Image.from_id()` cache keeps
 cold starts down. GPU passthrough uses `Capabilities.gpu_types` plus a
 `--gpu <TYPE>` CLI flag on
 `loom run`. Cost telemetry routes through the same
-`cloud_compute_records` table as Daytona, tagged
-`cloud_provider="modal"`; `/api/v1/usage` exposes
-`modal_compute_seconds` + `modal_cost_usd` alongside the Daytona
-fields. Auth via `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`. Live
+`cloud_compute_records` table, tagged `cloud_provider="modal"`;
+`/api/v1/usage` exposes `modal_compute_seconds` +
+`modal_cost_usd` alongside provider-neutral cloud totals. Auth via
+`MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`. Live
 integration test opt-in via `LOOM_RUN_MODAL_INTEGRATION=1`.
 
 ## Adding a new driver
 
-1. Pick a Driver as reference. For cloud sandbox APIs that are
-   async-native, copy `loom_drivers/daytona/`. For SDK-bridged
-   sync-style APIs that need a threadpool, copy `loom_drivers/modal/`
+1. Pick a Driver as reference. For SDK-bridged sync-style APIs that need a
+   threadpool, copy `loom_drivers/modal/`
    (specifically its `client.py` `asyncio.to_thread` bridge pattern).
 2. Implement every Protocol method. Run
    `pytest tests/contract/test_driver_contract.py` — the parametrized
    contract suite exercises Protocol conformance against every
    registered Driver impl.
 3. If the cloud backend needs cost telemetry, reuse
-   `loom_drivers.daytona.usage.compute_record` with
-   `cloud_provider="<name>"`. The `cloud_compute_records` table is
-   shared across providers via the `cloud_provider` column.
+   `loom.cost.cloud_records.CloudComputeRecord` and `persist_record`.
+   The `cloud_compute_records` table is shared across providers via the
+   `cloud_provider` column.
 4. Wire into `src/loom_cli/run_cmd.py::_driver_factory` for
    `--backend <name>` support. Add `<name>` to the `--backend`
    `choices=` tuple in `src/loom_cli/__main__.py`.
@@ -203,17 +185,10 @@ integration test opt-in via `LOOM_RUN_MODAL_INTEGRATION=1`.
 
 ## Common pitfalls
 
-- **`set_network_policy` order-of-operations**: if the backend
-  enforces "block all egress" by default at start time, your domain
-  resolution call inside the sandbox will fail. DaytonaDriver
-  resolves before applying the new policy; do the same in any
-  driver where the in-sandbox DNS uses the network being
-  reconfigured.
 - **`stop()` should not raise**. Even if the cloud delete fails, log
   + continue. Use `asyncio.wait_for(delete, timeout=N+5)` so a stuck
-  delete doesn't hang `stop()`. See DaytonaDriver's `_teardown` —
-  keep the entry in the live-sandbox registry on delete failure so
-  the atexit/SIGINT path retries.
+  delete doesn't hang `stop()`. Keep retry authority durable when a
+  provider deletion fails.
 - **GIL + signal handlers**: cloud drivers that install SIGINT
   handlers should keep handler bodies minimal. `asyncio.run` inside
   a signal handler is technically not async-signal-safe; it works

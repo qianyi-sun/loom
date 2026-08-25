@@ -21,8 +21,8 @@ Prometheus process health, provider billing, and Slurm requested resources.
   never persists environment variables, commands, host paths, credentials, or
   unbounded backend payloads.
 
-Docker workers sample Docker's cgroup-backed stats. Daytona and Modal currently
-persist typed `unavailable` records because their Loom adapters do not expose a
+Docker workers sample Docker's cgroup-backed stats. Modal currently persists
+typed `unavailable` records because its Loom adapter does not expose a
 stable CPU/RSS/PID/I/O contract. Adding provider telemetry requires a new typed
 adapter implementation and contract tests; it must not map billing duration to
 resource use.

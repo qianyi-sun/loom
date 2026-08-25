@@ -1,10 +1,7 @@
 """Modal compute-seconds + cost capture.
 
-Reuses ``loom_drivers.daytona.usage.CloudComputeRecord`` /
-``persist_record`` so the underlying ``cloud_compute_records`` schema is
-a single source of truth (per Plan 26 amendment A26.1). Modal's
-calculator (:func:`loom.cost.cloud.calc_modal_cost`) is GPU-aware, unlike
-Daytona's flat per-second rate.
+Uses the provider-neutral ``cloud_compute_records`` schema. Modal's
+calculator (:func:`loom.cost.cloud.calc_modal_cost`) is GPU-aware.
 """
 
 from __future__ import annotations
@@ -16,7 +13,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.cost.cloud import calc_modal_cost
-from loom_drivers.daytona.usage import CloudComputeRecord, persist_record
+from loom.cost.cloud_records import CloudComputeRecord, persist_record
 
 _6DP = Decimal("0.000001")
 

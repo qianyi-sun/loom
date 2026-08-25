@@ -147,7 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_run.add_argument("--backend", default="docker",
-                       choices=("docker", "fake", "daytona", "modal"),
+                       choices=("docker", "fake", "modal"),
                        help="Driver backend")
     p_run.add_argument("--gpu", type=str, default=None,
                        help=(

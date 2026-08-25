@@ -86,9 +86,9 @@ async def test_claim_requires_exact_sandbox_backend(
     team_id = uuid4()
     worker_id = uuid4()
     trial_id = uuid4()
-    task_id = f"daytona-backend-claim/{uuid4()}"
+    task_id = f"modal-backend-claim/{uuid4()}"
     capability_digest = "sha256:" + "d" * 64
-    token_hash = b"daytona-backend-worker-token"
+    token_hash = b"modal-backend-worker-token"
     now = datetime.now(UTC)
     try:
         async with sessions() as session, session.begin():
@@ -113,11 +113,11 @@ async def test_claim_requires_exact_sandbox_backend(
             await session.execute(
                 insert(Worker).values(
                     id=worker_id,
-                    hostname=f"daytona-worker-{worker_id}",
+                    hostname=f"modal-worker-{worker_id}",
                     version="test",
                     capabilities=[
                         {
-                            "backend": "daytona",
+                            "backend": "modal",
                             "os": "linux",
                             "cpu_arch": "x86_64",
                             "gpu_vendor": "none",
@@ -145,7 +145,7 @@ async def test_claim_requires_exact_sandbox_backend(
                     task_id=task_id,
                     config={},
                     requires_caps={
-                        "backend": "daytona",
+                        "backend": "modal",
                         "os": "linux",
                         "cpu_arch": "x86_64",
                         "gpu_vendor": "none",
@@ -173,7 +173,7 @@ async def test_claim_requires_exact_sandbox_backend(
                 worker_id=worker_id,
                 capability_digest=capability_digest,
                 token_hash=token_hash,
-                worker_backends=["daytona"],
+                worker_backends=["modal"],
             )
             assert claimed is not None and claimed["id"] == trial_id
             await session.commit()

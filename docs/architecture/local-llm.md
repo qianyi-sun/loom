@@ -174,7 +174,7 @@ Two layers, deliberately partitioned by signal type:
 
 **SIGINT behavior:** the default handler lets `asyncio.run` raise
 `KeyboardInterrupt`, so the surrounding `try/finally` also tears down Docker
-containers and Daytona sandboxes. A custom SIGINT handler would intercept
+containers and cloud sandboxes. A custom SIGINT handler would intercept
 Ctrl-C before that shared cleanup path runs.
 
 ## Security defaults

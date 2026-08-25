@@ -53,7 +53,7 @@ package or surface:
 - `feat(loom.driver): add NetworkPolicy enforcement`
 - `feat(loom_service): GET /api/v1/usage rollup`
 - `feat(web): SPA scaffold + read pages`
-- `fix(loom_drivers.daytona): teardown ordering`
+- `fix(loom_drivers.modal): teardown ordering`
 - `docs: update --task id format + --backend fake caveat`
 - `chore(ci): bump actions/checkout v4→v5`
 

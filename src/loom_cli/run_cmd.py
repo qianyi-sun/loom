@@ -382,7 +382,7 @@ class UnsupportedFlagError(ValueError):
     """Raised when a CLI flag is incompatible with the chosen backend."""
 
 
-_VALID_BACKENDS = {"docker", "fake", "daytona", "modal"}
+_VALID_BACKENDS = {"docker", "fake", "modal"}
 
 
 def build_driver(*, backend: str, image: str, gpu: str | None = None) -> Driver:
@@ -390,7 +390,7 @@ def build_driver(*, backend: str, image: str, gpu: str | None = None) -> Driver:
 
     Raises:
         UnsupportedFlagError: when ``--gpu`` is set with a backend that does
-            not support GPU passthrough (docker / fake / daytona today).
+            not support GPU passthrough (docker / fake today).
         ValueError: for an unknown backend value.
         ModalConfigError: when ``--backend modal`` is chosen but Modal
             credentials env vars are not set.
@@ -414,15 +414,6 @@ def build_driver(*, backend: str, image: str, gpu: str | None = None) -> Driver:
                 "Use --backend modal for GPU trials.",
             )
         return DockerDriver(image=image)
-    if backend == "daytona":
-        if gpu is not None:
-            raise UnsupportedFlagError(
-                "--gpu is not supported by --backend daytona. "
-                "Use --backend modal for GPU trials.",
-            )
-        from loom_drivers.daytona.config import DaytonaConfig
-        from loom_drivers.daytona.driver import DaytonaDriver
-        return DaytonaDriver(image=image, config=DaytonaConfig.from_env())
     # backend == "modal"
     from loom_drivers.modal.config import ModalConfig
     from loom_drivers.modal.driver import ModalDriver
@@ -440,7 +431,7 @@ async def _driver_factory(
     """Return a zero-arg factory for the chosen backend.
 
     Each call to the returned factory constructs a fresh Driver instance.
-    Heavy SDK config (e.g. ``DaytonaConfig`` / ``ModalConfig``) is captured
+    Heavy SDK config (for example, ``ModalConfig``) is captured
     in the closure so env vars are read once per ``loom run`` invocation.
 
     Resolves the task image up front via
@@ -480,16 +471,6 @@ async def _driver_factory(
                 "Use --backend modal for GPU trials.",
             )
         return lambda: DockerDriver(image=image, workspace=cfg.environment.workdir)
-    if backend == "daytona":
-        if gpu is not None:
-            raise UnsupportedFlagError(
-                "--gpu is not supported by --backend daytona. "
-                "Use --backend modal for GPU trials.",
-            )
-        from loom_drivers.daytona.config import DaytonaConfig
-        from loom_drivers.daytona.driver import DaytonaDriver
-        daytona_cfg = DaytonaConfig.from_env()
-        return lambda: DaytonaDriver(image=image, config=daytona_cfg)
     # backend == "modal"
     from loom_drivers.modal.config import ModalConfig
     from loom_drivers.modal.driver import ModalDriver

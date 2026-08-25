@@ -112,7 +112,6 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "workers",
         "trials",
         "trial_resource_usage",
-        "daytona_sandboxes",
         "tokens",
         "rate_cards",
         "llm_calls",

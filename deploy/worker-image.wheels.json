@@ -5,14 +5,14 @@
   "harbor_runtime_version": "0.18.0",
   "packages": {
     "openai": {
-      "version": "2.45.0",
-      "wheel": "openai-2.45.0-py3-none-any.whl",
-      "sha256": "5df105f5f8c9b711fcb9d06d2d3888cebc82506db216484c14a4e53cdf651777"
+      "version": "2.54.0",
+      "wheel": "openai-2.54.0-py3-none-any.whl",
+      "sha256": "89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b"
     },
     "litellm": {
-      "version": "1.91.1",
-      "wheel": "litellm-1.91.1-py3-none-any.whl",
-      "sha256": "bf8e3d23cddf0eb4c05714dffcaafd8a944adf0f9c9b01c6c863b2637309de2e"
+      "version": "1.98.0",
+      "wheel": "litellm-1.98.0-py3-none-any.whl",
+      "sha256": "3a95260f087a4cf763da85bbeeb2efa82caec243ad2394c9e6362ff747963738"
     }
   },
   "regenerate": "scripts/ops/update_worker_image_lock.sh"

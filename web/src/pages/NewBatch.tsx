@@ -1542,7 +1542,7 @@ export default function NewBatch(): JSX.Element {
                 ) : (
                   <Help>
                     The sandbox provider that runs each trial. Loom ships
-                    drivers for docker, daytona, modal, and fake; entries
+                    drivers for docker, modal, and fake; entries
                     marked &quot;no live worker&quot; have a driver but no
                     worker advertising them right now.
                   </Help>

@@ -37,14 +37,6 @@ spec:
           value: '0'
         - name: LOOM_WORKER_CONTROL_PLANE_URL
           value: http://loom-control-plane:8080
-        - name: LOOM_WORKER_DAYTONA_API_MAX_CONCURRENT
-          value: '4'
-        - name: LOOM_WORKER_DAYTONA_API_MIN_INTERVAL_SEC
-          value: '0.25'
-        - name: LOOM_WORKER_DAYTONA_CLEANUP_INTERVAL_SEC
-          value: '30.0'
-        - name: LOOM_WORKER_DAYTONA_SANDBOX_TTL_SEC
-          value: '86400'
         - name: LOOM_WORKER_DOCKER_API_TIMEOUT_SEC
           value: '1800'
         - name: LOOM_WORKER_DOCKER_SOCKET
@@ -99,8 +91,6 @@ spec:
           value: '60.0'
         - name: LOOM_WORKER_REQUIRE_CGROUP_PARENT
           value: 'False'
-        - name: LOOM_WORKER_SANDBOX_BACKEND
-          value: docker
         - name: LOOM_WORKER_SANDBOX_IDENTITY
           value: ''
         - name: LOOM_WORKER_SANDBOX_ISOLATION

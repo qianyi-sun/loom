@@ -18,7 +18,7 @@ cd loom
 LICENSE                            # Apache-2.0
 src/loom/                          # foundation library (types, errors, models)
 src/loom_cli/                      # `loom` CLI entry point
-src/loom_drivers/                  # cloud Driver implementations (Daytona, Modal)
+src/loom_drivers/                  # cloud Driver implementations (Modal)
 src/loom_control_plane/            # FastAPI Control Plane service
 src/loom_llm_gateway/              # OpenAI-compatible LLM Gateway service
 src/loom_worker/                   # Worker process
@@ -42,7 +42,7 @@ scripts/                           # operator + test helpers
 |---|---|---|
 | Foundation library | `src/loom/` | (used by all) |
 | `loom` CLI | `src/loom_cli/` | adapters, local disk, provider SDKs |
-| Cloud drivers | `src/loom_drivers/` | Daytona, Modal |
+| Cloud drivers | `src/loom_drivers/` | Modal |
 | Control Plane | `src/loom_control_plane/` | Postgres, MinIO |
 | LLM Gateway | `src/loom_llm_gateway/` | Anthropic / OpenAI / Google, Postgres |
 | Worker | `src/loom_worker/` | Control Plane, Gateway, MinIO, Docker |
@@ -227,9 +227,9 @@ pytest tests/integration -m slow         # only the heavy ones
 # System tier — full docker-compose stack
 pytest tests/system -v
 
-# Live Daytona — costs ~$0.01/run
-LOOM_RUN_DAYTONA_INTEGRATION=1 DAYTONA_API_KEY=... \
-  pytest tests/integration/test_daytona_driver.py -v
+# Live Modal — requires provider credentials
+LOOM_RUN_MODAL_INTEGRATION=1 \
+  pytest tests/integration/test_modal_driver.py -v
 ```
 
 On GitHub, selected non-Docker integration tests are split into two disjoint,
@@ -258,7 +258,7 @@ that points at the same commit.
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
-network-policy + full trial e2e + Daytona live). CI selects integration for
+network-policy + full trial e2e + Modal live). CI selects integration for
 non-documentation changes. The ownership authority at
 `config/component-ownership.toml` inventories every tracked Dockerfile and
 Python, Go, or web test path. Schema v2 also declares the allowed CI lanes,

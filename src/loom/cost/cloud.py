@@ -4,11 +4,7 @@ Rate tables are USD per second per resource unit. Treat the result of
 ``calc_modal_cost()`` as an estimate — Modal's authoritative billing is
 on their dashboard.
 
-Sources:
-- Modal: https://modal.com/pricing (snapshot 2026-06-09)
-- Daytona pricing is captured in ``loom_drivers.daytona.usage``; not
-  duplicated here because Daytona bills a flat per-second rate that
-  doesn't need a per-SKU table.
+Source: Modal pricing snapshot from 2026-06-09.
 """
 
 from __future__ import annotations

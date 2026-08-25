@@ -8,7 +8,7 @@ via `LOOM_WORKER_METRICS_PORT`).
 
 Cardinality bounded:
 - `result` is a small enum per metric.
-- `backend` is a fixed enum (docker, fake, daytona, modal).
+- `backend` is a fixed enum (docker, fake, modal).
 """
 
 from __future__ import annotations
