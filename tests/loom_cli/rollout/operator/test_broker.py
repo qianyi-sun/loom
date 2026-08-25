@@ -45,16 +45,29 @@ from loom_cli.rollout.preflight_contract import (
     CheckOutcome,
     StageCapability,
 )
-from loom_cli.rollout.preflight_pipeline import PreflightPipeline
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
 from tests.loom_cli.rollout.test_preflight_pipeline import (
     _context as pipeline_context,
 )
 from tests.loom_cli.rollout.test_preflight_pipeline import _registry as pipeline_registry
+from tests.loom_cli.rollout.test_preflight_runtime import _runtime as preflight_runtime
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 SHA = "a" * 40
 REQUEST_ID = "req-alpha"
 ROLLOUT_ID = "rollout-alpha"
+ARTIFACT_BUNDLE_SHA256 = "9" * 64
+PREFLIGHT_ARTIFACT_BUNDLE_SHA256 = "1" * 64
+
+
+def _published_assessment(tmp_path: Path) -> PreflightAssessment:
+    runtime = preflight_runtime(tmp_path)
+    plan = runtime.prebackup_plan(runtime.candidate)
+    return PreflightPipeline(
+        registry=plan.registry,
+        store=PreflightAttestationStore(tmp_path / "published-assessment-attestations"),
+        now=lambda: NOW,
+    ).assess(context=plan.context)
 
 
 def make_config(tmp_path: Path) -> OperatorConfig:
@@ -489,9 +502,7 @@ def test_installed_broker_authenticates_before_constructing_rollout_dependencies
     monkeypatch.setattr(
         broker_module,
         "caller_from_sudo",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            PolicyError("wrong environment group")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PolicyError("wrong environment group")),
     )
 
     def construct_dependencies(_config: OperatorConfig) -> BrokerDependencies:
@@ -510,14 +521,20 @@ class _ManifestOwnership:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    def inventory(self, candidate: CandidateBinding) -> dict[str, object]:
-        self.calls.append(("inventory", candidate.resolved_sha))
+    def inventory(
+        self,
+        candidate: CandidateBinding,
+        *,
+        artifact_bundle_sha256: str,
+    ) -> dict[str, object]:
+        self.calls.append(("inventory", candidate.resolved_sha, artifact_bundle_sha256))
         return {"action": "inventory", "inventory_sha256": "d" * 64}
 
     def apply(
         self,
         candidate: CandidateBinding,
         *,
+        artifact_bundle_sha256: str,
         request_id: str,
         approved_inventory_sha256: str,
     ) -> dict[str, object]:
@@ -525,6 +542,7 @@ class _ManifestOwnership:
             (
                 "apply",
                 candidate.resolved_sha,
+                artifact_bundle_sha256,
                 request_id,
                 approved_inventory_sha256,
             )
@@ -560,12 +578,18 @@ def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Pat
         manifest_ownership=service,
     )
 
-    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
+    inventory_argv = [
+        "manifest-ownership",
+        "inventory",
+        "--artifact-bundle-sha256",
+        ARTIFACT_BUNDLE_SHA256,
+    ]
+    assert broker_main(inventory_argv, dependencies=dependencies) == 1
     assert service.calls == []
 
     deps.lifecycle.maintenance = True
-    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 0
-    assert service.calls == [("inventory", SHA)]
+    assert broker_main(inventory_argv, dependencies=dependencies) == 0
+    assert service.calls == [("inventory", SHA, ARTIFACT_BUNDLE_SHA256)]
     assert _last_json(deps.stdout)["inventory_sha256"] == "d" * 64
 
     assert (
@@ -573,6 +597,8 @@ def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Pat
             [
                 "manifest-ownership",
                 "apply",
+                "--artifact-bundle-sha256",
+                ARTIFACT_BUNDLE_SHA256,
                 "--request-id",
                 "req-manifest-ownership-12345678",
                 "--approved-inventory-sha256",
@@ -585,6 +611,7 @@ def test_manifest_ownership_requires_frozen_exact_coordinator_lane(tmp_path: Pat
     assert service.calls[-1] == (
         "apply",
         SHA,
+        ARTIFACT_BUNDLE_SHA256,
         "req-manifest-ownership-12345678",
         "d" * 64,
     )
@@ -600,7 +627,18 @@ def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
         authenticate=lambda: CallerIdentity("devansh", 2003),
         manifest_ownership=_ManifestOwnership(),
     )
-    assert broker_main(["manifest-ownership", "inventory"], dependencies=dependencies) == 1
+    assert (
+        broker_main(
+            [
+                "manifest-ownership",
+                "inventory",
+                "--artifact-bundle-sha256",
+                ARTIFACT_BUNDLE_SHA256,
+            ],
+            dependencies=dependencies,
+        )
+        == 1
+    )
     assert deps.order == []
 
 
@@ -613,12 +651,17 @@ class _LifecycleCapacity:
             to_dict=lambda: {"plan_digest": "e" * 64, "schema_version": 1},
         )
 
-    def inventory(self):  # type: ignore[no-untyped-def]
-        self.calls.append(("inventory", self.lifecycle.guard_depth))
+    def inventory(self, *, artifact_bundle_sha256):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth, artifact_bundle_sha256))
         return self.plan
 
-    def prepare_apply(self, *, approved_plan_digest: str):  # type: ignore[no-untyped-def]
-        self.calls.append(("prepare", self.lifecycle.guard_depth))
+    def prepare_apply(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        artifact_bundle_sha256,
+        approved_plan_digest: str,
+    ):
+        self.calls.append(("prepare", self.lifecycle.guard_depth, artifact_bundle_sha256))
         assert approved_plan_digest == "e" * 64
         return self.plan
 
@@ -647,14 +690,22 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
         lifecycle_capacity=service,
     )
 
-    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 0
-    assert service.calls == [("inventory", 0)]
+    inventory_argv = [
+        "lifecycle-capacity",
+        "inventory",
+        "--artifact-bundle-sha256",
+        ARTIFACT_BUNDLE_SHA256,
+    ]
+    assert broker_main(inventory_argv, dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 0, ARTIFACT_BUNDLE_SHA256)]
 
     assert (
         broker_main(
             [
                 "lifecycle-capacity",
                 "apply",
+                "--artifact-bundle-sha256",
+                ARTIFACT_BUNDLE_SHA256,
                 "--approved-plan-sha256",
                 "e" * 64,
             ],
@@ -662,7 +713,7 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
         )
         == 1
     )
-    assert service.calls == [("inventory", 0)]
+    assert service.calls == [("inventory", 0, ARTIFACT_BUNDLE_SHA256)]
 
     deps.lifecycle.maintenance = True
     assert (
@@ -670,6 +721,8 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
             [
                 "lifecycle-capacity",
                 "apply",
+                "--artifact-bundle-sha256",
+                ARTIFACT_BUNDLE_SHA256,
                 "--approved-plan-sha256",
                 "e" * 64,
             ],
@@ -677,7 +730,10 @@ def test_lifecycle_capacity_uses_digest_approval_and_releases_launch_lock(
         )
         == 0
     )
-    assert service.calls[-2:] == [("prepare", 1), ("execute", 0)]
+    assert service.calls[-2:] == [
+        ("prepare", 1, ARTIFACT_BUNDLE_SHA256),
+        ("execute", 0),
+    ]
 
 
 def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
@@ -689,8 +745,57 @@ def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
         lifecycle_capacity=service,
     )
 
-    assert broker_main(["lifecycle-capacity", "inventory"], dependencies=dependencies) == 1
+    assert (
+        broker_main(
+            [
+                "lifecycle-capacity",
+                "inventory",
+                "--artifact-bundle-sha256",
+                ARTIFACT_BUNDLE_SHA256,
+            ],
+            dependencies=dependencies,
+        )
+        == 1
+    )
     assert service.calls == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["manifest-ownership", "inventory"],
+        [
+            "manifest-ownership",
+            "apply",
+            "--request-id",
+            "req-manifest-ownership-12345678",
+            "--approved-inventory-sha256",
+            "d" * 64,
+        ],
+        ["lifecycle-capacity", "inventory"],
+        ["lifecycle-capacity", "apply", "--approved-plan-sha256", "e" * 64],
+        [
+            "manifest-ownership",
+            "inventory",
+            "--artifact-bundle-sha256",
+            "A" * 64,
+        ],
+        [
+            "lifecycle-capacity",
+            "inventory",
+            "--artifact-bundle-sha256",
+            "9" * 63,
+        ],
+    ],
+)
+def test_maintenance_artifact_digest_is_required_and_strict(
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
+    deps = fakes(tmp_path)
+
+    assert broker_main(argv, dependencies=deps.dependencies) == 2
+    assert deps.order == []
 
 
 class _BackupRetention:
@@ -858,12 +963,7 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
 
 def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
-    registry = pipeline_registry()
-    assessment = PreflightPipeline(
-        registry=registry,
-        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
-        now=lambda: NOW,
-    ).assess(context=pipeline_context(registry))
+    assessment = _published_assessment(tmp_path)
     expected_candidate = deps.candidate.bind()
     deps.order.clear()
 
@@ -889,6 +989,7 @@ def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path:
         "candidate_tree": None,
         "coverage_sha256": assessment.coverage_digest,
         "mutation_epoch": 7,
+        "preflight_artifact_bundle_sha256": PREFLIGHT_ARTIFACT_BUNDLE_SHA256,
         "preflight_assessment_sha256": assessment.assessment_digest,
         "registry_sha256": assessment.registry_digest,
         "status": "passed",
@@ -953,6 +1054,47 @@ def test_start_refuses_missing_deep_preflight_before_request_or_backup(tmp_path:
     assert deps.store.requests == {}
     assert deps.backup.create_count == 0
     assert "deep rollout preflight is not configured" in deps.stderr.getvalue()
+
+
+def test_staged_start_rejects_malformed_artifact_evidence_before_publication(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    store = RequestStore(tmp_path / "malformed-staged-state")
+    assessment = _published_assessment(tmp_path)
+    malformed = replace(
+        assessment,
+        executions=tuple(
+            execution
+            for execution in assessment.executions
+            if execution.check_id != "artifacts.publish"
+        ),
+    )
+    dependencies = replace(
+        deps.dependencies,
+        store=store,
+        bind_candidate=lambda: replace(
+            deps.candidate.bind(),
+            resolved_tree="b" * 40,
+        ),
+        assess_preflight=lambda _candidate, _epoch: malformed,
+        read_mutation_epoch=lambda: 7,
+        new_request_id=lambda: "req-malformed01",
+        new_backup_job_id=lambda: "job-malformed01",
+        new_payload_id=lambda: "payload-malform01",
+    )
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="idle",
+        pointer=None,
+        cleared=False,
+        safe_status={},
+    )
+
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    with pytest.raises(RequestStoreError, match="does not exist"):
+        store.read_preflight_request("req-malformed01")
+    assert deps.backup.create_count == 0
+    assert deps.systemd.backup_starts == []
 
 
 def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_request(
@@ -1052,13 +1194,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         failed_rotation,
         expected_generation=reserved_failed.generation,
     )
-    registry = pipeline_registry()
-    pipeline = PreflightPipeline(
-        registry=registry,
-        store=PreflightAttestationStore(tmp_path / "staged-attestations"),
-        now=lambda: NOW,
-    )
-    assessment = pipeline.assess(context=pipeline_context(registry))
+    assessment = _published_assessment(tmp_path)
 
     class StagedLifecycle:
         depth = 0
@@ -1127,6 +1263,18 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
     assert deps.systemd.backup_starts == []
     assert store.clear_backup_retention_claim("e" * 64) is True
 
+    preview_store = RequestStore(tmp_path / "staged-preview-state")
+    preview_staged = replace(
+        staged,
+        store=preview_store,
+        new_request_id=lambda: "req-preview0001",
+    )
+    assert broker_main(["start", "--dry-run"], dependencies=preview_staged) == 0
+    assert _last_json(deps.stdout)["preflight_artifact_bundle_sha256"] == (
+        PREFLIGHT_ARTIFACT_BUNDLE_SHA256
+    )
+    assert deps.systemd.backup_starts == []
+
     rc = broker_main(["start"], dependencies=staged)
 
     assert rc == 0, deps.stderr.getvalue()
@@ -1148,7 +1296,9 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
             "loom-staging-backup-req-staged0001.service",
         )
     ]
-    assert '"status":"backup_pending"' in deps.stdout.getvalue()
+    pending = _last_json(deps.stdout)
+    assert pending["status"] == "backup_pending"
+    assert pending["preflight_artifact_bundle_sha256"] == (PREFLIGHT_ARTIFACT_BUNDLE_SHA256)
 
     class StagedCleanupBackup:
         def __init__(self) -> None:
@@ -1175,9 +1325,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         == 1
     )
     assert cleanup.calls == []
-    assert store.read_preflight_backup_job_state("req-staged0001").phase.value == (
-        "backup_pending"
-    )
+    assert store.read_preflight_backup_job_state("req-staged0001").phase.value == ("backup_pending")
 
     deps.systemd.visible_units.remove(backup_unit)
     assert (
@@ -1190,9 +1338,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
     cleaned_job = store.read_preflight_backup_job_state("req-staged0001")
     assert cleaned_job.phase.value == "backup_failed"
     assert cleaned_job.failure_code == "backup_cleanup_requested"
-    assert cleanup.calls == [
-        ("req-staged0001", "20260714T120000Z-req-staged0001")
-    ]
+    assert cleanup.calls == [("req-staged0001", "20260714T120000Z-req-staged0001")]
     cleaned_rotation = store.read_backup_rotation()
     assert cleaned_rotation.candidate is None
     assert tuple(record.payload_id for record in cleaned_rotation.retirements) == (
@@ -1493,14 +1639,7 @@ def test_status_reports_incomplete_protected_component_without_reading_payload(
 ) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
-    root = (
-        deps.config.state_root
-        / "requests"
-        / REQUEST_ID
-        / "attempts"
-        / "1"
-        / "protected-apply"
-    )
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
     _private_directory(root)
     _private_file(root / "execution.lock", "")
     epoch = root / "00-mutation-epoch-claim"
@@ -1533,14 +1672,7 @@ def test_status_reports_incomplete_protected_component_without_reading_payload(
 def test_status_fails_closed_on_unsafe_protected_progress_metadata(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
-    root = (
-        deps.config.state_root
-        / "requests"
-        / REQUEST_ID
-        / "attempts"
-        / "1"
-        / "protected-apply"
-    )
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
     _private_directory(root)
     _private_file(root / "execution.lock", "")
     unsafe = root / "03-gb10-candidate"
@@ -1599,14 +1731,7 @@ def test_status_reports_only_normalized_final_gate_failure_metadata(tmp_path: Pa
 def test_status_fails_closed_on_unsafe_final_gate_progress(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
-    root = (
-        deps.config.state_root
-        / "requests"
-        / REQUEST_ID
-        / "attempts"
-        / "1"
-        / "final-gates"
-    )
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "final-gates"
     _private_directory(root)
     (root / "final.convergence.json").symlink_to(tmp_path)
 

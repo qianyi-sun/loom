@@ -43,7 +43,7 @@ class _FakeOrchestrator:
 
 
 def _assessment(tmp_path: Path, request):
-    def factory(candidate, epoch):
+    def factory(candidate, epoch, _reference):
         runtime = _runtime(tmp_path)
         return replace(runtime, candidate=candidate)
 

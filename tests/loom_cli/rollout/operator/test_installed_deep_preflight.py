@@ -35,6 +35,10 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ServiceRuntimeStatus,
     TimerRuntimeStatus,
 )
+from loom_cli.rollout.preflight_artifact_reference import (
+    PreflightArtifactReference,
+    PreflightArtifactReferenceError,
+)
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import EXTERNAL_SUPERVISOR_ABSENT_DIGEST, CheckContext
 from loom_cli.rollout.preflight_registered_checks import (
@@ -297,14 +301,22 @@ def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
 class _Artifacts:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.drifted = False
 
-    def load_exact(self, **kwargs):
+    def load(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
             publication=SimpleNamespace(
                 candidate_sha=kwargs["candidate_sha"],
                 candidate_tree=kwargs["candidate_tree"],
                 mutation_epoch=kwargs["mutation_epoch"],
+                bundle_digest=kwargs["bundle_digest"],
+                image_artifact_sha256=("f" if self.drifted else "2") * 64,
+                manifest_artifact_sha256="3" * 64,
+                rendered_manifest_sha256="4" * 64,
+                migration_manifest_sha256="5" * 64,
+                migration_manifest_artifact_sha256="6" * 64,
+                production_defaults_sha256="7" * 64,
             )
         )
 
@@ -315,6 +327,15 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     config = _config(tmp_path)
     candidate = _candidate()
     artifacts = _Artifacts()
+    reference = PreflightArtifactReference(
+        bundle_digest="1" * 64,
+        image_artifact_sha256="2" * 64,
+        manifest_artifact_sha256="3" * 64,
+        rendered_manifest_sha256="4" * 64,
+        migration_manifest_sha256="5" * 64,
+        migration_artifact_sha256="6" * 64,
+        production_defaults_sha256="7" * 64,
+    )
     inputs = InstalledPreflightInputs(
         runner_install_digest="1" * 64,
         credential_sources=(CredentialProbeSource(label="admin", path=tmp_path / "admin"),),
@@ -398,12 +419,18 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     )
 
     admission = composition.sources(candidate, 9, RuntimePurpose.ADMISSION)
-    detached = composition.sources(candidate, 9, RuntimePurpose.DETACHED_REHEARSAL)
+    detached = composition.sources(
+        candidate,
+        9,
+        RuntimePurpose.DETACHED_REHEARSAL,
+        reference,
+    )
 
     assert admission.loaded_artifacts is None
     assert detached.loaded_artifacts is not None
     assert artifacts.calls == [
         {
+            "bundle_digest": reference.bundle_digest,
             "candidate_sha": candidate.resolved_sha,
             "candidate_tree": candidate.resolved_tree,
             "mutation_epoch": 9,
@@ -415,6 +442,15 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     ]
     assert composition.authority().current_mutation_epoch() == 9
     assert admission.database_schema_revision == "0074"
+
+    artifacts.drifted = True
+    with pytest.raises(PreflightArtifactReferenceError, match="drifted from assessment"):
+        composition.sources(
+            candidate,
+            9,
+            RuntimePurpose.DETACHED_REHEARSAL,
+            reference,
+        )
 
 
 class _LegacyExternalSupervisorStore:
