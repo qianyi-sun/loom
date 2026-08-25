@@ -30,10 +30,7 @@ NetworkPolicyKind = Literal["public", "no-network", "allowlist"]
 # Logging level (spec §7.2).
 LogLevel = Literal["debug", "info", "warn", "error", "fatal"]
 
-# Service-mode worker execution backend. Docker remains the default so an
-# existing worker deployment keeps its byte-for-byte scheduling behavior.
-WorkerSandboxBackend = Literal["docker", "daytona"]
-SandboxBackend = Literal["docker", "daytona", "modal", "fake"]
+SandboxBackend = Literal["docker", "modal", "fake"]
 
 
 ModelSource = Literal["api", "local-server", "hf"]

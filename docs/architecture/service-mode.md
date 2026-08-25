@@ -632,7 +632,7 @@ Core pages include:
 - **RateCardsAdmin** — list + create form (gated on
   `admin:rate_cards`)
 - **UsageDashboard** — date-range picker + inline SVG bar chart +
-  breakdown table; `daytona_compute_seconds` + `daytona_cost_usd`
+  breakdown table; provider-neutral compute totals and Modal-specific totals
   surfaced via a CTE join against `cloud_compute_records` (see
   `src/loom_service/routes/usage.py`)
 - **Settings** — authenticated Team/session settings. Signed-out onboarding

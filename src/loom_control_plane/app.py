@@ -42,7 +42,6 @@ from loom_control_plane.retry_exhausted_sweeper import (
 from loom_control_plane.routes import (
     admin,
     artifacts,
-    daytona_sandboxes,
     execution_attempts,
     health,
     pipeline_catalog,
@@ -276,7 +275,6 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(trials.router)
     app.include_router(resource_usage.router)
     app.include_router(workers.router)
-    app.include_router(daytona_sandboxes.router)
     app.include_router(state.router)
     app.include_router(trajectory.router)
     app.include_router(artifacts.router)

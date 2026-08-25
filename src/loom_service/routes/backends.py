@@ -25,7 +25,6 @@ router = APIRouter()
 
 _DESCRIPTIONS: dict[str, str] = {
     "docker": "Local docker on the worker host.",
-    "daytona": "Cloud sandboxes via the Daytona API.",
     "modal": "Cloud sandboxes via the Modal API.",
     "fake": "In-memory driver. Tests + smoke only — no real env.",
 }
@@ -33,7 +32,7 @@ _DESCRIPTIONS: dict[str, str] = {
 # Backends Loom ships drivers for. Even when no live worker advertises
 # a given backend, we surface it as `available=false` so the dropdown
 # shows what's *possible* — better than a confusing empty list.
-_KNOWN_BACKENDS: tuple[str, ...] = ("docker", "daytona", "modal", "fake")
+_KNOWN_BACKENDS: tuple[str, ...] = ("docker", "modal", "fake")
 
 
 @router.get("/backends")

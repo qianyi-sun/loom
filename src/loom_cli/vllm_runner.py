@@ -86,7 +86,7 @@ class VLLMServerInfo:
 
 
 # Module-level registry of live processes so SIGINT/SIGTERM cleanup hits
-# everything. Matches the pattern Daytona uses (LiveSandboxRegistry).
+# everything. Mirrors the cleanup registry used by cloud runtimes.
 _LIVE_PROCESSES: list[subprocess.Popen[bytes]] = []
 _SIGNAL_HANDLERS_INSTALLED = False
 
@@ -309,7 +309,7 @@ def _install_cleanup_handlers() -> None:
     Why no SIGINT handler: the default Python SIGINT raises
     `KeyboardInterrupt`, which propagates through `asyncio.run` and
     triggers the `try/finally` in `_run_async` (the right place to
-    tear down vLLM + Docker + Daytona together). Installing our own
+    tear down vLLM and Docker together). Installing our own
     SIGINT handler here would short-circuit that path.
 
     SIGTERM doesn't raise — atexit doesn't fire on it either — so we

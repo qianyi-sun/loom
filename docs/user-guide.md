@@ -68,8 +68,7 @@ That wires through every layer (config → adapter → task loader →
 trial → object store → ATIF projection) without spending any cloud
 budget. **Note**: `--backend fake` no-ops every sandbox `exec` — the
 trial completes successfully but no real solver runs. Use it to
-verify your install; use `--backend docker`, `--backend daytona`, or
-`--backend modal`
+verify your install; use `--backend docker` or `--backend modal`
 for actual evaluation.
 
 After the smoke succeeds:
@@ -672,26 +671,10 @@ diagnostic panels work, see [Web platform workflows](#web-platform-workflows).
   Docker Desktop on macOS) and per-trial containers.
 - **`fake`** — no-op sandbox. `exec` returns success without running anything.
   Verifies the trial pipeline end-to-end without a container.
-- **`daytona`** — cloud sandbox for elastic capacity or when Docker isn't
-  available on the submit host.
 - **`modal`** — Modal Sandbox backend with CPU and GPU selection; requires the
   `loom[modal]` extra and Modal credentials.
 
 ### Cloud sandboxes
-
-#### Daytona
-
-The service-mode backend is separately opt-in; see
-[Daytona service-mode worker](architecture/daytona-service-worker.md) for its
-immutable-image, lifecycle, recovery, and unsupported-workload contract. It
-does not turn on automatic overflow from Docker or Slurm pools.
-
-```bash
-export DAYTONA_API_KEY=...
-loom run --backend daytona --dataset bfcl \
-  --agent claude-code --model anthropic/claude-opus-4-7 \
-  --output-dir ./runs
-```
 
 BFCL is a tool-use benchmark. Its task instructions require the agent to
 write `agent_output.json` with a `calls` list, or a `turns` list for
@@ -718,11 +701,6 @@ but have different runtime assumptions:
 - `browsecomp` publishes the full 1266-question BrowseComp release from
   OpenAI simple-evals. It requires network/browsing capability at execution
   time and grades the `Exact Answer:` line deterministically.
-
-Daytona usage rows land in the `cloud_compute_records` table when the
-run is connected to a Loom service (`--server-url`). Standalone
-laptop runs skip persistence — the trajectories + ATIF still drop on
-local disk.
 
 #### Modal
 
@@ -1548,7 +1526,7 @@ loom run
   --split SPLIT           # default "test"
   --agent NAME            # oracle | direct-completion | <launcher adapter>
   --model PROVIDER/NAME   # e.g. anthropic/claude-opus-4-7
-  --backend BACKEND       # docker | fake | daytona | modal
+  --backend BACKEND       # docker | fake | modal
   --concurrency N         # parallel trials (default 1)
   --output-dir DIR        # default ./runs
   --json                  # JSON-line output instead of text
@@ -1803,12 +1781,6 @@ to the family total.
 slash (`HumanEval/0`); SWE-Bench instance ids contain double
 underscores (`django__django-12345`). Check the upstream dataset for
 the exact form.
-
-**`DAYTONA_API_KEY or DAYTONA_JWT_TOKEN must be set`** — `--backend
-daytona` requires credentials. Either `loom config set
-token.daytona <key>` is not currently supported (the CLI reads
-`DAYTONA_*` env vars directly); export `DAYTONA_API_KEY` before
-invoking `loom run`.
 
 **`loom.benchmarks entry-point '<name>' failed to load`** — a
 pip-installed adapter package raised at import time. Try `pip

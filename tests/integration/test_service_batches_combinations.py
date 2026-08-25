@@ -154,7 +154,6 @@ async def setup(
                 capabilities=[
                     {"backend": "docker"},
                     {"backend": "fake"},
-                    {"backend": "daytona"},
                     {"backend": "modal"},
                 ],
                 registered_at=datetime.now(UTC),
