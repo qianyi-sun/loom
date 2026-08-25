@@ -193,6 +193,14 @@ class PersonalDevAcceptanceStatus:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedPodTemplate:
+    body: dict[str, Any]
+    replicas: int
+    statefulset_name: str | None
+    claim_template_names: tuple[str, ...]
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -324,6 +332,67 @@ def _expected_subset(
             )
         )
     return type(expected) is type(actual) and expected == actual
+
+
+def _pod_matches_expected(
+    expected: _ExpectedPodTemplate,
+    actual: Mapping[str, Any],
+) -> bool:
+    statefulset_name = expected.statefulset_name
+    if statefulset_name is None:
+        return _expected_subset(expected.body, actual)
+
+    metadata = _metadata(actual)
+    expected_spec = expected.body.get("spec")
+    actual_spec = actual.get("spec")
+    if (
+        metadata is None
+        or not isinstance(expected_spec, Mapping)
+        or not isinstance(actual_spec, Mapping)
+    ):
+        return False
+    pod_name = metadata.get("name")
+    if not isinstance(pod_name, str) or pod_name not in {
+        f"{statefulset_name}-{ordinal}" for ordinal in range(expected.replicas)
+    }:
+        return False
+
+    expected_volumes = expected_spec.get("volumes", [])
+    actual_volumes = actual_spec.get("volumes", [])
+    if not isinstance(expected_volumes, list) or not isinstance(actual_volumes, list):
+        return False
+
+    claim_template_names = set(expected.claim_template_names)
+    observed_claim_templates: set[str] = set()
+    declared_volumes: list[object] = []
+    for volume in actual_volumes:
+        if not isinstance(volume, Mapping):
+            return False
+        name = volume.get("name")
+        if name not in claim_template_names:
+            declared_volumes.append(volume)
+            continue
+        if (
+            not isinstance(name, str)
+            or name in observed_claim_templates
+            or set(volume) != {"name", "persistentVolumeClaim"}
+            or volume.get("persistentVolumeClaim") != {"claimName": f"{name}-{pod_name}"}
+        ):
+            return False
+        observed_claim_templates.add(name)
+
+    if observed_claim_templates != claim_template_names or not _expected_subset(
+        expected_volumes,
+        declared_volumes,
+        ("spec", "volumes"),
+    ):
+        return False
+
+    normalized_spec = dict(actual_spec)
+    normalized_spec["volumes"] = declared_volumes
+    normalized_actual = dict(actual)
+    normalized_actual["spec"] = normalized_spec
+    return _expected_subset(expected.body, normalized_actual)
 
 
 def _security_boundary_matches(
@@ -1324,7 +1393,7 @@ def _observe_personal_dev_status(
             or not _expected_subset(expected_pvc, live_namespaced[identity])
             for identity, expected_pvc in expected_generated_pvcs.items()
         )
-        expected_pod_templates: dict[str, tuple[dict[str, Any], int]] = {}
+        expected_pod_templates: dict[str, _ExpectedPodTemplate] = {}
         for item in expected_namespaced:
             if item.get("kind") not in {"Deployment", "StatefulSet", "Job"}:
                 continue
@@ -1337,12 +1406,33 @@ def _observe_personal_dev_status(
                 or type(replicas) is not int
             ):
                 raise ValueError("expected pod template is invalid")
-            expected_pod_templates[app] = (
-                {
+            statefulset_name: str | None = None
+            claim_template_names: tuple[str, ...] = ()
+            if item.get("kind") == "StatefulSet":
+                metadata = _metadata(item)
+                claim_templates = item["spec"].get("volumeClaimTemplates", [])
+                if metadata is None or not isinstance(claim_templates, list):
+                    raise ValueError("expected StatefulSet claim templates are invalid")
+                name = metadata.get("name")
+                claim_names: list[str] = []
+                for claim in claim_templates:
+                    claim_metadata = _metadata(claim) if isinstance(claim, Mapping) else None
+                    claim_name = claim_metadata.get("name") if claim_metadata is not None else None
+                    if not isinstance(claim_name, str):
+                        raise ValueError("expected StatefulSet claim templates are invalid")
+                    claim_names.append(claim_name)
+                if not isinstance(name, str) or len(set(claim_names)) != len(claim_names):
+                    raise ValueError("expected StatefulSet claim templates are invalid")
+                statefulset_name = name
+                claim_template_names = tuple(claim_names)
+            expected_pod_templates[app] = _ExpectedPodTemplate(
+                body={
                     "metadata": template["metadata"],
                     "spec": template["spec"],
                 },
-                replicas,
+                replicas=replicas,
+                statefulset_name=statefulset_name,
+                claim_template_names=claim_template_names,
             )
         observed_pods: dict[str, list[dict[str, Any]]] = {app: [] for app in expected_pod_templates}
         pod_drift = False
@@ -1354,14 +1444,14 @@ def _observe_personal_dev_status(
                 pod_drift = True
                 continue
             observed_pods[app].append(pod)
-            if not _expected_subset(
-                expected_pod_templates[app][0],
+            if not _pod_matches_expected(
+                expected_pod_templates[app],
                 pod,
             ) or not _security_boundary_matches({"kind": "Pod"}, pod):
                 pod_drift = True
         pod_drift = pod_drift or any(
-            len(observed_pods[app]) != expected_count
-            for app, (_template, expected_count) in expected_pod_templates.items()
+            len(observed_pods[app]) != expected.replicas
+            for app, expected in expected_pod_templates.items()
         )
         if missing or unexpected or drifted or generated_pvc_drift or pod_drift or history_drift:
             blockers.add("resource_inventory_drift")

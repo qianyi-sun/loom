@@ -235,6 +235,18 @@ def _pod_for(item: dict[str, Any], suffix: str, *, phase: str) -> dict[str, Any]
     }
     if item["kind"] == "Job":
         pod["metadata"]["labels"]["job-name"] = item["metadata"]["name"]
+    elif item["kind"] == "StatefulSet":
+        pod["spec"]["volumes"] = [
+            {
+                "name": claim_template["metadata"]["name"],
+                "persistentVolumeClaim": {
+                    "claimName": (
+                        f"{claim_template['metadata']['name']}-{pod['metadata']['name']}"
+                    ),
+                },
+            }
+            for claim_template in item["spec"]["volumeClaimTemplates"]
+        ] + pod["spec"]["volumes"]
     return pod
 
 
@@ -643,6 +655,14 @@ def _item(
     return next(value for value in _items(runner, command) if _identity(value) == (kind, name))
 
 
+def _pod_by_app(runner: _FakeRunner, app: str) -> dict[str, Any]:
+    return next(
+        item
+        for item in _items(runner, _NAMESPACED)
+        if item["kind"] == "Pod" and item["metadata"]["labels"].get("app") == app
+    )
+
+
 def _observe(
     expected: RenderedPersonalDevControlPlane,
     runner: _FakeRunner,
@@ -752,6 +772,122 @@ def test_status_accepts_api_server_canonical_empty_literal_environment(
     assert shadow_status.blockers == ()
     assert acceptance_status.ready is True
     assert acceptance_status.blockers == ()
+
+
+def test_status_accepts_exact_statefulset_controller_claim_volumes(
+    tmp_path: Path,
+) -> None:
+    shadow_expected, shadow_runner = _healthy_fixture(tmp_path)
+    acceptance_expected, plan, acceptance_runner = _acceptance_healthy_fixture(tmp_path)
+
+    shadow_status = _observe(shadow_expected, shadow_runner)
+    acceptance_status = _observe_acceptance(acceptance_expected, plan, acceptance_runner)
+
+    assert shadow_status.ready is True
+    assert shadow_status.blockers == ()
+    assert acceptance_status.ready is True
+    assert acceptance_status.blockers == ()
+
+
+def test_status_rejects_missing_statefulset_controller_claim_volumes(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    for pod in _items(runner, _NAMESPACED):
+        if pod["kind"] != "Pod" or pod["metadata"]["labels"].get("app") not in {
+            "loom-dev-postgres",
+            "loom-dev-minio",
+        }:
+            continue
+        pod["spec"]["volumes"] = [
+            volume for volume in pod["spec"]["volumes"] if volume["name"] != "data"
+        ]
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
+
+
+def test_status_accepts_exact_statefulset_claim_volume_after_declared_volumes(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    postgres_pod = _pod_by_app(runner, "loom-dev-postgres")
+    claim_volume = postgres_pod["spec"]["volumes"].pop(0)
+    assert claim_volume["name"] == "data"
+    postgres_pod["spec"]["volumes"].append(claim_volume)
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong-claim-name",
+        "extra-claim-source-field",
+        "duplicate-claim-volume",
+        "unknown-volume",
+        "reordered-declared-volumes",
+        "unexpected-statefulset-ordinal",
+        "deployment-lookalike-volume",
+        "job-lookalike-volume",
+    ],
+)
+def test_status_rejects_untrusted_statefulset_claim_volume_normalization(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    postgres_pod = _pod_by_app(runner, "loom-dev-postgres")
+    claim_volume = postgres_pod["spec"]["volumes"][0]
+    assert claim_volume["name"] == "data"
+
+    if mutation == "wrong-claim-name":
+        claim_volume["persistentVolumeClaim"]["claimName"] = "data-loom-dev-minio-0"
+    elif mutation == "extra-claim-source-field":
+        claim_volume["persistentVolumeClaim"]["readOnly"] = False
+    elif mutation == "duplicate-claim-volume":
+        postgres_pod["spec"]["volumes"].insert(1, copy.deepcopy(claim_volume))
+    elif mutation == "unknown-volume":
+        postgres_pod["spec"]["volumes"].append({"name": "unknown", "emptyDir": {}})
+    elif mutation == "reordered-declared-volumes":
+        postgres_pod["spec"]["volumes"][1:] = reversed(postgres_pod["spec"]["volumes"][1:])
+    elif mutation == "unexpected-statefulset-ordinal":
+        postgres_pod["metadata"]["name"] = "loom-dev-postgres-1"
+        claim_volume["persistentVolumeClaim"]["claimName"] = "data-loom-dev-postgres-1"
+    elif mutation == "deployment-lookalike-volume":
+        management_pod = _pod_by_app(runner, "loom-personal-dev-management")
+        management_pod["spec"]["volumes"].insert(
+            0,
+            {
+                "name": "data",
+                "persistentVolumeClaim": {
+                    "claimName": f"data-{management_pod['metadata']['name']}",
+                },
+            },
+        )
+    elif mutation == "job-lookalike-volume":
+        migration_pod = _pod_by_app(runner, "loom-personal-dev-migration")
+        migration_pod["spec"]["volumes"].insert(
+            0,
+            {
+                "name": "data",
+                "persistentVolumeClaim": {
+                    "claimName": f"data-{migration_pod['metadata']['name']}",
+                },
+            },
+        )
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
 
 
 def test_status_accepts_api_server_default_empty_admission_selectors(
