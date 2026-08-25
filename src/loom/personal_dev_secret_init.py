@@ -166,6 +166,16 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
     )
 
 
+def _is_private_directory(metadata: os.stat_result) -> bool:
+    """Allow only owner-private directories, with optional fsGroup setgid."""
+
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) in {0o700, 0o2700}
+    )
+
+
 def _source_payloads(source: Path, expected: frozenset[str]) -> _ProjectedSnapshot:
     try:
         source_metadata = source.lstat()
@@ -280,20 +290,14 @@ def _open_private_parent(destination: Path) -> int:
     parent = destination.parent
     try:
         metadata = parent.lstat()
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-        ):
+        if not _is_private_directory(metadata):
             raise _invalid()
         descriptor = os.open(parent, _DIRECTORY_FLAGS)
         opened = os.fstat(descriptor)
-        if (
-            (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) != 0o700
-        ):
+        if (opened.st_dev, opened.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ) or not _is_private_directory(opened):
             os.close(descriptor)
             raise _invalid()
         return descriptor
@@ -318,12 +322,7 @@ def _existing_payloads(
         return None
     except OSError:
         raise _invalid() from None
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
+    if not _is_private_directory(metadata):
         raise _invalid()
     try:
         descriptor = os.open(destination_name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
@@ -333,8 +332,7 @@ def _existing_payloads(
         opened = os.fstat(descriptor)
         if (
             (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) != 0o700
+            or not _is_private_directory(opened)
             or set(os.listdir(descriptor)) != expected
         ):
             raise _invalid()
@@ -379,6 +377,8 @@ def _existing_payloads(
             (destination_after.st_dev, destination_after.st_ino)
             != (metadata.st_dev, metadata.st_ino)
             or (directory_after.st_dev, directory_after.st_ino) != (opened.st_dev, opened.st_ino)
+            or not _is_private_directory(destination_after)
+            or not _is_private_directory(directory_after)
             or set(os.listdir(descriptor)) != expected
         ):
             raise _invalid()
@@ -402,7 +402,7 @@ def _create_staging(parent_descriptor: int, destination_name: str) -> tuple[str,
         except OSError:
             raise _invalid() from None
         metadata = os.fstat(descriptor)
-        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        if not _is_private_directory(metadata):
             os.close(descriptor)
             try:
                 os.rmdir(name, dir_fd=parent_descriptor)
