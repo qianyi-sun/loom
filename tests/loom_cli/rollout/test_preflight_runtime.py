@@ -37,6 +37,21 @@ def _checks(tier: int) -> tuple[RegisteredCheck, ...]:
     entries = [entry for entry in load_coverage_manifest().checks if entry.tier == tier]
     checks: list[RegisteredCheck] = []
     for entry in entries:
+        artifact_evidence = {
+            "bundle-digest": "1" * 64,
+            "image-artifact-digest": "2" * 64,
+            "manifest-artifact-digest": "3" * 64,
+            "rendered-manifest-digest": "4" * 64,
+            "migration-manifest-digest": "5" * 64,
+            "migration-artifact-digest": "6" * 64,
+            "production-defaults-digest": "7" * 64,
+        }
+        evidence_schema = (
+            tuple(EvidenceField(name, "sha256") for name in artifact_evidence)
+            if entry.check_id == "artifacts.publish"
+            else (EvidenceField("ready", "boolean"),)
+        )
+        evidence = artifact_evidence if entry.check_id == "artifacts.publish" else {"ready": True}
         spec = CheckSpec(
             check_id=entry.check_id,
             failure_code=entry.failure_code,
@@ -45,7 +60,7 @@ def _checks(tier: int) -> tuple[RegisteredCheck, ...]:
             dependencies=entry.dependencies,
             mutation_class=entry.mutation_class,
             input_keys=("runtime.binding",),
-            evidence_schema=(EvidenceField("ready", "boolean"),),
+            evidence_schema=evidence_schema,
             timeout_seconds=10,
             freshness_ttl_seconds=60,
             remediation="restore the declared runtime fixture",
@@ -57,8 +72,8 @@ def _checks(tier: int) -> tuple[RegisteredCheck, ...]:
                 spec=spec,
                 implementation_version="runtime-test-v1",
                 operations={
-                    CheckOperation.PROBE: lambda _context: CheckProbe(
-                        passed=True, evidence={"ready": True}
+                    CheckOperation.PROBE: lambda _context, found=evidence: CheckProbe(
+                        passed=True, evidence=found
                     )
                 },
             )

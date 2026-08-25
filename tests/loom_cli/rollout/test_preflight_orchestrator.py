@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from loom_cli.rollout.operator.model import CallerIdentity, PreflightRequest
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_orchestrator import CandidatePreflightOrchestrator
 from tests.loom_cli.rollout.test_preflight_runtime import _candidate, _runtime
@@ -39,10 +40,10 @@ def _request(*, assessment_digest: str, registry_digest: str, coverage_digest: s
 
 
 def test_assessment_and_worker_rebuild_share_exact_registry(tmp_path: Path) -> None:
-    calls: list[int] = []
+    calls: list[tuple[int, PreflightArtifactReference | None]] = []
 
-    def factory(candidate, epoch):
-        calls.append(epoch)
+    def factory(candidate, epoch, reference):
+        calls.append((epoch, reference))
         runtime = _runtime(tmp_path)
         assert runtime.candidate == candidate
         return runtime
@@ -66,13 +67,16 @@ def test_assessment_and_worker_rebuild_share_exact_registry(tmp_path: Path) -> N
         rehearsal_store=_RehearsalStore(),  # type: ignore[arg-type]
     )
     assert attestor.assessment.registry_digest == assessment.registry_digest
-    assert calls == [17, 17]
+    assert calls == [
+        (17, None),
+        (17, PreflightArtifactReference.from_assessment(assessment)),
+    ]
 
 
 def test_runtime_factory_drift_is_rejected(tmp_path: Path) -> None:
     candidate = _candidate()
 
-    def drifted(_candidate, _epoch):
+    def drifted(_candidate, _epoch, _reference):
         runtime = _runtime(tmp_path)
         other = replace(
             candidate,
@@ -94,7 +98,7 @@ def test_runtime_factory_drift_is_rejected(tmp_path: Path) -> None:
 
 def test_worker_rebuild_rejects_checkpoint_drift(tmp_path: Path) -> None:
     orchestrator = CandidatePreflightOrchestrator(
-        runtime_factory=lambda _candidate, _epoch: _runtime(tmp_path),
+        runtime_factory=lambda _candidate, _epoch, _reference: _runtime(tmp_path),
         store=PreflightAttestationStore(tmp_path / "attestations"),
         now=lambda: NOW,
     )
