@@ -216,6 +216,130 @@ def test_route_replay_returns_the_same_frozen_document(tmp_path: Path) -> None:
     assert replay == first
 
 
+def test_route_decision_freezes_eligibility_and_response_across_replay(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path)
+    request = _route_request(job_count=2)
+
+    first = broker.decide_route(request, now=NOW, allow_oldlab=True)
+    replay = broker.decide_route(
+        request,
+        now=NOW + timedelta(minutes=5),
+        allow_oldlab=False,
+    )
+
+    assert replay == first
+    assert replay.oldlab_eligible is True
+    assert replay.document().oldlab_eligible is True
+    assert all(
+        assignment.target is leases.PlacementTarget.OLDLAB
+        for assignment in replay.document().assignments
+    )
+
+
+def test_route_decision_identity_replay_with_changed_request_fails_atomically(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path)
+    request = _route_request(job_count=2)
+    first = broker.decide_route(request, now=NOW)
+    changed = leases.RouteRequest(
+        repository=request.repository,
+        workflow_name=request.workflow_name,
+        workflow_id=request.workflow_id,
+        workflow_run_id=request.workflow_run_id,
+        run_attempt=request.run_attempt,
+        head_sha="b" * 40,
+        job_keys=request.job_keys,
+    )
+
+    with pytest.raises(leases.LeaseBrokerError, match="different inputs"):
+        broker.decide_route(changed, now=NOW + timedelta(minutes=1))
+
+    assert broker.route_decisions() == (first,)
+    assert broker.active_assignments() == first.document().assignments
+
+
+def test_route_outbox_state_is_durable_and_idempotent(tmp_path: Path) -> None:
+    broker = _broker(tmp_path)
+    decision = broker.decide_route(_route_request(job_count=1), now=NOW)
+
+    dispatched = broker.record_route_dispatch(decision.request_sha256, now=NOW)
+    redispatched = broker.record_route_dispatch(
+        decision.request_sha256,
+        now=NOW + timedelta(minutes=5),
+    )
+    published = broker.mark_route_published(
+        decision.request_sha256,
+        now=NOW + timedelta(minutes=6),
+    )
+    replay = broker.mark_route_published(
+        decision.request_sha256,
+        now=NOW + timedelta(minutes=7),
+    )
+    not_abandoned = broker.abandon_route(
+        decision.request_sha256,
+        now=NOW + timedelta(minutes=8),
+    )
+
+    assert dispatched.dispatch_attempts == 1
+    assert redispatched.dispatch_attempts == 2
+    assert published.state is leases.RouteDecisionState.PUBLISHED
+    assert replay.published_at == published.published_at
+    assert not_abandoned == replay
+
+
+def test_schema_one_state_migrates_without_losing_assignments(tmp_path: Path) -> None:
+    state_db = tmp_path / "leases.sqlite3"
+    original = leases.CiRunnerLeaseBroker(state_db, _config())
+    assignment = original.allocate(_request(1), now=NOW)
+    with sqlite3.connect(state_db) as connection:
+        connection.execute("DROP TABLE route_decisions")
+        connection.execute(
+            "UPDATE metadata SET value = '1' WHERE key = 'schema_version'"
+        )
+
+    migrated = leases.CiRunnerLeaseBroker(state_db, _config())
+    decision = migrated.decide_route(
+        _route_request(workflow_run_id=20_001, job_count=1),
+        now=NOW,
+    )
+    with sqlite3.connect(state_db) as connection:
+        schema_version = connection.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+
+    assert schema_version == ("2",)
+    assert migrated.active_assignments()[0] == assignment
+    assert decision.state is leases.RouteDecisionState.PENDING
+
+
+def test_route_decision_retention_uses_terminal_time_and_active_lease_guard(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path)
+    decision = broker.decide_route(_route_request(job_count=1), now=NOW)
+    broker.mark_route_published(
+        decision.request_sha256,
+        now=NOW + timedelta(days=8),
+    )
+
+    assert broker.prune_route_decisions(before=NOW + timedelta(days=9)) == 0
+
+    assignment = broker.active_assignments()[0]
+    broker.release(
+        assignment_id=assignment.assignment_id,
+        lease_epoch=assignment.lease_epoch,
+        reason="completed",
+        terminal_observed=True,
+        now=NOW + timedelta(days=8),
+    )
+    assert broker.prune_route_decisions(before=NOW + timedelta(days=7)) == 0
+    assert broker.prune_route_decisions(before=NOW + timedelta(days=9)) == 1
+    assert broker.route_decisions() == ()
+
+
 def test_untrusted_workflow_route_is_forced_to_hosted_without_consuming_slots(
     tmp_path: Path,
 ) -> None:

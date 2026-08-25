@@ -21,7 +21,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
 WORK_CLASSES = ("normal", "image", "smoke")
 EXPECTED_CAPACITIES = {"normal": 5, "image": 4, "smoke": 2}
@@ -84,6 +84,7 @@ RELEASE_REASONS = {
     "expired",
 }
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _JOB_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@()-]{0,199}$")
 _MAX_RUN_ID = 2**63 - 1
 _MIN_TTL_SECONDS = 60
@@ -102,6 +103,12 @@ class PlacementTarget(StrEnum):
 class AssignmentState(StrEnum):
     ASSIGNED = "assigned"
     RELEASED = "released"
+
+
+class RouteDecisionState(StrEnum):
+    PENDING = "pending"
+    PUBLISHED = "published"
+    ABANDONED = "abandoned"
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +342,112 @@ class PlacementAssignment:
     released_at: str | None
     release_reason: str | None
 
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> PlacementAssignment:
+        expected = {
+            "assignment_id",
+            "repository",
+            "workflow_run_id",
+            "run_attempt",
+            "job_key",
+            "head_sha",
+            "work_class",
+            "target",
+            "slot",
+            "lease_epoch",
+            "state",
+            "runs_on",
+            "created_at",
+            "lease_expires_at",
+            "released_at",
+            "release_reason",
+        }
+        if set(value) != expected:
+            raise LeaseBrokerError("stored route assignment fields do not match")
+        runs_on_value = value.get("runs_on")
+        if not isinstance(runs_on_value, list) or any(
+            not isinstance(item, str) or not item for item in runs_on_value
+        ):
+            raise LeaseBrokerError("stored route assignment labels are invalid")
+        try:
+            target = PlacementTarget(_exact_text(value.get("target"), "target"))
+            state = AssignmentState(_exact_text(value.get("state"), "state"))
+        except ValueError as exc:
+            raise LeaseBrokerError("stored route assignment enum is invalid") from exc
+        slot_value = value.get("slot")
+        slot = (
+            None
+            if slot_value is None
+            else _bounded_int(slot_value, "slot", minimum=0, maximum=10)
+        )
+        lease_expires_at = value.get("lease_expires_at")
+        released_at = value.get("released_at")
+        release_reason = value.get("release_reason")
+        if lease_expires_at is not None and not isinstance(lease_expires_at, str):
+            raise LeaseBrokerError("stored route assignment expiry is invalid")
+        if released_at is not None and not isinstance(released_at, str):
+            raise LeaseBrokerError("stored route assignment release time is invalid")
+        if release_reason is not None and not isinstance(release_reason, str):
+            raise LeaseBrokerError("stored route assignment release reason is invalid")
+        assignment = cls(
+            assignment_id=_bounded_int(
+                value.get("assignment_id"), "assignment_id", minimum=1, maximum=_MAX_RUN_ID
+            ),
+            repository=_exact_text(value.get("repository"), "repository"),
+            workflow_run_id=_bounded_int(
+                value.get("workflow_run_id"),
+                "workflow_run_id",
+                minimum=1,
+                maximum=_MAX_RUN_ID,
+            ),
+            run_attempt=_bounded_int(
+                value.get("run_attempt"), "run_attempt", minimum=1, maximum=1_000_000
+            ),
+            job_key=_exact_text(value.get("job_key"), "job_key"),
+            head_sha=_exact_text(value.get("head_sha"), "head_sha"),
+            work_class=_exact_text(value.get("work_class"), "work_class"),
+            target=target,
+            slot=slot,
+            lease_epoch=_bounded_int(
+                value.get("lease_epoch"), "lease_epoch", minimum=1, maximum=_MAX_RUN_ID
+            ),
+            state=state,
+            runs_on=tuple(runs_on_value),
+            created_at=_exact_text(value.get("created_at"), "created_at"),
+            lease_expires_at=lease_expires_at,
+            released_at=released_at,
+            release_reason=release_reason,
+        )
+        if assignment.repository != EXPECTED_REPOSITORY:
+            raise LeaseBrokerError("stored route assignment repository is invalid")
+        if _JOB_KEY_RE.fullmatch(assignment.job_key) is None:
+            raise LeaseBrokerError("stored route assignment job key is invalid")
+        if _SHA_RE.fullmatch(assignment.head_sha) is None:
+            raise LeaseBrokerError("stored route assignment head is invalid")
+        if assignment.work_class not in WORK_CLASSES:
+            raise LeaseBrokerError("stored route assignment work class is invalid")
+        if assignment.state is not AssignmentState.ASSIGNED:
+            raise LeaseBrokerError("stored route assignment must be frozen while assigned")
+        if assignment.target is PlacementTarget.OLDLAB:
+            if assignment.slot is None or assignment.lease_expires_at is None:
+                raise LeaseBrokerError("stored oldlab route assignment is incomplete")
+            if assignment.slot >= EXPECTED_CAPACITIES[assignment.work_class]:
+                raise LeaseBrokerError("stored oldlab route assignment slot is invalid")
+            if not {
+                "self-hosted",
+                "linux",
+                "x64",
+                "loom-ci",
+                "oldlab-5",
+                CLASS_LABELS[assignment.work_class],
+            }.issubset(assignment.runs_on):
+                raise LeaseBrokerError("stored oldlab route labels are invalid")
+        elif assignment.slot is not None or assignment.lease_expires_at is not None:
+            raise LeaseBrokerError("stored hosted route assignment is inconsistent")
+        elif assignment.runs_on != HOSTED_RUNS_ON[assignment.work_class]:
+            raise LeaseBrokerError("stored hosted route labels are invalid")
+        return assignment
+
     def public_dict(self) -> dict[str, object]:
         value = asdict(self)
         value["target"] = self.target.value
@@ -354,17 +467,18 @@ class RouteAssignmentDocument:
     head_sha: str
     request_sha256: str
     assignments: tuple[PlacementAssignment, ...]
+    oldlab_eligible: bool
 
     @classmethod
     def create(
         cls,
         request: RouteRequest,
         assignments: Sequence[PlacementAssignment],
+        *,
+        oldlab_eligible: bool,
     ) -> RouteAssignmentDocument:
-        canonical_request = json.dumps(
-            request.public_dict(), sort_keys=True, separators=(",", ":")
-        ).encode()
-        return cls(
+        canonical_request = _canonical_json(request.public_dict()).encode()
+        document = cls(
             schema_version=1,
             repository=request.repository,
             workflow_name=request.workflow_name,
@@ -374,12 +488,141 @@ class RouteAssignmentDocument:
             head_sha=request.head_sha,
             request_sha256=hashlib.sha256(canonical_request).hexdigest(),
             assignments=tuple(assignments),
+            oldlab_eligible=oldlab_eligible,
         )
+        document.validate()
+        return document
+
+    def validate(self) -> None:
+        if _SHA256_RE.fullmatch(self.request_sha256) is None:
+            raise LeaseBrokerError("stored route request digest is invalid")
+        assignment_ids = [assignment.assignment_id for assignment in self.assignments]
+        job_keys = [assignment.job_key for assignment in self.assignments]
+        if (
+            len(assignment_ids) != len(set(assignment_ids))
+            or len(job_keys) != len(set(job_keys))
+        ):
+            raise LeaseBrokerError("stored route response assignments are not unique")
+        for assignment in self.assignments:
+            if (
+                assignment.repository != self.repository
+                or assignment.workflow_run_id != self.workflow_run_id
+                or assignment.run_attempt != self.run_attempt
+                or assignment.head_sha != self.head_sha
+            ):
+                raise LeaseBrokerError("stored route assignment identity does not match response")
+        if not self.oldlab_eligible and any(
+            assignment.target is PlacementTarget.OLDLAB
+            for assignment in self.assignments
+        ):
+            raise LeaseBrokerError("ineligible stored route response selects oldlab")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> RouteAssignmentDocument:
+        expected = {
+            "schema_version",
+            "repository",
+            "workflow_name",
+            "workflow_id",
+            "workflow_run_id",
+            "run_attempt",
+            "head_sha",
+            "request_sha256",
+            "assignments",
+            "oldlab_eligible",
+        }
+        if set(value) != expected or value.get("schema_version") != 1:
+            raise LeaseBrokerError("stored route response fields do not match schema 1")
+        assignments_value = value.get("assignments")
+        if not isinstance(assignments_value, list) or not assignments_value:
+            raise LeaseBrokerError("stored route response assignments are invalid")
+        assignments = tuple(
+            PlacementAssignment.from_mapping(item)
+            for item in assignments_value
+            if isinstance(item, dict)
+        )
+        if len(assignments) != len(assignments_value):
+            raise LeaseBrokerError("stored route response assignment is invalid")
+        oldlab_eligible = value.get("oldlab_eligible")
+        if not isinstance(oldlab_eligible, bool):
+            raise LeaseBrokerError("stored route response eligibility is invalid")
+        document = cls(
+            schema_version=1,
+            repository=_exact_text(value.get("repository"), "repository"),
+            workflow_name=_exact_text(value.get("workflow_name"), "workflow_name"),
+            workflow_id=_bounded_int(
+                value.get("workflow_id"), "workflow_id", minimum=1, maximum=_MAX_RUN_ID
+            ),
+            workflow_run_id=_bounded_int(
+                value.get("workflow_run_id"),
+                "workflow_run_id",
+                minimum=1,
+                maximum=_MAX_RUN_ID,
+            ),
+            run_attempt=_bounded_int(
+                value.get("run_attempt"), "run_attempt", minimum=1, maximum=1_000_000
+            ),
+            head_sha=_exact_text(value.get("head_sha"), "head_sha"),
+            request_sha256=_exact_text(value.get("request_sha256"), "request_sha256"),
+            assignments=assignments,
+            oldlab_eligible=oldlab_eligible,
+        )
+        document.validate()
+        return document
 
     def public_dict(self) -> dict[str, object]:
         value = asdict(self)
         value["assignments"] = [item.public_dict() for item in self.assignments]
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class RouteDecision:
+    decision_id: int
+    repository: str
+    workflow_name: str
+    workflow_id: int
+    workflow_run_id: int
+    run_attempt: int
+    head_sha: str
+    request_sha256: str
+    request_json: str
+    response_json: str
+    oldlab_eligible: bool
+    state: RouteDecisionState
+    created_at: str
+    dispatch_attempted_at: str | None
+    dispatch_attempts: int
+    published_at: str | None
+    abandoned_at: str | None
+
+    def response_dict(self) -> dict[str, object]:
+        try:
+            value = json.loads(self.response_json)
+        except json.JSONDecodeError as exc:
+            raise LeaseBrokerError("stored route response is invalid JSON") from exc
+        if not isinstance(value, dict) or _canonical_json(value) != self.response_json:
+            raise LeaseBrokerError("stored route response is not canonical")
+        return value
+
+    def document(self) -> RouteAssignmentDocument:
+        document = RouteAssignmentDocument.from_mapping(self.response_dict())
+        if (
+            document.repository != self.repository
+            or document.workflow_name != self.workflow_name
+            or document.workflow_id != self.workflow_id
+            or document.workflow_run_id != self.workflow_run_id
+            or document.run_attempt != self.run_attempt
+            or document.head_sha != self.head_sha
+            or document.request_sha256 != self.request_sha256
+            or document.oldlab_eligible is not self.oldlab_eligible
+        ):
+            raise LeaseBrokerError("stored route decision identity does not match response")
+        return document
+
+
+def _canonical_json(value: Mapping[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _utc(value: datetime) -> datetime:
@@ -445,6 +688,7 @@ class CiRunnerLeaseBroker:
         try:
             connection.executescript(
                 """
+                BEGIN IMMEDIATE;
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -481,9 +725,36 @@ class CiRunnerLeaseBroker:
                     WHERE target = 'oldlab' AND state = 'assigned';
                 CREATE INDEX IF NOT EXISTS assignment_state
                     ON assignments(state, work_class, target);
+                CREATE TABLE IF NOT EXISTS route_decisions (
+                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository TEXT NOT NULL,
+                    workflow_name TEXT NOT NULL,
+                    workflow_id INTEGER NOT NULL,
+                    workflow_run_id INTEGER NOT NULL,
+                    run_attempt INTEGER NOT NULL,
+                    head_sha TEXT NOT NULL,
+                    request_sha256 TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    oldlab_eligible INTEGER NOT NULL CHECK (oldlab_eligible IN (0, 1)),
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'abandoned')),
+                    created_at TEXT NOT NULL,
+                    dispatch_attempted_at TEXT,
+                    dispatch_attempts INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
+                    published_at TEXT,
+                    abandoned_at TEXT,
+                    UNIQUE (repository, workflow_run_id, run_attempt),
+                    UNIQUE (request_sha256),
+                    CHECK (
+                        (state = 'pending' AND published_at IS NULL AND abandoned_at IS NULL)
+                        OR (state = 'published' AND published_at IS NOT NULL AND abandoned_at IS NULL)
+                        OR (state = 'abandoned' AND abandoned_at IS NOT NULL)
+                    )
+                );
+                CREATE INDEX IF NOT EXISTS route_decision_state
+                    ON route_decisions(state, created_at);
                 """
             )
-            connection.execute("BEGIN IMMEDIATE")
             self._initialize_contract(connection)
             connection.commit()
         except BaseException:
@@ -505,11 +776,18 @@ class CiRunnerLeaseBroker:
             for row in connection.execute("SELECT key, value FROM metadata")
         }
         if existing:
-            for key in ("schema_version", "repository", "oldlab_labels"):
+            if existing.get("schema_version") not in {"1", SCHEMA_VERSION}:
+                raise LeaseBrokerError("stored broker schema_version does not match config")
+            for key in ("repository", "oldlab_labels"):
                 if existing.get(key) != expected_metadata[key]:
                     raise LeaseBrokerError(f"stored broker {key} does not match config")
             if "next_lease_epoch" not in existing:
                 raise LeaseBrokerError("stored broker lease epoch is missing")
+            if existing["schema_version"] == "1":
+                connection.execute(
+                    "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+                    (SCHEMA_VERSION,),
+                )
         else:
             connection.executemany(
                 "INSERT INTO metadata(key, value) VALUES (?, ?)",
@@ -604,13 +882,102 @@ class CiRunnerLeaseBroker:
         now: datetime | None = None,
         allow_oldlab: bool = True,
     ) -> RouteAssignmentDocument:
-        request.validate()
-        assignments = self.allocate_many(
-            request.assignment_requests(),
+        return self.decide_route(
+            request,
             now=now,
             allow_oldlab=allow_oldlab,
-        )
-        return RouteAssignmentDocument.create(request, assignments)
+        ).document()
+
+    def decide_route(
+        self,
+        request: RouteRequest,
+        *,
+        now: datetime | None = None,
+        allow_oldlab: bool = True,
+    ) -> RouteDecision:
+        """Atomically freeze one route response with its capacity assignments."""
+        request.validate()
+        if request.repository != self.config.repository:
+            raise LeaseBrokerError("request repository does not match broker config")
+        observed_at = _utc(now or datetime.now(UTC))
+        request_json = _canonical_json(request.public_dict())
+        request_sha256 = hashlib.sha256(request_json.encode()).hexdigest()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT * FROM route_decisions
+                WHERE repository = ? AND workflow_run_id = ? AND run_attempt = ?
+                """,
+                (request.repository, request.workflow_run_id, request.run_attempt),
+            ).fetchone()
+            if existing is not None:
+                decision = self._route_decision_from_row(existing)
+                if (
+                    decision.request_json != request_json
+                    or decision.request_sha256 != request_sha256
+                ):
+                    raise LeaseBrokerError(
+                        "route decision identity was replayed with different inputs"
+                    )
+                connection.commit()
+                return decision
+
+            assignments = tuple(
+                self._allocate_in_transaction(
+                    connection,
+                    assignment_request,
+                    observed_at,
+                    allow_oldlab=allow_oldlab,
+                )
+                for assignment_request in request.assignment_requests()
+            )
+            document = RouteAssignmentDocument.create(
+                request,
+                assignments,
+                oldlab_eligible=allow_oldlab,
+            )
+            if document.request_sha256 != request_sha256:
+                raise LeaseBrokerError("route request digest is inconsistent")
+            response_json = _canonical_json(document.public_dict())
+            cursor = connection.execute(
+                """
+                INSERT INTO route_decisions(
+                    repository, workflow_name, workflow_id, workflow_run_id,
+                    run_attempt, head_sha, request_sha256, request_json,
+                    response_json, oldlab_eligible, state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    request.repository,
+                    request.workflow_name,
+                    request.workflow_id,
+                    request.workflow_run_id,
+                    request.run_attempt,
+                    request.head_sha,
+                    request_sha256,
+                    request_json,
+                    response_json,
+                    int(allow_oldlab),
+                    _timestamp(observed_at),
+                ),
+            )
+            stored = connection.execute(
+                "SELECT * FROM route_decisions WHERE decision_id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            if stored is None:
+                raise LeaseBrokerError("stored route decision could not be read back")
+            decision = self._route_decision_from_row(stored)
+            connection.commit()
+            return decision
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _allocate_in_transaction(
         self,
@@ -798,6 +1165,211 @@ class CiRunnerLeaseBroker:
         finally:
             connection.close()
         return tuple(self._assignment_from_row(row) for row in rows)
+
+    def route_decisions(
+        self, *, states: Sequence[RouteDecisionState] | None = None
+    ) -> tuple[RouteDecision, ...]:
+        selected = tuple(states or tuple(RouteDecisionState))
+        if not selected or len(selected) != len(set(selected)):
+            raise LeaseBrokerError("route decision state filter is invalid")
+        placeholders = ",".join("?" for _ in selected)
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"SELECT * FROM route_decisions WHERE state IN ({placeholders}) "
+                "ORDER BY decision_id",
+                tuple(state.value for state in selected),
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(self._route_decision_from_row(row) for row in rows)
+
+    def record_route_dispatch(
+        self, request_sha256: str, *, now: datetime | None = None
+    ) -> RouteDecision:
+        return self._update_route_decision(
+            request_sha256,
+            """
+            UPDATE route_decisions
+            SET dispatch_attempted_at = ?, dispatch_attempts = dispatch_attempts + 1
+            WHERE request_sha256 = ? AND state = 'pending'
+            """,
+            (_timestamp(_utc(now or datetime.now(UTC))), request_sha256),
+        )
+
+    def mark_route_published(
+        self, request_sha256: str, *, now: datetime | None = None
+    ) -> RouteDecision:
+        observed = _timestamp(_utc(now or datetime.now(UTC)))
+        return self._update_route_decision(
+            request_sha256,
+            """
+            UPDATE route_decisions
+            SET state = CASE WHEN state = 'pending' THEN 'published' ELSE state END,
+                published_at = COALESCE(published_at, ?)
+            WHERE request_sha256 = ?
+            """,
+            (observed, request_sha256),
+        )
+
+    def abandon_route(
+        self, request_sha256: str, *, now: datetime | None = None
+    ) -> RouteDecision:
+        observed = _timestamp(_utc(now or datetime.now(UTC)))
+        return self._update_route_decision(
+            request_sha256,
+            """
+            UPDATE route_decisions
+            SET state = 'abandoned', abandoned_at = ?
+            WHERE request_sha256 = ? AND state = 'pending'
+            """,
+            (observed, request_sha256),
+        )
+
+    def _update_route_decision(
+        self,
+        request_sha256: str,
+        statement: str,
+        parameters: tuple[object, ...],
+    ) -> RouteDecision:
+        if _SHA256_RE.fullmatch(request_sha256) is None:
+            raise LeaseBrokerError("route request digest must be SHA-256")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM route_decisions WHERE request_sha256 = ?",
+                (request_sha256,),
+            ).fetchone()
+            if row is None:
+                raise LeaseBrokerError("route decision does not exist")
+            connection.execute(statement, parameters)
+            updated = connection.execute(
+                "SELECT * FROM route_decisions WHERE request_sha256 = ?",
+                (request_sha256,),
+            ).fetchone()
+            if updated is None:
+                raise LeaseBrokerError("updated route decision could not be read back")
+            decision = self._route_decision_from_row(updated)
+            connection.commit()
+            return decision
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def prune_route_decisions(
+        self,
+        *,
+        before: datetime,
+        limit: int = 100,
+    ) -> int:
+        cutoff = _timestamp(_utc(before))
+        _bounded_int(limit, "limit", minimum=1, maximum=1_000)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT decision_id FROM route_decisions AS decision
+                WHERE decision.state IN ('published', 'abandoned')
+                  AND COALESCE(decision.published_at, decision.abandoned_at) < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM assignments AS assignment
+                      WHERE assignment.repository = decision.repository
+                        AND assignment.workflow_run_id = decision.workflow_run_id
+                        AND assignment.run_attempt = decision.run_attempt
+                        AND assignment.state = 'assigned'
+                  )
+                ORDER BY decision.decision_id
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+            ids = [int(row["decision_id"]) for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"DELETE FROM route_decisions WHERE decision_id IN ({placeholders})",
+                    ids,
+                )
+            connection.commit()
+            return len(ids)
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _route_decision_from_row(self, row: sqlite3.Row) -> RouteDecision:
+        try:
+            state = RouteDecisionState(str(row["state"]))
+        except ValueError as exc:
+            raise LeaseBrokerError("stored route decision state is invalid") from exc
+        decision = RouteDecision(
+            decision_id=int(row["decision_id"]),
+            repository=str(row["repository"]),
+            workflow_name=str(row["workflow_name"]),
+            workflow_id=int(row["workflow_id"]),
+            workflow_run_id=int(row["workflow_run_id"]),
+            run_attempt=int(row["run_attempt"]),
+            head_sha=str(row["head_sha"]),
+            request_sha256=str(row["request_sha256"]),
+            request_json=str(row["request_json"]),
+            response_json=str(row["response_json"]),
+            oldlab_eligible=bool(row["oldlab_eligible"]),
+            state=state,
+            created_at=str(row["created_at"]),
+            dispatch_attempted_at=(
+                str(row["dispatch_attempted_at"])
+                if row["dispatch_attempted_at"] is not None
+                else None
+            ),
+            dispatch_attempts=int(row["dispatch_attempts"]),
+            published_at=(
+                str(row["published_at"]) if row["published_at"] is not None else None
+            ),
+            abandoned_at=(
+                str(row["abandoned_at"]) if row["abandoned_at"] is not None else None
+            ),
+        )
+        try:
+            request_value = json.loads(decision.request_json)
+        except json.JSONDecodeError as exc:
+            raise LeaseBrokerError("stored route request is invalid JSON") from exc
+        if (
+            not isinstance(request_value, dict)
+            or _canonical_json(request_value) != decision.request_json
+        ):
+            raise LeaseBrokerError("stored route request is not canonical")
+        request = RouteRequest.from_mapping(request_value)
+        request_sha256 = hashlib.sha256(decision.request_json.encode()).hexdigest()
+        if (
+            request.repository != decision.repository
+            or request.workflow_name != decision.workflow_name
+            or request.workflow_id != decision.workflow_id
+            or request.workflow_run_id != decision.workflow_run_id
+            or request.run_attempt != decision.run_attempt
+            or request.head_sha != decision.head_sha
+            or request_sha256 != decision.request_sha256
+        ):
+            raise LeaseBrokerError("stored route decision identity does not match request")
+        document = decision.document()
+        if tuple(assignment.job_key for assignment in document.assignments) != request.job_keys:
+            raise LeaseBrokerError("stored route assignments do not match request jobs")
+        if any(assignment.work_class != request.work_class for assignment in document.assignments):
+            raise LeaseBrokerError("stored route assignment class does not match request")
+        expected_oldlab_labels = (*self.config.oldlab_labels, CLASS_LABELS[request.work_class])
+        if any(
+            assignment.target is PlacementTarget.OLDLAB
+            and assignment.runs_on != expected_oldlab_labels
+            for assignment in document.assignments
+        ):
+            raise LeaseBrokerError("stored oldlab route labels do not match broker config")
+        return decision
 
     def _assignment_from_row(self, row: sqlite3.Row) -> PlacementAssignment:
         target = PlacementTarget(str(row["target"]))
