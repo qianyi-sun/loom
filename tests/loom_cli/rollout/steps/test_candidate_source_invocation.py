@@ -3525,20 +3525,25 @@ def test_gb10_prep_slow_failing_host_does_not_block_other_hosts(
     host1_active = False
     progressed_while_host1_active: set[str] = set()
     lock = threading.Lock()
+    host1_started = threading.Event()
+    other_host_progressed = threading.Event()
 
     def fake_prep_one_host(ctx, host, host_dir):
         nonlocal host1_active
         if host.ssh_target == "trt-gb10-1":
             with lock:
                 host1_active = True
-            time.sleep(0.08)
+            host1_started.set()
+            assert other_host_progressed.wait(timeout=1.0)
             (host_dir / "prep.log").write_text("failed\n", encoding="utf-8")
             with lock:
                 host1_active = False
             return False, "checkout failed on trt-gb10-1: rc=1"
+        assert host1_started.wait(timeout=1.0)
         with lock:
             if host1_active:
                 progressed_while_host1_active.add(host.ssh_target)
+        other_host_progressed.set()
         (host_dir / "prep.log").write_text("ok\n", encoding="utf-8")
         return True, f"prepped {host.ssh_target}"
 
