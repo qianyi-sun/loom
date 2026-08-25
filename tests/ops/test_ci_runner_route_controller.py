@@ -108,12 +108,27 @@ class FakeRouteAPI:
             (request.workflow_run_id, request.run_attempt): []
         }
 
-    def latest_artifact_id(self) -> int:
-        return max((int(item["id"]) for item in self.artifacts), default=0)
+    def active_workflow_runs(self, workflow_id: int) -> list[dict[str, object]]:
+        return [
+            run
+            for run in self.runs.values()
+            if run["workflow_id"] == workflow_id and run["status"] == "in_progress"
+        ]
 
-    def list_route_artifacts(self, after_id: int) -> tuple[int, list[dict[str, object]]]:
-        highwater = self.latest_artifact_id()
-        return highwater, [item for item in self.artifacts if int(item["id"]) > after_id]
+    def route_artifact(
+        self, *, workflow_id: int, workflow_run_id: int, run_attempt: int
+    ) -> dict[str, object] | None:
+        expected = (
+            f"{routes.ARTIFACT_PREFIX}{workflow_id}-{workflow_run_id}-{run_attempt}"
+        )
+        matches = [
+            artifact
+            for artifact in self.artifacts
+            if artifact["name"] == expected and artifact["expired"] is False
+        ]
+        if len(matches) > 1:
+            raise routes.RouteControllerError("GitHub route artifact identity is ambiguous")
+        return matches[0] if matches else None
 
     def download_artifact(self, artifact_id: int) -> bytes:
         return self.archives[artifact_id]
@@ -158,13 +173,10 @@ def _controller(
 ) -> tuple[routes.CiRunnerRouteController, FakeRouteAPI, leases.CiRunnerLeaseBroker]:
     api = FakeRouteAPI(request)
     broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
-    cursor_file = tmp_path / "route-controller-cursor.json"
-    routes._write_artifact_cursor(cursor_file, 0)
     controller = routes.CiRunnerRouteController(
         api=api,
         broker=broker,
         candidate_sha=CANDIDATE_SHA,
-        cursor_file=cursor_file,
         publisher_key=PUBLISHER_KEY,
         publisher_poll_seconds=0,
         now=lambda: NOW,
@@ -179,10 +191,13 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     result = controller.reconcile()
 
     assert result.public_dict() == {
-        "artifacts_seen": 1,
+        "requests_seen": 1,
         "routes_published": 1,
         "routes_replayed": 0,
+        "routes_pending": 0,
+        "routes_abandoned": 0,
         "assignments_released": 0,
+        "decisions_pruned": 0,
     }
     summary = json.loads(api.created_checks[0]["output"]["summary"])
     assert summary["request_sha256"] in api.created_checks[0]["external_id"]
@@ -248,7 +263,7 @@ def test_future_request_fails_safe_to_hosted(tmp_path: Path) -> None:
     assert broker.status()["classes"]["normal"]["available"] == 5
 
 
-def test_invalid_artifact_time_fails_before_cursor_or_capacity_mutation(
+def test_invalid_artifact_time_fails_before_persistent_capacity_mutation(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=1)
@@ -258,54 +273,146 @@ def test_invalid_artifact_time_fails_before_cursor_or_capacity_mutation(
     with pytest.raises(routes.RouteControllerError, match=r"artifact\.created_at"):
         controller.reconcile()
 
-    assert routes._read_artifact_cursor(controller.cursor_file) == 0
     assert broker.active_assignments() == ()
+    assert broker.route_decisions() == ()
 
 
-def test_cursor_skips_processed_artifact_and_cursor_loss_replays_safely(
+def test_restart_replays_the_exact_persisted_route_decision(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=2)
-    controller, api, _ = _controller(tmp_path, request)
+    controller, api, broker = _controller(tmp_path, request)
     first = controller.reconcile()
-    skipped = controller.reconcile()
-    controller.cursor_file.unlink()
-    routes._write_artifact_cursor(controller.cursor_file, 0)
-    replay = controller.reconcile()
+    restarted = routes.CiRunnerRouteController(
+        api=api,
+        broker=leases.CiRunnerLeaseBroker(broker.state_db, _config()),
+        candidate_sha=CANDIDATE_SHA,
+        publisher_key=PUBLISHER_KEY,
+        publisher_poll_seconds=0,
+        now=lambda: NOW + timedelta(minutes=1),
+    )
+    replay = restarted.reconcile()
 
     assert first.routes_published == 1
-    assert skipped.artifacts_seen == 0
     assert replay.routes_published == 0
     assert replay.routes_replayed == 1
     assert len(api.created_checks) == 1
 
 
-def test_missing_relay_result_fails_before_advancing_cursor(tmp_path: Path) -> None:
-    request = _request(job_count=1)
-    controller, api, _ = _controller(tmp_path, request)
-    api.publish_dispatched_check = False
-    controller.publisher_poll_attempts = 1
-
-    with pytest.raises(routes.RouteControllerError, match="did not create"):
-        controller.reconcile()
-
-    assert routes._read_artifact_cursor(controller.cursor_file) == 0
-    assert len(api.dispatches) == 1
-
-
-def test_missing_cursor_requires_explicit_highwater_initialization(
+def test_late_publisher_replays_frozen_oldlab_decision_without_wedging(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=1)
-    controller, _, _ = _controller(tmp_path, request)
-    controller.cursor_file.unlink()
+    controller, api, broker = _controller(tmp_path, request)
+    api.publish_dispatched_check = False
+    controller.publisher_poll_attempts = 1
 
-    with pytest.raises(routes.RouteControllerError, match="initialize before routing"):
-        controller.reconcile()
+    first = controller.reconcile()
+    frozen = broker.route_decisions(states=(leases.RouteDecisionState.PENDING,))[0]
+    payload = json.loads(
+        base64.b64decode(api.dispatches[0]["payload_b64"], validate=True)
+    )
+    payload["app"] = {"id": routes.GITHUB_ACTIONS_APP_ID}
+    api.checks[(payload["head_sha"], payload["name"])] = [payload]
+    controller.now = lambda: NOW + timedelta(seconds=141)
 
-    assert controller.initialize_cursor() == 71
-    assert routes._read_artifact_cursor(controller.cursor_file) == 71
-    assert controller.reconcile().artifacts_seen == 0
+    replay = controller.reconcile()
+    published = broker.route_decisions(states=(leases.RouteDecisionState.PUBLISHED,))[0]
+
+    assert first.routes_pending == 1
+    assert frozen.document().oldlab_eligible is True
+    assert replay.routes_replayed == 1
+    assert published.response_json == frozen.response_json
+    assert len(api.dispatches) == 1
+
+
+def test_unrelated_repository_artifact_burst_cannot_block_fresh_route(
+    tmp_path: Path,
+) -> None:
+    request = _request(job_count=1)
+    controller, api, _ = _controller(tmp_path, request)
+    api.artifacts.extend(
+        {
+            "id": 1_000 + index,
+            "name": f"unrelated-{index}",
+            "expired": False,
+            "created_at": NOW.isoformat().replace("+00:00", "Z"),
+            "workflow_run": {"id": 99_000 + index, "head_sha": HEAD_SHA},
+        }
+        for index in range(1_000)
+    )
+
+    result = controller.reconcile()
+
+    assert result.requests_seen == 1
+    assert result.routes_published == 1
+    assert len(api.dispatches) == 1
+
+
+def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    workflow_id = leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
+    requested_paths: list[str] = []
+
+    def request(
+        method: str,
+        path: str,
+        *,
+        payload: object | None = None,
+    ) -> dict[str, object]:
+        assert method == "GET"
+        assert payload is None
+        requested_paths.append(path)
+        if path.startswith(f"/actions/workflows/{workflow_id}/runs?"):
+            return {"total_count": 1, "workflow_runs": [{"id": 30_000}]}
+        return {
+            "total_count": 1,
+            "artifacts": [
+                {
+                    "id": 71,
+                    "name": (
+                        f"{routes.ARTIFACT_PREFIX}{workflow_id}-30000-1"
+                    ),
+                    "expired": False,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(api, "_request", request)
+
+    assert api.active_workflow_runs(workflow_id) == [{"id": 30_000}]
+    assert api.route_artifact(
+        workflow_id=workflow_id,
+        workflow_run_id=30_000,
+        run_attempt=1,
+    ) == {
+        "id": 71,
+        "name": f"{routes.ARTIFACT_PREFIX}{workflow_id}-30000-1",
+        "expired": False,
+    }
+    assert "status=in_progress" in requested_paths[0]
+    assert requested_paths[1].startswith(
+        f"/actions/artifacts?name={routes.ARTIFACT_PREFIX}{workflow_id}-30000-1&"
+    )
+
+
+def test_github_active_run_inventory_overflow_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    monkeypatch.setattr(
+        api,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "total_count": routes.MAX_ACTIVE_RUNS_PER_WORKFLOW + 1,
+            "workflow_runs": [],
+        },
+    )
+
+    with pytest.raises(routes.RouteControllerError, match="exceeds the scan bound"):
+        api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0])
 
 
 def test_terminal_jobs_release_exact_leases(tmp_path: Path) -> None:
@@ -353,31 +460,46 @@ def test_workflow_attempt_regression_fails_closed(tmp_path: Path) -> None:
     assert len(broker.active_assignments()) == 1
 
 
-def test_terminal_hosted_fallback_without_a_route_advances_cursor(tmp_path: Path) -> None:
+def test_terminal_hosted_fallback_abandons_outbox_and_releases_lease(
+    tmp_path: Path,
+) -> None:
     request = _request(job_count=1)
     controller, api, broker = _controller(tmp_path, request)
-    api.runs[request.workflow_run_id]["status"] = "completed"
+    api.publish_dispatched_check = False
+    controller.publisher_poll_attempts = 1
+    pending = controller.reconcile()
+    api.jobs[(request.workflow_run_id, 1)] = [
+        {
+            "name": routes.ROUTE_JOB_NAMES[request.workflow_name],
+            "status": "completed",
+            "conclusion": "success",
+        }
+    ]
 
     result = controller.reconcile()
 
-    assert result.artifacts_seen == 1
-    assert result.routes_published == 0
-    assert routes._read_artifact_cursor(controller.cursor_file) == 71
+    assert pending.routes_pending == 1
+    assert result.routes_abandoned == 1
+    assert result.assignments_released == 1
     assert broker.active_assignments() == ()
+    assert broker.route_decisions()[0].state is leases.RouteDecisionState.ABANDONED
 
 
 def test_route_artifact_identity_and_shape_fail_closed(tmp_path: Path) -> None:
     request = _request(job_count=1)
     controller, api, _ = _controller(tmp_path, request)
-    api.artifacts[0]["name"] = f"{routes.ARTIFACT_PREFIX}{request.workflow_id}-999-1"
+    api.artifacts[0]["workflow_run"] = {
+        "id": 999,
+        "head_sha": request.head_sha,
+    }
 
-    with pytest.raises(routes.RouteControllerError, match="name does not match"):
+    with pytest.raises(routes.RouteControllerError, match="workflow run does not match"):
         controller.reconcile()
 
-    api.artifacts[0]["name"] = (
-        f"{routes.ARTIFACT_PREFIX}{request.workflow_id}-{request.workflow_run_id}-"
-        f"{request.run_attempt}"
-    )
+    api.artifacts[0]["workflow_run"] = {
+        "id": request.workflow_run_id,
+        "head_sha": request.head_sha,
+    }
     api.archives[71] = _zip_request(request, filename="wrong.json")
     with pytest.raises(
         routes.RouteControllerError,
@@ -439,7 +561,7 @@ def test_artifact_redirect_never_forwards_github_authorization(
     assert api.download_artifact(71) == payload
 
 
-def test_root_owned_token_and_cursor_files_fail_closed(tmp_path: Path) -> None:
+def test_root_owned_credential_files_fail_closed(tmp_path: Path) -> None:
     token = tmp_path / "github-token"
     token.write_text("opaque-token\n", encoding="utf-8")
     token.chmod(0o600)
@@ -448,16 +570,6 @@ def test_root_owned_token_and_cursor_files_fail_closed(tmp_path: Path) -> None:
     token.chmod(0o644)
     with pytest.raises(routes.RouteControllerError, match="group or other"):
         routes._read_token(token)
-
-    cursor = tmp_path / "state" / "cursor.json"
-    routes._write_artifact_cursor(cursor, 123)
-    assert routes._read_artifact_cursor(cursor) == 123
-    assert cursor.stat().st_mode & 0o777 == 0o600
-
-    cursor.unlink()
-    cursor.symlink_to(token)
-    with pytest.raises(routes.RouteControllerError, match="must not be a symlink"):
-        routes._read_artifact_cursor(cursor)
 
     publisher_key = tmp_path / "route-publisher-hmac"
     publisher_key.write_text(PUBLISHER_KEY.decode() + "\n", encoding="utf-8")
