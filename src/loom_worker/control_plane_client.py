@@ -3,9 +3,10 @@
 Used by the worker to register, claim, heartbeat, PATCH state, and update the
 trajectory index. All operations that need crash-safe ownership semantics
 are fenced by `worker_id` in the Control Plane's UPDATE WHERE clause
-(state PATCH, trajectory index) — a stale worker_id returns 409 and we
-surface that as `False` from the corresponding methods so callers can log
-+ stop reporting against a trial we no longer own.
+(state PATCH, trajectory index). An explicit stale-worker conflict surfaces
+as `False` so callers stop reporting against a trial they no longer own;
+semantic 409 conflicts remain typed HTTP errors rather than being mislabeled
+as claim fencing.
 """
 
 from __future__ import annotations
@@ -1417,7 +1418,15 @@ class HttpControlPlaneClient:
                 json={"worker_id": str(worker_id), **fields},
             )
             if r.status_code == 409:
-                return False
+                try:
+                    conflict = r.json()
+                except ValueError:
+                    conflict = None
+                if (
+                    isinstance(conflict, Mapping)
+                    and conflict.get("detail") == "worker lost claim"
+                ):
+                    return False
             r.raise_for_status()
             return True
         finally:
