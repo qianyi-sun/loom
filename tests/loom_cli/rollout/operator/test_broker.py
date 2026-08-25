@@ -45,17 +45,29 @@ from loom_cli.rollout.preflight_contract import (
     CheckOutcome,
     StageCapability,
 )
-from loom_cli.rollout.preflight_pipeline import PreflightPipeline
+from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
 from tests.loom_cli.rollout.test_preflight_pipeline import (
     _context as pipeline_context,
 )
 from tests.loom_cli.rollout.test_preflight_pipeline import _registry as pipeline_registry
+from tests.loom_cli.rollout.test_preflight_runtime import _runtime as preflight_runtime
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 SHA = "a" * 40
 REQUEST_ID = "req-alpha"
 ROLLOUT_ID = "rollout-alpha"
 ARTIFACT_BUNDLE_SHA256 = "9" * 64
+PREFLIGHT_ARTIFACT_BUNDLE_SHA256 = "1" * 64
+
+
+def _published_assessment(tmp_path: Path) -> PreflightAssessment:
+    runtime = preflight_runtime(tmp_path)
+    plan = runtime.prebackup_plan(runtime.candidate)
+    return PreflightPipeline(
+        registry=plan.registry,
+        store=PreflightAttestationStore(tmp_path / "published-assessment-attestations"),
+        now=lambda: NOW,
+    ).assess(context=plan.context)
 
 
 def make_config(tmp_path: Path) -> OperatorConfig:
@@ -951,12 +963,7 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
 
 def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
-    registry = pipeline_registry()
-    assessment = PreflightPipeline(
-        registry=registry,
-        store=PreflightAttestationStore(tmp_path / "preflight-attestations"),
-        now=lambda: NOW,
-    ).assess(context=pipeline_context(registry))
+    assessment = _published_assessment(tmp_path)
     expected_candidate = deps.candidate.bind()
     deps.order.clear()
 
@@ -982,6 +989,7 @@ def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path:
         "candidate_tree": None,
         "coverage_sha256": assessment.coverage_digest,
         "mutation_epoch": 7,
+        "preflight_artifact_bundle_sha256": PREFLIGHT_ARTIFACT_BUNDLE_SHA256,
         "preflight_assessment_sha256": assessment.assessment_digest,
         "registry_sha256": assessment.registry_digest,
         "status": "passed",
@@ -1046,6 +1054,47 @@ def test_start_refuses_missing_deep_preflight_before_request_or_backup(tmp_path:
     assert deps.store.requests == {}
     assert deps.backup.create_count == 0
     assert "deep rollout preflight is not configured" in deps.stderr.getvalue()
+
+
+def test_staged_start_rejects_malformed_artifact_evidence_before_publication(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    store = RequestStore(tmp_path / "malformed-staged-state")
+    assessment = _published_assessment(tmp_path)
+    malformed = replace(
+        assessment,
+        executions=tuple(
+            execution
+            for execution in assessment.executions
+            if execution.check_id != "artifacts.publish"
+        ),
+    )
+    dependencies = replace(
+        deps.dependencies,
+        store=store,
+        bind_candidate=lambda: replace(
+            deps.candidate.bind(),
+            resolved_tree="b" * 40,
+        ),
+        assess_preflight=lambda _candidate, _epoch: malformed,
+        read_mutation_epoch=lambda: 7,
+        new_request_id=lambda: "req-malformed01",
+        new_backup_job_id=lambda: "job-malformed01",
+        new_payload_id=lambda: "payload-malform01",
+    )
+    deps.lifecycle.reconciled = ReconciliationResult(
+        outcome="idle",
+        pointer=None,
+        cleared=False,
+        safe_status={},
+    )
+
+    assert broker_main(["start"], dependencies=dependencies) == 1
+    with pytest.raises(RequestStoreError, match="does not exist"):
+        store.read_preflight_request("req-malformed01")
+    assert deps.backup.create_count == 0
+    assert deps.systemd.backup_starts == []
 
 
 def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_request(
@@ -1145,13 +1194,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         failed_rotation,
         expected_generation=reserved_failed.generation,
     )
-    registry = pipeline_registry()
-    pipeline = PreflightPipeline(
-        registry=registry,
-        store=PreflightAttestationStore(tmp_path / "staged-attestations"),
-        now=lambda: NOW,
-    )
-    assessment = pipeline.assess(context=pipeline_context(registry))
+    assessment = _published_assessment(tmp_path)
 
     class StagedLifecycle:
         depth = 0
@@ -1220,6 +1263,18 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
     assert deps.systemd.backup_starts == []
     assert store.clear_backup_retention_claim("e" * 64) is True
 
+    preview_store = RequestStore(tmp_path / "staged-preview-state")
+    preview_staged = replace(
+        staged,
+        store=preview_store,
+        new_request_id=lambda: "req-preview0001",
+    )
+    assert broker_main(["start", "--dry-run"], dependencies=preview_staged) == 0
+    assert _last_json(deps.stdout)["preflight_artifact_bundle_sha256"] == (
+        PREFLIGHT_ARTIFACT_BUNDLE_SHA256
+    )
+    assert deps.systemd.backup_starts == []
+
     rc = broker_main(["start"], dependencies=staged)
 
     assert rc == 0, deps.stderr.getvalue()
@@ -1241,7 +1296,9 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
             "loom-staging-backup-req-staged0001.service",
         )
     ]
-    assert '"status":"backup_pending"' in deps.stdout.getvalue()
+    pending = _last_json(deps.stdout)
+    assert pending["status"] == "backup_pending"
+    assert pending["preflight_artifact_bundle_sha256"] == (PREFLIGHT_ARTIFACT_BUNDLE_SHA256)
 
     class StagedCleanupBackup:
         def __init__(self) -> None:

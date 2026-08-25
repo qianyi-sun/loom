@@ -22,6 +22,7 @@ from loom_cli.cluster_config import lifecycle_inventory_buckets, load_cluster_co
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
@@ -297,6 +298,13 @@ def _safe_error(dependencies: BrokerDependencies, message: str) -> int:
     return 1
 
 
+def _preflight_artifact_reference(
+    assessment: PreflightAssessment,
+) -> PreflightArtifactReference:
+    """Project the one secret-free artifact identity from immutable evidence."""
+    return PreflightArtifactReference.from_assessment(assessment)
+
+
 def _assert_available(dependencies: BrokerDependencies) -> None:
     result = dependencies.lifecycle.reconcile_active()
     if result.outcome == "busy" or (result.pointer is not None and not result.cleared):
@@ -448,6 +456,7 @@ def _preflight_only(
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
+    artifact_reference = _preflight_artifact_reference(assessment)
     _write_json(
         dependencies.stdout,
         {
@@ -455,6 +464,7 @@ def _preflight_only(
             "candidate_tree": candidate.resolved_tree,
             "coverage_sha256": assessment.coverage_digest,
             "mutation_epoch": mutation_epoch,
+            "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
             "preflight_assessment_sha256": assessment.assessment_digest,
             "registry_sha256": assessment.registry_digest,
             "status": "passed",
@@ -647,6 +657,7 @@ def _start_staged(
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
+    artifact_reference = _preflight_artifact_reference(assessment)
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
         dependencies.new_rollout_id(candidate),
@@ -706,6 +717,7 @@ def _start_staged(
             _write_json(
                 dependencies.stdout,
                 {
+                    "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
                     "preflight_assessment_sha256": assessment.assessment_digest,
                     "request_id": request.request_id,
                     "resolved_sha": candidate.resolved_sha,
@@ -809,6 +821,7 @@ def _start_staged(
         dependencies.stdout,
         {
             "backup_unit": unit_name,
+            "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
             "preflight_assessment_sha256": assessment.assessment_digest,
             "request_id": request.request_id,
             "resolved_sha": candidate.resolved_sha,

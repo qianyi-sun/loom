@@ -75,8 +75,8 @@ loom-staging-rollout --env staging logs REQUEST_ID --follow
 loom-staging-rollout --env staging resume REQUEST_ID
 loom-staging-rollout --env staging cancel REQUEST_ID --reason "bounded operational reason"
 loom-staging-rollout --env staging cleanup-incomplete-backup REQUEST_ID
-loom-staging-rollout --env staging lifecycle-capacity inventory
-loom-staging-rollout --env staging lifecycle-capacity apply --approved-plan-sha256 SHA256
+loom-staging-rollout --env staging lifecycle-capacity inventory --artifact-bundle-sha256 DIGEST
+loom-staging-rollout --env staging lifecycle-capacity apply --artifact-bundle-sha256 DIGEST --approved-plan-sha256 SHA256
 loom-staging-rollout --env staging backup-recovery inventory
 loom-staging-rollout --env staging backup-recovery apply --approved-plan-sha256 SHA256
 loom-staging-rollout --env staging backup-retention inventory
@@ -86,6 +86,9 @@ loom-staging-rollout --env staging backup-retention apply --approved-plan-sha256
 `start` accepts no ref, SHA, image tag, checkout, secret, or passthrough
 argument. `--dry-run` validates authority and resolves the current candidate
 without mutating staging. `status` and `logs` expose redacted request evidence.
+Use the `preflight_artifact_bundle_sha256` value returned by a passing
+`preflight` or `start` command as `DIGEST`; use the same value for inventory and
+apply.
 Use `resume` only for the same immutable request after correcting its failure;
 use a merged revert on `dev` and a new request to roll code back.
 
