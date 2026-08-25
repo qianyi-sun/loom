@@ -1320,7 +1320,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
             bundle_name: str | None = None,
         ) -> bool:
             self.calls.append((request_id, bundle_name))
-            return True
+            return len(self.calls) == 1
 
     cleanup = StagedCleanupBackup()
     cleanup_dependencies = replace(staged, backup=cleanup)
@@ -1359,6 +1359,36 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
         "backup_cleanup_started",
         "backup_cleanup_done",
     ]
+
+    compacted_rotation = replace(
+        cleaned_rotation,
+        generation=cleaned_rotation.generation + 1,
+        retirements=tuple(
+            record
+            for record in cleaned_rotation.retirements
+            if record.payload_id != "payload-staged01"
+        ),
+    )
+    store.replace_backup_rotation(
+        compacted_rotation,
+        expected_generation=cleaned_rotation.generation,
+    )
+    deps.stdout.seek(0)
+    deps.stdout.truncate(0)
+
+    assert (
+        broker_main(
+            ["cleanup-incomplete-backup", "req-staged0001"],
+            dependencies=cleanup_dependencies,
+        )
+        == 0
+    )
+    assert cleanup.calls == [
+        ("req-staged0001", "20260714T120000Z-req-staged0001"),
+        ("req-staged0001", "20260714T120000Z-req-staged0001"),
+    ]
+    assert '"cleanup":"already_absent"' in deps.stdout.getvalue()
+    assert store.read_events("req-staged0001")[-1].event == "backup_cleanup_done"
 
     failed_store = RequestStore(tmp_path / "failed-staged-state")
     deps.systemd.backup_start_error = RuntimeError("secret-bearing systemd detail")

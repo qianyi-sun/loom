@@ -1619,6 +1619,11 @@ def _cleanup_preflight_backup(
         ).state
     elif len(matching_retirements) == 1:
         failed_rotation = None
+    elif not matching_retirements and job_state.phase is LifecyclePhase.BACKUP_FAILED:
+        # Retention acknowledges a failed retirement only after its exact
+        # payload deletion.  Preserve cleanup idempotency after that compact
+        # evidence has been removed from the mutable rotation queue.
+        failed_rotation = None
     else:
         return _safe_error(dependencies, "request has no cleanable backup")
 
