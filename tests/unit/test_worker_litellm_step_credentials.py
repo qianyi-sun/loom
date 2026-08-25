@@ -12,6 +12,7 @@ import pytest
 from loom.agent.gateway_client import GatewayCallRequest
 from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
+from loom.agent.subprocess import SubprocessAgent
 from loom.errors import AgentError
 from loom.models.trajectory import ChatMessage
 from loom.models.types import ModelSpec
@@ -140,7 +141,7 @@ def test_worker_factory_routes_direct_completion_name() -> None:
     factory = _default_agent_factory(
         team_id=uuid4(),
         trial_id=uuid4(),
-        cp_client=_RecordingTokenIssuer(),  # type: ignore[arg-type]
+        cp_client=_RecordingTokenIssuer(),
         worker_gateway_url="http://gateway.test",
     )
 
@@ -155,6 +156,31 @@ def test_worker_factory_routes_direct_completion_name() -> None:
     )
 
     assert isinstance(agent, LiteLLMAgent)
+
+
+def test_subprocess_factory_applies_daytona_gateway_and_short_token_ttl() -> None:
+    factory = _default_agent_factory(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        cp_client=_RecordingTokenIssuer(),
+        worker_gateway_url="http://worker-only.gateway.test",
+        sandbox_gateway_url="https://gateway.example.com/openai/v1",
+        step_token_ttl_sec=600,
+    )
+
+    agent = factory(
+        Path("/tmp"),
+        HttpLLMGatewayClient(
+            base_url="http://worker-only.gateway.test",
+            token="unused",
+        ),
+        ModelSpec(provider="openai", name="gpt-4"),
+        "codex",
+    )
+
+    assert isinstance(agent, SubprocessAgent)
+    assert agent.agent_gateway_url == "https://gateway.example.com/openai/v1"
+    assert agent.step_token_ttl_sec == 600
 
 
 async def test_builtin_litellm_rejects_identity_drift_before_minting() -> None:

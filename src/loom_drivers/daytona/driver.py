@@ -7,10 +7,10 @@ Spec mapping:
             `result`; we put it in ExecResult.stdout, stderr=b"".
 - exec_streaming() → see exec_stream.open_session_stream
 - upload/download → sandbox.fs.upload_file / download_file (single-file)
-- set_network_policy() → sandbox.update_network_settings; domain allowlist
-                         entries are resolved to A records via a tiny
-                         in-sandbox getent ahosts exec, then promoted
-                         to /32 CIDRs.
+- set_network_policy() → sandbox.update_network_settings; domain-only
+                         policies use Daytona's network-layer domain firewall.
+                         Mixed domain/CIDR policies resolve on the trusted
+                         worker because Daytona modes are mutually exclusive.
 - run_healthcheck() → same loop pattern as DockerDriver.run_healthcheck
 
 Lifecycle invariants follow the Driver Protocol spec:
@@ -22,7 +22,9 @@ Lifecycle invariants follow the Driver Protocol spec:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -48,10 +50,11 @@ from loom.models.exec import ExecResult
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.networking import Allowlist, NetworkPolicy, Public
 from loom.models.types import OS
+from loom.security.redaction import redact_environment_mapping, redact_text
 from loom_drivers.daytona.client import DaytonaClient
 from loom_drivers.daytona.config import DaytonaConfig
 from loom_drivers.daytona.exec_stream import open_session_stream
-from loom_drivers.daytona.network import to_daytona_network_args
+from loom_drivers.daytona.network import DaytonaNetworkArgs, to_daytona_network_args
 from loom_drivers.daytona.registry import get_process_registry
 from loom_drivers.daytona.service_controller import DaytonaApiGate
 from loom_drivers.daytona.usage import (
@@ -65,6 +68,27 @@ logger = logging.getLogger(__name__)
 ReserveCallback = Callable[[], Awaitable[Mapping[str, Any]]]
 StartedCallback = Callable[[UUID, str, datetime], Awaitable[None]]
 DeletedCallback = Callable[[UUID, bool, datetime, str | None], Awaitable[None]]
+
+
+async def _resolve_public_ipv4(domain: str) -> tuple[str, ...]:
+    def resolve() -> tuple[str, ...]:
+        addresses = socket.getaddrinfo(
+            domain,
+            443,
+            family=socket.AF_INET,
+            type=socket.SOCK_STREAM,
+        )
+        return tuple(
+            sorted(
+                {
+                    str(item[4][0])
+                    for item in addresses
+                    if ipaddress.ip_address(str(item[4][0])).is_global
+                }
+            )
+        )
+
+    return await asyncio.to_thread(resolve)
 
 
 def _default_caps() -> Capabilities:
@@ -101,6 +125,10 @@ class DaytonaDriver:
     started_callback: StartedCallback | None = None
     deleted_callback: DeletedCallback | None = None
     per_second_usd: Decimal = field(default=DEFAULT_PER_SECOND_USD)
+    allow_public_network: bool = True
+    allowed_network_domains: frozenset[str] | None = None
+    allow_network_cidrs: bool = True
+    require_scoped_gateway_credentials: bool = False
     _client: DaytonaClient | None = field(default=None, init=False, repr=False)
     _sandbox: Any | None = field(default=None, init=False, repr=False)
     _started_at: datetime | None = field(default=None, init=False, repr=False)
@@ -129,6 +157,18 @@ class DaytonaDriver:
                 f"DaytonaDriver.start() rejected in state {self._state!r}",
             )
         opts = options or StartOptions()
+        if self.require_scoped_gateway_credentials:
+            sensitive_names = sorted(
+                redact_text(entry.name)
+                for entry in redact_environment_mapping(dict(opts.environment))
+                if entry.sensitive
+            )
+            if sensitive_names:
+                raise DriverError(
+                    "DAYTONA_RAW_SECRET_DENIED: sandbox startup environment "
+                    "contains secret-bearing variables: " + ", ".join(sensitive_names)
+                )
+        network_args = await self._network_args(self.network_policy_baseline)
         if (
             any(value is not None for value in (opts.cpus, opts.memory_mb, opts.storage_mb))
             or opts.gpus
@@ -189,12 +229,17 @@ class DaytonaDriver:
                     }.items()
                     if value is not None
                 }
+                if self.require_scoped_gateway_credentials:
+                    labels["loom.security_profile"] = "gateway-only-v1"
                 labels.update(dict(opts.labels))
                 params = CreateSandboxFromImageParams(
                     image=self.image,
                     name=self.sandbox_name,
                     labels=labels or None,
                     env_vars=dict(opts.environment) or None,
+                    network_block_all=network_args.network_block_all,
+                    network_allow_list=network_args.network_allow_list,
+                    domain_allow_list=network_args.domain_allow_list,
                     # Loom owns deadline, TTL and cleanup reconciliation. A
                     # provider idle heuristic must never kill a background job.
                     auto_stop_interval=0 if self.reserve_callback is not None else None,
@@ -226,6 +271,14 @@ class DaytonaDriver:
                         raise create_error
             sandbox = self._sandbox
             assert sandbox is not None  # narrows for mypy
+            if self.require_scoped_gateway_credentials and (
+                getattr(sandbox, "labels", {}).get("loom.security_profile")
+                != "gateway-only-v1"
+            ):
+                raise DriverError(
+                    "DAYTONA_SECURITY_PROFILE_MISSING: refusing to reuse an "
+                    "unlabelled sandbox"
+                )
             get_process_registry().register(self._client.sdk, sandbox)
             self._state = "running"
             self._started_at = datetime.now(tz=UTC)
@@ -236,8 +289,6 @@ class DaytonaDriver:
                     self._sandbox_id,
                     self._started_at,
                 )
-            if not isinstance(self.network_policy_baseline, Public):
-                await self.set_network_policy(self.network_policy_baseline)
         except BaseException:
             await self._teardown(delete=True)
             self._state = "stopped"
@@ -346,6 +397,7 @@ class DaytonaDriver:
         timeout_sec: float | None = None,
     ) -> ExecResult:
         sb = self._require_running()
+        self._validate_exec_credentials(command=cmd, env=dict(env or {}))
         loop = asyncio.get_running_loop()
         started = loop.time()
         resp = await sb.process.exec(
@@ -378,6 +430,7 @@ class DaytonaDriver:
         user: str | int | None = None,
     ) -> ExecHandle:
         sb = self._require_running()
+        self._validate_exec_credentials(command=" ".join(argv), env=env_vars)
         return await open_session_stream(
             sandbox=sb,
             argv=argv,
@@ -403,44 +456,76 @@ class DaytonaDriver:
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
         sb = self._require_running()
-        resolved: dict[str, tuple[str, ...]] = {}
-        if isinstance(policy, Allowlist) and policy.domains:
-            resolved = await self._resolve_domains_in_sandbox(
-                sb,
-                policy.domains,
+        args = await self._network_args(policy)
+        await sb.update_network_settings(
+            network_block_all=args.network_block_all,
+            network_allow_list=args.network_allow_list,
+            domain_allow_list=args.domain_allow_list,
+        )
+        self.network_policy_baseline = policy
+
+    async def _network_args(self, policy: NetworkPolicy) -> DaytonaNetworkArgs:
+        if isinstance(policy, Public) and not self.allow_public_network:
+            raise DriverError(
+                "DAYTONA_NETWORK_POLICY_DENIED: public internet access is disabled"
             )
+        if isinstance(policy, Allowlist):
+            normalized = frozenset(domain.rstrip(".").lower() for domain in policy.domains)
+            if (
+                self.allowed_network_domains is not None
+                and not normalized.issubset(self.allowed_network_domains)
+            ):
+                raise DriverError(
+                    "DAYTONA_NETWORK_POLICY_DENIED: allowlist contains an "
+                    "unreviewed domain"
+                )
+            if policy.cidrs and not self.allow_network_cidrs:
+                raise DriverError(
+                    "DAYTONA_NETWORK_POLICY_DENIED: arbitrary CIDRs are disabled"
+                )
+        resolved: dict[str, tuple[str, ...]] = {}
+        if isinstance(policy, Allowlist) and policy.domains and policy.cidrs:
+            for domain in policy.domains:
+                ips = await _resolve_public_ipv4(domain)
+                if not ips:
+                    raise DriverError(
+                        "DAYTONA_NETWORK_POLICY_DENIED: allowlist domain did not "
+                        "resolve to a public IPv4 address"
+                    )
+                resolved[domain] = ips
         try:
-            args = to_daytona_network_args(
+            return to_daytona_network_args(
                 policy,
                 resolved_domain_ips=resolved,
             )
         except ValueError as exc:
             raise DriverError(str(exc)) from exc
-        await sb.update_network_settings(
-            network_block_all=args.network_block_all,
-            network_allow_list=args.network_allow_list,
-        )
-        self.network_policy_baseline = policy
 
-    async def _resolve_domains_in_sandbox(
-        self,
-        sb: Any,
-        domains: tuple[str, ...],
-    ) -> dict[str, tuple[str, ...]]:
-        out: dict[str, tuple[str, ...]] = {}
-        for domain in domains:
-            cmd = (
-                f"getent ahosts {domain} | "
-                f"awk '$2 == \"STREAM\" && $1 !~ /:/ {{print $1}}' | "
-                f"sort -u"
-            )
-            r = await sb.process.exec(cmd, timeout=10)
-            if int(r.exit_code) != 0:
+    def _validate_exec_credentials(self, *, command: str, env: Mapping[str, str]) -> None:
+        if not self.require_scoped_gateway_credentials:
+            return
+        allowed_tokens: set[str] = set()
+        sensitive_names: list[str] = []
+        for entry in redact_environment_mapping(env):
+            if not entry.sensitive:
                 continue
-            ips = tuple(line.strip() for line in (r.result or "").splitlines() if line.strip())
-            if ips:
-                out[domain] = ips
-        return out
+            value = str(env[entry.name])
+            if value.startswith("loom_step_"):
+                allowed_tokens.add(value)
+            else:
+                sensitive_names.append(redact_text(entry.name))
+        if sensitive_names:
+            raise DriverError(
+                "DAYTONA_RAW_SECRET_DENIED: command environment contains "
+                "non-scoped credentials: " + ", ".join(sorted(sensitive_names))
+            )
+        scrubbed = command
+        for token in allowed_tokens:
+            scrubbed = scrubbed.replace(token, "[LOOM_SCOPED_STEP_TOKEN]")
+        if redact_text(scrubbed) != scrubbed:
+            raise DriverError(
+                "DAYTONA_RAW_SECRET_DENIED: command arguments contain a raw credential"
+            )
 
     async def run_healthcheck(
         self,

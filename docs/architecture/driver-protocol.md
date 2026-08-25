@@ -117,12 +117,15 @@ Domain resolution is backend-specific:
   IPs into `/etc/hosts`, sets iptables default DROP with explicit
   ACCEPT rules per IP/CIDR. Requires `cap_add=["NET_ADMIN"]`.
 - **DaytonaDriver** maps to Daytona's `update_network_settings`,
-  which is CIDR-only. Domains are resolved upstream via in-sandbox
-  `getent ahosts` and promoted to `/32` entries.
+  using the provider's network-layer domain firewall for domain-only
+  policies. Mixed domain/CIDR policies are collapsed to CIDRs after
+  trusted-worker DNS resolution because Daytona's firewall modes are
+  mutually exclusive.
 - **FakeDriver** records the policy on `self.network_policy_baseline`;
   no enforcement.
 
-Unresolvable domain → `DriverError` (no silent drop).
+An unresolvable domain in a mixed Daytona policy → `DriverError` (no silent
+drop). Domain-only policies are resolved and enforced by Daytona.
 
 ## Included implementations
 
@@ -205,10 +208,9 @@ integration test opt-in via `LOOM_RUN_MODAL_INTEGRATION=1`.
 
 - **`set_network_policy` order-of-operations**: if the backend
   enforces "block all egress" by default at start time, your domain
-  resolution call inside the sandbox will fail. DaytonaDriver
-  resolves before applying the new policy; do the same in any
-  driver where the in-sandbox DNS uses the network being
-  reconfigured.
+  resolution call inside the sandbox will fail. Resolve on a trusted
+  control-plane host or use a provider-native domain firewall; do not
+  open sandbox egress temporarily to bootstrap its own policy.
 - **`stop()` should not raise**. Even if the cloud delete fails, log
   + continue. Use `asyncio.wait_for(delete, timeout=N+5)` so a stuck
   delete doesn't hang `stop()`. See DaytonaDriver's `_teardown` —

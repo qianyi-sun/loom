@@ -83,6 +83,11 @@ from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
 from loom_drivers.daytona.config import DaytonaConfig
 from loom_drivers.daytona.driver import DaytonaDriver
+from loom_drivers.daytona.security import (
+    DaytonaSecurityError,
+    DaytonaTrialSecurity,
+    build_daytona_trial_security,
+)
 from loom_drivers.daytona.service_controller import (
     DaytonaApiGate,
     provider_scope,
@@ -1358,6 +1363,11 @@ async def _spawn_trial(
     async def _setup_run_and_cleanup() -> None:
         task_dir: Path | None = None
         trial_config: TrialConfig | None = None
+        daytona_security: DaytonaTrialSecurity | None = None
+        subprocess_gateway_url = getattr(settings, "subprocess_gateway_url", None)
+        subprocess_gateway_url_str = (
+            str(subprocess_gateway_url) if subprocess_gateway_url is not None else None
+        )
         pre_start_heartbeat_task = asyncio.create_task(
             _run_pre_start_heartbeat(
                 cp_client=cp_client,
@@ -1396,6 +1406,24 @@ async def _spawn_trial(
                     "source_provenance": (task_image_materialization.task_source_provenance),
                 }
             task_config = TaskConfig.model_validate(bundle["config"])
+            if daytona_runtime is not None:
+                try:
+                    daytona_security = build_daytona_trial_security(
+                        task_config=task_config,
+                        trial_config=trial_config,
+                        sandbox_gateway_url=subprocess_gateway_url_str,
+                    )
+                except DaytonaSecurityError as exc:
+                    raise TaskImageBuildError(
+                        f"TASK_COMPAT_DAYTONA_SECURITY: {exc}"
+                    ) from exc
+                trial_config = trial_config.model_copy(
+                    update={
+                        "baseline_network_policy_override": (
+                            daytona_security.baseline_network_policy
+                        )
+                    }
+                )
             task_checksum = str(bundle["checksum"])
             raw_provenance = bundle.get("source_provenance")
             provenance = raw_provenance if isinstance(raw_provenance, dict) else {}
@@ -1564,11 +1592,6 @@ async def _spawn_trial(
             send_batch=_send_event_batch,
         )
 
-        subprocess_gateway_url = getattr(settings, "subprocess_gateway_url", None)
-        subprocess_gateway_url_str = (
-            str(subprocess_gateway_url) if subprocess_gateway_url is not None else None
-        )
-
         # #672 PR-3: when the CP claim payload carries a family_state_uri,
         # download the shared skills tarball into a per-trial staging
         # dir and hand the (host, container, mode) volume tuple to the
@@ -1667,6 +1690,7 @@ async def _spawn_trial(
                     docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 )
             else:
+                assert daytona_security is not None
                 inner = DaytonaDriver(
                     image=task_image,
                     config=daytona_runtime.config,
@@ -1681,6 +1705,11 @@ async def _spawn_trial(
                     reserve_callback=_reserve_daytona,
                     started_callback=_daytona_started,
                     deleted_callback=_daytona_deleted,
+                    network_policy_baseline=daytona_security.baseline_network_policy,
+                    allow_public_network=False,
+                    allowed_network_domains=daytona_security.allowed_network_domains,
+                    allow_network_cidrs=False,
+                    require_scoped_gateway_credentials=True,
                 )
             role = "agent" if ordinal == 0 else "verifier"
             return ResourceAccountingDriver(
@@ -1747,8 +1776,17 @@ async def _spawn_trial(
                 trial_id,
                 cp_client=cp_client,
                 worker_gateway_url=str(settings.gateway_url),
-                sandbox_gateway_url=subprocess_gateway_url_str,
+                sandbox_gateway_url=(
+                    daytona_security.sandbox_gateway_url
+                    if daytona_security is not None
+                    else subprocess_gateway_url_str
+                ),
                 provider_connection_id=payload.get("provider_connection_id"),
+                step_token_ttl_sec=(
+                    settings.sandbox_step_jwt_ttl_sec
+                    if daytona_runtime is not None
+                    else 1800
+                ),
             ),
             verifier_factory=_verifier_factory(task_config),
             object_store=object_store,
@@ -1794,7 +1832,11 @@ async def _spawn_trial(
                 else None
             ),
             sandbox_step_jwt_ttl_sec=settings.sandbox_step_jwt_ttl_sec,
-            sandbox_extra_hosts=_sandbox_extra_hosts_for_url(subprocess_gateway_url_str),
+            sandbox_extra_hosts=_sandbox_extra_hosts_for_url(
+                daytona_security.sandbox_gateway_url
+                if daytona_security is not None
+                else subprocess_gateway_url_str
+            ),
             family_state_volumes=family_state_volumes,
             workspace_staging_policy=workspace_staging_policy,
             # #896: per-container hard caps for non-exclusive (packed)
@@ -2230,6 +2272,7 @@ def _default_agent_factory(
     worker_gateway_url: str,
     sandbox_gateway_url: str | None = None,
     provider_connection_id: str | None = None,
+    step_token_ttl_sec: int = 1800,
 ) -> AgentFactory:
     """Build the agent factory used by LocalTrialRunner. Routes by
     `agent_name` (read from `task_config.agent.name`):
@@ -2325,6 +2368,7 @@ def _default_agent_factory(
                 agent_gateway_url=sandbox_gateway_url,
                 team_id=team_id,
                 trial_id=trial_id,
+                step_token_ttl_sec=step_token_ttl_sec,
             )
         return agent
 

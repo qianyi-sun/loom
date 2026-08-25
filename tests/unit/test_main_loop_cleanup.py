@@ -178,6 +178,49 @@ def test_setup_failure_classifier_recognizes_preflight_task_compatibility() -> N
     assert ml._classify_setup_failure(detail) == FailureReason.TASK_COMPATIBILITY
 
 
+async def test_daytona_spawn_rejects_task_secret_before_driver_or_provider() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    cp = _FakeCPClient()
+    cp.bundle["config"]["environment"]["docker_image"] = (
+        "registry.example/task@sha256:" + "a" * 64
+    )
+    cp.bundle["config"]["environment"]["environment"] = {
+        "OPENAI_API_KEY": "sk-never-escape-the-worker"
+    }
+    pool = RunnerPool(max_concurrent=1)
+    trial_id = uuid4()
+    worker_id = uuid4()
+
+    with patch.object(ml, "LocalTrialRunner") as fake_runner_cls:
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=worker_id,
+            payload={
+                "trial_id": str(trial_id),
+                "team_id": str(uuid4()),
+                "task_id": "fake",
+                "attempt_count": 1,
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+            daytona_runtime=object(),  # type: ignore[arg-type]
+        )
+        await pool.wait_all(timeout=2.0)
+
+    fake_runner_cls.assert_not_called()
+    assert cp.patch_calls[0]["failure_reason"] == FailureReason.TASK_COMPATIBILITY.value
+    failure_message = str(cp.patch_calls[0]["failure_message"])
+    assert "TASK_COMPAT_DAYTONA_SECURITY" in failure_message
+    assert "OPENAI_API_KEY" in failure_message
+    assert "sk-never-escape-the-worker" not in failure_message
+
+
 def test_setup_failure_classifier_recognizes_node_health_guard() -> None:
     detail = (
         "SETUP_ADMISSION_BLOCKED reason=node_io_pressure "

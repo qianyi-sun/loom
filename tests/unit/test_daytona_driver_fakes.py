@@ -6,13 +6,14 @@ from uuid import uuid4
 
 import pytest
 
+from loom.driver.base import StartOptions
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
     DriverNotStartedError,
 )
 from loom.models.exec import ExecResult
-from loom.models.networking import Allowlist, NoNetwork
+from loom.models.networking import Allowlist, NoNetwork, Public
 from loom_drivers.daytona.config import DaytonaConfig
 from loom_drivers.daytona.driver import DaytonaDriver
 
@@ -140,7 +141,11 @@ async def test_set_network_policy_calls_update(
     await drv.set_network_policy(NoNetwork())
     sb.update_network_settings.assert_awaited()
     kwargs = sb.update_network_settings.await_args.kwargs
-    assert kwargs == {"network_block_all": True, "network_allow_list": None}
+    assert kwargs == {
+        "network_block_all": True,
+        "network_allow_list": None,
+        "domain_allow_list": None,
+    }
     await drv.stop()
 
 
@@ -182,14 +187,13 @@ async def test_download_writes_bytes_to_disk(
     await drv.stop()
 
 
-async def test_allowlist_resolves_domains_via_sandbox_exec(
+async def test_allowlist_resolves_domains_via_trusted_worker(
     fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sdk = _make_sdk_mock()
     sb = sdk.create.return_value
-    sb.process.exec = AsyncMock(side_effect=[
-        MagicMock(exit_code=0, result="203.0.113.5\n203.0.113.6\n", artifacts=None),
-    ])
+    resolver = AsyncMock(return_value=("203.0.113.5", "203.0.113.6"))
+    monkeypatch.setattr("loom_drivers.daytona.driver._resolve_public_ipv4", resolver)
     monkeypatch.setattr(
         "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
     )
@@ -199,10 +203,13 @@ async def test_allowlist_resolves_domains_via_sandbox_exec(
         Allowlist(domains=("api.example.com",), cidrs=("10.0.0.0/8",)),
     )
     kwargs = sb.update_network_settings.await_args.kwargs
-    assert kwargs["network_block_all"] is False
+    assert kwargs["network_block_all"] is None
     assert kwargs["network_allow_list"] == (
         "10.0.0.0/8,203.0.113.5/32,203.0.113.6/32"
     )
+    assert kwargs["domain_allow_list"] is None
+    resolver.assert_awaited_once_with("api.example.com")
+    sb.process.exec.assert_not_awaited()
     await drv.stop()
 
 
@@ -210,20 +217,163 @@ async def test_allowlist_unresolvable_domain_raises_driver_error(
     fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sdk = _make_sdk_mock()
-    sb = sdk.create.return_value
-    sb.process.exec = AsyncMock(return_value=MagicMock(
-        exit_code=1, result="", artifacts=None,
-    ))
+    resolver = AsyncMock(return_value=())
+    monkeypatch.setattr("loom_drivers.daytona.driver._resolve_public_ipv4", resolver)
     monkeypatch.setattr(
         "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
     )
     drv = DaytonaDriver(image="img", config=fake_cfg)
     await drv.start()
-    with pytest.raises(DriverError, match=r"bogus\.invalid"):
+    with pytest.raises(DriverError, match="did not resolve to a public IPv4"):
         await drv.set_network_policy(
-            Allowlist(domains=("bogus.invalid",), cidrs=()),
+            Allowlist(domains=("bogus.invalid",), cidrs=("10.0.0.0/8",)),
         )
     await drv.stop()
+
+
+async def test_strict_creation_applies_gateway_allowlist_before_provider_create(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _make_sdk_mock()
+    sb = sdk.create.return_value
+    sb.labels = {"loom.security_profile": "gateway-only-v1"}
+    resolver = AsyncMock(return_value=("198.51.100.10",))
+    monkeypatch.setattr("loom_drivers.daytona.driver._resolve_public_ipv4", resolver)
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="img",
+        config=fake_cfg,
+        network_policy_baseline=Allowlist(domains=("gateway.example.com",)),
+        allow_public_network=False,
+        allowed_network_domains=frozenset({"gateway.example.com"}),
+        allow_network_cidrs=False,
+        require_scoped_gateway_credentials=True,
+    )
+
+    await drv.start()
+
+    params = sdk.create.await_args.args[0]
+    assert params.network_block_all is None
+    assert params.network_allow_list is None
+    assert params.domain_allow_list == "gateway.example.com"
+    assert params.labels["loom.security_profile"] == "gateway-only-v1"
+    resolver.assert_not_awaited()
+    sb.update_network_settings.assert_not_awaited()
+    await drv.stop()
+
+
+async def test_strict_start_rejects_raw_secret_environment_before_provider_call(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _make_sdk_mock()
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="img",
+        config=fake_cfg,
+        network_policy_baseline=NoNetwork(),
+        allow_public_network=False,
+        require_scoped_gateway_credentials=True,
+    )
+
+    with pytest.raises(DriverError) as captured:
+        await drv.start(
+            options=StartOptions(
+                environment=(("OPENAI_API_KEY", "sk-never-print-this"),)
+            )
+        )
+
+    assert "DAYTONA_RAW_SECRET_DENIED" in str(captured.value)
+    assert "OPENAI_API_KEY" in str(captured.value)
+    assert "sk-never-print-this" not in str(captured.value)
+    sdk.create.assert_not_awaited()
+
+
+async def test_strict_start_does_not_inherit_ambient_provider_secret(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient_secret = "sk-ambient-provider-secret"
+    monkeypatch.setenv("OPENAI_API_KEY", ambient_secret)
+    sdk = _make_sdk_mock()
+    sb = sdk.create.return_value
+    sb.labels = {"loom.security_profile": "gateway-only-v1"}
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="img",
+        config=fake_cfg,
+        network_policy_baseline=NoNetwork(),
+        allow_public_network=False,
+        require_scoped_gateway_credentials=True,
+    )
+
+    await drv.start()
+
+    params = sdk.create.await_args.args[0]
+    assert params.env_vars is None
+    assert ambient_secret not in str(params)
+    await drv.stop()
+
+
+async def test_strict_driver_allows_only_scoped_step_credentials_at_exec(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _make_sdk_mock()
+    sb = sdk.create.return_value
+    sb.labels = {"loom.security_profile": "gateway-only-v1"}
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="img",
+        config=fake_cfg,
+        network_policy_baseline=NoNetwork(),
+        allow_public_network=False,
+        require_scoped_gateway_credentials=True,
+    )
+    await drv.start()
+
+    allowed = await drv.exec(
+        "python -c 'print(1)'",
+        env={"OPENAI_API_KEY": "loom_step_test-token"},
+    )
+    assert allowed.return_code == 0
+    with pytest.raises(DriverError) as captured:
+        await drv.exec(
+            "python -c 'print(1)'",
+            env={"OPENAI_API_KEY": "sk-provider-secret"},
+        )
+    assert "OPENAI_API_KEY" in str(captured.value)
+    assert "sk-provider-secret" not in str(captured.value)
+    with pytest.raises(DriverError, match="command arguments"):
+        await drv.exec("curl -H 'Authorization: Bearer raw-provider-token' example.com")
+    assert sb.process.exec.await_count == 1
+    await drv.stop()
+
+
+async def test_strict_driver_denies_public_unreviewed_domains_and_cidrs(
+    fake_cfg: DaytonaConfig,
+) -> None:
+    drv = DaytonaDriver(
+        image="img",
+        config=fake_cfg,
+        allow_public_network=False,
+        allowed_network_domains=frozenset({"gateway.example.com"}),
+        allow_network_cidrs=False,
+    )
+
+    with pytest.raises(DriverError, match="public internet"):
+        await drv._network_args(Public())
+    with pytest.raises(DriverError, match="unreviewed domain"):
+        await drv._network_args(Allowlist(domains=("api.openai.com",)))
+    with pytest.raises(DriverError, match="arbitrary CIDRs"):
+        await drv._network_args(
+            Allowlist(domains=("gateway.example.com",), cidrs=("1.1.1.1/32",))
+        )
 
 
 async def test_stop_skips_usage_when_no_trial_id(
