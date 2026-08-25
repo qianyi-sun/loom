@@ -52,7 +52,7 @@ class ActiveStore(Protocol):
     def read_active(self) -> object | None: ...
 
 
-ArtifactLoader = Callable[[CandidateBinding, int], LoadedPreflightArtifacts]
+ArtifactLoader = Callable[[CandidateBinding, int, str], LoadedPreflightArtifacts]
 EpochReader = Callable[[], int]
 DatabaseReader = Callable[[], ReadonlyDatabaseEvidence]
 Clock = Callable[[], datetime]
@@ -327,16 +327,23 @@ class InstalledLifecycleCapacityService:
         self.registry_publication = registry_publication
         self.evidence_root = config.state_root / "lifecycle-capacity-jobs"
 
-    def inventory(self) -> LifecycleCapacityJobPlan:
+    def inventory(
+        self,
+        *,
+        artifact_bundle_sha256: str,
+    ) -> LifecycleCapacityJobPlan:
+        if _SHA256_RE.fullmatch(artifact_bundle_sha256) is None:
+            raise InstalledLifecycleCapacityError("capacity artifact bundle digest is invalid")
         candidate = self.bind_candidate()
         epoch = self.read_mutation_epoch()
-        loaded = self.load_artifacts(candidate, epoch)
+        loaded = self.load_artifacts(candidate, epoch, artifact_bundle_sha256)
         if (
             candidate.resolved_sha != self.config.source_commit_sha
             or candidate.resolved_tree != self.config.source_tree_sha
             or loaded.publication.candidate_sha != candidate.resolved_sha
             or loaded.publication.candidate_tree != candidate.resolved_tree
             or loaded.publication.mutation_epoch != epoch
+            or loaded.publication.bundle_digest != artifact_bundle_sha256
         ):
             raise InstalledLifecycleCapacityError("capacity artifact identity drifted")
         return build_lifecycle_capacity_job_plan(
@@ -356,11 +363,18 @@ class InstalledLifecycleCapacityService:
             registry_digest=loaded.images.registry_digests["loom-control-plane"],
         )
 
-    def prepare_apply(self, *, approved_plan_digest: str) -> LifecycleCapacityJobPlan:
+    def prepare_apply(
+        self,
+        *,
+        artifact_bundle_sha256: str,
+        approved_plan_digest: str,
+    ) -> LifecycleCapacityJobPlan:
         """Claim one exact plan while the broker holds the short admission lock."""
         if _SHA256_RE.fullmatch(approved_plan_digest) is None:
             raise InstalledLifecycleCapacityError("approved capacity plan digest is invalid")
-        plan = self.inventory()
+        plan = self.inventory(
+            artifact_bundle_sha256=artifact_bundle_sha256,
+        )
         if plan.plan_digest != approved_plan_digest:
             raise InstalledLifecycleCapacityError("approved capacity plan digest drifted")
         if self.store.read_active() is not None:
@@ -386,7 +400,12 @@ class InstalledLifecycleCapacityService:
         claim = self.evidence_root / f"{plan.plan_digest}.claim.json"
         result_path = self.evidence_root / f"{plan.plan_digest}.result.json"
         _require_exact_claim(claim, plan, service_uid=self.service_uid)
-        if self.inventory() != plan:
+        if (
+            self.inventory(
+                artifact_bundle_sha256=plan.artifact_bundle_sha256,
+            )
+            != plan
+        ):
             raise InstalledLifecycleCapacityError("capacity plan drifted before image load")
         image = f"loom-control-plane:{plan.image_tag}"
         pull, push = self.registry_publication
@@ -404,7 +423,12 @@ class InstalledLifecycleCapacityService:
             raise InstalledLifecycleCapacityError(
                 "exact capacity image publication identity drifted"
             )
-        if self.inventory() != plan:
+        if (
+            self.inventory(
+                artifact_bundle_sha256=plan.artifact_bundle_sha256,
+            )
+            != plan
+        ):
             raise InstalledLifecycleCapacityError("capacity plan drifted during image load")
         apply_record = _object(
             _safe_command(

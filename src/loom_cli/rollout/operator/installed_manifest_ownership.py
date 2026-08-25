@@ -47,22 +47,43 @@ class InstalledManifestOwnershipService:
         ):
             raise ValueError("installed ownership maintenance authority is invalid")
 
-    def inventory(self, candidate: CandidateBinding) -> dict[str, object]:
-        return self._operator(candidate).inventory().to_document()
+    def inventory(
+        self,
+        candidate: CandidateBinding,
+        *,
+        artifact_bundle_sha256: str,
+    ) -> dict[str, object]:
+        return (
+            self._operator(
+                candidate,
+                artifact_bundle_sha256=artifact_bundle_sha256,
+            )
+            .inventory()
+            .to_document()
+        )
 
     def apply(
         self,
         candidate: CandidateBinding,
         *,
+        artifact_bundle_sha256: str,
         request_id: str,
         approved_inventory_sha256: str,
     ) -> dict[str, object]:
-        return self._operator(candidate).apply(
+        return self._operator(
+            candidate,
+            artifact_bundle_sha256=artifact_bundle_sha256,
+        ).apply(
             request_id=request_id,
             approved_inventory_sha256=approved_inventory_sha256,
         )
 
-    def _operator(self, candidate: CandidateBinding) -> ManifestOwnershipOperator:
+    def _operator(
+        self,
+        candidate: CandidateBinding,
+        *,
+        artifact_bundle_sha256: str,
+    ) -> ManifestOwnershipOperator:
         # Authority: an explicit (version, policy) gate, not the source-mode label
         # (#1085 phase 3). Integrity always comes from *exactness* below — the
         # operator only ever runs against the exact installer-pinned candidate.
@@ -99,7 +120,8 @@ class InstalledManifestOwnershipService:
         artifacts = PreflightArtifactStore(
             self.config.state_root,
             service_uid=self.service_uid,
-        ).load_exact(
+        ).load(
+            bundle_digest=artifact_bundle_sha256,
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
             mutation_epoch=epoch,
@@ -206,6 +228,7 @@ class InstalledManifestOwnershipService:
 
         return ManifestOwnershipOperator(
             artifact=artifacts.manifests,
+            artifact_bundle_sha256=artifact_bundle_sha256,
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
             read_mutation_epoch=read_exact_epoch,
