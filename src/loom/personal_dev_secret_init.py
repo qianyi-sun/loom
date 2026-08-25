@@ -167,12 +167,12 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
 
 
 def _is_private_directory(metadata: os.stat_result) -> bool:
-    """Allow only owner-private directories, with optional fsGroup setgid."""
+    """Allow only exact owner-owned mode-0700 directories."""
 
     return (
         stat.S_ISDIR(metadata.st_mode)
         and metadata.st_uid == os.geteuid()
-        and stat.S_IMODE(metadata.st_mode) in {0o700, 0o2700}
+        and stat.S_IMODE(metadata.st_mode) == 0o700
     )
 
 

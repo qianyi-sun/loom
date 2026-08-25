@@ -68,28 +68,27 @@ def test_management_projection_becomes_exact_owner_only_regular_files(
         assert target.read_bytes() == f"payload:{target.name}".encode()
 
 
-def test_setgid_private_parent_supports_new_copy(tmp_path: Path) -> None:
+def test_setgid_private_parent_is_rejected(tmp_path: Path) -> None:
     source = _projected_source(tmp_path, {"public-key"})
     destination = _destination(tmp_path)
     destination.parent.chmod(0o2700)
 
-    copy_projected_credentials(source, destination, profile="activation-public")
+    with pytest.raises(PersonalDevCredentialError):
+        copy_projected_credentials(source, destination, profile="activation-public")
 
-    assert S_IMODE(destination.parent.stat().st_mode) == 0o2700
-    assert S_IMODE(destination.stat().st_mode) == 0o2700
-    assert S_IMODE((destination / "public-key").stat().st_mode) == 0o600
+    assert not destination.exists()
 
 
-def test_setgid_private_destination_supports_identical_replay(tmp_path: Path) -> None:
+def test_setgid_private_destination_is_rejected_on_identical_replay(
+    tmp_path: Path,
+) -> None:
     source = _projected_source(tmp_path, {"public-key"})
     destination = _destination(tmp_path)
-    destination.parent.chmod(0o2700)
     copy_projected_credentials(source, destination, profile="activation-public")
-    identity = (destination / "public-key").stat().st_ino
+    destination.chmod(0o2700)
 
-    copy_projected_credentials(source, destination, profile="activation-public")
-
-    assert (destination / "public-key").stat().st_ino == identity
+    with pytest.raises(PersonalDevCredentialError):
+        copy_projected_credentials(source, destination, profile="activation-public")
 
 
 @pytest.mark.parametrize(
