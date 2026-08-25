@@ -357,24 +357,26 @@ def _backup_identity(
     config: OperatorConfig,
     job_path: Path,
     unit_name: str,
+    *,
+    error_type: type[RuntimeError] = UnitLaunchError,
 ) -> str:
     prefix = "loom-staging-backup-"
     suffix = ".service"
     if not unit_name.startswith(prefix) or not unit_name.endswith(suffix):
-        raise UnitLaunchError("unit name is not an approved backup job")
+        raise error_type("unit name is not an approved backup job")
     request_id = unit_name[len(prefix) : -len(suffix)]
     try:
         validate_safe_identifier(request_id, "request_id")
     except ValueError as exc:
-        raise UnitLaunchError("backup unit contains an invalid request id") from exc
+        raise error_type("backup unit contains an invalid request id") from exc
     if not job_path.is_absolute() or ".." in job_path.parts:
-        raise UnitLaunchError("backup job path is outside the protected request store")
+        raise error_type("backup job path is outside the protected request store")
     try:
         relative = job_path.relative_to(config.state_root)
     except ValueError as exc:
-        raise UnitLaunchError("backup job path is outside the protected request store") from exc
+        raise error_type("backup job path is outside the protected request store") from exc
     if relative.parts != ("requests", request_id, "preflight-backup", "job.json"):
-        raise UnitLaunchError("backup job path does not identify one immutable job")
+        raise error_type("backup job path does not identify one immutable job")
     return request_id
 
 
@@ -572,8 +574,7 @@ class SystemdUserManager:
         if result.returncode != 0:
             raise UnitLaunchError("transient backup unit launch failed")
 
-    def show(self, unit_name: str) -> SystemdUnitStatus | None:
-        _parse_unit_name(unit_name, error_type=SystemdQueryError)
+    def _show_validated(self, unit_name: str) -> SystemdUnitStatus | None:
         argv = [
             "systemctl",
             "--user",
@@ -591,6 +592,19 @@ class SystemdUserManager:
         if result.returncode != 0:
             raise SystemdQueryError("systemd unit status query failed")
         return _parse_show_output(unit_name, result.stdout)
+
+    def show(self, unit_name: str) -> SystemdUnitStatus | None:
+        _parse_unit_name(unit_name, error_type=SystemdQueryError)
+        return self._show_validated(unit_name)
+
+    def show_backup(self, job_path: Path, unit_name: str) -> SystemdUnitStatus | None:
+        _backup_identity(
+            self.config,
+            job_path,
+            unit_name,
+            error_type=SystemdQueryError,
+        )
+        return self._show_validated(unit_name)
 
     def terminate(self, unit_name: str) -> None:
         _parse_unit_name(unit_name, error_type=SystemdOperationError)
