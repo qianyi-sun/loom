@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
+import stat
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,7 +256,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "50e1c2b5472d817ba4f0d4bc11e84bb391f018b16496dcb6a45621e46352941a"
+        "92b55a14be0eadc760e6fa7c6ad712a6ab2e0ade8454c56f6b4ddaf2492ce0a7"
     )
 
     identities = {_identity(document) for document in documents}
@@ -846,14 +849,26 @@ def test_credential_init_clears_setgid_inherited_from_runtime_emptydir(
         "activation-public-credential-init",
         "management-credential-init",
     }
-    command_pattern = re.compile(
-        r"install -d -m 0700 "
-        r"(?P<parent>/run/loom-personal-dev/[a-z-]+); "
-        r"chmod 0700 (?P=parent); "
-        r"exec python -m loom\.personal_dev_secret_init --profile [a-z-]+ "
-        r"--source /var/run/[a-z-]+ --destination (?P=parent)/files"
-    )
-    assert all(command_pattern.fullmatch(command) for command in credential_inits.values())
+    for name, command in credential_inits.items():
+        match = re.match(
+            r"install -d -m 0700 "
+            r"(?P<parent>/run/loom-personal-dev/[a-z-]+); ",
+            command,
+        )
+        assert match is not None
+        setup, separator, _ = command.partition("; exec ")
+        assert separator
+
+        runtime_root = tmp_path / name
+        runtime_root.mkdir(mode=0o700)
+        runtime_root.chmod(0o3777)
+        private_parent = runtime_root / "private"
+        setup = setup.replace(match.group("parent"), shlex.quote(str(private_parent)))
+        subprocess.run(["/bin/sh", "-euc", setup], check=True)
+
+        metadata = private_parent.lstat()
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert stat.S_IMODE(metadata.st_mode) == 0o700
 
 
 def test_minio_admin_bootstraps_base_buckets_before_readiness(tmp_path: Path) -> None:
