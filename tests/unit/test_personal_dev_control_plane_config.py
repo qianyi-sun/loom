@@ -19,6 +19,12 @@ from loom.personal_dev_control_plane_config import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+_LINEAGE_RENDER_INPUT_SHA256 = (
+    "f260f9de95aa6f38416bf49c561c9c1f1388911e2123ce25a6691529e161239b"
+)
+_LINEAGE_TRUSTED_RELEASE_SHA256 = (
+    "70e01346639855b45ca4d01203ba3d369afa544c8e8b59d7b34b599a305b5760"
+)
 
 
 def _scanner() -> dict[str, Any]:
@@ -115,6 +121,8 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.identities.activation_public_secret == ("loom-personal-dev-activation-public")
     assert profile.identities.activation_private_secret == ("loom-personal-dev-activation-agent")
     assert profile.identities.scanner_cache_pvc == ("loom-personal-dev-scanner-cache")
+    assert profile.storage.lineage_render_input_sha256 == _LINEAGE_RENDER_INPUT_SHA256
+    assert profile.storage.lineage_trusted_release_sha256 == _LINEAGE_TRUSTED_RELEASE_SHA256
     assert profile.builder.prepared is False
     assert profile.builder.runtime_class_name == "loom-personal-dev-builder"
     assert profile.builder.runtime_handler == "runsc-personal-dev"
@@ -137,6 +145,70 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
         profile.canonical_bytes()
         == load_personal_dev_control_plane_profile(_PROFILE).canonical_bytes()
     )
+
+
+def test_profile_accepts_paired_storage_lineage(tmp_path: Path) -> None:
+    render_input_sha256 = "a" * 64
+    trusted_release_sha256 = "b" * 64
+    path = _write_profile(
+        tmp_path,
+        lambda text: text.replace(
+            _LINEAGE_RENDER_INPUT_SHA256, render_input_sha256, 1
+        ).replace(_LINEAGE_TRUSTED_RELEASE_SHA256, trusted_release_sha256, 1),
+    )
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.storage.lineage_render_input_sha256 == render_input_sha256
+    assert profile.storage.lineage_trusted_release_sha256 == trusted_release_sha256
+
+
+@pytest.mark.parametrize(
+    "lineage_entry",
+    [
+        'lineage_render_input_sha256 = "' + "a" * 64 + '"\n',
+        'lineage_trusted_release_sha256 = "' + "b" * 64 + '"\n',
+    ],
+)
+def test_profile_rejects_unpaired_storage_lineage(
+    tmp_path: Path,
+    lineage_entry: str,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: text.replace(
+            f'lineage_render_input_sha256 = "{_LINEAGE_RENDER_INPUT_SHA256}"\n',
+            "",
+            1,
+        )
+        .replace(
+            f'lineage_trusted_release_sha256 = "{_LINEAGE_TRUSTED_RELEASE_SHA256}"\n',
+            "",
+            1,
+        )
+        .replace("[storage]\n", "[storage]\n" + lineage_entry, 1),
+    )
+
+    with pytest.raises(ValidationError, match="storage lineage must be completely pinned"):
+        load_personal_dev_control_plane_profile(path)
+
+
+@pytest.mark.parametrize("invalid_digest", ["a" * 63, "A" * 64, "0" * 64])
+def test_profile_rejects_invalid_storage_lineage_digest(
+    tmp_path: Path,
+    invalid_digest: str,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: text.replace(
+            _LINEAGE_RENDER_INPUT_SHA256,
+            invalid_digest,
+            1,
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="storage lineage digest is invalid"):
+        load_personal_dev_control_plane_profile(path)
 
 
 @pytest.mark.parametrize(

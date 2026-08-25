@@ -223,6 +223,14 @@ def _workload_pod_specs(documents: list[dict[str, Any]]):
             yield document, document["spec"]["template"]["spec"]
 
 
+def _stateful_sets(documents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "StatefulSet"
+    }
+
+
 def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path) -> None:
     profile, release, rendered, documents = _render(tmp_path)
     repeated = render_shadow_personal_dev_control_plane(profile, release)
@@ -243,7 +251,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "6360fe13e563901ce1dc7214c860fe99c626899930c88a547ffb7d62840c0e75"
+        "808586dde5b1f7095196d2579c29aaf3d100d860855d96359fa16e69a91a75c4"
     )
 
     identities = {_identity(document) for document in documents}
@@ -313,6 +321,58 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert migration["metadata"]["labels"]["app"] == "loom-personal-dev-migration"
 
 
+def test_later_release_preserves_installed_stateful_claim_template_metadata(
+    tmp_path: Path,
+) -> None:
+    profile, release = _inputs(tmp_path)
+    first = render_shadow_personal_dev_control_plane(profile, release)
+    later_release = replace(
+        release,
+        source_sha="c" * 40,
+        source_tree="d" * 40,
+        release_evidence_sha256="e" * 64,
+    )
+    later = render_shadow_personal_dev_control_plane(profile, later_release)
+    first_sets = _stateful_sets(
+        [item for item in yaml.safe_load_all(first.yaml_text) if item]
+    )
+    later_sets = _stateful_sets(
+        [item for item in yaml.safe_load_all(later.yaml_text) if item]
+    )
+    expected_metadata = {
+        "name": "data",
+        "labels": {
+            "app.kubernetes.io/managed-by": "loom-personal-dev-control-plane",
+            "app.kubernetes.io/part-of": "loom",
+            "loom.dev/render-input": "f260f9de95aa6f38416bf49c561c9c1f",
+            "loom.dev/trusted-release": "70e01346639855b45ca4d01203ba3d36",
+        },
+        "annotations": {
+            "loom.dev/render-input-sha256": (
+                "f260f9de95aa6f38416bf49c561c9c1f1388911e2123ce25a6691529e161239b"
+            ),
+            "loom.dev/trusted-release-sha256": (
+                "70e01346639855b45ca4d01203ba3d369afa544c8e8b59d7b34b599a305b5760"
+            ),
+        },
+    }
+
+    assert first.input_sha256 != later.input_sha256
+    assert first.release_sha256 != later.release_sha256
+    assert set(first_sets) == set(later_sets) == {"loom-dev-minio", "loom-dev-postgres"}
+    for name in first_sets:
+        assert first_sets[name]["metadata"] != later_sets[name]["metadata"]
+        assert first_sets[name]["spec"]["template"]["metadata"] != (
+            later_sets[name]["spec"]["template"]["metadata"]
+        )
+        assert first_sets[name]["spec"]["volumeClaimTemplates"] == (
+            later_sets[name]["spec"]["volumeClaimTemplates"]
+        )
+        assert first_sets[name]["spec"]["volumeClaimTemplates"][0]["metadata"] == (
+            expected_metadata
+        )
+
+
 def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resources(
     tmp_path: Path,
 ) -> None:
@@ -375,6 +435,32 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             template = document["spec"]["template"]["metadata"]
             assert template["labels"]["loom.dev/acceptance-plan-sha256"] == plan.sha256[:32]
             assert template["annotations"]["loom.dev/acceptance-plan-sha256"] == plan.sha256
+
+
+def test_acceptance_render_preserves_shadow_claim_template_lineage(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, plan, shadow, acceptance, acceptance_documents = (
+        _acceptance_render(tmp_path)
+    )
+    shadow_sets = _stateful_sets(
+        [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
+    )
+    acceptance_sets = _stateful_sets(acceptance_documents)
+
+    assert acceptance.input_sha256 != shadow.input_sha256
+    assert set(shadow_sets) == set(acceptance_sets) == {
+        "loom-dev-minio",
+        "loom-dev-postgres",
+    }
+    for name in shadow_sets:
+        shadow_templates = shadow_sets[name]["spec"]["volumeClaimTemplates"]
+        acceptance_templates = acceptance_sets[name]["spec"]["volumeClaimTemplates"]
+        assert acceptance_templates == shadow_templates
+        metadata = acceptance_templates[0]["metadata"]
+        assert "loom.dev/acceptance-plan-sha256" not in metadata["labels"]
+        assert "loom.dev/acceptance-plan-sha256" not in metadata["annotations"]
+        assert plan.sha256 not in json.dumps(metadata, sort_keys=True)
 
 
 def test_acceptance_render_enables_only_personal_application_authorities(

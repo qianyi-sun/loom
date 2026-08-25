@@ -21,6 +21,8 @@ management_ingress = "loom-personal-dev-management"
 scanner_cache_pvc = "loom-personal-dev-scanner-cache"
 
 [storage]
+lineage_render_input_sha256 = "f260f9de95aa6f38416bf49c561c9c1f1388911e2123ce25a6691529e161239b"
+lineage_trusted_release_sha256 = "70e01346639855b45ca4d01203ba3d369afa544c8e8b59d7b34b599a305b5760"
 storage_class_name = "longhorn"
 postgres_storage = "20Gi"
 minio_storage = "100Gi"
