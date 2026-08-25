@@ -21,8 +21,12 @@ or another protected environment remain on their explicit hosted or protected
 runner class.
 
 The route publisher runs on hosted infrastructure and publishes the complete
-generation atomically. Superseded generations cannot partially update the
-matrix.
+generation atomically. Before dispatching that publisher, the root-owned
+controller commits the canonical request, oldlab eligibility, capacity
+assignments, canonical response, and delivery state in the same SQLite
+transaction. The stored response is an immutable outbox item: restarts and
+publisher retries reuse it exactly and never recompute an age-sensitive route.
+Superseded generations cannot partially update the matrix.
 
 ## Isolated pool
 
@@ -54,13 +58,21 @@ need them, so VM destruction is the security boundary between jobs.
 Work classes have explicit slot ceilings and resource shapes. The router may
 prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
-the pool is draining, or health cannot be proven. Only a route request observed
-within 30 seconds of its GitHub artifact creation may consume oldlab capacity.
+the pool is draining, or health cannot be proven. Only a route request first
+observed within 30 seconds of its GitHub artifact creation may consume oldlab
+capacity. The controller discovers requests from the bounded inventories of the
+four active routed workflows and then performs an exact artifact-name lookup
+for each run. It does not walk repository-wide artifact history or rely on a
+global artifact cursor, so unrelated artifact bursts and one delayed publisher
+cannot block newer workflows.
+
 If the root-owned controller or its publisher remains unavailable, the pinned
 route action freezes the run onto the workflow's exact GitHub-hosted label after
-180 seconds. A controller that recovers later can publish only a hosted route
-for that stale request; terminal fallback requests are skipped without blocking
-newer artifacts. The next fresh workflow can prefer oldlab again automatically.
+180 seconds. A later controller pass accepts an exact late CheckRun only when it
+matches the persisted response. If the route resolver has already completed
+without that CheckRun, the outbox item is abandoned and its unconsumed leases
+are released without blocking fresh requests. The next fresh workflow can
+prefer oldlab again automatically.
 
 `LOOM_CI_ROUTE_MODE=oldlab-preferred-v1` is therefore a persistent preference,
 not a transient host-health switch. Do not delete it merely because oldlab is
@@ -96,6 +108,15 @@ LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA=<full merged route-controller commit SHA>
 Install the route-controller modules, wrapper, and service unit from that exact
 route commit. The legacy `LOOM_CI_RUNNER_CANDIDATE_SHA` may coexist only while
 an old unit is retained for rollback; the split unit does not read it.
+
+The broker upgrades an existing schema-1 lease database in place to schema 2 on
+the first controller start. Existing assignments and lease epochs are
+preserved; the new `route_decisions` table becomes the durable route/outbox
+authority. Keep the database and its WAL files on the service-owned persistent
+state volume. A pre-upgrade artifact cursor file may remain for rollback of the
+old binary, but schema 2 never reads or advances it. Published and abandoned
+decisions are retained for seven days after their terminal transition and are
+deleted only after every associated assignment is released.
 
 Draining stops new self-hosted selection, waits for busy jobs, removes idle JIT
 registrations and guests, and leaves workflows using hosted runners. Do not

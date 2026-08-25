@@ -87,7 +87,6 @@ def test_active_action_and_broker_share_exact_request_and_assignment_contract(
     broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
     document = broker.allocate_route(request)
     response = document.public_dict()
-    response["oldlab_eligible"] = True
 
     routes = action.validate_assignment(request_value, response)
 
@@ -123,7 +122,6 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
     request = leases.RouteRequest.from_mapping(request_value)
     broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
     response = broker.allocate_route(request).public_dict()
-    response["oldlab_eligible"] = True
     response["assignments"][1]["slot"] = response["assignments"][0]["slot"]
     with pytest.raises(action.RouteActionError, match="duplicated or out of range"):
         action.validate_assignment(request_value, response)
@@ -162,7 +160,6 @@ def test_poll_accepts_only_the_exact_digest_check(
     request = leases.RouteRequest.from_mapping(request_value)
     broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
     response = broker.allocate_route(request).public_dict()
-    response["oldlab_eligible"] = True
     external_id = (
         f"{action.CHECK_PREFIX}:{request.workflow_id}:{request.workflow_run_id}:"
         f"{request.run_attempt}:{action._canonical_sha(request_value)}"
