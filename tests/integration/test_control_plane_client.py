@@ -789,3 +789,97 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
         )
     finally:
         await http.aclose()
+
+
+async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        worker_id = UUID(info["worker_id"])
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="succeeded",
+                worker_id=worker_id, result={},
+            ))
+        engine.dispose()
+
+        with pytest.raises(httpx.HTTPStatusError) as conflict:
+            await cp.patch_output_projection(
+                trial_id=trial_id,
+                worker_id=worker_id,
+                result={"schema_version": "1", "state": "succeeded"},
+                trajectory_index={
+                    "trajectory_uri": (
+                        f"s3://wrong-bucket/{team_id}/{trial_id}/events.jsonl"
+                    ),
+                    "trajectory_size_bytes": 42,
+                    "trajectory_sha256": "8" * 64,
+                },
+            )
+
+        assert conflict.value.response.status_code == 409
+        assert conflict.value.response.json()["detail"]["code"] == (
+            "trajectory_lifecycle_evidence_invalid"
+        )
+    finally:
+        await http.aclose()
+
+
+async def test_patch_output_projection_returns_false_only_for_claim_fence(  # type: ignore[no-untyped-def]
+    cp_setup, postgres_url,
+):
+    app, raw = cp_setup
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(hostname="h", version="v", capabilities=_CAPS)
+        worker_id = UUID(info["worker_id"])
+        owner_id = uuid4()
+
+        team_id = uuid4()
+        trial_id = uuid4()
+        engine = create_engine(postgres_url)
+        with engine.begin() as conn:
+            conn.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
+            conn.execute(insert(TeamQuota).values(team_id=team_id))
+            conn.execute(insert(Worker).values(
+                id=owner_id, hostname="owner", version="v", capabilities=[],
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC), status="active",
+            ))
+            conn.execute(insert(Task).values(
+                id="t", checksum="0" * 64, config={},
+            ))
+            conn.execute(insert(Trial).values(
+                id=trial_id, team_id=team_id, task_id="t",
+                config={}, requires_caps={}, state="succeeded",
+                worker_id=owner_id, result={},
+            ))
+        engine.dispose()
+
+        assert await cp.patch_output_projection(
+            trial_id=trial_id,
+            worker_id=worker_id,
+            result={"schema_version": "1", "state": "succeeded"},
+            trajectory_index={
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+                ),
+                "trajectory_size_bytes": 42,
+                "trajectory_sha256": "9" * 64,
+            },
+        ) is False
+    finally:
+        await http.aclose()
