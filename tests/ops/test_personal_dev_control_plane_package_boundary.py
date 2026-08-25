@@ -399,6 +399,63 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert '--trusted-release-file "$trusted_release"' in normalized
     assert '--trusted-release-sha256 "$trusted_release_sha256"' in normalized
     assert 'sha256sum "$shadow_render"' in runbook
+    assert "python -m loom.personal_dev_storage_lineage_guard" in normalized
+    assert '--current "$shadow_render"' in normalized
+    assert '--previous "$previous_shadow_render"' in normalized
+    assert '--live-inventory "$live_storage_inventory"' in normalized
+    storage_command_start = runbook.index(
+        'live_storage_inventory="$(mktemp',
+    )
+    storage_command_end = runbook.index(
+        "    --namespace loom-dev",
+        storage_command_start,
+    )
+    storage_inventory_command = runbook[storage_command_start:storage_command_end]
+    assert "," not in storage_inventory_command
+    for resource in (
+        "statefulset.apps/loom-dev-postgres",
+        "statefulset.apps/loom-dev-minio",
+        "persistentvolumeclaim/data-loom-dev-postgres-0",
+        "persistentvolumeclaim/data-loom-dev-minio-0",
+        "persistentvolumeclaim/loom-personal-dev-scanner-cache",
+    ):
+        assert resource in storage_inventory_command
+    storage_calls = [
+        match.start()
+        for match in re.finditer(
+            r"^assert_forward_storage_lineage_contract$",
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    diff_calls = [
+        match.start()
+        for match in re.finditer(
+            r'^kubectl --kubeconfig "\$kubeconfig" diff --server-side',
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    apply_calls = [
+        match.start()
+        for match in re.finditer(
+            r'^kubectl --kubeconfig "\$kubeconfig" apply --server-side',
+            runbook,
+            flags=re.MULTILINE,
+        )
+    ]
+    assert len(storage_calls) == 4
+    assert len(diff_calls) == len(apply_calls) == 2
+    assert (
+        storage_calls[0]
+        < diff_calls[0]
+        < storage_calls[1]
+        < apply_calls[0]
+        < storage_calls[2]
+        < diff_calls[1]
+        < storage_calls[3]
+        < apply_calls[1]
+    )
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
     assert "diff_status=0" in runbook
     assert "|| diff_status=$?" in runbook
@@ -443,6 +500,125 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert "|| rollback_diff_status=$?" in runbook
     assert 'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1' in runbook
     assert 'sha256sum "$rollback_status_evidence"' in runbook
+
+
+@pytest.mark.parametrize(
+    ("kubectl_payload", "kubectl_status", "expected_items", "expected_returncode"),
+    [
+        pytest.param("", 0, 0, 0, id="all-five-absent"),
+        pytest.param(
+            '{"apiVersion":"v1","items":[{"sentinel":true}],"kind":"List"}',
+            0,
+            1,
+            0,
+            id="nonempty-inventory",
+        ),
+        pytest.param("", 1, 0, 1, id="kubectl-failure"),
+    ],
+)
+def test_personal_management_storage_inventory_producer_handles_kubectl_output(
+    tmp_path: Path,
+    kubectl_payload: str,
+    kubectl_status: int,
+    expected_items: int,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    function_start = runbook.index("assert_forward_storage_lineage_contract() {")
+    function_end = runbook.index("\n}\n\njq -e", function_start) + 2
+    function_source = runbook[function_start:function_end]
+    fake_bin = tmp_path / "bin"
+    evidence_dir = tmp_path / "evidence"
+    fake_bin.mkdir()
+    evidence_dir.mkdir()
+    kubeconfig = tmp_path / "reviewed.kubeconfig"
+    shadow_render = tmp_path / "shadow.yaml"
+    previous_render = tmp_path / "absent-previous.yaml"
+    kubeconfig.write_text("reviewed\n", encoding="utf-8")
+    shadow_render.write_text("reviewed\n", encoding="utf-8")
+    fake_kubectl = fake_bin / "kubectl"
+    fake_kubectl.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'test "$*" = "$EXPECTED_KUBECTL_ARGS"\n'
+        'printf %s "$KUBECTL_PAYLOAD"\n'
+        'exit "$KUBECTL_STATUS"\n',
+        encoding="utf-8",
+    )
+    fake_kubectl.chmod(0o755)
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "live_inventory=\n"
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --live-inventory; then\n'
+        "    shift\n"
+        '    live_inventory="$1"\n'
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        'test -n "$live_inventory"\n'
+        "jq -e --argjson expected \"$EXPECTED_ITEMS\" "
+        "'.apiVersion == \"v1\" and .kind == \"List\" and "
+        "(.items | length) == $expected' \"$live_inventory\" >/dev/null\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    expected_arguments = " ".join(
+        (
+            "--kubeconfig",
+            str(kubeconfig),
+            "--request-timeout=10s",
+            "get",
+            "statefulset.apps/loom-dev-postgres",
+            "statefulset.apps/loom-dev-minio",
+            "persistentvolumeclaim/data-loom-dev-postgres-0",
+            "persistentvolumeclaim/data-loom-dev-minio-0",
+            "persistentvolumeclaim/loom-personal-dev-scanner-cache",
+            "--namespace",
+            "loom-dev",
+            "--ignore-not-found",
+            "--output=json",
+        )
+    )
+    script = (
+        "set -euo pipefail\n"
+        f"{function_source}\n"
+        'evidence_dir="$1"\n'
+        'kubeconfig="$2"\n'
+        'shadow_render="$3"\n'
+        'previous_shadow_render="$4"\n'
+        "previous_shadow_sha256=" + "0" * 64 + "\n"
+        "assert_forward_storage_lineage_contract\n"
+    )
+    environment = {
+        **os.environ,
+        "EXPECTED_ITEMS": str(expected_items),
+        "EXPECTED_KUBECTL_ARGS": expected_arguments,
+        "KUBECTL_PAYLOAD": kubectl_payload,
+        "KUBECTL_STATUS": str(kubectl_status),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "runbook-storage-producer",
+            str(evidence_dir),
+            str(kubeconfig),
+            str(shadow_render),
+            str(previous_render),
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
 
 
 def test_personal_management_shadow_runbook_preserves_authority_boundaries() -> None:

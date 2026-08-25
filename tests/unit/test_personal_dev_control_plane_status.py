@@ -1466,6 +1466,77 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
     assert runner.calls[-1][0] == _MANAGER
 
 
+def test_status_accepts_installed_lineage_digests_on_generated_stateful_claims(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    generated_claims = [
+        item
+        for item in _items(runner, _NAMESPACED)
+        if item["kind"] == "PersistentVolumeClaim"
+        and item["metadata"]["name"].startswith("data-")
+    ]
+
+    assert len(generated_claims) == 2
+    assert all(
+        claim["metadata"]["annotations"]["loom.dev/render-input-sha256"]
+        != expected.input_sha256
+        for claim in generated_claims
+    )
+    assert all(
+        claim["metadata"]["annotations"]["loom.dev/trusted-release-sha256"]
+        != expected.release_sha256
+        for claim in generated_claims
+    )
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
+def test_shadow_status_rejects_plan_digest_on_generated_stateful_claim(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    generated_claim = next(
+        item
+        for item in _items(runner, _NAMESPACED)
+        if item["kind"] == "PersistentVolumeClaim"
+        and item["metadata"]["name"].startswith("data-")
+    )
+    generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = "a" * 32
+    generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "a" * 64
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "acceptance_plan_digest_drift" in result.blockers
+
+
+def test_acceptance_status_rejects_plan_digest_on_generated_stateful_claim(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    generated_claim = next(
+        item
+        for item in _items(runner, _NAMESPACED)
+        if item["kind"] == "PersistentVolumeClaim"
+        and item["metadata"]["name"].startswith("data-")
+    )
+    generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = (
+        plan.sha256[:32]
+    )
+    generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = (
+        plan.sha256
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "acceptance_plan_digest_drift" in result.blockers
+
+
 def test_healthy_shadow_accepts_generic_namespace_list_from_kubectl(
     tmp_path: Path,
 ) -> None:

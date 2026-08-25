@@ -114,6 +114,27 @@ def _pod_metadata(
     }
 
 
+def _claim_template_metadata(
+    context: _RenderContext,
+    profile: PersonalDevControlPlaneProfile,
+) -> dict[str, Any]:
+    render_input_sha256 = profile.storage.lineage_render_input_sha256
+    trusted_release_sha256 = profile.storage.lineage_trusted_release_sha256
+    if (render_input_sha256 is None) != (trusted_release_sha256 is None):
+        raise ValueError("storage lineage must be completely pinned")
+    lineage = _RenderContext(
+        input_sha256=(
+            context.input_sha256 if render_input_sha256 is None else render_input_sha256
+        ),
+        release_sha256=(
+            context.release_sha256
+            if trusted_release_sha256 is None
+            else trusted_release_sha256
+        ),
+    )
+    return _metadata(lineage, "data")
+
+
 def _resources(value: ResourceEnvelope) -> dict[str, dict[str, str]]:
     return {
         "requests": {"cpu": value.cpu_request, "memory": value.memory_request},
@@ -2023,7 +2044,7 @@ def _postgres(
             },
             "volumeClaimTemplates": [
                 {
-                    "metadata": _metadata(context, "data"),
+                    "metadata": _claim_template_metadata(context, profile),
                     "spec": {
                         "accessModes": ["ReadWriteOnce"],
                         "storageClassName": profile.storage.storage_class_name,
@@ -2156,7 +2177,7 @@ def _minio(
             },
             "volumeClaimTemplates": [
                 {
-                    "metadata": _metadata(context, "data"),
+                    "metadata": _claim_template_metadata(context, profile),
                     "spec": {
                         "accessModes": ["ReadWriteOnce"],
                         "storageClassName": profile.storage.storage_class_name,

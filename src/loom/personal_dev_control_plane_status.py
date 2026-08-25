@@ -519,6 +519,20 @@ def _acceptance_plan_digest_matches(
     )
 
 
+def _acceptance_plan_digest_absent(item: Mapping[str, Any]) -> bool:
+    metadata = _metadata(item)
+    if metadata is None:
+        return False
+    labels = metadata.get("labels")
+    annotations = metadata.get("annotations")
+    return (
+        isinstance(labels, Mapping)
+        and isinstance(annotations, Mapping)
+        and "loom.dev/acceptance-plan-sha256" not in labels
+        and "loom.dev/acceptance-plan-sha256" not in annotations
+    )
+
+
 def _containers(item: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     spec = item.get("spec")
     if not isinstance(spec, Mapping):
@@ -1352,6 +1366,7 @@ def _observe_personal_dev_status(
         if missing or unexpected or drifted or generated_pvc_drift or pod_drift or history_drift:
             blockers.add("resource_inventory_drift")
 
+        derived_digest_identities = historical_identities | generated_pvcs
         digest_ok = all(
             _digest_matches(
                 item,
@@ -1359,18 +1374,24 @@ def _observe_personal_dev_status(
                 release_sha256=expected.release_sha256,
             )
             for item in namespaced_items
-            if _identity(item) not in historical_identities
+            if _identity(item) not in derived_digest_identities
         )
         if not digest_ok:
             blockers.add("resource_digest_drift")
-        if plan is not None and not all(
+        generated_pvc_acceptance_digest_ok = all(
+            _acceptance_plan_digest_absent(item)
+            for item in namespaced_items
+            if _identity(item) in generated_pvcs
+        )
+        acceptance_resource_digest_ok = plan is None or all(
             _acceptance_plan_digest_matches(
                 item,
                 acceptance_plan_sha256=plan.sha256,
             )
             for item in namespaced_items
-            if _identity(item) not in historical_identities
-        ):
+            if _identity(item) not in historical_identities | generated_pvcs
+        )
+        if not generated_pvc_acceptance_digest_ok or not acceptance_resource_digest_ok:
             blockers.add("acceptance_plan_digest_drift")
 
         workload_image_ok = all(
