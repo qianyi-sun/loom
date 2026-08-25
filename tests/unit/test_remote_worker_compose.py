@@ -65,6 +65,17 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
     )
 
 
+def test_remote_worker_compose_requires_operator_supplied_storage_identity() -> None:
+    env = _env_map(_worker_service(_COMPOSE)["environment"])
+
+    assert env["LOOM_WORKER_TRAJECTORIES_BUCKET"] == (
+        "${LOOM_WORKER_TRAJECTORIES_BUCKET:?set LOOM_WORKER_TRAJECTORIES_BUCKET}"
+    )
+    assert env["LOOM_WORKER_ARTIFACTS_BUCKET"] == (
+        "${LOOM_WORKER_ARTIFACTS_BUCKET:?set LOOM_WORKER_ARTIFACTS_BUCKET}"
+    )
+
+
 def test_remote_worker_compose_passes_trial_cache_registry_to_worker() -> None:
     env = _env_map(_worker_service(_COMPOSE)["environment"])
 
