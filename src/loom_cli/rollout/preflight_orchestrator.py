@@ -12,12 +12,16 @@ from loom_cli.rollout.operator.rehearsal_attestor import (
     RehearsalLeaseAttestor,
     RehearsalStore,
 )
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_authority import CandidatePreflightAuthorizer
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment
 from loom_cli.rollout.preflight_runtime import CandidatePreflightRuntime
 
-RuntimeFactory = Callable[[CandidateBinding, int], CandidatePreflightRuntime]
+RuntimeFactory = Callable[
+    [CandidateBinding, int, PreflightArtifactReference | None],
+    CandidatePreflightRuntime,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +45,7 @@ class CandidatePreflightOrchestrator:
 
     def assess(self, candidate: CandidateBinding, mutation_epoch: int) -> PreflightAssessment:
         """Execute Tier 0-2 for one exact candidate and mutation epoch."""
-        runtime = self._runtime(candidate, mutation_epoch)
+        runtime = self._runtime(candidate, mutation_epoch, None)
         return self._authorizer(runtime).assess(candidate)
 
     def build_rehearsal_attestor(
@@ -62,7 +66,11 @@ class CandidatePreflightOrchestrator:
             or checkpoint.namespace != request.namespace
         ):
             raise ValueError("checkpoint rehearsal request identity drifted")
-        runtime = self._runtime(request.candidate, request.mutation_epoch)
+        runtime = self._runtime(
+            request.candidate,
+            request.mutation_epoch,
+            PreflightArtifactReference.from_assessment(assessment),
+        )
         return self._authorizer(runtime).build_rehearsal_attestor(
             candidate=request.candidate,
             checkpoint=checkpoint,
@@ -74,10 +82,11 @@ class CandidatePreflightOrchestrator:
         self,
         candidate: CandidateBinding,
         mutation_epoch: int,
+        artifact_reference: PreflightArtifactReference | None,
     ) -> CandidatePreflightRuntime:
         if type(mutation_epoch) is not int or mutation_epoch < 0:
             raise ValueError("preflight mutation epoch is invalid")
-        runtime = self.runtime_factory(candidate, mutation_epoch)
+        runtime = self.runtime_factory(candidate, mutation_epoch, artifact_reference)
         if (
             runtime.candidate != candidate
             or runtime.bindings.get("staging.mutation-epoch") != mutation_epoch

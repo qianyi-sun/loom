@@ -48,6 +48,7 @@ class _Commands:
         self.capacity = capacity
         self.oci_index = oci_index
         self.calls: list[tuple[str, ...]] = []
+        self.artifact_loads: list[str] = []
         self.job_metadata: dict[str, object] = {}
 
     def simple(self, argv):  # type: ignore[no-untyped-def]
@@ -262,7 +263,9 @@ def _service(
         store=store or _Store(),
         bind_candidate=_candidate,
         read_mutation_epoch=lambda: 8,
-        load_artifacts=lambda _candidate, _epoch: loaded,  # type: ignore[arg-type]
+        load_artifacts=lambda _candidate, _epoch, digest: (
+            commands.artifact_loads.append(digest) or loaded
+        ),
         commands=commands,
         read_database=lambda: database,
         now=lambda: datetime(2026, 7, 20, 0, 0, 1, tzinfo=UTC),
@@ -281,9 +284,12 @@ def _service(
 
 def test_inventory_claim_and_execute_publish_exact_registry_evidence(tmp_path: Path) -> None:
     service, commands = _service(tmp_path)
-    plan = service.inventory()
+    plan = service.inventory(artifact_bundle_sha256=_BUNDLE)
 
-    claimed = service.prepare_apply(approved_plan_digest=plan.plan_digest)
+    claimed = service.prepare_apply(
+        artifact_bundle_sha256=_BUNDLE,
+        approved_plan_digest=plan.plan_digest,
+    )
     assert claimed == plan
     evidence = service.execute_claimed(plan)
 
@@ -294,21 +300,28 @@ def test_inventory_claim_and_execute_publish_exact_registry_evidence(tmp_path: P
     assert (service.evidence_root / f"{plan.plan_digest}.result.json").is_file()
     assert commands.calls[0][:3] == ("docker", "manifest", "inspect")
     assert "--verbose" in commands.calls[0]
+    assert commands.artifact_loads == [_BUNDLE, _BUNDLE, _BUNDLE, _BUNDLE]
 
 
 def test_prepare_rejects_active_rollout_or_digest_drift_without_claim(tmp_path: Path) -> None:
     service, _commands = _service(tmp_path, store=_Store(active=object()))
-    plan = service.inventory()
+    plan = service.inventory(artifact_bundle_sha256=_BUNDLE)
 
     with pytest.raises(InstalledLifecycleCapacityError, match="active rollout"):
-        service.prepare_apply(approved_plan_digest=plan.plan_digest)
+        service.prepare_apply(
+            artifact_bundle_sha256=_BUNDLE,
+            approved_plan_digest=plan.plan_digest,
+        )
     assert not service.evidence_root.exists()
 
 
 def test_registry_capacity_uses_preflight_digest_without_republish(tmp_path: Path) -> None:
     service, commands = _service(tmp_path)
-    plan = service.inventory()
-    service.prepare_apply(approved_plan_digest=plan.plan_digest)
+    plan = service.inventory(artifact_bundle_sha256=_BUNDLE)
+    service.prepare_apply(
+        artifact_bundle_sha256=_BUNDLE,
+        approved_plan_digest=plan.plan_digest,
+    )
 
     service.execute_claimed(plan)
 
@@ -319,14 +332,20 @@ def test_registry_capacity_uses_preflight_digest_without_republish(tmp_path: Pat
 
     inactive, _commands = _service(tmp_path / "other")
     with pytest.raises(InstalledLifecycleCapacityError, match="digest drifted"):
-        inactive.prepare_apply(approved_plan_digest="0" * 64)
+        inactive.prepare_apply(
+            artifact_bundle_sha256=_BUNDLE,
+            approved_plan_digest="0" * 64,
+        )
     assert not inactive.evidence_root.exists()
 
 
 def test_registry_capacity_accepts_exact_docker_provenance_index(tmp_path: Path) -> None:
     service, commands = _service(tmp_path, oci_index=True)
-    plan = service.inventory()
-    service.prepare_apply(approved_plan_digest=plan.plan_digest)
+    plan = service.inventory(artifact_bundle_sha256=_BUNDLE)
+    service.prepare_apply(
+        artifact_bundle_sha256=_BUNDLE,
+        approved_plan_digest=plan.plan_digest,
+    )
 
     service.execute_claimed(plan)
 
@@ -344,11 +363,17 @@ def test_registry_capacity_accepts_exact_docker_provenance_index(tmp_path: Path)
 
 def test_claim_is_single_use_and_failed_execution_preserves_claim(tmp_path: Path) -> None:
     service, commands = _service(tmp_path)
-    plan = service.inventory()
-    service.prepare_apply(approved_plan_digest=plan.plan_digest)
+    plan = service.inventory(artifact_bundle_sha256=_BUNDLE)
+    service.prepare_apply(
+        artifact_bundle_sha256=_BUNDLE,
+        approved_plan_digest=plan.plan_digest,
+    )
 
     with pytest.raises(InstalledLifecycleCapacityError, match="already exists"):
-        service.prepare_apply(approved_plan_digest=plan.plan_digest)
+        service.prepare_apply(
+            artifact_bundle_sha256=_BUNDLE,
+            approved_plan_digest=plan.plan_digest,
+        )
     commands.simple = lambda _argv: SimpleNamespace(  # type: ignore[method-assign]
         returncode=1,
         stdout="",
@@ -358,3 +383,14 @@ def test_claim_is_single_use_and_failed_execution_preserves_claim(tmp_path: Path
         service.execute_claimed(plan)
     assert (service.evidence_root / f"{plan.plan_digest}.claim.json").is_file()
     assert not (service.evidence_root / f"{plan.plan_digest}.result.json").exists()
+
+
+def test_requested_artifact_digest_mismatch_fails_before_kubernetes_mutation(
+    tmp_path: Path,
+) -> None:
+    service, commands = _service(tmp_path)
+
+    with pytest.raises(InstalledLifecycleCapacityError, match="artifact identity drifted"):
+        service.inventory(artifact_bundle_sha256="0" * 64)
+
+    assert commands.calls == []

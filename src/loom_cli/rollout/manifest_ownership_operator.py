@@ -50,20 +50,23 @@ class OwnershipJournal(Protocol):
 @dataclass(frozen=True, slots=True)
 class OwnershipInventory:
     plan: ManifestOwnershipAdoptionPlan
+    artifact_bundle_sha256: str
     dry_run_sha256: str
     inventory_sha256: str
     live_json: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if (
-            _SHA256_RE.fullmatch(self.dry_run_sha256) is None
+            _SHA256_RE.fullmatch(self.artifact_bundle_sha256) is None
+            or _SHA256_RE.fullmatch(self.dry_run_sha256) is None
             or _SHA256_RE.fullmatch(self.inventory_sha256) is None
             or self.inventory_sha256
             != _hash_json(
                 {
+                    "artifact_bundle_sha256": self.artifact_bundle_sha256,
                     "dry_run_sha256": self.dry_run_sha256,
                     "plan_sha256": self.plan.plan_sha256,
-                    "version": "v1",
+                    "version": "v2",
                 }
             )
             or len(self.live_json) != len(self.plan.resources)
@@ -103,8 +106,9 @@ class OwnershipInventory:
 
     def to_document(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "action": "inventory",
+            "artifact_bundle_sha256": self.artifact_bundle_sha256,
             "candidate_sha": self.plan.candidate_sha,
             "candidate_tree": self.plan.candidate_tree,
             "rendered_manifest_sha256": self.plan.rendered_manifest_sha256,
@@ -131,6 +135,7 @@ class OwnershipInventory:
 @dataclass(slots=True)
 class ManifestOwnershipOperator:
     artifact: ManifestArtifact
+    artifact_bundle_sha256: str
     candidate_sha: str
     candidate_tree: str
     read_mutation_epoch: Callable[[], int]
@@ -163,12 +168,14 @@ class ManifestOwnershipOperator:
         )
         return OwnershipInventory(
             plan=plan,
+            artifact_bundle_sha256=self.artifact_bundle_sha256,
             dry_run_sha256=dry_run_sha256,
             inventory_sha256=_hash_json(
                 {
+                    "artifact_bundle_sha256": self.artifact_bundle_sha256,
                     "dry_run_sha256": dry_run_sha256,
                     "plan_sha256": plan.plan_sha256,
-                    "version": "v1",
+                    "version": "v2",
                 }
             ),
             live_json=tuple(

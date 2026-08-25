@@ -7,6 +7,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from loom_cli.cluster_config import lifecycle_inventory_buckets, load_cluster_co
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipelineResult
 
@@ -86,6 +88,7 @@ from .systemd import (
 
 _MAX_CANCEL_REASON = 500
 _MAX_LOG_BYTES = 8 * 1024 * 1024
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian"})
 _PROTECTED_APPLY_COMPONENTS = frozenset(
     {
@@ -129,6 +132,14 @@ def _cancel_reason(value: str) -> str:
     return value
 
 
+def _artifact_bundle_sha256(value: str) -> str:
+    if _SHA256_RE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "artifact bundle digest must be exactly 64 lowercase hex characters"
+        )
+    return value
+
+
 def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParser:
     parser = _Parser(prog="loom-rollout", add_help=True)
     parser.add_argument(
@@ -164,15 +175,35 @@ def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParse
 
     ownership = commands.add_parser("manifest-ownership")
     ownership_commands = ownership.add_subparsers(dest="ownership_action", required=True)
-    ownership_commands.add_parser("inventory")
+    ownership_inventory = ownership_commands.add_parser("inventory")
+    ownership_inventory.add_argument(
+        "--artifact-bundle-sha256",
+        required=True,
+        type=_artifact_bundle_sha256,
+    )
     ownership_apply = ownership_commands.add_parser("apply")
+    ownership_apply.add_argument(
+        "--artifact-bundle-sha256",
+        required=True,
+        type=_artifact_bundle_sha256,
+    )
     ownership_apply.add_argument("--request-id", required=True)
     ownership_apply.add_argument("--approved-inventory-sha256", required=True)
 
     capacity = commands.add_parser("lifecycle-capacity")
     capacity_commands = capacity.add_subparsers(dest="capacity_action", required=True)
-    capacity_commands.add_parser("inventory")
+    capacity_inventory = capacity_commands.add_parser("inventory")
+    capacity_inventory.add_argument(
+        "--artifact-bundle-sha256",
+        required=True,
+        type=_artifact_bundle_sha256,
+    )
     capacity_apply = capacity_commands.add_parser("apply")
+    capacity_apply.add_argument(
+        "--artifact-bundle-sha256",
+        required=True,
+        type=_artifact_bundle_sha256,
+    )
     capacity_apply.add_argument("--approved-plan-sha256", required=True)
     retention = commands.add_parser("backup-retention")
     retention_commands = retention.add_subparsers(dest="retention_action", required=True)
@@ -265,6 +296,13 @@ def _write_json(stream: TextIO, payload: dict[str, object]) -> None:
 def _safe_error(dependencies: BrokerDependencies, message: str) -> int:
     dependencies.stderr.write(f"error: {redact_rollout_text(message, limit=500)}\n")
     return 1
+
+
+def _preflight_artifact_reference(
+    assessment: PreflightAssessment,
+) -> PreflightArtifactReference:
+    """Project the one secret-free artifact identity from immutable evidence."""
+    return PreflightArtifactReference.from_assessment(assessment)
 
 
 def _assert_available(dependencies: BrokerDependencies) -> None:
@@ -418,6 +456,7 @@ def _preflight_only(
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
+    artifact_reference = _preflight_artifact_reference(assessment)
     _write_json(
         dependencies.stdout,
         {
@@ -425,6 +464,7 @@ def _preflight_only(
             "candidate_tree": candidate.resolved_tree,
             "coverage_sha256": assessment.coverage_digest,
             "mutation_epoch": mutation_epoch,
+            "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
             "preflight_assessment_sha256": assessment.assessment_digest,
             "registry_sha256": assessment.registry_digest,
             "status": "passed",
@@ -438,6 +478,7 @@ def _manifest_ownership(
     caller: CallerIdentity,
     *,
     action: str,
+    artifact_bundle_sha256: str,
     request_id: str | None,
     approved_inventory_sha256: str | None,
 ) -> int:
@@ -464,10 +505,14 @@ def _manifest_ownership(
         dependencies.lifecycle.assert_maintenance_idle()
         candidate = dependencies.bind_candidate()
         if action == "inventory":
-            result = dependencies.manifest_ownership.inventory(candidate)
+            result = dependencies.manifest_ownership.inventory(
+                candidate,
+                artifact_bundle_sha256=artifact_bundle_sha256,
+            )
         elif action == "apply" and request_id is not None and approved_inventory_sha256 is not None:
             result = dependencies.manifest_ownership.apply(
                 candidate,
+                artifact_bundle_sha256=artifact_bundle_sha256,
                 request_id=request_id,
                 approved_inventory_sha256=approved_inventory_sha256,
             )
@@ -482,6 +527,7 @@ def _lifecycle_capacity(
     caller: CallerIdentity,
     *,
     action: str,
+    artifact_bundle_sha256: str,
     approved_plan_sha256: str | None,
 ) -> int:
     if not _has_coordinator_authority(caller):
@@ -498,7 +544,9 @@ def _lifecycle_capacity(
             "lifecycle capacity maintenance is not configured",
         )
     if action == "inventory" and approved_plan_sha256 is None:
-        plan = dependencies.lifecycle_capacity.inventory()
+        plan = dependencies.lifecycle_capacity.inventory(
+            artifact_bundle_sha256=artifact_bundle_sha256,
+        )
         _write_json(dependencies.stdout, plan.to_dict())
         return 0
     if action != "apply" or approved_plan_sha256 is None:
@@ -506,6 +554,7 @@ def _lifecycle_capacity(
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_maintenance_idle()
         plan = dependencies.lifecycle_capacity.prepare_apply(
+            artifact_bundle_sha256=artifact_bundle_sha256,
             approved_plan_digest=approved_plan_sha256,
         )
     result = dependencies.lifecycle_capacity.execute_claimed(plan)
@@ -608,6 +657,7 @@ def _start_staged(
     if not assessment.passed:
         _write_json(dependencies.stderr, assessment.to_dict())
         return 1
+    artifact_reference = _preflight_artifact_reference(assessment)
     request_id = validate_safe_identifier(dependencies.new_request_id(), "request_id")
     rollout_id = validate_safe_identifier(
         dependencies.new_rollout_id(candidate),
@@ -667,6 +717,7 @@ def _start_staged(
             _write_json(
                 dependencies.stdout,
                 {
+                    "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
                     "preflight_assessment_sha256": assessment.assessment_digest,
                     "request_id": request.request_id,
                     "resolved_sha": candidate.resolved_sha,
@@ -770,6 +821,7 @@ def _start_staged(
         dependencies.stdout,
         {
             "backup_unit": unit_name,
+            "preflight_artifact_bundle_sha256": artifact_reference.bundle_digest,
             "preflight_assessment_sha256": assessment.assessment_digest,
             "request_id": request.request_id,
             "resolved_sha": candidate.resolved_sha,
@@ -1922,10 +1974,12 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
     def load_capacity_artifacts(
         candidate: CandidateBinding,
         mutation_epoch: int,
+        artifact_bundle_sha256: str,
     ) -> Any:
         if candidate.resolved_tree is None:
             raise ValueError("sealed capacity candidate tree is unavailable")
-        return PreflightArtifactStore(config.state_root, service_uid=service_uid).load_exact(
+        return PreflightArtifactStore(config.state_root, service_uid=service_uid).load(
+            bundle_digest=artifact_bundle_sha256,
             candidate_sha=candidate.resolved_sha,
             candidate_tree=candidate.resolved_tree,
             mutation_epoch=mutation_epoch,
@@ -2105,6 +2159,7 @@ def _main(
                 deps,
                 caller,
                 action=args.ownership_action,
+                artifact_bundle_sha256=args.artifact_bundle_sha256,
                 request_id=getattr(args, "request_id", None),
                 approved_inventory_sha256=getattr(
                     args,
@@ -2117,6 +2172,7 @@ def _main(
                 deps,
                 caller,
                 action=args.capacity_action,
+                artifact_bundle_sha256=args.artifact_bundle_sha256,
                 approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         if args.command == "backup-retention":

@@ -13,6 +13,7 @@ from loom_cli.rollout.final_attestation_admission import (
     validate_post_apply_resume_attestation,
 )
 from loom_cli.rollout.operator.model import CandidateBinding
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_orchestrator import CandidatePreflightOrchestrator
 from loom_cli.rollout.preflight_pipeline import PreflightAssessment
@@ -26,7 +27,7 @@ class RuntimePurpose(StrEnum):
 
 
 RuntimeSourcesFactory = Callable[
-    [CandidateBinding, int, RuntimePurpose],
+    [CandidateBinding, int, RuntimePurpose, PreflightArtifactReference | None],
     PreflightRuntimeSources,
 ]
 
@@ -72,7 +73,12 @@ class DeepPreflightAuthority:
         ):
             raise ValueError("final admission envelope authority drifted")
         mutation_epoch = self.current_mutation_epoch()
-        sources = self.sources_factory(candidate, mutation_epoch, RuntimePurpose.ADMISSION)
+        sources = self.sources_factory(
+            candidate,
+            mutation_epoch,
+            RuntimePurpose.ADMISSION,
+            None,
+        )
         if sources.candidate != candidate:
             raise ValueError("final admission source candidate drifted")
         runtime = sources.build(mutation_epoch=mutation_epoch)
@@ -104,7 +110,12 @@ class DeepPreflightAuthority:
         ):
             raise ValueError("post-apply resume envelope authority drifted")
         mutation_epoch = self.current_mutation_epoch()
-        sources = self.sources_factory(candidate, mutation_epoch, RuntimePurpose.ADMISSION)
+        sources = self.sources_factory(
+            candidate,
+            mutation_epoch,
+            RuntimePurpose.ADMISSION,
+            None,
+        )
         if sources.candidate != candidate:
             raise ValueError("post-apply resume source candidate drifted")
         plan = sources.build(mutation_epoch=mutation_epoch).prebackup_plan(candidate)
@@ -121,8 +132,16 @@ class DeepPreflightAuthority:
         def runtime_factory(
             candidate: CandidateBinding,
             mutation_epoch: int,
+            artifact_reference: PreflightArtifactReference | None,
         ) -> CandidatePreflightRuntime:
-            sources = self.sources_factory(candidate, mutation_epoch, purpose)
+            if (purpose is RuntimePurpose.ADMISSION) != (artifact_reference is None):
+                raise ValueError("preflight artifact reference does not match runtime purpose")
+            sources = self.sources_factory(
+                candidate,
+                mutation_epoch,
+                purpose,
+                artifact_reference,
+            )
             if sources.candidate != candidate:
                 raise ValueError("deep preflight source candidate drifted")
             loaded = sources.loaded_artifacts

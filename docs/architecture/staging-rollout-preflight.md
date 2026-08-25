@@ -55,6 +55,11 @@ digest-addressed `PreflightAssessment`; no preliminary request or backup job may
 be published if it contains a blocker. The same registered check plan and
 immutable build/baseline artifacts are retained while a request-specific
 checkpoint is created and restore-verified.
+The broker derives the one passing `artifacts.publish` reference from that
+assessment before it publishes a request. Passing `preflight`, preview, and
+backup-pending output exposes only its secret-free bundle digest as
+`preflight_artifact_bundle_sha256`; `assessment.json` remains the complete
+immutable evidence authority.
 Tier 3 reruns the earlier probes as drift checks, reuses the immutable image,
 manifest, and baseline artifacts instead of rebuilding them, and refuses to
 attest if a rerun is stale or failed, if a check implementation changed, or if
@@ -455,8 +460,11 @@ rendered resource, binds each live UID, resourceVersion, optional generation,
 managed-fields digest and semantic state, and builds an overlay from live
 values only. A force-conflicts server dry-run must prove that overlay is a
 semantic no-op before an operator can approve its inventory digest. Apply then
-requires the root-owned maintenance admission freeze, an idle rollout pointer,
-a no-replace private journal, and a compare-and-swap mutation-epoch claim. The
+requires the same explicit `--artifact-bundle-sha256` used for inventory, the
+root-owned maintenance admission freeze, an idle rollout pointer, a no-replace
+private journal, and a compare-and-swap mutation-epoch claim. The artifact
+digest is part of the approved inventory hash, so apply cannot substitute a
+different publication even when it contains equivalent manifests. The
 force operation transfers only fields already present. A following selective
 JSON Patch stage removes only checked-in recognized legacy managed-field
 entries after a semantic-no-op server dry-run; it retains the canonical Loom
@@ -467,6 +475,13 @@ until lifecycle inventory and deletion authority are separately accepted.
 UID/resourceVersion preconditions, cleanup evidence, a post-apply live readback
 and a final full no-force dry-run make concurrent drift fail closed. This is a
 one-time ownership migration, not a general force flag or fallback apply path.
+
+The one-shot `lifecycle-capacity` maintenance protocol has the same explicit
+artifact selection rule. Inventory and apply require
+`--artifact-bundle-sha256`; its plan binds that digest, and execution reloads
+only the digest embedded in the claimed plan. Candidate, tree, epoch,
+rendered-manifest, image, or registry drift fails before the capacity Job is
+applied.
 
 The maintenance marker is entered and left only by the exact installed root
 host helper. Entry is serialized with broker launch admission and proves that

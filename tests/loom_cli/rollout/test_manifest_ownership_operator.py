@@ -15,6 +15,7 @@ from loom_cli.rollout.manifest_readiness import ManifestArtifact
 
 _SHA = "1" * 40
 _TREE = "2" * 40
+_BUNDLE = "6" * 64
 
 
 def _desired() -> list[dict[str, object]]:
@@ -214,9 +215,14 @@ class _Harness:
         self.epoch_claims.append((epoch, request_id, inventory_sha256))
         return epoch + 1 if self.claimed_epoch is None else self.claimed_epoch
 
-    def operator(self) -> ManifestOwnershipOperator:
+    def operator(
+        self,
+        *,
+        artifact_bundle_sha256: str = _BUNDLE,
+    ) -> ManifestOwnershipOperator:
         return ManifestOwnershipOperator(
             artifact=_artifact(),
+            artifact_bundle_sha256=artifact_bundle_sha256,
             candidate_sha=_SHA,
             candidate_tree=_TREE,
             read_mutation_epoch=lambda: 2,
@@ -236,6 +242,7 @@ class _Harness:
 def test_inventory_is_immutable_and_apply_is_journaled() -> None:
     harness = _Harness()
     inventory = harness.operator().inventory()
+    assert inventory.to_document()["artifact_bundle_sha256"] == _BUNDLE
     original_live = inventory.live_resources
     harness.live[0]["spec"]["suspend"] = False  # type: ignore[index]
     assert inventory.live_resources == original_live
@@ -265,6 +272,15 @@ def test_inventory_is_immutable_and_apply_is_journaled() -> None:
     assert cron["suspend"] is True
     assert "no-force-apply:3" in harness.calls
     assert "no-force-dry-run:5" in harness.calls
+
+
+def test_inventory_approval_binds_the_artifact_bundle() -> None:
+    harness = _Harness()
+
+    first = harness.operator(artifact_bundle_sha256=_BUNDLE).inventory()
+    second = harness.operator(artifact_bundle_sha256="7" * 64).inventory()
+
+    assert first.inventory_sha256 != second.inventory_sha256
 
 
 def test_inventory_digest_drift_blocks_before_epoch_or_mutation() -> None:

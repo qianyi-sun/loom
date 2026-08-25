@@ -12,6 +12,7 @@ from loom_cli.rollout.operator.deep_preflight_authority import (
     RuntimePurpose,
 )
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
+from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
     CheckOperation,
@@ -36,6 +37,18 @@ def _candidate() -> CandidateBinding:
         source_mode="sealed-cumulative",
         resolved_tree="b" * 40,
         approved_base_sha="c" * 40,
+    )
+
+
+def _reference() -> PreflightArtifactReference:
+    return PreflightArtifactReference(
+        bundle_digest="1" * 64,
+        image_artifact_sha256="2" * 64,
+        manifest_artifact_sha256="3" * 64,
+        rendered_manifest_sha256="4" * 64,
+        migration_manifest_sha256="5" * 64,
+        migration_artifact_sha256="6" * 64,
+        production_defaults_sha256="7" * 64,
     )
 
 
@@ -98,7 +111,8 @@ def test_broker_runtime_uses_admission_purpose(tmp_path: Path) -> None:
     candidate = _candidate()
     purposes: list[RuntimePurpose] = []
 
-    def factory(found, epoch, purpose):
+    def factory(found, epoch, purpose, reference):
+        assert reference is None
         purposes.append(purpose)
         return _Sources(_runtime(found, epoch), None)
 
@@ -108,7 +122,7 @@ def test_broker_runtime_uses_admission_purpose(tmp_path: Path) -> None:
         read_mutation_epoch=lambda: 7,
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
     )
-    runtime = authority.admission_orchestrator().runtime_factory(candidate, 7)
+    runtime = authority.admission_orchestrator().runtime_factory(candidate, 7, None)
 
     assert runtime.candidate == candidate
     assert purposes == [RuntimePurpose.ADMISSION]
@@ -118,7 +132,7 @@ def test_detached_runtime_requires_exact_persisted_outputs(tmp_path: Path) -> No
     candidate = _candidate()
 
     authority = DeepPreflightAuthority(
-        sources_factory=lambda found, epoch, _purpose: _Sources(  # type: ignore[arg-type]
+        sources_factory=lambda found, epoch, _purpose, _reference: _Sources(  # type: ignore[arg-type]
             _runtime(found, epoch), None
         ),
         attestation_store=PreflightAttestationStore(tmp_path / "state"),
@@ -127,7 +141,7 @@ def test_detached_runtime_requires_exact_persisted_outputs(tmp_path: Path) -> No
     )
 
     with pytest.raises(ValueError, match="exact immutable outputs"):
-        authority.detached_orchestrator().runtime_factory(candidate, 7)
+        authority.detached_orchestrator().runtime_factory(candidate, 7, _reference())
 
 
 def test_mutation_epoch_authority_fails_closed(tmp_path: Path) -> None:
@@ -165,8 +179,9 @@ def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.Monke
             assert mutation_epoch == 7
             return Runtime()
 
-    def sources(found, epoch, purpose):
+    def sources(found, epoch, purpose, reference):
         assert epoch == 7
+        assert reference is None
         purposes.append(purpose)
         return Sources(found)
 
@@ -231,9 +246,9 @@ def test_post_apply_resume_admission_rechecks_the_advanced_epoch(
         validate,
     )
     authority = DeepPreflightAuthority(
-        sources_factory=lambda found, epoch, purpose: (  # type: ignore[arg-type]
+        sources_factory=lambda found, epoch, purpose, reference: (  # type: ignore[arg-type]
             Sources(found)
-            if epoch == 8 and purpose is RuntimePurpose.ADMISSION
+            if epoch == 8 and purpose is RuntimePurpose.ADMISSION and reference is None
             else pytest.fail("resume used the wrong runtime authority")
         ),
         attestation_store=Store(),  # type: ignore[arg-type]
