@@ -556,6 +556,48 @@ def test_show_returns_none_only_for_systemctl_not_found_status() -> None:
     assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
 
 
+def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
+    runner = RecordingRunner(returncode=4, stderr="Unit does not exist")
+    job = Path("/var/lib/loom-staging-rollout/requests/req-alpha/preflight-backup/job.json")
+
+    assert (
+        make_manager(runner).show_backup(
+            job,
+            "loom-staging-backup-req-alpha.service",
+        )
+        is None
+    )
+    assert runner.argvs == [
+        [
+            "systemctl",
+            "--user",
+            "show",
+            "--no-pager",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=MainPID",
+            "--property=ExecMainStartTimestamp",
+            "--property=ExecMainExitTimestamp",
+            "loom-staging-backup-req-alpha.service",
+        ]
+    ]
+
+
+def test_show_backup_rejects_job_unit_identity_mismatch_before_query() -> None:
+    runner = RecordingRunner(returncode=4, stderr="Unit does not exist")
+    job = Path("/var/lib/loom-staging-rollout/requests/req-other/preflight-backup/job.json")
+
+    with pytest.raises(SystemdQueryError):
+        make_manager(runner).show_backup(
+            job,
+            "loom-staging-backup-req-alpha.service",
+        )
+
+    assert runner.argvs == []
+
+
 @pytest.mark.parametrize(
     "stdout",
     [

@@ -1556,7 +1556,17 @@ def _cleanup_preflight_backup(
         job_state = dependencies.store.read_preflight_backup_job_state(request_id)
         events = dependencies.store.read_events(request_id)
         rotation = dependencies.store.read_backup_rotation()
-        unit = dependencies.systemd.show(f"loom-staging-backup-{request_id}.service")
+        job_path = (
+            dependencies.config.state_root
+            / "requests"
+            / request_id
+            / "preflight-backup"
+            / "job.json"
+        )
+        unit = dependencies.systemd.show_backup(
+            job_path,
+            f"loom-staging-backup-{request_id}.service",
+        )
     except Exception:
         return _safe_error(dependencies, "request does not exist")
     if request.status != "pending" or (unit is not None and unit.is_running):
