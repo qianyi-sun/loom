@@ -20,6 +20,7 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -267,6 +268,29 @@ def _trial_row(
         t,
         llm_calls_count=int(usage_projection["llm_calls_count"]),
     )
+    backend_diagnostic: dict[str, Any] | None = None
+    if (
+        t.state == "queued"
+        and t.selected_backend is None
+        and t.backend_policy_snapshot.get("mode") == "overflow"
+    ):
+        spillover_seconds = int(
+            t.backend_policy_snapshot.get("spillover_after_queue_seconds", 0)
+        )
+        elapsed = max(0.0, (datetime.now(UTC) - t.submitted_at).total_seconds())
+        if elapsed < spillover_seconds:
+            backend_diagnostic = {
+                "reason": "spillover_delay_not_met",
+                "retryable": True,
+                "eligible_after_seconds": spillover_seconds,
+                "queue_age_seconds": int(elapsed),
+            }
+        else:
+            backend_diagnostic = {
+                "reason": "no_eligible_backend_capacity",
+                "retryable": True,
+                "allowed_backends": t.backend_policy_snapshot.get("allowed_backends", []),
+            }
     out: dict[str, Any] = {
         "id": str(t.id),
         "task_id": t.task_id,
@@ -279,6 +303,15 @@ def _trial_row(
         "started_at": t.started_at.isoformat() if t.started_at else None,
         "finished_at": (t.finished_at.isoformat() if t.finished_at else None),
         "attempt_count": t.attempt_count,
+        "backend_policy": t.backend_policy_snapshot,
+        "backend_policy_digest": t.backend_policy_digest,
+        "selected_backend": t.selected_backend,
+        "backend_selection_reason": t.backend_selection_reason,
+        "backend_selected_at": (
+            t.backend_selected_at.isoformat() if t.backend_selected_at else None
+        ),
+        "backend_incompatibility_reasons": t.backend_incompatibility_reasons,
+        "backend_diagnostic": backend_diagnostic,
         "aggregate_reward": _extract_reward(t.result),
         "total_prompt_tokens": usage_projection["total_prompt_tokens"],
         "total_completion_tokens": usage_projection["total_completion_tokens"],

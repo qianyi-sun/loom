@@ -33,6 +33,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -47,6 +48,7 @@ from loom.agent.http_gateway_client import HttpLLMGatewayClient
 from loom.agent.litellm import LiteLLMAgent
 from loom.agent.oracle import OracleAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
+from loom.daytona_policy import BackendPolicySnapshot, build_policy_snapshot, policy_digest
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError, classify_failure_message
 from loom.models.resource_usage import TrialResourceUsageReport
@@ -296,7 +298,7 @@ def _worker_capabilities(settings: WorkerSettings) -> list[dict[str, Any]]:
         caps.update(
             backend="daytona",
             cpu_arch="x86_64",
-            resource_modes=["auto"],
+            resource_modes=["limit"],
             supports_custom_network=False,
         )
     return [caps]
@@ -1368,6 +1370,27 @@ async def _spawn_trial(
         )
         try:
             trial_config = TrialConfig.model_validate(payload.get("config") or {})
+            raw_backend_policy = payload.get("backend_policy_snapshot")
+            if raw_backend_policy is None:
+                if daytona_runtime is not None:
+                    raise TaskImageBuildError("Daytona claim is missing its backend policy")
+                # Backward compatibility for local unit/direct invocations that
+                # predate the work-protocol field. Real claims always carry the
+                # persisted snapshot.
+                backend_policy = build_policy_snapshot(
+                    request=None,
+                    expected_trial_count=1,
+                    max_attempts=trial_config.retry.max_attempts,
+                    authority={"kind": "legacy_local_worker_payload"},
+                )
+            else:
+                backend_policy = BackendPolicySnapshot.model_validate(raw_backend_policy)
+                if policy_digest(backend_policy) != payload.get("backend_policy_digest"):
+                    raise TaskImageBuildError("backend policy digest does not match its snapshot")
+            if daytona_runtime is not None and payload.get("selected_backend") != "daytona":
+                raise TaskImageBuildError(
+                    "Daytona worker received a claim without a persisted Daytona decision"
+                )
             if daytona_runtime is not None and payload.get("family_state_uri"):
                 raise TaskImageBuildError(
                     "Daytona backend does not support host-mounted family state",
@@ -1589,6 +1612,13 @@ async def _spawn_trial(
             multiplier=settings.trial_hard_deadline_multiplier,
             grace_sec=settings.trial_hard_deadline_grace_sec,
         )
+        if daytona_runtime is not None:
+            if backend_policy.max_runtime_seconds is None:
+                raise TaskImageBuildError("Daytona claim is missing its maximum runtime")
+            hard_deadline_sec = min(
+                float(backend_policy.max_runtime_seconds),
+                hard_deadline_sec or float(backend_policy.max_runtime_seconds),
+            )
         sandbox_lifetime_sec = getattr(settings, "daytona_sandbox_ttl_sec", 86_400)
         if hard_deadline_sec is not None:
             sandbox_lifetime_sec = min(sandbox_lifetime_sec, int(hard_deadline_sec))
@@ -1667,6 +1697,15 @@ async def _spawn_trial(
                     docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 )
             else:
+                resources = backend_policy.daytona_resources
+                price = backend_policy.daytona_price_snapshot
+                if resources is None or price is None:
+                    raise TaskImageBuildError("Daytona claim has an incomplete resource policy")
+                per_hour_usd = (
+                    Decimal(resources.cpu) * price.cpu_usd_per_hour
+                    + Decimal(resources.memory_gib) * price.memory_gib_usd_per_hour
+                    + Decimal(resources.disk_gib) * price.disk_gib_usd_per_hour
+                )
                 inner = DaytonaDriver(
                     image=task_image,
                     config=daytona_runtime.config,
@@ -1681,6 +1720,10 @@ async def _spawn_trial(
                     reserve_callback=_reserve_daytona,
                     started_callback=_daytona_started,
                     deleted_callback=_daytona_deleted,
+                    per_second_usd=per_hour_usd / Decimal(3600),
+                    resource_cpu=resources.cpu,
+                    resource_memory_gib=resources.memory_gib,
+                    resource_disk_gib=resources.disk_gib,
                 )
             role = "agent" if ordinal == 0 else "verifier"
             return ResourceAccountingDriver(
@@ -2088,6 +2131,10 @@ def _setup_failure_diagnostic_head(detail: str, max_chars: int) -> str:
 
 
 def _classify_setup_failure(detail: str) -> FailureReason:
+    if "DAYTONA_CAPACITY_UNAVAILABLE" in detail:
+        return FailureReason.DAYTONA_CAPACITY_UNAVAILABLE
+    if "DAYTONA_RATE_LIMITED" in detail:
+        return FailureReason.DAYTONA_RATE_LIMITED
     if "SETUP_ADMISSION_BLOCKED" in detail:
         return FailureReason.NODE_SETUP_HEALTH
     if "TASK_COMPAT_" in detail:

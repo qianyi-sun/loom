@@ -83,7 +83,64 @@ WITH next AS (
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
-     AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
+     AND (
+       t.selected_backend = ANY(:worker_backends)
+       OR (
+         t.backend_policy_digest =
+           'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+         AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
+       )
+       OR (
+         t.selected_backend IS NULL
+         AND t.backend_policy_snapshot->>'mode' = 'overflow'
+         AND (
+           (
+             'docker' = ANY(:worker_backends)
+             AND t.backend_policy_snapshot->'allowed_backends' ? 'docker'
+           )
+           OR (
+             'daytona' = ANY(:worker_backends)
+             AND t.backend_policy_snapshot->'allowed_backends' ? 'daytona'
+             AND t.submitted_at
+                 + make_interval(
+                     secs => (t.backend_policy_snapshot->>'spillover_after_queue_seconds')::int
+                   ) <= NOW()
+             AND jsonb_array_length(t.backend_incompatibility_reasons) = 0
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM workers local_worker
+                WHERE local_worker.status = 'active'
+                  AND local_worker.drain_state = 'active'
+                  AND local_worker.last_seen_at >= NOW() - INTERVAL '30 seconds'
+                  AND local_worker.max_concurrent > (
+                    SELECT count(*) FROM trials local_active
+                     WHERE local_active.worker_id = local_worker.id
+                       AND local_active.state IN ('claimed','running')
+                  )
+                  AND (
+                    (NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
+                     AND local_worker.pool_name = t.requires_caps->>'worker_pool')
+                    OR
+                    (NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+                     AND (t.autoscaler_pool_name IS NULL
+                          OR local_worker.pool_name = t.autoscaler_pool_name))
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(local_worker.capabilities) local_cap
+                     WHERE COALESCE(local_cap->>'backend', 'docker') = 'docker'
+                       AND local_cap->>'os' = t.requires_caps->>'os'
+                       AND (COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
+                            OR local_cap->>'cpu_arch'
+                               = COALESCE(t.requires_caps->>'cpu_arch', 'x86_64'))
+                       AND local_cap->>'gpu_vendor' = t.requires_caps->>'gpu_vendor'
+                       AND t.requires_caps->'network_policies'
+                           <@ COALESCE(local_cap->'network_policies', '[]'::jsonb)
+                  )
+             )
+           )
+         )
+       )
+     )
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
        t.family_key IS NULL
@@ -182,6 +239,40 @@ UPDATE trials t
    SET state = 'claimed',
        worker_id = :worker_id,
        claimed_at = NOW(),
+       selected_backend = COALESCE(
+         t.selected_backend,
+         CASE
+           WHEN t.backend_policy_digest =
+             'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+           THEN COALESCE(t.requires_caps->>'backend', 'docker')
+           WHEN 'docker' = ANY(:worker_backends) THEN 'docker'
+           ELSE 'daytona'
+         END
+       ),
+       backend_selection_reason = COALESCE(
+         t.backend_selection_reason,
+         CASE WHEN t.backend_policy_digest =
+                   'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+              THEN 'legacy_backend'
+              WHEN 'docker' = ANY(:worker_backends)
+              THEN 'local_capacity_available' ELSE 'spillover_threshold_met' END
+       ),
+       backend_selected_at = COALESCE(t.backend_selected_at, NOW()),
+       requires_caps = jsonb_set(
+         t.requires_caps,
+         '{backend}',
+         to_jsonb(COALESCE(
+           t.selected_backend,
+           CASE
+             WHEN t.backend_policy_digest =
+               'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+             THEN COALESCE(t.requires_caps->>'backend', 'docker')
+             WHEN 'docker' = ANY(:worker_backends) THEN 'docker'
+             ELSE 'daytona'
+           END
+         )),
+         true
+       ),
        pre_start_heartbeat_at = NULL,
        failure_reason = NULL,
        failure_message = NULL,
@@ -189,6 +280,9 @@ UPDATE trials t
   FROM next
  WHERE t.id = next.id
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
+           t.backend_policy_snapshot, t.backend_policy_digest,
+           t.selected_backend, t.backend_selection_reason, t.backend_selected_at,
+           t.backend_incompatibility_reasons,
            t.attempt_count, t.provider_connection_id,
            t.family_key, t.batch_id,
            (SELECT state_uri FROM family_lock) AS family_state_uri,
@@ -307,7 +401,61 @@ WITH candidates AS (
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
-     AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
+     AND (
+       t.selected_backend = ANY(:worker_backends)
+       OR (
+         t.backend_policy_digest =
+           'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+         AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
+       )
+       OR (
+         t.selected_backend IS NULL
+         AND t.backend_policy_snapshot->>'mode' = 'overflow'
+         AND (
+           ('docker' = ANY(:worker_backends)
+            AND t.backend_policy_snapshot->'allowed_backends' ? 'docker')
+           OR
+           ('daytona' = ANY(:worker_backends)
+            AND t.backend_policy_snapshot->'allowed_backends' ? 'daytona'
+            AND t.submitted_at
+                + make_interval(
+                    secs => (t.backend_policy_snapshot->>'spillover_after_queue_seconds')::int
+                  ) <= NOW()
+            AND jsonb_array_length(t.backend_incompatibility_reasons) = 0
+            AND NOT EXISTS (
+              SELECT 1 FROM workers local_worker
+               WHERE local_worker.status = 'active'
+                 AND local_worker.drain_state = 'active'
+                 AND local_worker.last_seen_at >= NOW() - INTERVAL '30 seconds'
+                 AND local_worker.max_concurrent > (
+                   SELECT count(*) FROM trials local_active
+                    WHERE local_active.worker_id = local_worker.id
+                      AND local_active.state IN ('claimed','running')
+                 )
+                 AND (
+                   (NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
+                    AND local_worker.pool_name = t.requires_caps->>'worker_pool')
+                   OR
+                   (NULLIF(t.requires_caps->>'worker_pool', '') IS NULL
+                    AND (t.autoscaler_pool_name IS NULL
+                         OR local_worker.pool_name = t.autoscaler_pool_name))
+                 )
+                 AND EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(local_worker.capabilities) local_cap
+                    WHERE COALESCE(local_cap->>'backend', 'docker') = 'docker'
+                      AND local_cap->>'os' = t.requires_caps->>'os'
+                      AND (COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
+                           OR local_cap->>'cpu_arch'
+                              = COALESCE(t.requires_caps->>'cpu_arch', 'x86_64'))
+                      AND local_cap->>'gpu_vendor' = t.requires_caps->>'gpu_vendor'
+                      AND t.requires_caps->'network_policies'
+                          <@ COALESCE(local_cap->'network_policies', '[]'::jsonb)
+                 )
+            )
+           )
+         )
+       )
+     )
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
        COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
@@ -765,6 +913,40 @@ WITH candidates AS (
 ), claimed_trial AS (
   UPDATE trials t
      SET state = 'claimed', worker_id = (:worker_id)::uuid, claimed_at = NOW(),
+         selected_backend = COALESCE(
+           t.selected_backend,
+           CASE
+             WHEN t.backend_policy_digest =
+               'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+             THEN COALESCE(t.requires_caps->>'backend', 'docker')
+             WHEN 'docker' = ANY(:worker_backends) THEN 'docker'
+             ELSE 'daytona'
+           END
+         ),
+         backend_selection_reason = COALESCE(
+           t.backend_selection_reason,
+           CASE WHEN t.backend_policy_digest =
+                     'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+                THEN 'legacy_backend'
+                WHEN 'docker' = ANY(:worker_backends)
+                THEN 'local_capacity_available' ELSE 'spillover_threshold_met' END
+         ),
+         backend_selected_at = COALESCE(t.backend_selected_at, NOW()),
+         requires_caps = jsonb_set(
+           t.requires_caps,
+           '{backend}',
+           to_jsonb(COALESCE(
+             t.selected_backend,
+             CASE
+               WHEN t.backend_policy_digest =
+                 'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+               THEN COALESCE(t.requires_caps->>'backend', 'docker')
+               WHEN 'docker' = ANY(:worker_backends) THEN 'docker'
+               ELSE 'daytona'
+             END
+           )),
+           true
+         ),
          pre_start_heartbeat_at = NULL, failure_reason = NULL, failure_message = NULL,
          attempt_count = attempt_count + 1
     FROM picked p
@@ -780,7 +962,10 @@ WITH candidates AS (
   RETURNING 'trial'::text AS work_kind, t.id, t.team_id, NULL::uuid AS stage_run_id,
             NULL::uuid AS pipeline_run_id, NULL::uuid AS claim_id,
             NULL::bigint AS lease_epoch, NULL::timestamptz AS lease_expires_at,
-            t.task_id, t.config, t.requires_caps, t.attempt_count,
+            t.task_id, t.config, t.requires_caps,
+            t.backend_policy_snapshot, t.backend_policy_digest,
+            t.selected_backend, t.backend_selection_reason, t.backend_selected_at,
+            t.backend_incompatibility_reasons, t.attempt_count,
             t.provider_connection_id, t.family_key, t.batch_id
 ), claimed_attempt AS (
   UPDATE execution_attempts a
@@ -797,6 +982,12 @@ WITH candidates AS (
             r.team_id, a.stage_run_id, r.id AS pipeline_run_id, a.claim_id,
             a.lease_epoch, a.lease_expires_at, NULL::text AS task_id,
             NULL::jsonb AS config, NULL::jsonb AS requires_caps,
+            NULL::jsonb AS backend_policy_snapshot,
+            NULL::text AS backend_policy_digest,
+            NULL::text AS selected_backend,
+            NULL::text AS backend_selection_reason,
+            NULL::timestamptz AS backend_selected_at,
+            NULL::jsonb AS backend_incompatibility_reasons,
             a.attempt_number, NULL::uuid AS provider_connection_id,
             NULL::text AS family_key, NULL::uuid AS batch_id
 ), acceptance_consume AS (

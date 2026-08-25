@@ -36,6 +36,8 @@ class FailureReason(StrEnum):
     TASK_IMAGE_BUILD_TIMEOUT = "task_image_build_timeout"
     NODE_SETUP_HEALTH = "node_setup_health"
     TASK_COMPATIBILITY = "task_compatibility"
+    DAYTONA_CAPACITY_UNAVAILABLE = "daytona_capacity_unavailable"
+    DAYTONA_RATE_LIMITED = "daytona_rate_limited"
     EXHAUSTED_RETRIES = "exhausted_retries"
     WORKER_LOST_CLAIM = "worker_lost_claim"
     INTERNAL_ERROR = "internal_error"

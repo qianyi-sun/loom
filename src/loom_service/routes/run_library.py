@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
+from loom.daytona_policy import build_policy_snapshot, policy_digest
 from loom.db.schema import (
     Artifact,
     ArtifactLineageEdge,
@@ -2068,6 +2069,20 @@ async def clone_run_library_batch_config(
         team_id=ctx.team_id,
         created_at=clone_created_at,
     )
+    clone_policy = build_policy_snapshot(
+        request=None,
+        expected_trial_count=expected,
+        max_attempts=int(
+            dict(source.trial_config).get("retry", {}).get("max_attempts", 1)
+        ),
+        authority={
+            "kind": "team_user_clone",
+            "team_id": str(ctx.team_id),
+            "user_id": str(ctx.user_id),
+            "source_batch_id": str(source.id),
+        },
+        accepted_at=clone_created_at,
+    )
     clone = Batch(
         id=clone_id,
         team_id=ctx.team_id,
@@ -2086,7 +2101,9 @@ async def clone_run_library_batch_config(
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=expected,
         n_per_task=source.n_per_task,
-        backend=source.backend,
+        backend="docker",
+        backend_policy_snapshot=clone_policy.model_dump(mode="json"),
+        backend_policy_digest=policy_digest(clone_policy),
         combinations=combinations,
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
@@ -2266,6 +2283,18 @@ async def reuse_run_library_artifact(
         team_id=ctx.team_id,
         created_at=derived_created_at,
     )
+    derived_policy = build_policy_snapshot(
+        request=None,
+        expected_trial_count=expected,
+        max_attempts=int(dict(trial_config).get("retry", {}).get("max_attempts", 1)),
+        authority={
+            "kind": "team_user_artifact_reuse",
+            "team_id": str(ctx.team_id),
+            "user_id": str(ctx.user_id),
+            "source_trial_id": str(trial.id),
+        },
+        accepted_at=derived_created_at,
+    )
     derived = Batch(
         id=derived_id,
         team_id=ctx.team_id,
@@ -2282,7 +2311,9 @@ async def reuse_run_library_artifact(
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=expected,
         n_per_task=n_per_task,
-        backend=batch.backend if batch else "docker",
+        backend="docker",
+        backend_policy_snapshot=derived_policy.model_dump(mode="json"),
+        backend_policy_digest=policy_digest(derived_policy),
         combinations=combinations,
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,

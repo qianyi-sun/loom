@@ -1660,8 +1660,32 @@ def _admin_submit_batch_on_behalf(args: argparse.Namespace) -> int:
                 payload["description"] = args.description
             if args.n_per_task is not None:
                 payload["n_per_task"] = args.n_per_task
-            if args.backend is not None:
-                payload["backend"] = args.backend
+            backend_policy = args.backend_policy
+            backend = args.backend
+            if backend_policy is not None:
+                mode = backend_policy.get("mode")
+                expected_backend = "daytona" if mode == "explicit" else "docker"
+                if mode not in {"explicit", "overflow"}:
+                    sys.stderr.write(
+                        "error: --backend-policy mode must be explicit or overflow.\n"
+                    )
+                    return 2
+                if backend is not None and backend != expected_backend:
+                    sys.stderr.write(
+                        f"error: backend policy mode {mode!r} requires "
+                        f"--backend {expected_backend}.\n"
+                    )
+                    return 2
+                backend = expected_backend
+                payload["backend_policy"] = backend_policy
+            elif backend == "daytona":
+                sys.stderr.write(
+                    "error: --backend daytona requires --backend-policy with "
+                    "resources, rate snapshot, runtime, and hard budget.\n"
+                )
+                return 2
+            if backend is not None:
+                payload["backend"] = backend
             if args.required_worker_pool:
                 payload["required_worker_pools"] = args.required_worker_pool
             if needs_model:
@@ -2485,6 +2509,15 @@ def dispatch(argv: list[str]) -> int:
         "--backend",
         default=None,
         help="Worker backend (default: server default).",
+    )
+    p_submit_on_behalf.add_argument(
+        "--backend-policy",
+        type=_load_task_filter_json,
+        default=None,
+        help=(
+            "Complete Daytona backend policy as a JSON object or @path/to/file.json. "
+            "Mode explicit selects Daytona; mode overflow remains Docker-first."
+        ),
     )
     p_submit_on_behalf.add_argument(
         "--required-worker-pool",

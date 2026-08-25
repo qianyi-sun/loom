@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from loom.errors import ConfigError
+from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom_drivers.daytona.config import DaytonaConfig
 from loom_drivers.daytona.driver import DaytonaDriver
@@ -15,6 +16,7 @@ from loom_drivers.daytona.service_controller import DaytonaApiGate, provider_sco
 from loom_worker.config import WorkerSettings
 from loom_worker.main_loop import (
     _build_daytona_runtime,
+    _classify_setup_failure,
     _daytona_sandbox_name,
     _resolve_daytona_trial_image,
     _worker_capabilities,
@@ -56,7 +58,7 @@ def test_daytona_registration_is_explicit_and_remote_x86() -> None:
     caps = _worker_capabilities(_settings())[0]
     assert caps["backend"] == "daytona"
     assert caps["cpu_arch"] == "x86_64"
-    assert caps["resource_modes"] == ["auto"]
+    assert caps["resource_modes"] == ["limit"]
 
 
 def test_daytona_credentials_fail_before_runtime_registration(
@@ -103,6 +105,17 @@ def test_daytona_sandbox_name_is_candidate_and_attempt_bound() -> None:
     )
     assert name == f"loom-{trial_id.hex}-2-cccccccc"
     assert len(name) <= 63
+
+
+def test_daytona_backpressure_failure_reasons_are_structured() -> None:
+    assert (
+        _classify_setup_failure("DAYTONA_RATE_LIMITED: provider throttled")
+        == FailureReason.DAYTONA_RATE_LIMITED
+    )
+    assert (
+        _classify_setup_failure("DAYTONA_CAPACITY_UNAVAILABLE: pool exhausted")
+        == FailureReason.DAYTONA_CAPACITY_UNAVAILABLE
+    )
 
 
 async def test_managed_driver_disables_provider_idle_lifecycle_and_reports(

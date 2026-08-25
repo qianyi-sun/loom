@@ -15,7 +15,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, func, insert, select, text
+from sqlalchemy import create_engine, delete, func, insert, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -887,6 +887,86 @@ async def test_admin_submit_on_behalf_rejects_inactive_represented_user(
 
     assert r.status_code == 403
     assert "represented user is not active" in r.json()["detail"]
+
+
+async def test_daytona_policy_requires_admin_and_persists_hard_authority_snapshot(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        represented_username = conn.execute(
+            select(User.username).where(User.username.like("BatchOwner-%")),
+        ).scalar_one()
+        config = _valid_task_config("local/mit-0")
+        config["environment"]["docker_image"] = (
+            "registry.example/task@sha256:" + "d" * 64
+        )
+        conn.execute(
+            update(Task).where(Task.id == "local/mit-0").values(config=config)
+        )
+    policy = {
+        "mode": "explicit",
+        "allowed_backends": ["daytona"],
+        "spillover_after_queue_seconds": 0,
+        "daytona_resources": {"cpu": 2, "memory_gib": 4, "disk_gib": 10},
+        "daytona_price_snapshot": {
+            "source": "operator-rate-card",
+            "version": "2026-08-25",
+            "effective_at": "2026-08-25T00:00:00Z",
+            "currency": "USD",
+            "cpu_usd_per_hour": "0.10",
+            "memory_gib_usd_per_hour": "0.01",
+            "disk_gib_usd_per_hour": "0.001",
+        },
+        "max_cloud_cost_usd": "1.00",
+        "max_runtime_seconds": 600,
+    }
+    body = {
+        "team_id": str(team_id),
+        "represented_username": represented_username,
+        "name": "daytona explicit",
+        "task_filter": {"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+        "trial_config": {"agent": {"name": "oracle"}},
+        "backend": "daytona",
+        "backend_policy": policy,
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        denied = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={k: v for k, v in body.items() if k != "represented_username"},
+        )
+        created = await ac.post(
+            "/api/v1/admin/batches/on-behalf",
+            headers={
+                "Authorization": f"Bearer {RAW_ADMIN_TOKEN}",
+                "X-Loom-Admin-Actor": "daytona-operator",
+            },
+            json=body,
+        )
+
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["reason"] == "daytona_policy_operator_required"
+    assert created.status_code == 201, created.text
+    response = created.json()
+    assert response["backend_policy"]["mode"] == "explicit"
+    assert response["backend_policy"]["authority"]["kind"] == "platform_admin"
+    assert response["backend_policy"]["worst_case_cloud_cost_usd"] == "0.125000"
+    assert response["backend_policy_digest"].startswith("sha256:")
+
+    with sync_engine.connect() as conn:
+        row = conn.execute(
+            select(Batch.backend_policy_snapshot, Batch.backend_policy_digest).where(
+                Batch.id == UUID(response["batch_id"])
+            )
+        ).one()
+    sync_engine.dispose()
+    assert row.backend_policy_snapshot == response["backend_policy"]
+    assert row.backend_policy_digest == response["backend_policy_digest"]
 
 
 async def test_admin_submit_on_behalf_rejects_non_member_user(

@@ -1410,6 +1410,29 @@ def test_batch_create_forwards_optional_fields(
     assert body["backend"] == "fake"
 
 
+def test_user_batch_create_rejects_daytona_without_operator_policy(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--agent",
+            "oracle",
+            "--benchmark",
+            "hello-world",
+            "--backend",
+            "daytona",
+        ]
+    )
+
+    assert rc == 2
+    assert "requires an operator policy" in capsys.readouterr().err
+    assert mock_server.requests == []
+
+
 def test_batch_create_has_no_required_worker_pool_flag(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

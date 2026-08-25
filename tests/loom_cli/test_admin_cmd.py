@@ -2085,6 +2085,69 @@ def test_admin_batches_submit_on_behalf_requires_admin_actor_before_request(
     assert "--admin-actor is required" in capsys.readouterr().err
 
 
+def test_admin_batches_submit_on_behalf_forwards_daytona_policy(
+    mock_server: _MockServer,
+) -> None:
+    mock_server.canned[("POST", "/api/v1/admin/batches/on-behalf")] = httpx.Response(
+        201,
+        json={
+            "batch_id": "11111111-1111-1111-1111-111111111111",
+            "team_id": _TEAM_ID,
+            "name": "daytona overflow",
+            "state": "submitted",
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "backend_policy": {"mode": "overflow"},
+            "backend_policy_digest": "sha256:" + "a" * 64,
+            "required_worker_pools": [],
+        },
+    )
+    policy = {
+        "mode": "overflow",
+        "allowed_backends": ["docker", "daytona"],
+        "spillover_after_queue_seconds": 60,
+        "daytona_resources": {"cpu": 2, "memory_gib": 4, "disk_gib": 10},
+        "daytona_price_snapshot": {
+            "source": "operator",
+            "version": "v1",
+            "effective_at": "2026-08-25T00:00:00Z",
+            "cpu_usd_per_hour": "0.1",
+            "memory_gib_usd_per_hour": "0.01",
+            "disk_gib_usd_per_hour": "0.001",
+        },
+        "max_cloud_cost_usd": "1.00",
+        "max_runtime_seconds": 600,
+    }
+
+    rc = main(
+        [
+            "admin",
+            "batches",
+            "submit-on-behalf",
+            "--represented-username",
+            "qianyi",
+            "--team-id",
+            _TEAM_ID,
+            "--agent",
+            "oracle",
+            "--benchmark",
+            "hello-world",
+            "--name",
+            "daytona overflow",
+            "--backend-policy",
+            json.dumps(policy),
+            "--admin-actor",
+            "release-operator",
+        ]
+    )
+
+    assert rc == 0
+    body = json.loads(mock_server.requests[0].content)
+    assert body["backend"] == "docker"
+    assert body["backend_policy"] == policy
+
+
 def test_team_mint_rejects_admin_type_before_request(
     _team_logged_in: None,
     capsys: pytest.CaptureFixture[str],

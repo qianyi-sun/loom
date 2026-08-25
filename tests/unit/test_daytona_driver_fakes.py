@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from loom.driver.base import StartOptions
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -14,7 +15,7 @@ from loom.errors import (
 from loom.models.exec import ExecResult
 from loom.models.networking import Allowlist, NoNetwork
 from loom_drivers.daytona.config import DaytonaConfig
-from loom_drivers.daytona.driver import DaytonaDriver
+from loom_drivers.daytona.driver import DaytonaDriver, _raise_structured_backpressure
 
 
 @pytest.fixture
@@ -52,6 +53,59 @@ async def test_start_creates_sandbox_and_marks_running(
     assert drv.state == "running"
     sdk.create.assert_awaited_once()
     await drv.stop()
+
+
+async def test_managed_start_enforces_persisted_resources(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _make_sdk_mock()
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="python:3.12-slim",
+        config=fake_cfg,
+        resource_cpu=4,
+        resource_memory_gib=8,
+        resource_disk_gib=20,
+    )
+    await drv.start(options=StartOptions(cpus=2, memory_mb=2048, storage_mb=10240))
+    params = sdk.create.await_args.args[0]
+    assert params.resources.cpu == 2
+    assert params.resources.memory == 2
+    assert params.resources.disk == 10
+    await drv.stop()
+
+
+async def test_managed_start_rejects_task_above_policy_ceiling(
+    fake_cfg: DaytonaConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _make_sdk_mock()
+    monkeypatch.setattr(
+        "loom_drivers.daytona.client._build_async_daytona", lambda c: sdk,
+    )
+    drv = DaytonaDriver(
+        image="python:3.12-slim",
+        config=fake_cfg,
+        resource_cpu=2,
+        resource_memory_gib=4,
+        resource_disk_gib=10,
+    )
+    with pytest.raises(DriverError, match="exceeds the Daytona policy ceiling"):
+        await drv.start(options=StartOptions(cpus=3))
+
+
+def test_provider_backpressure_is_structured() -> None:
+    from daytona import DaytonaError
+
+    with pytest.raises(DriverError, match="DAYTONA_RATE_LIMITED"):
+        _raise_structured_backpressure(
+            DaytonaError("too many requests", status_code=429)
+        )
+    with pytest.raises(DriverError, match="DAYTONA_CAPACITY_UNAVAILABLE"):
+        _raise_structured_backpressure(
+            DaytonaError("organization compute pool exhausted", status_code=503)
+        )
 
 
 async def test_double_start_rejected(

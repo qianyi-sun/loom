@@ -274,6 +274,49 @@ async def test_list_my_trials(
     assert "failure_message" in items[0]
 
 
+async def test_queued_overflow_trial_exposes_no_eligible_backend_diagnostic(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, trial_ids = trials_setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            update(Trial)
+            .where(Trial.id == trial_ids[1])
+            .values(
+                state="queued",
+                selected_backend=None,
+                backend_selection_reason=None,
+                backend_selected_at=None,
+                backend_policy_snapshot={
+                    "schema_version": "loom.daytona-backend-policy.v1",
+                    "mode": "overflow",
+                    "allowed_backends": ["docker", "daytona"],
+                    "spillover_after_queue_seconds": 0,
+                },
+                backend_policy_digest="sha256:" + "d" * 64,
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.get(
+            f"/api/v1/trials/{trial_ids[1]}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["backend_diagnostic"] == {
+        "reason": "no_eligible_backend_capacity",
+        "retryable": True,
+        "allowed_backends": ["docker", "daytona"],
+    }
+
+
 async def test_trial_list_and_detail_project_current_agent_config_shape(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
     postgres_url: str,

@@ -29,6 +29,13 @@ from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
+from loom.daytona_policy import (
+    LEGACY_POLICY_DIGEST,
+    BackendPolicyRequest,
+    build_policy_snapshot,
+    daytona_incompatibilities,
+    policy_digest,
+)
 from loom.db.schema import (
     Batch,
     Benchmark,
@@ -44,6 +51,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.models.batch import Combination
+from loom.models.task import TaskConfig, normalize_steps
 from loom.models.types import ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
@@ -201,6 +209,10 @@ class _CreateBatch(BaseModel):
     # defaults to "docker" so single-backend deployments don't have
     # to send it.
     backend: str = "docker"
+    # #425: operator-authorized immutable Daytona scheduling contract.
+    # Omitted means local-only Docker. Daytona cannot be selected from the
+    # legacy backend string alone because that lacks price/budget authority.
+    backend_policy: BackendPolicyRequest | None = None
     # Plan 28 PR-3: multi-(agent, model) combinations. Empty list
     # ⇒ single-combination behavior (agent + model come from
     # trial_config).
@@ -718,6 +730,8 @@ def _serialize(
         "expected_trial_count": b.expected_trial_count,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
+        "backend_policy": b.backend_policy_snapshot,
+        "backend_policy_digest": b.backend_policy_digest,
         "combinations": b.combinations,
         "required_worker_pools": b.required_worker_pools,
         "visibility": b.visibility,
@@ -879,7 +893,57 @@ async def _create_batch_record(
     # this check uses the same predicate so a backend that shows
     # `available=false` there also rejects here.
     active_backends = await get_active_backends(s)
-    if payload.backend not in active_backends:
+    policy_request = payload.backend_policy
+    available_allowed: set[str]
+    if payload.backend == "daytona" and policy_request is None:
+        _reject_submission(
+            reason="daytona_policy_required",
+            status_code=400,
+            detail={
+                "reason": "daytona_policy_required",
+                "message": (
+                    "explicit Daytona execution requires an immutable backend_policy "
+                    "with operator authority, resources, price snapshot, runtime, and hard budget"
+                ),
+            },
+        )
+    if policy_request is not None:
+        if not is_admin(ctx):
+            _reject_submission(
+                reason="daytona_policy_operator_required",
+                status_code=403,
+                detail={
+                    "reason": "daytona_policy_operator_required",
+                    "message": "Daytona cloud authority may only be snapshotted by a platform admin",
+                },
+            )
+        expected_backend = "daytona" if policy_request.mode == "explicit" else "docker"
+        if payload.backend != expected_backend:
+            _reject_submission(
+                reason="backend_policy_mismatch",
+                status_code=400,
+                detail={
+                    "reason": "backend_policy_mismatch",
+                    "message": (
+                        f"{policy_request.mode} policy requires backend={expected_backend!r}"
+                    ),
+                },
+            )
+        if required_worker_pools:
+            _reject_submission(
+                reason="daytona_required_worker_pool_incompatible",
+                status_code=400,
+                detail={
+                    "reason": "daytona_required_worker_pool_incompatible",
+                    "message": "operator-pinned local coverage trials cannot use Daytona authority",
+                },
+            )
+        available_allowed = {
+            str(backend) for backend in policy_request.allowed_backends
+        } & active_backends
+    else:
+        available_allowed = {payload.backend} & active_backends
+    if not available_allowed:
         available_str = (
             ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
         )
@@ -887,8 +951,12 @@ async def _create_batch_record(
             reason="no_workers",
             status_code=400,
             detail=(
-                f"no active worker advertises backend "
-                f"{payload.backend!r}. Currently available: "
+                (
+                    f"no active worker advertises backend {payload.backend!r}"
+                    if policy_request is None
+                    else f"no active worker advertises an allowed backend for {payload.backend!r}"
+                )
+                + ". Currently available: "
                 f"{available_str}. See `GET /api/v1/backends`."
             ),
         )
@@ -1120,6 +1188,78 @@ async def _create_batch_record(
         ) + len(required_worker_pools)
         combinations_jsonb = []
 
+    compatibility_by_task: list[dict[str, Any]] = []
+    if policy_request is not None:
+        trial_level_reasons: list[dict[str, str]] = []
+        if trial_config.get("verifier_env_mode") == "separate":
+            trial_level_reasons.append(
+                {
+                    "code": "private_verifier_unsupported",
+                    "detail": "Daytona does not support a separate private verifier runtime",
+                }
+            )
+        if trial_config.get("workspace_staging_policy_name") == "tb21":
+            trial_level_reasons.append(
+                {
+                    "code": "private_workspace_unsupported",
+                    "detail": "Daytona does not support the TB2.1 private workspace boundary",
+                }
+            )
+        if trial_config.get("family_run") is not None:
+            trial_level_reasons.append(
+                {
+                    "code": "family_state_unsupported",
+                    "detail": "Daytona does not support host-mounted family state",
+                }
+            )
+        task_rows = (
+            await s.execute(select(Task.id, Task.config).where(Task.id.in_(valid_task_ids)))
+        ).all()
+        for task_id, raw_task_config in task_rows:
+            parsed_task = normalize_steps(TaskConfig.model_validate(raw_task_config))
+            reasons = [*trial_level_reasons, *daytona_incompatibilities(parsed_task)]
+            if reasons:
+                compatibility_by_task.append(
+                    {"task_id": task_id, "reasons": reasons}
+                )
+        if compatibility_by_task:
+            _reject_submission(
+                reason="daytona_task_incompatible",
+                status_code=400,
+                detail={
+                    "reason": "daytona_task_incompatible",
+                    "tasks": compatibility_by_task,
+                },
+            )
+
+    retry_raw = trial_config.get("retry")
+    requested_max_attempts = (
+        int(retry_raw.get("max_attempts", request.app.state.settings.trial_retry_default_max_attempts))
+        if isinstance(retry_raw, dict)
+        else int(request.app.state.settings.trial_retry_default_max_attempts)
+    )
+    authority = {
+        "kind": "platform_admin" if is_admin(ctx) else "team_user",
+        "team_id": str(submission_team_id),
+        "user_id": str(ctx.user_id) if ctx.user_id is not None else None,
+        "actor": usage_attributed_actor,
+    }
+    try:
+        backend_policy = build_policy_snapshot(
+            request=policy_request,
+            expected_trial_count=expected,
+            max_attempts=requested_max_attempts,
+            authority=authority,
+        )
+    except ValueError as exc:
+        _reject_submission(
+            reason="daytona_budget_exceeded",
+            status_code=400,
+            detail={"reason": "daytona_budget_exceeded", "message": str(exc)},
+        )
+    backend_policy_json = backend_policy.model_dump(mode="json")
+    backend_policy_sha256 = policy_digest(backend_policy)
+
     budget_policy = payload.budget_policy
     if payload.budget_usd is None:
         budget_policy = "none"
@@ -1215,6 +1355,8 @@ async def _create_batch_record(
         expected_trial_count=expected,
         n_per_task=payload.n_per_task,
         backend=payload.backend,
+        backend_policy_snapshot=backend_policy_json,
+        backend_policy_digest=backend_policy_sha256,
         combinations=combinations_jsonb,
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
@@ -1294,6 +1436,8 @@ async def _create_batch_record(
         "expected_trial_count": expected,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
+        "backend_policy": b.backend_policy_snapshot,
+        "backend_policy_digest": b.backend_policy_digest,
         "combinations": b.combinations,
         "required_worker_pools": b.required_worker_pools,
         "state": b.state,
@@ -2424,9 +2568,33 @@ async def rerun_failed_batch(
     require_team_or_admin(ctx, b.team_id)
     await _reject_if_team_paused(s, b.team_id)
     _reject_if_k8s_worker_unavailable(request, b.required_worker_pools or [])
+    if (
+        b.backend_policy_snapshot.get("mode") != "local_only"
+        and b.backend_policy_digest == LEGACY_POLICY_DIGEST
+    ):
+        _reject_submission(
+            reason="legacy_daytona_policy_missing",
+            status_code=409,
+            detail={
+                "reason": "legacy_daytona_policy_missing",
+                "message": "resubmit with a complete operator-authorized Daytona policy",
+            },
+        )
+    if b.backend_policy_snapshot.get("mode") != "local_only" and not is_admin(ctx):
+        _reject_submission(
+            reason="daytona_policy_operator_required",
+            status_code=403,
+            detail={
+                "reason": "daytona_policy_operator_required",
+                "message": "cloud-authorized batches require an operator-authorized rerun",
+            },
+        )
 
     active_backends = await get_active_backends(s)
-    if b.backend not in active_backends:
+    rerun_allowed_backends = set(
+        b.backend_policy_snapshot.get("allowed_backends", [b.backend])
+    )
+    if not (rerun_allowed_backends & active_backends):
         available_str = (
             ", ".join(sorted(active_backends)) if active_backends else "(none -- no active workers)"
         )
@@ -2569,6 +2737,8 @@ async def rerun_failed_batch(
         expected_trial_count=len(targets),
         n_per_task=1,
         backend=b.backend,
+        backend_policy_snapshot=dict(b.backend_policy_snapshot),
+        backend_policy_digest=b.backend_policy_digest,
         combinations=list(b.combinations or []),
         provider_connection_id=b.provider_connection_id,
         provider_model_id=b.provider_model_id,

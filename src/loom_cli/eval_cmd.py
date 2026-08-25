@@ -457,6 +457,11 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"expected_trial_count:  {item.get('expected_trial_count', '?')}")
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
     print(f"backend:               {item.get('backend', 'docker')}")
+    backend_policy = item.get("backend_policy")
+    if isinstance(backend_policy, dict):
+        print(f"backend_policy_mode:   {backend_policy.get('mode', '(unknown)')}")
+    if item.get("backend_policy_digest"):
+        print(f"backend_policy_digest: {item['backend_policy_digest']}")
     required_worker_pools = item.get("required_worker_pools") or []
     if required_worker_pools:
         print(f"required_worker_pools: {', '.join(required_worker_pools)}")
@@ -732,6 +737,12 @@ def _batch_create(args: argparse.Namespace) -> int:
             if args.n_per_task is not None:
                 payload["n_per_task"] = args.n_per_task
             if args.backend is not None:
+                if args.backend == "daytona":
+                    sys.stderr.write(
+                        "error: Daytona execution requires an operator policy; use "
+                        "`loom admin batches submit-on-behalf --backend-policy ...`.\n"
+                    )
+                    return 2
                 payload["backend"] = args.backend
             if args.description is not None:
                 payload["description"] = args.description

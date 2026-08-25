@@ -3380,6 +3380,25 @@ class Batch(Base):
         server_default=text("'docker'"),
         default="docker",
     )
+    # #425: immutable logical backend authority. ``backend`` remains the
+    # compatibility/default value; this snapshot owns explicit Daytona and
+    # local-first overflow admission, including the hard cost ceiling.
+    backend_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text(
+            "'{\"schema_version\":\"loom.daytona-backend-policy.v1\","
+            "\"mode\":\"local_only\",\"allowed_backends\":[\"docker\"],"
+            "\"spillover_after_queue_seconds\":0,\"max_attempts\":1,"
+            "\"expected_trial_count\":1,\"authority\":{\"kind\":\"legacy_insert\"},"
+            "\"accepted_at\":\"1970-01-01T00:00:00Z\"}'::jsonb"
+        ),
+    )
+    backend_policy_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'sha256:" + "0" * 64 + "'"),
+    )
     # Plan 28 PR-3: multi-(agent, model) combinations. Each entry is
     # `{agent_name, agent_model, n_per_task, label?}`. Empty list ⇒
     # single-combination behaviour (agent + model + n_per_task live
@@ -3632,6 +3651,37 @@ class Trial(Base):
     task_id: Mapped[str] = mapped_column(String, ForeignKey("tasks.id"), nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     requires_caps: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # #425: copied from the parent batch so claim decisions remain auditable
+    # even after the parent lifecycle changes. Overflow trials start without a
+    # selected backend; the atomic claim statement records the winner.
+    backend_policy_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text(
+            "'{\"schema_version\":\"loom.daytona-backend-policy.v1\","
+            "\"mode\":\"local_only\",\"allowed_backends\":[\"docker\"],"
+            "\"spillover_after_queue_seconds\":0,\"max_attempts\":1,"
+            "\"expected_trial_count\":1,\"authority\":{\"kind\":\"legacy_insert\"},"
+            "\"accepted_at\":\"1970-01-01T00:00:00Z\"}'::jsonb"
+        ),
+    )
+    backend_policy_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'sha256:" + "0" * 64 + "'"),
+    )
+    selected_backend: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backend_selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    backend_selected_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    backend_incompatibility_reasons: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
+    )
     # Internal capacity routing for architecture-neutral queued trials. User
     # requirements remain immutable in requires_caps; this assignment makes
     # independent pool autoscalers count the demand exactly once.

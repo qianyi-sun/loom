@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
@@ -103,6 +103,25 @@ class TrialClaimV1(PipelineModel):
     task_id: str
     config: dict[str, Any]
     requires_caps: dict[str, Any]
+    backend_policy_snapshot: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "schema_version": "loom.daytona-backend-policy.v1",
+            "mode": "local_only",
+            "allowed_backends": ["docker"],
+            "spillover_after_queue_seconds": 0,
+            "max_attempts": 1,
+            "expected_trial_count": 1,
+            "authority": {"kind": "legacy_claim"},
+            "accepted_at": "1970-01-01T00:00:00Z",
+        }
+    )
+    backend_policy_digest: Digest = "sha256:" + "0" * 64
+    selected_backend: Literal["docker", "daytona"] = "docker"
+    backend_selection_reason: str = "legacy_backend"
+    backend_selected_at: datetime = Field(
+        default_factory=lambda: datetime.fromtimestamp(0, UTC)
+    )
+    backend_incompatibility_reasons: list[dict[str, Any]] = Field(default_factory=list)
     attempt_count: PositiveSafeInt
     provider_connection_id: UUID | None
     family_key: str | None

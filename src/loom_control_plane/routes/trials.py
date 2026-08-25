@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
+from loom.daytona_policy import build_policy_snapshot, policy_digest
 from loom.db.schema import (
     Batch,
     LlmCall,
@@ -103,6 +105,8 @@ async def submit_trial(
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
     batch_backend = "docker"
+    batch_backend_policy: dict[str, Any] | None = None
+    batch_backend_policy_digest: str | None = None
     batch_submitter_user_id: UUID | None = None
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None
@@ -113,6 +117,8 @@ async def submit_trial(
                     select(
                         Batch.team_id,
                         Batch.backend,
+                        Batch.backend_policy_snapshot,
+                        Batch.backend_policy_digest,
                         Batch.submitted_by_user_id,
                         Batch.usage_attributed_user_id,
                         Batch.usage_attributed_actor,
@@ -126,6 +132,8 @@ async def submit_trial(
             )
         batch_team_id = batch_row.team_id
         batch_backend = batch_row.backend
+        batch_backend_policy = batch_row.backend_policy_snapshot
+        batch_backend_policy_digest = batch_row.backend_policy_digest
         batch_submitter_user_id = batch_row.submitted_by_user_id
         batch_usage_user_id = batch_row.usage_attributed_user_id
         batch_usage_actor = batch_row.usage_attributed_actor
@@ -296,6 +304,30 @@ async def submit_trial(
                     ),
                 }
             )
+        if batch_backend_policy is None:
+            policy = build_policy_snapshot(
+                request=None,
+                expected_trial_count=1,
+                max_attempts=trial_config.retry.max_attempts,
+                authority={
+                    "kind": "team_user",
+                    "team_id": str(submit_team_id),
+                    "user_id": str(submitter_user_id) if submitter_user_id is not None else None,
+                },
+            )
+            trial_backend_policy = policy.model_dump(mode="json")
+            trial_backend_policy_digest = policy_digest(policy)
+        else:
+            trial_backend_policy = batch_backend_policy
+            assert batch_backend_policy_digest is not None
+            trial_backend_policy_digest = batch_backend_policy_digest
+        policy_mode = str(trial_backend_policy.get("mode", "local_only"))
+        selected_backend = None if policy_mode == "overflow" else batch_backend
+        selection_reason = {
+            "local_only": "policy_local_only",
+            "explicit": "explicit_request",
+        }.get(policy_mode)
+        selection_time = datetime.now(UTC) if selected_backend is not None else None
         # Plan 19: batch_id + idempotency_key are optional. When
         # `idempotency_key` is set we use pg_insert + ON CONFLICT DO
         # NOTHING so a concurrent race (two runner instances picking
@@ -332,6 +364,12 @@ async def submit_trial(
             "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
             "requires_caps": requires_caps_json,
+            "backend_policy_snapshot": trial_backend_policy,
+            "backend_policy_digest": trial_backend_policy_digest,
+            "selected_backend": selected_backend,
+            "backend_selection_reason": selection_reason,
+            "backend_selected_at": selection_time,
+            "backend_incompatibility_reasons": [],
             "state": "queued",
             "submit_priority": trial_config.submit_priority,
             "batch_id": batch_id,
@@ -558,6 +596,14 @@ async def get_trial(
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "attempt_count": row.attempt_count,
+        "backend_policy": row.backend_policy_snapshot,
+        "backend_policy_digest": row.backend_policy_digest,
+        "selected_backend": row.selected_backend,
+        "backend_selection_reason": row.backend_selection_reason,
+        "backend_selected_at": (
+            row.backend_selected_at.isoformat() if row.backend_selected_at else None
+        ),
+        "backend_incompatibility_reasons": row.backend_incompatibility_reasons,
         "result": row.result,
         "trajectory_index": row.trajectory_index,
     }

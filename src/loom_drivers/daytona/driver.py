@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -67,6 +68,26 @@ StartedCallback = Callable[[UUID, str, datetime], Awaitable[None]]
 DeletedCallback = Callable[[UUID, bool, datetime, str | None], Awaitable[None]]
 
 
+def _raise_structured_backpressure(exc: BaseException) -> None:
+    status_code = getattr(exc, "status_code", None)
+    message = str(exc).lower()
+    if status_code == 429:
+        raise DriverError(
+            "DAYTONA_RATE_LIMITED: Daytona API request rate limit was reached"
+        ) from exc
+    capacity_markers = (
+        "capacity",
+        "compute pool",
+        "quota",
+        "no available",
+        "insufficient resources",
+    )
+    if status_code in {409, 423, 503} or any(marker in message for marker in capacity_markers):
+        raise DriverError(
+            "DAYTONA_CAPACITY_UNAVAILABLE: Daytona organization compute capacity is unavailable"
+        ) from exc
+
+
 def _default_caps() -> Capabilities:
     return Capabilities(
         backend="daytona",
@@ -75,7 +96,7 @@ def _default_caps() -> Capabilities:
         network_policies=frozenset(["public", "no-network", "allowlist"]),
         dynamic_network_policy=True,
         mounted_fs=True,
-        resource_modes=frozenset(["auto"]),
+        resource_modes=frozenset(["limit"]),
     )
 
 
@@ -101,6 +122,9 @@ class DaytonaDriver:
     started_callback: StartedCallback | None = None
     deleted_callback: DeletedCallback | None = None
     per_second_usd: Decimal = field(default=DEFAULT_PER_SECOND_USD)
+    resource_cpu: int | None = None
+    resource_memory_gib: int | None = None
+    resource_disk_gib: int | None = None
     _client: DaytonaClient | None = field(default=None, init=False, repr=False)
     _sandbox: Any | None = field(default=None, init=False, repr=False)
     _started_at: datetime | None = field(default=None, init=False, repr=False)
@@ -129,13 +153,9 @@ class DaytonaDriver:
                 f"DaytonaDriver.start() rejected in state {self._state!r}",
             )
         opts = options or StartOptions()
-        if (
-            any(value is not None for value in (opts.cpus, opts.memory_mb, opts.storage_mb))
-            or opts.gpus
-        ):
+        if opts.gpus:
             raise DriverError(
-                "DaytonaDriver cannot enforce task resource limits; use a "
-                "compatible backend instead",
+                "DaytonaDriver does not support GPU task resources",
             )
         if (
             opts.network is not None
@@ -166,7 +186,7 @@ class DaytonaDriver:
         self._client = DaytonaClient(self.config)
         await self._client.open()
         try:
-            from daytona import CreateSandboxFromImageParams, DaytonaError
+            from daytona import CreateSandboxFromImageParams, DaytonaError, Resources
 
             assert self._client is not None
             client = self._client
@@ -190,11 +210,73 @@ class DaytonaDriver:
                     if value is not None
                 }
                 labels.update(dict(opts.labels))
+                requested_cpu = self.resource_cpu
+                if opts.cpus is not None:
+                    if not float(opts.cpus).is_integer():
+                        raise DriverError("Daytona CPU resources require whole cores")
+                    requested_cpu = int(opts.cpus)
+                requested_memory_gib = (
+                    math.ceil(opts.memory_mb / 1024)
+                    if opts.memory_mb is not None
+                    else self.resource_memory_gib
+                )
+                requested_disk_gib = (
+                    math.ceil(opts.storage_mb / 1024)
+                    if opts.storage_mb is not None
+                    else self.resource_disk_gib
+                )
+                requested = (requested_cpu, requested_memory_gib, requested_disk_gib)
+                ceiling = (self.resource_cpu, self.resource_memory_gib, self.resource_disk_gib)
+                resources = None
+                if all(value is None for value in requested) and all(
+                    value is None for value in ceiling
+                ):
+                    # Standalone Driver use retains Daytona's provider default.
+                    # Loom service workers always supply the persisted policy.
+                    pass
+                elif any(value is None for value in requested) or any(
+                    value is None for value in ceiling
+                ):
+                    raise DriverError(
+                        "DaytonaDriver requires a persisted CPU, memory, and disk policy"
+                    )
+                else:
+                    assert requested_cpu is not None
+                    assert requested_memory_gib is not None
+                    assert requested_disk_gib is not None
+                    assert self.resource_cpu is not None
+                    assert self.resource_memory_gib is not None
+                    assert self.resource_disk_gib is not None
+                    requested_limits = (
+                        requested_cpu,
+                        requested_memory_gib,
+                        requested_disk_gib,
+                    )
+                    policy_limits = (
+                        self.resource_cpu,
+                        self.resource_memory_gib,
+                        self.resource_disk_gib,
+                    )
+                    if any(
+                        value > limit
+                        for value, limit in zip(
+                            requested_limits, policy_limits, strict=True
+                        )
+                    ):
+                        raise DriverError(
+                            "task resource request exceeds the Daytona policy ceiling"
+                        )
+                    resources = Resources(
+                        cpu=requested_cpu,
+                        memory=requested_memory_gib,
+                        disk=requested_disk_gib,
+                    )
                 params = CreateSandboxFromImageParams(
                     image=self.image,
                     name=self.sandbox_name,
                     labels=labels or None,
                     env_vars=dict(opts.environment) or None,
+                    resources=resources,
                     # Loom owns deadline, TTL and cleanup reconciliation. A
                     # provider idle heuristic must never kill a background job.
                     auto_stop_interval=0 if self.reserve_callback is not None else None,
@@ -211,6 +293,7 @@ class DaytonaDriver:
                     # the provider. The deterministic name is the idempotency
                     # key: re-read it before allowing the trial to fail.
                     if self.sandbox_name is None:
+                        _raise_structured_backpressure(create_error)
                         raise
                     for recovery_attempt in range(3):
                         try:
@@ -223,6 +306,7 @@ class DaytonaDriver:
                             if recovery_attempt < 2:
                                 await asyncio.sleep(0.5 * (recovery_attempt + 1))
                     if self._sandbox is None:
+                        _raise_structured_backpressure(create_error)
                         raise create_error
             sandbox = self._sandbox
             assert sandbox is not None  # narrows for mypy
