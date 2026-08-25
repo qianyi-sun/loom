@@ -2884,8 +2884,6 @@ def test_eval_usage_calls_public_usage_route(
                     "total_cost_usd": 0.125,
                     "llm_input_tokens": 100,
                     "llm_output_tokens": 50,
-                    "daytona_compute_seconds": 0.0,
-                    "daytona_cost_usd": 0.0,
                     "modal_compute_seconds": 0.0,
                     "modal_cost_usd": 0.0,
                     "cloud_compute_seconds": 0.0,

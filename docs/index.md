@@ -75,7 +75,7 @@ the supporting services differently.
    shares capacity between teams while respecting worker capabilities.
 3. **Prepare the environment.** The worker obtains the task bundle and asks a
    [Driver](architecture/driver-protocol.md) to create its sandbox. Drivers
-   provide the common lifecycle implemented by Docker, Fake, Daytona, and
+   provide the common lifecycle implemented by Docker, Fake, and
    Modal. Kubernetes and Slurm can host worker pools, but they are not
    additional Driver implementations.
 4. **Run the agent.** The shared `Trial.run()` orchestrator gives the task

@@ -32,12 +32,12 @@ class Capabilities(BaseModel):
     resource_modes: frozenset[ResourceMode]
     # GPU types this backend can attach to a single sandbox. Empty set ⇒
     # backend cannot attach a GPU even if gpu_vendor != "none". For Docker
-    # and Daytona this is always empty (no GPU passthrough). For Modal it
+    # and Docker this is always empty (no GPU passthrough). For Modal it
     # lists the modal-supported GPU strings.
     gpu_types: frozenset[str] = frozenset()
     # Phase B (#78 / #188): can the backend honor `StartOptions.network`
     # (attach the sandbox container to a specific docker network)?
-    # True for DockerDriver. False for Daytona/Modal (cloud sandboxes
+    # True for DockerDriver. False for Modal (cloud sandboxes
     # don't expose docker networking). When the worker has sandbox
     # isolation on AND this is False, the trial fails loudly with
     # CapabilityError rather than silently degrading.

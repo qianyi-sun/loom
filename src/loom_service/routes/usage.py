@@ -400,16 +400,6 @@ async def get_usage(
                     date_trunc('{group_by}', d.stopped_at) AS bucket_start,
                     COALESCE(
                         SUM(d.compute_seconds)
-                            FILTER (WHERE d.cloud_provider = 'daytona'),
-                        0
-                    ) AS daytona_compute_seconds,
-                    COALESCE(
-                        SUM(d.cost_usd)
-                            FILTER (WHERE d.cloud_provider = 'daytona'),
-                        0
-                    ) AS daytona_cost_usd,
-                    COALESCE(
-                        SUM(d.compute_seconds)
                             FILTER (WHERE d.cloud_provider = 'modal'),
                         0
                     ) AS modal_compute_seconds,
@@ -462,9 +452,6 @@ async def get_usage(
                     AS partial_usage_llm_calls_count,
                 COALESCE(l.missing_usage_llm_calls_count, 0)
                     AS missing_usage_llm_calls_count,
-                COALESCE(d.daytona_compute_seconds, 0)
-                    AS daytona_compute_seconds,
-                COALESCE(d.daytona_cost_usd, 0) AS daytona_cost_usd,
                 COALESCE(d.modal_compute_seconds, 0)
                     AS modal_compute_seconds,
                 COALESCE(d.modal_cost_usd, 0) AS modal_cost_usd,
@@ -618,8 +605,6 @@ async def get_usage(
             "usage_estimate_confidence": usage["usage_estimate_confidence"],
             "llm_input_tokens": int(r.llm_input_tokens),
             "llm_output_tokens": int(r.llm_output_tokens),
-            "daytona_compute_seconds": (float(r.daytona_compute_seconds) if include_cloud else 0.0),
-            "daytona_cost_usd": (float(r.daytona_cost_usd) if include_cloud else 0.0),
             "modal_compute_seconds": (float(r.modal_compute_seconds) if include_cloud else 0.0),
             "modal_cost_usd": (float(r.modal_cost_usd) if include_cloud else 0.0),
             "cloud_compute_seconds": (float(r.cloud_compute_seconds) if include_cloud else 0.0),

@@ -49,7 +49,7 @@ def test_required_caps_subset_mismatch_os():
 
 def test_required_caps_rejects_different_sandbox_backend():
     worker = Capabilities(
-        backend="daytona",
+        backend="modal",
         os="linux",
         gpu_vendor="none",
         network_policies=frozenset(["public"]),

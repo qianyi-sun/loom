@@ -260,7 +260,6 @@ async def app_setup(
                 capabilities=[
                     {"backend": "docker"},
                     {"backend": "fake"},
-                    {"backend": "daytona"},
                     {"backend": "modal"},
                 ],
                 registered_at=now,
