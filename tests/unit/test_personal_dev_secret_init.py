@@ -68,6 +68,30 @@ def test_management_projection_becomes_exact_owner_only_regular_files(
         assert target.read_bytes() == f"payload:{target.name}".encode()
 
 
+def test_setgid_private_parent_supports_new_copy(tmp_path: Path) -> None:
+    source = _projected_source(tmp_path, {"public-key"})
+    destination = _destination(tmp_path)
+    destination.parent.chmod(0o2700)
+
+    copy_projected_credentials(source, destination, profile="activation-public")
+
+    assert S_IMODE(destination.parent.stat().st_mode) == 0o2700
+    assert S_IMODE(destination.stat().st_mode) == 0o2700
+    assert S_IMODE((destination / "public-key").stat().st_mode) == 0o600
+
+
+def test_setgid_private_destination_supports_identical_replay(tmp_path: Path) -> None:
+    source = _projected_source(tmp_path, {"public-key"})
+    destination = _destination(tmp_path)
+    destination.parent.chmod(0o2700)
+    copy_projected_credentials(source, destination, profile="activation-public")
+    identity = (destination / "public-key").stat().st_ino
+
+    copy_projected_credentials(source, destination, profile="activation-public")
+
+    assert (destination / "public-key").stat().st_ino == identity
+
+
 @pytest.mark.parametrize(
     ("profile", "filename"),
     [("activation-public", "public-key"), ("activation-private", "private-key")],
@@ -275,6 +299,34 @@ def test_existing_destination_must_be_one_exact_owner_only_replay(
         copy_projected_credentials(source, destination, profile="activation-private")
 
 
+def test_existing_destination_permission_change_during_replay_is_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _projected_source(tmp_path, {"public-key"})
+    destination = _destination(tmp_path)
+    copy_projected_credentials(source, destination, profile="activation-public")
+    original_read = secret_init._read_bounded_descriptor
+    reads = 0
+
+    def expose_destination_after_open(descriptor: int, *, expected_size: int) -> bytes:
+        nonlocal reads
+        payload = original_read(descriptor, expected_size=expected_size)
+        reads += 1
+        if reads == 2:
+            destination.chmod(0o750)
+        return payload
+
+    monkeypatch.setattr(
+        secret_init,
+        "_read_bounded_descriptor",
+        expose_destination_after_open,
+    )
+
+    with pytest.raises(PersonalDevCredentialError):
+        copy_projected_credentials(source, destination, profile="activation-public")
+
+
 def test_destination_parent_must_be_private_owned_and_nonsymlink(tmp_path: Path) -> None:
     source = _projected_source(tmp_path, {"public-key"})
     destination = _destination(tmp_path)
@@ -293,6 +345,25 @@ def test_destination_parent_must_be_private_owned_and_nonsymlink(tmp_path: Path)
             linked_parent / "credentials",
             profile="activation-public",
         )
+
+
+@pytest.mark.parametrize("target", ["parent", "destination"])
+@pytest.mark.parametrize("mode", [0o1700, 0o2600, 0o2740, 0o2701, 0o4700])
+def test_private_directories_reject_forbidden_special_or_access_bits(
+    tmp_path: Path,
+    target: str,
+    mode: int,
+) -> None:
+    source = _projected_source(tmp_path, {"public-key"})
+    destination = _destination(tmp_path)
+    if target == "destination":
+        copy_projected_credentials(source, destination, profile="activation-public")
+        destination.chmod(mode)
+    else:
+        destination.parent.chmod(mode)
+
+    with pytest.raises(PersonalDevCredentialError):
+        copy_projected_credentials(source, destination, profile="activation-public")
 
 
 def test_interrupted_staging_is_removed_and_error_is_redacted(
