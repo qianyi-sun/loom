@@ -1,9 +1,10 @@
 # Nebius service execution contract
 
 Status: accepted target architecture for issue #1548, with the provider-neutral
-durable execution control plane from #1540 implemented but not traffic-enabled.
-The Nebius actuator, infrastructure, live canaries, cutover, and retirement
-remain separately authorized work.
+durable execution control plane from #1540 and namespace-scoped Kubernetes Job
+actuator from #1549 implemented but not traffic-enabled. Infrastructure,
+sandbox-runtime acceptance, live canaries, cutover, and retirement remain
+separately authorized work.
 
 ## Decision
 
@@ -192,6 +193,40 @@ an architecture assumption. References:
 
 ## Kubernetes execution units
 
+The #1549 actuator consumes the durable command outbox through database-backed
+delivery leases. It renders one deterministic `batch/v1` Job per execution
+unit, requires an immutable image digest, exact CPU/RAM/ephemeral-storage
+requests and limits, a non-root restricted security context, an explicit
+sandbox `RuntimeClass`, and an attempt service account with token automount
+disabled. It never receives Nebius credentials and its Kubernetes service
+account has namespace-only Job create/get/list/watch/delete plus Pod
+get/list/watch permissions. There is no Secret read, Pod exec, log, node,
+namespace, CRD, or cluster-wide permission.
+
+Job labels bind the immutable resource generation; annotations bind the full
+target and execution-unit identities. Create timeouts and HTTP 409 are resolved
+only by exact name/identity readback. Deletes carry a Job UID precondition;
+404 means cleanup is already converged, while UID reuse or any scope mismatch
+is dead-lettered and never deleted. Watch observations are backed by periodic
+full lists, and an expired resourceVersion resets the watch cursor. Multiple
+replicas are safe because only one holds a durable command delivery lease and
+all observations are idempotent by resourceVersion, UID, state, lease, and
+generation.
+
+The observed projection records Job/Pod UIDs, Kubernetes resourceVersion,
+node, scheduling/start/termination timestamps, last reconciliation, and
+bounded normalized failure detail. Pending, unschedulable, image-pull backoff,
+running, succeeded, failed, OOM-killed, evicted, node-lost, active-deadline,
+terminating, missing, and deleted states have explicit mappings. A stuck Job
+remains visible as observed failure/debt; the actuator never fabricates a Loom
+success or changes retry policy outside the fenced control-plane transition.
+
+`deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
+replicas. Repository merge cannot scale it or create its referenced database
+secret, namespace in a live target, runtime class, cluster, or cloud resource.
+The disposable k3s conformance test validates the real Kubernetes API seam
+with a suspended Job and makes no Nebius call.
+
 Each attempt owns one task-scoped Kubernetes object bearing the Loom trial ID,
 attempt generation, lease generation, requirements digest, and image digest.
 The primary task runs in one Pod/Job. Declared sidecars are containers in that
@@ -304,7 +339,10 @@ not authorize legacy retirement until drain and rollback-retention gates pass.
 
 ## Follow-on ownership
 
-- #1540: durable execution state and provider-neutral lease schema.
+- #1540: durable execution state and provider-neutral lease schema; implemented
+  and held traffic-disabled in this change.
+- #1549: namespace-scoped Kubernetes Job actuator and observed-state
+  reconciliation; implemented and held at zero replicas in this change.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
 - #1551: sandbox runtime and hostile-workload empirical acceptance.

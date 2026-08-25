@@ -117,6 +117,7 @@ class ExecutionTargetV1(_StrictContract):
     region: str = Field(min_length=1, max_length=80)
     failure_domain: str = Field(min_length=1, max_length=120)
     data_residency: Literal["eu"]
+    namespace_name: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
     health_role: Literal["primary", "secondary"]
     health_check_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     health_check_interval_seconds: int = Field(ge=5, le=300)
@@ -144,10 +145,13 @@ class ExecutionTopologyV1(_StrictContract):
     def _targets_form_an_isolated_multi_region_topology(self) -> ExecutionTopologyV1:
         target_ids = [target.target_id for target in self.targets]
         health_ids = [target.health_check_id for target in self.targets]
+        namespaces = [target.namespace_name for target in self.targets]
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("execution target ids must be unique")
         if len(health_ids) != len(set(health_ids)):
             raise ValueError("every execution target needs an independent health check")
+        if len(namespaces) != len(set(namespaces)):
+            raise ValueError("every execution target needs an isolated namespace")
         for target in self.targets:
             if target.logical_pool_id != self.logical_pool_id:
                 raise ValueError("every target must bind the declared logical pool")

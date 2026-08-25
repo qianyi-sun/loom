@@ -73,6 +73,9 @@ _EVENT_ALLOWED_DESIRED = {
     "trajectory_committed": frozenset({"start", "finalize"}),
     "usage_reported": frozenset({"start", "finalize"}),
     "result_reported": frozenset({"finalize"}),
+    "kubernetes_observed": frozenset(
+        {"create", "start", "finalize", "cancel", "timeout", "retry", "delete_pending"}
+    ),
     "cancelled": frozenset({"cancel"}),
     "timed_out": frozenset({"timeout"}),
     "failed": frozenset({"create", "start", "finalize"}),
@@ -121,6 +124,26 @@ class ClaimedExecutionCommand:
     claim_expires_at: datetime
 
 
+def _bounded_optional_text(value: object, limit: int, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ServiceExecutionConflict(f"invalid Kubernetes {name}")
+    return value
+
+
+def _optional_datetime(value: object, name: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ServiceExecutionConflict(f"invalid Kubernetes {name}") from exc
+    if parsed.tzinfo is None:
+        raise ServiceExecutionConflict(f"invalid Kubernetes {name}")
+    return parsed.astimezone(UTC)
+
+
 def _command_key(lease_id: UUID, generation: int, command_type: str) -> str:
     return canonical_digest(
         {
@@ -149,13 +172,11 @@ def _event_key(lease_id: UUID, generation: int, ordinal: int, event_kind: str) -
 def _execution_identity(
     *,
     trial_id: UUID,
-    team_id: UUID,
     attempt: int,
     generation: int,
-    environment: str,
+    namespace_name: str,
     target_id: str,
 ) -> tuple[str, str, str, UUID]:
-    namespace_name = f"loom-{environment}-{team_id.hex[:12]}"
     job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}"
     execution_unit_key = canonical_uuid5(
         _EXECUTION_UNIT_NAMESPACE,
@@ -330,10 +351,9 @@ async def reserve_trial_execution(
     lease_id = uuid4()
     provider_scope, namespace_name, job_name, execution_unit_key = _execution_identity(
         trial_id=trial.id,
-        team_id=trial.team_id,
         attempt=attempt,
         generation=generation,
-        environment=target.environment,
+        namespace_name=str(target.spec_json["namespace_name"]),
         target_id=target.id,
     )
     requirements_json = requirements.model_dump(mode="json")
@@ -346,6 +366,7 @@ async def reserve_trial_execution(
         lifecycle_authority_id=trial.lifecycle_authority_id,
         attempt=attempt,
         generation=generation,
+        resource_generation=generation,
         execution_class_id=execution_class_id,
         target_id=target_id,
         workload_requirements_json=requirements_json,
@@ -603,6 +624,47 @@ async def acknowledge_execution_command(
     return row
 
 
+async def defer_execution_command(
+    session: AsyncSession,
+    *,
+    command_id: UUID,
+    consumer_id: str,
+    error_code: str,
+    error_message: str,
+    retry_after_seconds: int,
+    max_deliveries: int = 20,
+    now: datetime | None = None,
+) -> ServiceExecutionCommand:
+    """Release a failed delivery with bounded backoff or dead-letter it."""
+
+    if retry_after_seconds < 1 or retry_after_seconds > 300 or max_deliveries < 1:
+        raise ServiceExecutionConflict("invalid command retry bounds")
+    row = (
+        await session.execute(
+            select(ServiceExecutionCommand)
+            .where(ServiceExecutionCommand.id == command_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ServiceExecutionConflict("execution command not found")
+    if row.state != CommandState.LEASED or row.claimed_by != consumer_id:
+        raise ServiceExecutionFenceError("command delivery lease is not authoritative")
+    current_time = now or datetime.now(UTC)
+    row.last_error_code = error_code[:120]
+    row.last_error_message = error_message[:2000]
+    row.claimed_by = None
+    row.claim_expires_at = None
+    row.updated_at = current_time
+    if row.delivery_count >= max_deliveries:
+        row.state = CommandState.DEAD_LETTER
+    else:
+        row.state = CommandState.PENDING
+        row.available_at = current_time + timedelta(seconds=retry_after_seconds)
+    await session.flush()
+    return row
+
+
 async def verify_trial_execution_fence(
     session: AsyncSession,
     *,
@@ -664,6 +726,7 @@ async def record_execution_event(
         "trajectory_committed",
         "usage_reported",
         "result_reported",
+        "kubernetes_observed",
         "cancelled",
         "timed_out",
         "failed",
@@ -707,7 +770,14 @@ async def record_execution_event(
         lease_id=lease_id,
         generation=generation,
         surface=event_kind,
-        allow_terminal_event=event_kind in _TERMINAL_EVENT_KINDS,
+        allow_terminal_event=(
+            event_kind in _TERMINAL_EVENT_KINDS
+            or (
+                event_kind == "kubernetes_observed"
+                and lease.desired_state
+                in {"cancel", "timeout", "retry", "delete_pending", "deleted"}
+            )
+        ),
     )
     if lease.desired_state not in _EVENT_ALLOWED_DESIRED[event_kind]:
         raise ServiceExecutionConflict(
@@ -732,6 +802,74 @@ async def record_execution_event(
         lease.last_heartbeat_at = observed_at
     if event_kind in _EVENT_TO_OBSERVED and advances_projection:
         lease.observed_state = _EVENT_TO_OBSERVED[event_kind]
+    if event_kind == "kubernetes_observed" and advances_projection:
+        normalized_state = payload.get("normalized_state")
+        observed_states = {
+            "absent": "reserved",
+            "missing": "failed",
+            "pending": "creating",
+            "unschedulable": "creating",
+            "image_pull_backoff": "creating",
+            "running": "running",
+            "succeeded": "finalizing",
+            "failed": "failed",
+            "oom_killed": "failed",
+            "evicted": "failed",
+            "node_lost": "failed",
+            "deadline_exceeded": "failed",
+            "terminating": "delete_pending",
+            "deleted": "deleted",
+        }
+        if not isinstance(normalized_state, str) or normalized_state not in observed_states:
+            raise ServiceExecutionConflict("invalid normalized Kubernetes state")
+        for field in ("job_uid", "pod_uid"):
+            incoming = payload.get(field)
+            current = getattr(lease, field)
+            if incoming is not None and not isinstance(incoming, str):
+                raise ServiceExecutionConflict(f"invalid Kubernetes {field}")
+            if current is not None and incoming is not None and current != incoming:
+                raise ServiceExecutionConflict(f"Kubernetes {field} changed")
+            if incoming is not None:
+                setattr(lease, field, incoming)
+        lease.kubernetes_resource_version = _bounded_optional_text(
+            payload.get("resource_version"), 128, "resource_version"
+        )
+        lease.node_name = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
+        lease.pod_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
+        lease.pod_started_at = _optional_datetime(payload.get("started_at"), "started_at")
+        lease.pod_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
+        lease.last_reconciled_at = observed_at
+        lease.observed_state = observed_states[normalized_state]
+        if normalized_state in {
+            "unschedulable",
+            "missing",
+            "image_pull_backoff",
+            "failed",
+            "oom_killed",
+            "evicted",
+            "node_lost",
+            "deadline_exceeded",
+        }:
+            lease.error_class = (
+                "transient"
+                if normalized_state in {"missing", "unschedulable", "evicted", "node_lost"}
+                else "permanent"
+            )
+            lease.error_code = normalized_state
+            lease.error_message = _bounded_optional_text(payload.get("message"), 2000, "message")
+        else:
+            lease.error_class = None
+            lease.error_code = None
+            lease.error_message = None
+        if normalized_state == "deleted" and lease.desired_state in {
+            "cancel",
+            "timeout",
+            "retry",
+            "delete_pending",
+        }:
+            lease.desired_state = "deleted"
+            lease.deleted_at = observed_at
+            lease.cleanup_state = "complete"
     if event_kind == "finalized" and advances_projection:
         lease.finalized_at = observed_at
         trial = await session.get(Trial, lease.trial_id)
@@ -765,6 +903,60 @@ async def record_execution_event(
     lease.updated_at = datetime.now(UTC)
     await session.flush()
     return event, False
+
+
+async def record_kubernetes_observation(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    generation: int,
+    payload: dict[str, Any],
+    observed_at: datetime,
+) -> tuple[ServiceExecutionEvent, bool]:
+    """Persist one resourceVersion/state observation exactly once."""
+
+    idempotency_key = canonical_digest(
+        {
+            "schema_version": "loom.kubernetes-observation-key.v1",
+            "lease_id": str(lease_id),
+            "generation": generation,
+            "job_uid": payload.get("job_uid"),
+            "pod_uid": payload.get("pod_uid"),
+            "resource_version": payload.get("resource_version"),
+            "normalized_state": payload.get("normalized_state"),
+        },
+        persisted=False,
+    )
+    existing = (
+        await session.execute(
+            select(ServiceExecutionEvent).where(
+                ServiceExecutionEvent.idempotency_key == idempotency_key
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        ordinal = existing.ordinal
+    else:
+        lease = (
+            await session.execute(
+                select(ServiceExecutionLease)
+                .where(ServiceExecutionLease.id == lease_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if lease is None:
+            raise ServiceExecutionConflict("execution lease not found")
+        ordinal = lease.last_event_ordinal + 1
+    return await record_execution_event(
+        session,
+        lease_id=lease_id,
+        generation=generation,
+        ordinal=ordinal,
+        event_kind="kubernetes_observed",
+        payload=payload,
+        observed_at=observed_at,
+        idempotency_key=idempotency_key,
+    )
 
 
 async def refresh_service_execution_metrics(
@@ -809,6 +1001,7 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "trial_id": str(lease.trial_id),
         "attempt": lease.attempt,
         "generation": lease.generation,
+        "resource_generation": lease.resource_generation,
         "execution_class_id": lease.execution_class_id,
         "target_id": lease.target_id,
         "desired_state": lease.desired_state,
@@ -824,7 +1017,21 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "namespace_name": lease.namespace_name,
         "job_name": lease.job_name,
         "execution_unit_key": str(lease.execution_unit_key),
+        "job_uid": lease.job_uid,
+        "pod_uid": lease.pod_uid,
+        "kubernetes_resource_version": lease.kubernetes_resource_version,
+        "node_name": lease.node_name,
         "deadline_at": lease.deadline_at.isoformat(),
+        "pod_scheduled_at": (
+            lease.pod_scheduled_at.isoformat() if lease.pod_scheduled_at else None
+        ),
+        "pod_started_at": lease.pod_started_at.isoformat() if lease.pod_started_at else None,
+        "pod_terminated_at": (
+            lease.pod_terminated_at.isoformat() if lease.pod_terminated_at else None
+        ),
+        "last_reconciled_at": (
+            lease.last_reconciled_at.isoformat() if lease.last_reconciled_at else None
+        ),
         "last_event_ordinal": lease.last_event_ordinal,
         "last_heartbeat_at": (
             lease.last_heartbeat_at.isoformat() if lease.last_heartbeat_at else None
@@ -853,10 +1060,12 @@ __all__ = [
     "ServiceExecutionFenceError",
     "acknowledge_execution_command",
     "claim_execution_commands",
+    "defer_execution_command",
     "enqueue_execution_transition",
     "execution_lease_projection",
     "persist_execution_catalog",
     "record_execution_event",
+    "record_kubernetes_observation",
     "refresh_service_execution_metrics",
     "reserve_trial_execution",
     "set_execution_target_health",

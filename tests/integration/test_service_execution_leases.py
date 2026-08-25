@@ -42,6 +42,14 @@ from loom_control_plane.service_execution import (
     set_execution_target_health,
     verify_trial_execution_fence,
 )
+from loom_execution_actuator.contracts import (
+    KubernetesApiError,
+    KubernetesJobInventory,
+    KubernetesJobObservation,
+    NormalizedJobState,
+)
+from loom_execution_actuator.controller import ExecutionActuator
+from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 
 
@@ -72,6 +80,83 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
         await engine.dispose()
 
 
+class _FakeKubernetesJobApi:
+    def __init__(self, *, ambiguous_create: bool = False) -> None:
+        self.jobs: dict[str, KubernetesJobObservation] = {}
+        self.watch_events: list[KubernetesJobObservation] = []
+        self.create_count = 0
+        self.delete_count = 0
+        self.ambiguous_create = ambiguous_create
+
+    async def get_job(self, *, namespace: str, job_name: str) -> KubernetesJobObservation | None:
+        observation = self.jobs.get(job_name)
+        assert observation is None or observation.namespace == namespace
+        return observation
+
+    async def create_job(
+        self, *, namespace: str, manifest: dict[str, object]
+    ) -> KubernetesJobObservation:
+        metadata = manifest["metadata"]
+        assert isinstance(metadata, dict)
+        labels = metadata["labels"]
+        annotations = metadata["annotations"]
+        assert isinstance(labels, dict) and isinstance(annotations, dict)
+        job_name = str(metadata["name"])
+        self.create_count += 1
+        observation = KubernetesJobObservation(
+            namespace=namespace,
+            job_name=job_name,
+            lease_id=str(labels["loom.openai.com/lease-id"]),
+            resource_generation=int(str(labels["loom.openai.com/generation"])),
+            target_id=str(annotations["loom.openai.com/target-id"]),
+            execution_unit_key=str(annotations["loom.openai.com/execution-unit-key"]),
+            normalized_state=NormalizedJobState.PENDING,
+            job_uid=f"job-uid-{job_name}",
+            resource_version="1",
+        )
+        self.jobs[job_name] = observation
+        if self.ambiguous_create:
+            self.ambiguous_create = False
+            raise KubernetesApiError("response lost", ambiguous=True)
+        return observation
+
+    async def delete_job(
+        self,
+        *,
+        namespace: str,
+        job_name: str,
+        expected_uid: str,
+        grace_period_seconds: int,
+    ) -> None:
+        assert grace_period_seconds >= 0
+        current = self.jobs.get(job_name)
+        if current is None:
+            return
+        assert current.namespace == namespace
+        assert current.job_uid == expected_uid
+        self.delete_count += 1
+        del self.jobs[job_name]
+
+    async def list_jobs(self, *, namespace: str, label_selector: str) -> KubernetesJobInventory:
+        assert label_selector == "app.kubernetes.io/managed-by=loom-execution-actuator"
+        return KubernetesJobInventory(
+            tuple(item for item in self.jobs.values() if item.namespace == namespace)
+        )
+
+    async def watch_jobs(
+        self,
+        *,
+        namespace: str,
+        label_selector: str,
+        resource_version: str | None,
+        timeout_seconds: int,
+    ) -> tuple[KubernetesJobObservation, ...]:
+        del label_selector, resource_version, timeout_seconds
+        events = tuple(item for item in self.watch_events if item.namespace == namespace)
+        self.watch_events.clear()
+        return events
+
+
 def _target(suffix: str) -> ExecutionTargetV1:
     return ExecutionTargetV1(
         target_id=f"nebius-staging-{suffix}",
@@ -82,6 +167,7 @@ def _target(suffix: str) -> ExecutionTargetV1:
         region="eu-north1",
         failure_domain=f"eu-north1-{suffix}",
         data_residency="eu",
+        namespace_name=f"loom-nebius-{suffix}",
         health_role="primary",
         health_check_id=f"nebius-staging-health-{suffix}",
         health_check_interval_seconds=10,
@@ -755,5 +841,162 @@ async def test_operator_projection_is_team_isolated(
         assert len(projection["commands"]) == 1
         assert projection["events"] == []
         assert projection["history"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("ambiguous_create", [False, True], ids=["normal", "lost-response"])
+async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
+    postgres_url: str,
+    ambiguous_create: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi(ambiguous_create=ambiguous_create)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+
+        runtime = ExecutionTargetRuntime(
+            target_id=target.target_id,
+            namespace=target.namespace_name,
+            runtime_class_name="loom-sandbox",
+        )
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=runtime,
+            controller_id="actuator-a",
+            command_lease_seconds=5,
+        )
+        assert await actuator.run_commands_once(now=now) == 1
+        assert kubernetes.create_count == 1
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            create_command = (
+                await session.execute(
+                    select(ServiceExecutionCommand).where(
+                        ServiceExecutionCommand.lease_id == lease.id,
+                        ServiceExecutionCommand.command_type == "create",
+                    )
+                )
+            ).scalar_one()
+            assert persisted is not None
+            assert persisted.job_uid == f"job-uid-{lease.job_name}"
+            assert persisted.observed_state == "creating"
+            assert persisted.last_reconciled_at == now
+            assert create_command.state == "acknowledged"
+
+        restarted = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=runtime,
+            controller_id="actuator-b",
+            command_lease_seconds=5,
+        )
+        assert await restarted.run_commands_once(now=now + timedelta(seconds=1)) == 0
+        assert kubernetes.create_count == 1
+
+        async with sessions() as session:
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                now=now + timedelta(seconds=2),
+            )
+            await session.commit()
+
+        assert await restarted.run_commands_once(now=now + timedelta(seconds=2)) == 1
+        assert kubernetes.delete_count == 1
+        assert kubernetes.jobs == {}
+        assert await restarted.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.desired_state == "deleted"
+            assert persisted.observed_state == "deleted"
+            assert persisted.cleanup_state == "complete"
+            assert persisted.deleted_at == now + timedelta(seconds=3)
+    finally:
+        await engine.dispose()
+
+
+async def test_actuator_refuses_uid_reuse_and_never_deletes_foreign_scope(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        runtime = ExecutionTargetRuntime(
+            target_id=target.target_id,
+            namespace=target.namespace_name,
+            runtime_class_name="loom-sandbox",
+        )
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=runtime,
+            controller_id="actuator-a",
+            command_lease_seconds=5,
+        )
+        assert await actuator.run_commands_once(now=now) == 1
+        original = kubernetes.jobs[lease.job_name]
+        kubernetes.watch_events.append(
+            original.model_copy(update={"lease_id": str(uuid4()), "resource_version": "2"})
+        )
+        assert await actuator.watch_once(timeout_seconds=1) == 0
+        assert actuator._watch_resource_version == "2"
+        kubernetes.jobs[lease.job_name] = original.model_copy(update={"job_uid": "reused-uid"})
+
+        async with sessions() as session:
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
+        assert kubernetes.delete_count == 0
+        async with sessions() as session:
+            cancel = (
+                await session.execute(
+                    select(ServiceExecutionCommand).where(
+                        ServiceExecutionCommand.lease_id == lease.id,
+                        ServiceExecutionCommand.command_type == "cancel",
+                    )
+                )
+            ).scalar_one()
+            assert cancel.state == "dead_letter"
+            assert cancel.last_error_code == "contract_error"
+
+        foreign = KubernetesJobObservation(
+            namespace=target.namespace_name,
+            job_name="foreign-managed-job",
+            lease_id=str(uuid4()),
+            resource_generation=1,
+            target_id=target.target_id,
+            execution_unit_key=str(uuid4()),
+            normalized_state=NormalizedJobState.RUNNING,
+            job_uid="foreign-uid",
+            resource_version="2",
+        )
+        kubernetes.jobs[foreign.job_name] = foreign
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=2)) >= 1
+        assert kubernetes.jobs[foreign.job_name] == foreign
+        assert kubernetes.delete_count == 0
     finally:
         await engine.dispose()

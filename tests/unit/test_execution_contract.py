@@ -70,6 +70,7 @@ def test_provider_binding_lives_on_regional_execution_target() -> None:
         region="eu-north1",
         failure_domain="eu-north1-primary",
         data_residency="eu",
+        namespace_name="loom-nebius-development-test",
         health_role="primary",
         health_check_id="nebius-eu-north1-production",
         health_check_interval_seconds=30,
@@ -99,6 +100,7 @@ def test_topology_requires_environment_isolation_and_two_production_regions() ->
             "target_id": target_id,
             "environment": environment,
             "health_check_id": target_id,
+            "namespace_name": f"loom-{target_id}",
         }
         values.update(updates)
         return values

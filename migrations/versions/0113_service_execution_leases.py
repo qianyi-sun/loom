@@ -90,6 +90,7 @@ def upgrade() -> None:
             REFERENCES data_lifecycle_authorities(id) ON DELETE RESTRICT,
           attempt INTEGER NOT NULL,
           generation BIGINT NOT NULL,
+          resource_generation BIGINT NOT NULL,
           execution_class_id TEXT NOT NULL
             REFERENCES execution_classes(id) ON DELETE RESTRICT,
           target_id TEXT REFERENCES execution_targets(id) ON DELETE RESTRICT,
@@ -104,7 +105,15 @@ def upgrade() -> None:
           namespace_name TEXT NOT NULL,
           job_name TEXT NOT NULL UNIQUE,
           execution_unit_key UUID NOT NULL UNIQUE,
+          job_uid TEXT,
+          pod_uid TEXT,
+          kubernetes_resource_version TEXT,
+          node_name TEXT,
           deadline_at TIMESTAMPTZ NOT NULL,
+          pod_scheduled_at TIMESTAMPTZ,
+          pod_started_at TIMESTAMPTZ,
+          pod_terminated_at TIMESTAMPTZ,
+          last_reconciled_at TIMESTAMPTZ,
           last_heartbeat_at TIMESTAMPTZ,
           last_event_ordinal BIGINT NOT NULL DEFAULT 0,
           revoked_at TIMESTAMPTZ,
@@ -117,6 +126,8 @@ def upgrade() -> None:
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           CONSTRAINT execution_leases_attempt_check CHECK (attempt > 0),
           CONSTRAINT execution_leases_generation_check CHECK (generation > 0),
+          CONSTRAINT execution_leases_resource_generation_check
+            CHECK (resource_generation > 0 AND resource_generation <= generation),
           CONSTRAINT execution_leases_event_ordinal_check CHECK (last_event_ordinal >= 0),
           CONSTRAINT execution_leases_workload_digest_check
             CHECK (workload_requirements_sha256 ~ '^sha256:[0-9a-f]{64}$'),
@@ -141,6 +152,19 @@ def upgrade() -> None:
             CHECK (namespace_name ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'),
           CONSTRAINT execution_leases_job_check
             CHECK (job_name ~ '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'),
+          CONSTRAINT execution_leases_kubernetes_identity_bound_check CHECK (
+            (job_uid IS NULL OR length(job_uid) BETWEEN 1 AND 128)
+            AND (pod_uid IS NULL OR length(pod_uid) BETWEEN 1 AND 128)
+            AND (kubernetes_resource_version IS NULL
+              OR length(kubernetes_resource_version) BETWEEN 1 AND 128)
+            AND (node_name IS NULL OR length(node_name) BETWEEN 1 AND 253)
+          ),
+          CONSTRAINT execution_leases_pod_time_order_check CHECK (
+            (pod_started_at IS NULL OR pod_scheduled_at IS NULL
+              OR pod_started_at >= pod_scheduled_at)
+            AND (pod_terminated_at IS NULL OR pod_started_at IS NULL
+              OR pod_terminated_at >= pod_started_at)
+          ),
           CONSTRAINT execution_leases_error_class_check
             CHECK (error_class IS NULL OR error_class IN ('transient','permanent','policy')),
           CONSTRAINT execution_leases_error_group_check CHECK (
@@ -241,7 +265,7 @@ def upgrade() -> None:
           CONSTRAINT execution_events_ordinal_check CHECK (ordinal BETWEEN 1 AND 10000),
           CONSTRAINT execution_events_kind_check CHECK (
             event_kind IN ('created','started','heartbeat','gateway_call','artifact_committed',
-              'trajectory_committed','usage_reported','result_reported','cancelled',
+              'trajectory_committed','usage_reported','result_reported','kubernetes_observed','cancelled',
               'timed_out','failed','finalized','deleted')
           ),
           CONSTRAINT execution_events_digest_check
@@ -280,12 +304,14 @@ def upgrade() -> None:
         LANGUAGE plpgsql AS $$
         BEGIN
           IF ROW(NEW.request_id, NEW.trial_id, NEW.team_id, NEW.attempt,
+                 NEW.resource_generation,
                  NEW.execution_class_id, NEW.workload_requirements_json,
                  NEW.workload_requirements_sha256, NEW.provider_scope_key,
                  NEW.namespace_name, NEW.job_name, NEW.execution_unit_key,
                  NEW.created_at)
              IS DISTINCT FROM
              ROW(OLD.request_id, OLD.trial_id, OLD.team_id, OLD.attempt,
+                 OLD.resource_generation,
                  OLD.execution_class_id, OLD.workload_requirements_json,
                  OLD.workload_requirements_sha256, OLD.provider_scope_key,
                  OLD.namespace_name, OLD.job_name, OLD.execution_unit_key,
@@ -352,6 +378,9 @@ def upgrade() -> None:
             'cleanup_deadline_at', NEW.cleanup_deadline_at,
             'last_event_ordinal', NEW.last_event_ordinal,
             'target_id', NEW.target_id,
+            'job_uid', NEW.job_uid,
+            'pod_uid', NEW.pod_uid,
+            'kubernetes_resource_version', NEW.kubernetes_resource_version,
             'revoked_at', NEW.revoked_at,
             'finalized_at', NEW.finalized_at,
             'deleted_at', NEW.deleted_at,
@@ -371,7 +400,9 @@ def upgrade() -> None:
         CREATE TRIGGER execution_leases_history_trigger
           AFTER INSERT OR UPDATE OF generation, desired_state, observed_state,
             cleanup_state, cleanup_requested_at, cleanup_deadline_at, target_id,
-            last_event_ordinal, revoked_at, finalized_at, deleted_at,
+            last_event_ordinal, job_uid, pod_uid, kubernetes_resource_version,
+            node_name, pod_scheduled_at, pod_started_at, pod_terminated_at,
+            last_reconciled_at, revoked_at, finalized_at, deleted_at,
             error_class, error_code ON execution_leases
           FOR EACH ROW EXECUTE FUNCTION append_execution_lease_history();
         """

@@ -57,6 +57,11 @@
       "title": "Logical Pool Id",
       "type": "string"
     },
+    "namespace_name": {
+      "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+      "title": "Namespace Name",
+      "type": "string"
+    },
     "provider": {
       "const": "nebius",
       "title": "Provider",
@@ -89,6 +94,7 @@
     "region",
     "failure_domain",
     "data_residency",
+    "namespace_name",
     "health_role",
     "health_check_id",
     "health_check_interval_seconds",

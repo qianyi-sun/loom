@@ -268,6 +268,41 @@ runtime_policy = "conformance"
 rollout_role = "none"
 
 [[components]]
+id = "execution-actuator"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.execution-actuator"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.execution-actuator",
+  "deploy/execution-actuator-requirements.txt",
+  "migrations/**",
+  "src/loom/__init__.py",
+  "src/loom/db/**",
+  "src/loom/execution_contract.py",
+  "src/loom/models/__init__.py",
+  "src/loom/models/healthcheck.py",
+  "src/loom/models/mcp.py",
+  "src/loom/models/networking.py",
+  "src/loom/models/skill.py",
+  "src/loom/models/task.py",
+  "src/loom/models/types.py",
+  "src/loom/pipeline/__init__.py",
+  "src/loom/pipeline/keys.py",
+  "src/loom/startup_retry.py",
+  "src/loom_control_plane/__init__.py",
+  "src/loom_control_plane/metrics.py",
+  "src/loom_control_plane/service_execution.py",
+  "src/loom_execution_actuator/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-execution-actuator"
+runtime_policy = "start"
+rollout_role = "primary"
+
+[[components]]
 id = "egress-xds"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.egress-xds"

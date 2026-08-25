@@ -34,6 +34,7 @@ _PERL_BASE_COMPONENTS = (
     "capacity-manager",
     "control-plane",
     "egress-xds",
+    "execution-actuator",
     "family-orchestrator",
     "llm-gateway",
     "personal-dev-activation-agent",

@@ -3770,6 +3770,10 @@ class ServiceExecutionLease(Base):
         CheckConstraint("attempt > 0", name="execution_leases_attempt_check"),
         CheckConstraint("generation > 0", name="execution_leases_generation_check"),
         CheckConstraint(
+            "resource_generation > 0 AND resource_generation <= generation",
+            name="execution_leases_resource_generation_check",
+        ),
+        CheckConstraint(
             "desired_state IN ('create','start','cancel','timeout','retry','finalize',"
             "'delete_pending','deleted')",
             name="execution_leases_desired_check",
@@ -3785,6 +3789,21 @@ class ServiceExecutionLease(Base):
             "AND cleanup_deadline_at IS NOT NULL "
             "AND cleanup_deadline_at > cleanup_requested_at)",
             name="execution_leases_cleanup_time_check",
+        ),
+        CheckConstraint(
+            "(job_uid IS NULL OR length(job_uid) BETWEEN 1 AND 128) AND "
+            "(pod_uid IS NULL OR length(pod_uid) BETWEEN 1 AND 128) AND "
+            "(kubernetes_resource_version IS NULL OR "
+            "length(kubernetes_resource_version) BETWEEN 1 AND 128) AND "
+            "(node_name IS NULL OR length(node_name) BETWEEN 1 AND 253)",
+            name="execution_leases_kubernetes_identity_bound_check",
+        ),
+        CheckConstraint(
+            "(pod_started_at IS NULL OR pod_scheduled_at IS NULL OR "
+            "pod_started_at >= pod_scheduled_at) AND "
+            "(pod_terminated_at IS NULL OR pod_started_at IS NULL OR "
+            "pod_terminated_at >= pod_started_at)",
+            name="execution_leases_pod_time_order_check",
         ),
         UniqueConstraint("trial_id", "attempt", name="execution_leases_trial_attempt_uidx"),
         Index(
@@ -3818,6 +3837,7 @@ class ServiceExecutionLease(Base):
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    resource_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     execution_class_id: Mapped[str] = mapped_column(
         Text, ForeignKey("execution_classes.id", ondelete="RESTRICT"), nullable=False
     )
@@ -3837,7 +3857,15 @@ class ServiceExecutionLease(Base):
     execution_unit_key: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), nullable=False, unique=True
     )
+    job_uid: Mapped[str | None] = mapped_column(Text)
+    pod_uid: Mapped[str | None] = mapped_column(Text)
+    kubernetes_resource_version: Mapped[str | None] = mapped_column(Text)
+    node_name: Mapped[str | None] = mapped_column(Text)
     deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    pod_scheduled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    pod_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    pod_terminated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     last_event_ordinal: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0"), default=0
