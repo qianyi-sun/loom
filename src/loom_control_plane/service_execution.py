@@ -1,0 +1,864 @@
+"""Durable desired-state and generation fencing for service execution (#1540)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom.db.schema import (
+    ServiceExecutionClass,
+    ServiceExecutionCommand,
+    ServiceExecutionEvent,
+    ServiceExecutionLease,
+    ServiceExecutionTarget,
+    Trial,
+)
+from loom.execution_contract import (
+    ExecutionClassV1,
+    ExecutionTargetV1,
+    WorkloadRequirementsV1,
+)
+from loom.pipeline.keys import canonical_digest, canonical_uuid5
+from loom_control_plane.metrics import (
+    SERVICE_EXECUTION_CLEANUP_DEBT,
+    SERVICE_EXECUTION_COMMAND_BACKLOG,
+    SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL,
+    SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL,
+)
+
+_EXECUTION_UNIT_NAMESPACE = UUID("a2f6a80b-b27c-4ae1-b9a0-8c743edb0fa5")
+_TERMINAL_EVENT_KINDS = frozenset({"cancelled", "timed_out", "failed", "finalized", "deleted"})
+_EVENT_TO_OBSERVED = {
+    "created": "created",
+    "started": "running",
+    "cancelled": "cancelled",
+    "timed_out": "timed_out",
+    "failed": "failed",
+    "finalized": "finalized",
+    "deleted": "deleted",
+}
+_DESIRED_TO_COMMAND = {
+    "create": "create",
+    "start": "start",
+    "cancel": "cancel",
+    "timeout": "timeout",
+    "retry": "retry",
+    "finalize": "finalize",
+    "delete_pending": "delete",
+}
+_REVOCATION_STATES = frozenset({"cancel", "timeout", "retry", "delete_pending"})
+_RESOURCE_RELEASE_DEADLINE = timedelta(minutes=5)
+_ALLOWED_DESIRED_TRANSITIONS = {
+    "create": frozenset({"start", "cancel", "timeout", "retry", "delete_pending"}),
+    "start": frozenset({"finalize", "cancel", "timeout", "retry", "delete_pending"}),
+    "finalize": frozenset({"delete_pending"}),
+    "cancel": frozenset({"delete_pending"}),
+    "timeout": frozenset({"retry", "delete_pending"}),
+    "retry": frozenset({"delete_pending"}),
+    "delete_pending": frozenset(),
+    "deleted": frozenset(),
+}
+_EVENT_ALLOWED_DESIRED = {
+    "created": frozenset({"create", "start"}),
+    "started": frozenset({"start", "finalize"}),
+    "heartbeat": frozenset({"start", "finalize"}),
+    "gateway_call": frozenset({"start", "finalize"}),
+    "artifact_committed": frozenset({"start", "finalize"}),
+    "trajectory_committed": frozenset({"start", "finalize"}),
+    "usage_reported": frozenset({"start", "finalize"}),
+    "result_reported": frozenset({"finalize"}),
+    "cancelled": frozenset({"cancel"}),
+    "timed_out": frozenset({"timeout"}),
+    "failed": frozenset({"create", "start", "finalize"}),
+    "finalized": frozenset({"finalize"}),
+    "deleted": frozenset({"cancel", "timeout", "retry", "delete_pending"}),
+}
+
+
+class ServiceExecutionError(RuntimeError):
+    """Base class for fail-closed execution-state errors."""
+
+
+class ServiceExecutionConflict(ServiceExecutionError):  # noqa: N818 - contract name
+    pass
+
+
+class ServiceExecutionFenceError(ServiceExecutionConflict):
+    pass
+
+
+class CommandState(StrEnum):
+    PENDING = "pending"
+    LEASED = "leased"
+    ACKNOWLEDGED = "acknowledged"
+    DEAD_LETTER = "dead_letter"
+
+
+@dataclass(frozen=True)
+class ExecutionFence:
+    lease_id: UUID
+    generation: int
+    trial_id: UUID
+    attempt: int
+
+
+@dataclass(frozen=True)
+class ClaimedExecutionCommand:
+    id: UUID
+    lease_id: UUID
+    generation: int
+    sequence: int
+    command_type: str
+    idempotency_key: str
+    payload: dict[str, Any]
+    delivery_count: int
+    claim_expires_at: datetime
+
+
+def _command_key(lease_id: UUID, generation: int, command_type: str) -> str:
+    return canonical_digest(
+        {
+            "schema_version": "loom.execution-command-key.v1",
+            "lease_id": str(lease_id),
+            "generation": generation,
+            "command_type": command_type,
+        },
+        persisted=False,
+    )
+
+
+def _event_key(lease_id: UUID, generation: int, ordinal: int, event_kind: str) -> str:
+    return canonical_digest(
+        {
+            "schema_version": "loom.execution-event-key.v1",
+            "lease_id": str(lease_id),
+            "generation": generation,
+            "ordinal": ordinal,
+            "event_kind": event_kind,
+        },
+        persisted=False,
+    )
+
+
+def _execution_identity(
+    *,
+    trial_id: UUID,
+    team_id: UUID,
+    attempt: int,
+    generation: int,
+    environment: str,
+    target_id: str,
+) -> tuple[str, str, str, UUID]:
+    namespace_name = f"loom-{environment}-{team_id.hex[:12]}"
+    job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}"
+    execution_unit_key = canonical_uuid5(
+        _EXECUTION_UNIT_NAMESPACE,
+        {
+            "schema_version": "loom.execution-unit-key.v1",
+            "trial_id": str(trial_id),
+            "attempt": attempt,
+            "generation": generation,
+        },
+    )
+    provider_scope_key = canonical_digest(
+        {
+            "schema_version": "loom.provider-scope-key.v1",
+            "target_id": target_id,
+            "namespace": namespace_name,
+            "execution_unit_key": str(execution_unit_key),
+        },
+        persisted=False,
+    )
+    return provider_scope_key, namespace_name, job_name, execution_unit_key
+
+
+async def persist_execution_catalog(
+    session: AsyncSession,
+    *,
+    execution_class: ExecutionClassV1,
+    targets: tuple[ExecutionTargetV1, ...],
+) -> None:
+    """Persist immutable catalog rows, rejecting same-id semantic drift."""
+
+    class_json = execution_class.model_dump(mode="json")
+    class_digest = canonical_digest(class_json)
+    existing_class = await session.get(ServiceExecutionClass, execution_class.class_id)
+    if existing_class is None:
+        session.add(
+            ServiceExecutionClass(
+                id=execution_class.class_id,
+                schema_version=execution_class.schema_version,
+                spec_json=class_json,
+                spec_sha256=class_digest,
+                enabled=True,
+            )
+        )
+        await session.flush()
+    elif existing_class.spec_sha256 != class_digest or existing_class.spec_json != class_json:
+        raise ServiceExecutionConflict("execution class identity already has different content")
+
+    for target in targets:
+        if target.execution_class_id != execution_class.class_id:
+            raise ServiceExecutionConflict("target binds a different execution class")
+        target_json = target.model_dump(mode="json")
+        target_digest = canonical_digest(target_json)
+        existing_target = await session.get(ServiceExecutionTarget, target.target_id)
+        if existing_target is None:
+            session.add(
+                ServiceExecutionTarget(
+                    id=target.target_id,
+                    logical_pool_id=target.logical_pool_id,
+                    execution_class_id=target.execution_class_id,
+                    schema_version=target.schema_version,
+                    spec_json=target_json,
+                    spec_sha256=target_digest,
+                    environment=target.environment,
+                    provider=target.provider,
+                    region=target.region,
+                    failure_domain=target.failure_domain,
+                    data_residency=target.data_residency,
+                    desired_state="disabled",
+                    observed_state="unknown",
+                    health_status="unknown",
+                )
+            )
+        elif (
+            existing_target.spec_sha256 != target_digest or existing_target.spec_json != target_json
+        ):
+            raise ServiceExecutionConflict(
+                "execution target identity already has different content"
+            )
+    await session.flush()
+
+
+async def set_execution_target_health(
+    session: AsyncSession,
+    *,
+    target_id: str,
+    desired_state: str,
+    observed_state: str,
+    health_status: str,
+    observed_at: datetime,
+    error_code: str | None = None,
+) -> ServiceExecutionTarget:
+    target = (
+        await session.execute(
+            select(ServiceExecutionTarget)
+            .where(ServiceExecutionTarget.id == target_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise ServiceExecutionConflict("execution target not found")
+    target.desired_state = desired_state
+    target.observed_state = observed_state
+    target.health_status = health_status
+    target.health_observed_at = observed_at
+    target.health_error_code = error_code
+    target.updated_at = datetime.now(UTC)
+    await session.flush()
+    return target
+
+
+async def reserve_trial_execution(
+    session: AsyncSession,
+    *,
+    request_id: UUID,
+    trial_id: UUID,
+    execution_class_id: str,
+    target_id: str,
+    requirements: WorkloadRequirementsV1,
+    deadline_at: datetime,
+    now: datetime | None = None,
+) -> ServiceExecutionLease:
+    """Atomically reserve a trial and append its durable create command."""
+
+    current_time = now or datetime.now(UTC)
+    existing = (
+        await session.execute(
+            select(ServiceExecutionLease).where(ServiceExecutionLease.request_id == request_id)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.trial_id != trial_id:
+            raise ServiceExecutionConflict("reservation request_id changed trial identity")
+        return existing
+
+    trial = (
+        await session.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
+    ).scalar_one_or_none()
+    if trial is None:
+        raise ServiceExecutionConflict("trial not found")
+    if trial.state != "queued":
+        raise ServiceExecutionConflict("trial is not reservable")
+    previous_lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.trial_id == trial_id)
+            .order_by(ServiceExecutionLease.attempt.desc())
+            .limit(1)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if previous_lease is not None and previous_lease.cleanup_state != "complete":
+        raise ServiceExecutionConflict("previous execution cleanup is not complete")
+    if deadline_at <= current_time:
+        raise ServiceExecutionConflict("execution deadline must be in the future")
+
+    execution_class = await session.get(ServiceExecutionClass, execution_class_id)
+    target = await session.get(ServiceExecutionTarget, target_id)
+    if execution_class is None or not execution_class.enabled:
+        raise ServiceExecutionConflict("execution class is unavailable")
+    if target is None or target.execution_class_id != execution_class_id:
+        raise ServiceExecutionConflict("execution target is unavailable")
+    if target.desired_state != "active" or target.observed_state != "ready":
+        raise ServiceExecutionConflict("execution target is not ready")
+    if target.health_status != "healthy" or target.health_observed_at is None:
+        raise ServiceExecutionConflict("execution target is not healthy")
+    stale_after = int(target.spec_json["health_stale_after_seconds"])
+    if target.health_observed_at + timedelta(seconds=stale_after) <= current_time:
+        raise ServiceExecutionConflict("execution target health is stale")
+
+    attempt = trial.attempt_count + 1
+    generation = 1
+    lease_id = uuid4()
+    provider_scope, namespace_name, job_name, execution_unit_key = _execution_identity(
+        trial_id=trial.id,
+        team_id=trial.team_id,
+        attempt=attempt,
+        generation=generation,
+        environment=target.environment,
+        target_id=target.id,
+    )
+    requirements_json = requirements.model_dump(mode="json")
+    requirements_digest = canonical_digest(requirements_json)
+    lease = ServiceExecutionLease(
+        id=lease_id,
+        request_id=request_id,
+        trial_id=trial.id,
+        team_id=trial.team_id,
+        lifecycle_authority_id=trial.lifecycle_authority_id,
+        attempt=attempt,
+        generation=generation,
+        execution_class_id=execution_class_id,
+        target_id=target_id,
+        workload_requirements_json=requirements_json,
+        workload_requirements_sha256=requirements_digest,
+        desired_state="create",
+        observed_state="reserved",
+        cleanup_state="not_requested",
+        provider_scope_key=provider_scope,
+        namespace_name=namespace_name,
+        job_name=job_name,
+        execution_unit_key=execution_unit_key,
+        deadline_at=deadline_at,
+    )
+    command_payload = {
+        "schema_version": "loom.execution-command.v1",
+        "lease_id": str(lease_id),
+        "generation": generation,
+        "command_type": "create",
+        "trial_id": str(trial.id),
+        "attempt": attempt,
+        "execution_class_id": execution_class_id,
+        "target_id": target_id,
+        "provider_scope_key": provider_scope,
+        "namespace_name": namespace_name,
+        "job_name": job_name,
+        "execution_unit_key": str(execution_unit_key),
+        "workload_requirements_sha256": requirements_digest,
+        "deadline_at": deadline_at.isoformat(),
+    }
+    command = ServiceExecutionCommand(
+        id=uuid4(),
+        lease_id=lease_id,
+        generation=generation,
+        sequence=1,
+        command_type="create",
+        idempotency_key=_command_key(lease_id, generation, "create"),
+        payload_json=command_payload,
+        payload_sha256=canonical_digest(command_payload),
+        state=CommandState.PENDING,
+        available_at=current_time,
+    )
+    # Flush the lease identity before its FK-bound outbox row.  Both writes
+    # remain in this transaction; the deferred database trigger then proves
+    # that the desired state cannot commit without the matching command.
+    session.add(lease)
+    await session.flush()
+    session.add(command)
+    trial.state = "claimed"
+    trial.attempt_count = attempt
+    trial.claimed_at = current_time
+    trial.pre_start_heartbeat_at = None
+    trial.worker_id = None
+    await session.flush()
+    return lease
+
+
+async def enqueue_execution_transition(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    expected_generation: int,
+    desired_state: str,
+    payload: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> ServiceExecutionCommand:
+    if desired_state not in _DESIRED_TO_COMMAND:
+        raise ServiceExecutionConflict("invalid execution desired state")
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.id == lease_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    if lease.generation != expected_generation:
+        SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL.labels(surface="command").inc()
+        raise ServiceExecutionFenceError("execution generation is stale")
+    if desired_state not in _ALLOWED_DESIRED_TRANSITIONS.get(lease.desired_state, frozenset()):
+        raise ServiceExecutionConflict(
+            f"invalid execution transition {lease.desired_state} -> {desired_state}"
+        )
+
+    command_type = _DESIRED_TO_COMMAND[desired_state]
+    next_generation = (
+        lease.generation + 1 if desired_state in _REVOCATION_STATES else lease.generation
+    )
+    key = _command_key(lease.id, next_generation, command_type)
+    existing = (
+        await session.execute(
+            select(ServiceExecutionCommand).where(ServiceExecutionCommand.idempotency_key == key)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    # Generation and desired state are one atomic intent.  Set desired state
+    # before any query can autoflush a generation change.
+    lease.desired_state = desired_state
+    if desired_state in _REVOCATION_STATES:
+        revoked_at = now or datetime.now(UTC)
+        lease.generation = next_generation
+        lease.revoked_at = revoked_at
+        lease.cleanup_state = "pending"
+        lease.cleanup_requested_at = revoked_at
+        lease.cleanup_deadline_at = revoked_at + _RESOURCE_RELEASE_DEADLINE
+        if desired_state == "retry":
+            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            if trial is None or trial.attempt_count != lease.attempt:
+                raise ServiceExecutionFenceError("retry lost the trial attempt fence")
+            trial.state = "queued"
+            trial.worker_id = None
+            trial.claimed_at = None
+            trial.pre_start_heartbeat_at = None
+            trial.started_at = None
+    sequence = (
+        await session.execute(
+            select(func.coalesce(func.max(ServiceExecutionCommand.sequence), 0)).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+                ServiceExecutionCommand.generation == next_generation,
+            )
+        )
+    ).scalar_one() + 1
+    command_payload = {
+        "schema_version": "loom.execution-command.v1",
+        "lease_id": str(lease.id),
+        "generation": next_generation,
+        "command_type": command_type,
+        "trial_id": str(lease.trial_id),
+        "attempt": lease.attempt,
+        "target_id": lease.target_id,
+        "provider_scope_key": lease.provider_scope_key,
+        "namespace_name": lease.namespace_name,
+        "job_name": lease.job_name,
+        "execution_unit_key": str(lease.execution_unit_key),
+        **(payload or {}),
+    }
+    command = ServiceExecutionCommand(
+        id=uuid4(),
+        lease_id=lease.id,
+        generation=next_generation,
+        sequence=sequence,
+        command_type=command_type,
+        idempotency_key=key,
+        payload_json=command_payload,
+        payload_sha256=canonical_digest(command_payload),
+        state=CommandState.PENDING,
+        available_at=now or datetime.now(UTC),
+    )
+    lease.updated_at = now or datetime.now(UTC)
+    session.add(command)
+    await session.flush()
+    return command
+
+
+async def claim_execution_commands(
+    session: AsyncSession,
+    *,
+    consumer_id: str,
+    limit: int,
+    lease_seconds: int,
+    now: datetime | None = None,
+) -> tuple[ClaimedExecutionCommand, ...]:
+    current_time = now or datetime.now(UTC)
+    if not consumer_id or len(consumer_id) > 120:
+        raise ServiceExecutionConflict("invalid command consumer identity")
+    if limit < 1 or limit > 100 or lease_seconds < 5 or lease_seconds > 300:
+        raise ServiceExecutionConflict("invalid command claim bounds")
+    rows = (
+        (
+            await session.execute(
+                select(ServiceExecutionCommand)
+                .where(
+                    or_(
+                        ServiceExecutionCommand.state == CommandState.PENDING,
+                        (
+                            (ServiceExecutionCommand.state == CommandState.LEASED)
+                            & (ServiceExecutionCommand.claim_expires_at <= current_time)
+                        ),
+                    ),
+                    ServiceExecutionCommand.available_at <= current_time,
+                )
+                .order_by(
+                    ServiceExecutionCommand.available_at,
+                    ServiceExecutionCommand.created_at,
+                    ServiceExecutionCommand.id,
+                )
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    claimed: list[ClaimedExecutionCommand] = []
+    expires_at = current_time + timedelta(seconds=lease_seconds)
+    for row in rows:
+        if row.state == CommandState.LEASED:
+            SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL.labels(command_type=row.command_type).inc()
+        row.state = CommandState.LEASED
+        row.claimed_by = consumer_id
+        row.claim_expires_at = expires_at
+        row.delivery_count += 1
+        row.updated_at = current_time
+        claimed.append(
+            ClaimedExecutionCommand(
+                id=row.id,
+                lease_id=row.lease_id,
+                generation=row.generation,
+                sequence=row.sequence,
+                command_type=row.command_type,
+                idempotency_key=row.idempotency_key,
+                payload=row.payload_json,
+                delivery_count=row.delivery_count,
+                claim_expires_at=expires_at,
+            )
+        )
+    await session.flush()
+    await refresh_service_execution_metrics(session, now=current_time)
+    return tuple(claimed)
+
+
+async def acknowledge_execution_command(
+    session: AsyncSession,
+    *,
+    command_id: UUID,
+    consumer_id: str,
+    acknowledgement: dict[str, Any],
+    now: datetime | None = None,
+) -> ServiceExecutionCommand:
+    row = (
+        await session.execute(
+            select(ServiceExecutionCommand)
+            .where(ServiceExecutionCommand.id == command_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ServiceExecutionConflict("execution command not found")
+    digest = canonical_digest(acknowledgement)
+    if row.state == CommandState.ACKNOWLEDGED:
+        if row.acknowledgement_sha256 != digest:
+            raise ServiceExecutionConflict("command acknowledgement replay changed")
+        return row
+    if row.state != CommandState.LEASED or row.claimed_by != consumer_id:
+        raise ServiceExecutionFenceError("command delivery lease is not authoritative")
+    row.state = CommandState.ACKNOWLEDGED
+    row.claimed_by = None
+    row.claim_expires_at = None
+    row.acknowledged_at = now or datetime.now(UTC)
+    row.acknowledgement_sha256 = digest
+    row.updated_at = now or datetime.now(UTC)
+    await session.flush()
+    return row
+
+
+async def verify_trial_execution_fence(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    lease_id: UUID | None,
+    generation: int | None,
+    surface: str,
+    allow_terminal_event: bool = False,
+    lock: bool = False,
+) -> ExecutionFence | None:
+    """Allow legacy trials without a lease; fail closed once a lease exists."""
+
+    statement = select(ServiceExecutionLease).where(ServiceExecutionLease.trial_id == trial_id)
+    if lease_id is not None:
+        statement = statement.where(ServiceExecutionLease.id == lease_id)
+    else:
+        statement = statement.order_by(ServiceExecutionLease.attempt.desc()).limit(1)
+    if lock:
+        statement = statement.with_for_update()
+    lease = (await session.execute(statement)).scalar_one_or_none()
+    if lease is None:
+        return None
+    valid = (
+        lease_id is not None
+        and generation is not None
+        and lease.id == lease_id
+        and lease.generation == generation
+        and (lease.revoked_at is None or allow_terminal_event)
+        and lease.deleted_at is None
+    )
+    if not valid:
+        SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL.labels(surface=surface).inc()
+        raise ServiceExecutionFenceError("execution lease generation is not authoritative")
+    return ExecutionFence(
+        lease_id=lease.id,
+        generation=lease.generation,
+        trial_id=lease.trial_id,
+        attempt=lease.attempt,
+    )
+
+
+async def record_execution_event(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    generation: int,
+    ordinal: int,
+    event_kind: str,
+    payload: dict[str, Any],
+    observed_at: datetime,
+    idempotency_key: str | None = None,
+) -> tuple[ServiceExecutionEvent, bool]:
+    if event_kind not in {
+        "created",
+        "started",
+        "heartbeat",
+        "gateway_call",
+        "artifact_committed",
+        "trajectory_committed",
+        "usage_reported",
+        "result_reported",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "finalized",
+        "deleted",
+    }:
+        raise ServiceExecutionConflict("invalid execution event kind")
+    if ordinal <= 0 or ordinal > 10_000:
+        raise ServiceExecutionConflict("execution event ordinal must be between 1 and 10000")
+    key = idempotency_key or _event_key(lease_id, generation, ordinal, event_kind)
+    payload_digest = canonical_digest(payload)
+    existing = (
+        await session.execute(
+            select(ServiceExecutionEvent).where(ServiceExecutionEvent.idempotency_key == key)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if (
+            existing.lease_id != lease_id
+            or existing.generation != generation
+            or existing.ordinal != ordinal
+            or existing.event_kind != event_kind
+            or existing.payload_sha256 != payload_digest
+        ):
+            raise ServiceExecutionConflict("execution event replay changed")
+        SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL.labels(command_type="event").inc()
+        return existing, True
+
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.id == lease_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    await verify_trial_execution_fence(
+        session,
+        trial_id=lease.trial_id,
+        lease_id=lease_id,
+        generation=generation,
+        surface=event_kind,
+        allow_terminal_event=event_kind in _TERMINAL_EVENT_KINDS,
+    )
+    if lease.desired_state not in _EVENT_ALLOWED_DESIRED[event_kind]:
+        raise ServiceExecutionConflict(
+            f"execution event {event_kind} is invalid for desired state {lease.desired_state}"
+        )
+    event = ServiceExecutionEvent(
+        id=uuid4(),
+        lease_id=lease_id,
+        generation=generation,
+        ordinal=ordinal,
+        event_kind=event_kind,
+        idempotency_key=key,
+        payload_json=payload,
+        payload_sha256=payload_digest,
+        observed_at=observed_at,
+    )
+    session.add(event)
+    advances_projection = ordinal > lease.last_event_ordinal
+    if advances_projection:
+        lease.last_event_ordinal = ordinal
+    if event_kind == "heartbeat" and advances_projection:
+        lease.last_heartbeat_at = observed_at
+    if event_kind in _EVENT_TO_OBSERVED and advances_projection:
+        lease.observed_state = _EVENT_TO_OBSERVED[event_kind]
+    if event_kind == "finalized" and advances_projection:
+        lease.finalized_at = observed_at
+        trial = await session.get(Trial, lease.trial_id)
+        trial_state = payload.get("trial_state")
+        if trial is None or trial_state not in {"succeeded", "failed", "cancelled"}:
+            raise ServiceExecutionConflict("finalized event lacks a valid trial state")
+        if trial_state == "succeeded" and not isinstance(payload.get("result"), dict):
+            raise ServiceExecutionConflict("successful finalization requires a result")
+        trial.state = trial_state
+        trial.result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+        trial.failure_reason = (
+            payload.get("failure_reason")
+            if isinstance(payload.get("failure_reason"), str)
+            else None
+        )
+        trial.failure_message = (
+            payload.get("failure_message")
+            if isinstance(payload.get("failure_message"), str)
+            else None
+        )
+        trial.finished_at = observed_at
+    elif event_kind == "deleted" and advances_projection:
+        lease.desired_state = "deleted"
+        lease.deleted_at = observed_at
+        lease.cleanup_state = "complete"
+    elif event_kind == "failed" and advances_projection:
+        lease.error_class = str(payload.get("error_class") or "permanent")
+        lease.error_code = str(payload.get("error_code") or "execution_failed")[:120]
+        raw_message = payload.get("error_message")
+        lease.error_message = str(raw_message)[:2000] if raw_message is not None else None
+    lease.updated_at = datetime.now(UTC)
+    await session.flush()
+    return event, False
+
+
+async def refresh_service_execution_metrics(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> None:
+    current_time = now or datetime.now(UTC)
+    pending, cleanup, oldest = (
+        await session.execute(
+            select(
+                func.count(ServiceExecutionCommand.id).filter(
+                    ServiceExecutionCommand.state.in_(["pending", "leased"])
+                ),
+                func.count(func.distinct(ServiceExecutionLease.id)).filter(
+                    ServiceExecutionLease.cleanup_state.in_(["pending", "in_progress", "blocked"])
+                ),
+                func.min(ServiceExecutionCommand.created_at).filter(
+                    ServiceExecutionCommand.state.in_(["pending", "leased"])
+                ),
+            )
+            .select_from(ServiceExecutionLease)
+            .outerjoin(
+                ServiceExecutionCommand,
+                ServiceExecutionCommand.lease_id == ServiceExecutionLease.id,
+            )
+        )
+    ).one()
+    SERVICE_EXECUTION_COMMAND_BACKLOG.set(int(pending or 0))
+    SERVICE_EXECUTION_CLEANUP_DEBT.set(int(cleanup or 0))
+    from loom_control_plane.metrics import SERVICE_EXECUTION_RECONCILE_LAG_SECONDS
+
+    SERVICE_EXECUTION_RECONCILE_LAG_SECONDS.set(
+        max(0.0, (current_time - oldest).total_seconds()) if oldest is not None else 0.0
+    )
+
+
+def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
+    return {
+        "schema_version": "loom.execution-lease-projection.v1",
+        "lease_id": str(lease.id),
+        "trial_id": str(lease.trial_id),
+        "attempt": lease.attempt,
+        "generation": lease.generation,
+        "execution_class_id": lease.execution_class_id,
+        "target_id": lease.target_id,
+        "desired_state": lease.desired_state,
+        "observed_state": lease.observed_state,
+        "cleanup_state": lease.cleanup_state,
+        "cleanup_requested_at": (
+            lease.cleanup_requested_at.isoformat() if lease.cleanup_requested_at else None
+        ),
+        "cleanup_deadline_at": (
+            lease.cleanup_deadline_at.isoformat() if lease.cleanup_deadline_at else None
+        ),
+        "provider_scope_key": lease.provider_scope_key,
+        "namespace_name": lease.namespace_name,
+        "job_name": lease.job_name,
+        "execution_unit_key": str(lease.execution_unit_key),
+        "deadline_at": lease.deadline_at.isoformat(),
+        "last_event_ordinal": lease.last_event_ordinal,
+        "last_heartbeat_at": (
+            lease.last_heartbeat_at.isoformat() if lease.last_heartbeat_at else None
+        ),
+        "revoked_at": lease.revoked_at.isoformat() if lease.revoked_at else None,
+        "finalized_at": lease.finalized_at.isoformat() if lease.finalized_at else None,
+        "deleted_at": lease.deleted_at.isoformat() if lease.deleted_at else None,
+        "error": (
+            {
+                "class": lease.error_class,
+                "code": lease.error_code,
+                "message": lease.error_message,
+            }
+            if lease.error_class is not None
+            else None
+        ),
+        "created_at": lease.created_at.isoformat(),
+        "updated_at": lease.updated_at.isoformat(),
+    }
+
+
+__all__ = [
+    "ClaimedExecutionCommand",
+    "ExecutionFence",
+    "ServiceExecutionConflict",
+    "ServiceExecutionFenceError",
+    "acknowledge_execution_command",
+    "claim_execution_commands",
+    "enqueue_execution_transition",
+    "execution_lease_projection",
+    "persist_execution_catalog",
+    "record_execution_event",
+    "refresh_service_execution_metrics",
+    "reserve_trial_execution",
+    "set_execution_target_health",
+    "verify_trial_execution_fence",
+]

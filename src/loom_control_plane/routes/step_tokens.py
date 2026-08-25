@@ -35,6 +35,10 @@ _MAX_STEP_TOKEN_TTL_SEC = 30_000
 OptionalClaimIdHeader = Annotated[UUID | None, Header(alias="X-Loom-Claim-Id")]
 OptionalLeaseEpochHeader = Annotated[int | None, Header(alias="X-Loom-Lease-Epoch")]
 OptionalLeaseTokenHeader = Annotated[str | None, Header(alias="X-Loom-Lease-Token")]
+OptionalExecutionLeaseIdHeader = Annotated[UUID | None, Header(alias="X-Loom-Execution-Lease-Id")]
+OptionalExecutionGenerationHeader = Annotated[
+    int | None, Header(alias="X-Loom-Execution-Generation")
+]
 
 
 class _IssueStepTokenRequest(BaseModel):
@@ -65,6 +69,8 @@ async def issue_step_token(
     claim_id: OptionalClaimIdHeader = None,
     lease_epoch: OptionalLeaseEpochHeader = None,
     lease_token: OptionalLeaseTokenHeader = None,
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, str]:
     settings = request.app.state.settings
     signing_key = settings.step_jwt_signing_key.get_secret_value()
@@ -121,6 +127,8 @@ async def issue_step_token(
     attempt_execution_spec_digest: str | None = None
     attempt_control_binding_digest: str | None = None
     attempt_execution_authorization_digest: str | None = None
+    service_execution_lease_id: UUID | None = None
+    service_execution_generation: int | None = None
     if payload.trial_id is not None:
         async with request.app.state.session_factory() as session:
             trial_row = (
@@ -130,6 +138,28 @@ async def issue_step_token(
                     ),
                 )
             ).one_or_none()
+            if trial_row is not None:
+                from loom_control_plane.service_execution import (
+                    ServiceExecutionFenceError,
+                    verify_trial_execution_fence,
+                )
+
+                try:
+                    fence = await verify_trial_execution_fence(
+                        session,
+                        trial_id=payload.trial_id,
+                        lease_id=execution_lease_id,
+                        generation=execution_generation,
+                        surface="step_token",
+                    )
+                except ServiceExecutionFenceError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="execution_generation_fenced",
+                    ) from exc
+                if fence is not None:
+                    service_execution_lease_id = fence.lease_id
+                    service_execution_generation = fence.generation
         if trial_row is None:
             raise HTTPException(status_code=404, detail="trial not found")
         subject_team, subject_provider_connection_id = trial_row
@@ -181,14 +211,13 @@ async def issue_step_token(
                 raise HTTPException(status_code=409, detail="execution_attempt_not_dispatchable")
             if payload.step_id != node_key:
                 raise HTTPException(status_code=409, detail="execution_attempt_step_mismatch")
-            if not isinstance(execution_spec, dict) or not isinstance(
-                execution_spec_digest, str
-            ):
+            if not isinstance(execution_spec, dict) or not isinstance(execution_spec_digest, str):
                 raise HTTPException(status_code=409, detail="execution_attempt_spec_unavailable")
             container_node = execution_spec.get("container_node")
-            if not isinstance(container_node, dict) or container_node.get(
-                "network_profile"
-            ) != "gateway":
+            if (
+                not isinstance(container_node, dict)
+                or container_node.get("network_profile") != "gateway"
+            ):
                 raise HTTPException(
                     status_code=409, detail="gateway token forbidden for network none"
                 )
@@ -284,6 +313,8 @@ async def issue_step_token(
         execution_spec_digest=attempt_execution_spec_digest,
         control_binding_snapshot_digest=attempt_control_binding_digest,
         execution_authorization_digest=attempt_execution_authorization_digest,
+        service_execution_lease_id=service_execution_lease_id,
+        service_execution_generation=service_execution_generation,
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=payload.ttl_sec)
     return {

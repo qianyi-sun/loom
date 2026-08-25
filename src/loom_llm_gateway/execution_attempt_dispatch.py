@@ -9,7 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
-from loom.db.schema import ExecutionAttempt, PipelineRun, PipelineStageRun
+from loom.db.schema import (
+    ExecutionAttempt,
+    PipelineRun,
+    PipelineStageRun,
+    ServiceExecutionLease,
+    Trial,
+)
 
 
 def _control_binding_digest(execution_spec: dict[str, object] | None) -> str | None:
@@ -90,4 +96,46 @@ async def authorize_execution_attempt_dispatch(
         raise HTTPException(status_code=403, detail="execution attempt dispatch forbidden")
 
 
-__all__ = ["authorize_execution_attempt_dispatch"]
+async def authorize_trial_execution_dispatch(
+    session: AsyncSession,
+    ctx: AuthContext,
+    *,
+    lock: bool = False,
+) -> None:
+    """Re-check a service trial JWT against the current live lease generation."""
+
+    if ctx.trial_id is None:
+        return
+    statement = (
+        select(ServiceExecutionLease, Trial)
+        .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+        .where(ServiceExecutionLease.trial_id == ctx.trial_id)
+        .order_by(ServiceExecutionLease.attempt.desc())
+        .limit(1)
+    )
+    if lock:
+        statement = statement.with_for_update(of=(ServiceExecutionLease, Trial))
+    row = (await session.execute(statement)).one_or_none()
+    if row is None:
+        if ctx.service_execution_lease_id is None and ctx.service_execution_generation is None:
+            return
+        raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
+    lease, trial = row
+    authorized = (
+        ctx.service_execution_lease_id is not None
+        and ctx.service_execution_generation is not None
+        and lease.id == ctx.service_execution_lease_id
+        and lease.generation == ctx.service_execution_generation
+        and lease.team_id == ctx.team_id
+        and lease.attempt == trial.attempt_count
+        and lease.revoked_at is None
+        and lease.deleted_at is None
+        and lease.desired_state in {"create", "start", "finalize"}
+        and lease.observed_state in {"created", "running", "finalizing"}
+        and trial.state in {"claimed", "running"}
+    )
+    if not authorized:
+        raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
+
+
+__all__ = ["authorize_execution_attempt_dispatch", "authorize_trial_execution_dispatch"]

@@ -25,6 +25,11 @@ from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
 )
+from loom_control_plane.routes.execution_fence import (
+    OptionalExecutionGenerationHeader,
+    OptionalExecutionLeaseIdHeader,
+    enforce_trial_execution_fence,
+)
 
 router = APIRouter()
 
@@ -96,9 +101,7 @@ def _exact_sha256(content_hash: str) -> str:
     prefix = "sha256:"
     digest = content_hash.removeprefix(prefix)
     if not content_hash.startswith(prefix) or len(digest) != 64:
-        raise TrajectoryLifecycleEvidenceError(
-            "artifact object requires an exact SHA-256"
-        )
+        raise TrajectoryLifecycleEvidenceError("artifact object requires an exact SHA-256")
     if any(ch not in "0123456789abcdef" for ch in digest):
         raise TrajectoryLifecycleEvidenceError(
             "artifact object SHA-256 must be lowercase hexadecimal"
@@ -227,8 +230,7 @@ def _artifact_storage_from_item(
         "bucket": bucket if isinstance(bucket, str) and bucket else default_bucket,
         "key": key,
         "media_type": (
-            media_type if isinstance(media_type, str) and media_type
-            else "application/octet-stream"
+            media_type if isinstance(media_type, str) and media_type else "application/octet-stream"
         ),
         "size_bytes": size_bytes,
         "version_id": _required_object_version_id(
@@ -379,31 +381,33 @@ def _artifact_descriptors_from_index(
             status = _share_status(item.get("share_status"), "pending_scan")
             safety_state, redaction_state = _policy_from_share_status(status)
             blocked_reason = item.get("blocked_reason")
-            descriptors.append(_artifact_descriptor_base(
-                trial,
-                batch,
-                artifact_type=_artifact_type_from_item(item),
-                name=str(item.get("name") or _artifact_filename(storage["key"])),
-                content_hash=_content_hash(item.get("content_hash")),
-                storage=storage,
-                share_status=status,
-                safety_state=safety_state,
-                redaction_state=redaction_state,
-                blocked_reason=(
-                    blocked_reason
-                    if isinstance(blocked_reason, str) and blocked_reason
-                    else None
-                ),
-                retention_class=(
-                    "owner_only_debug"
-                    if safety_state == "unsafe" or status == "blocked"
-                    else "shared_reusable"
-                ),
-                metadata={
-                    "legacy_role": item.get("role") or item.get("artifact_role"),
-                    "step_name": item.get("step_name"),
-                },
-            ))
+            descriptors.append(
+                _artifact_descriptor_base(
+                    trial,
+                    batch,
+                    artifact_type=_artifact_type_from_item(item),
+                    name=str(item.get("name") or _artifact_filename(storage["key"])),
+                    content_hash=_content_hash(item.get("content_hash")),
+                    storage=storage,
+                    share_status=status,
+                    safety_state=safety_state,
+                    redaction_state=redaction_state,
+                    blocked_reason=(
+                        blocked_reason
+                        if isinstance(blocked_reason, str) and blocked_reason
+                        else None
+                    ),
+                    retention_class=(
+                        "owner_only_debug"
+                        if safety_state == "unsafe" or status == "blocked"
+                        else "shared_reusable"
+                    ),
+                    metadata={
+                        "legacy_role": item.get("role") or item.get("artifact_role"),
+                        "step_name": item.get("step_name"),
+                    },
+                )
+            )
     return descriptors
 
 
@@ -441,13 +445,10 @@ def _lineage_parent_specs(
         relation = item.get("relation")
         if not isinstance(relation, str) or not relation:
             kind = item.get("kind")
-            relation = (
-                "reused_as_input"
-                if kind == "reused_artifact"
-                else "produced_from"
-            )
+            relation = "reused_as_input" if kind == "reused_artifact" else "produced_from"
         metadata = {
-            key: value for key, value in {
+            key: value
+            for key, value in {
                 "kind": item.get("kind"),
                 "source_batch_id": item.get("source_batch_id"),
                 "source_trial_id": item.get("source_trial_id"),
@@ -481,19 +482,27 @@ async def _sync_artifact_lineage_edges(
     if not parent_specs:
         return
     parent_ids = [parent_id for parent_id, _relation, _metadata in parent_specs]
-    existing_parent_ids = set((await session.execute(
-        select(Artifact.id).where(Artifact.id.in_(parent_ids)),
-    )).scalars().all())
+    existing_parent_ids = set(
+        (
+            await session.execute(
+                select(Artifact.id).where(Artifact.id.in_(parent_ids)),
+            )
+        )
+        .scalars()
+        .all()
+    )
     for child_id in child_ids:
         for parent_id, relation, metadata in parent_specs:
             if parent_id not in existing_parent_ids:
                 continue
-            session.add(ArtifactLineageEdge(
-                child_artifact_id=child_id,
-                parent_artifact_id=parent_id,
-                relation=relation,
-                edge_metadata=metadata,
-            ))
+            session.add(
+                ArtifactLineageEdge(
+                    child_artifact_id=child_id,
+                    parent_artifact_id=parent_id,
+                    relation=relation,
+                    edge_metadata=metadata,
+                )
+            )
 
 
 async def _sync_typed_artifacts_from_index(
@@ -504,9 +513,11 @@ async def _sync_typed_artifacts_from_index(
     artifacts_bucket: str = "artifacts",
     trajectories_bucket: str = "trajectories",
 ) -> None:
-    trial = (await session.execute(
-        select(TrialRow).where(TrialRow.id == trial_id),
-    )).scalar_one_or_none()
+    trial = (
+        await session.execute(
+            select(TrialRow).where(TrialRow.id == trial_id),
+        )
+    ).scalar_one_or_none()
     if trial is None:
         return
     await bind_existing_trial_lifecycle_authority(
@@ -516,9 +527,11 @@ async def _sync_typed_artifacts_from_index(
     )
     batch: Batch | None = None
     if trial.batch_id is not None:
-        batch = (await session.execute(
-            select(Batch).where(Batch.id == trial.batch_id),
-        )).scalar_one_or_none()
+        batch = (
+            await session.execute(
+                select(Batch).where(Batch.id == trial.batch_id),
+            )
+        ).scalar_one_or_none()
 
     descriptors = _artifact_descriptors_from_index(
         trial,
@@ -530,11 +543,17 @@ async def _sync_typed_artifacts_from_index(
     if not descriptors:
         return
 
-    existing = list((await session.execute(
-        select(Artifact)
-        .where(Artifact.trial_id == trial.id)
-        .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
-    )).scalars().all())
+    existing = list(
+        (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.trial_id == trial.id)
+                .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
     existing_by_key = {
         (artifact.artifact_type, _artifact_storage_key(artifact)): artifact
         for artifact in existing
@@ -590,9 +609,7 @@ async def _sync_typed_artifacts_from_index(
             or isinstance(size_bytes, bool)
             or size_bytes < 0
         ):
-            raise TrajectoryLifecycleEvidenceError(
-                "artifact object identity is incomplete"
-            )
+            raise TrajectoryLifecycleEvidenceError("artifact object identity is incomplete")
         await register_lifecycle_object(
             session,
             authority_id=lifecycle_authority_id,
@@ -620,6 +637,8 @@ async def patch_trajectory_index(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
@@ -630,21 +649,37 @@ async def patch_trajectory_index(
         worker_id = UUID(payload["worker_id"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"worker_id required: {exc}",
+            status_code=400,
+            detail=f"worker_id required: {exc}",
         ) from exc
     result_payload = payload.get("result")
-    index_payload = {
-        k: v for k, v in payload.items()
-        if k not in {"worker_id", "result"}
-    }
+    index_payload = {k: v for k, v in payload.items() if k not in {"worker_id", "result"}}
 
     async with request.app.state.session_factory() as session:
-        row = (await session.execute(_INDEX_PATCH, {
-            "trial_id": trial_id, "worker_id": worker_id,
-            "index_payload": index_payload,
-            "result_payload": result_payload,
-            "has_result": result_payload is not None,
-        })).mappings().one_or_none()
+        await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="artifact",
+            lock=True,
+        )
+        row = (
+            (
+                await session.execute(
+                    _INDEX_PATCH,
+                    {
+                        "trial_id": trial_id,
+                        "worker_id": worker_id,
+                        "index_payload": index_payload,
+                        "result_payload": result_payload,
+                        "has_result": result_payload is not None,
+                    },
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
         if row is not None:
             try:
                 await _sync_typed_artifacts_from_index(
@@ -652,9 +687,7 @@ async def patch_trajectory_index(
                     trial_id=trial_id,
                     index_payload=index_payload,
                     artifacts_bucket=request.app.state.settings.artifacts_bucket,
-                    trajectories_bucket=(
-                        request.app.state.settings.trajectories_bucket
-                    ),
+                    trajectories_bucket=(request.app.state.settings.trajectories_bucket),
                 )
             except TrajectoryLifecycleEvidenceError as exc:
                 raise HTTPException(
@@ -681,14 +714,17 @@ async def get_trajectory_url(
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     async with request.app.state.session_factory() as session:
-        row = (await session.execute(
-            select(TrialRow).where(TrialRow.id == trial_id),
-        )).scalar_one_or_none()
+        row = (
+            await session.execute(
+                select(TrialRow).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
     if row is None or not row.trajectory_index:
         raise HTTPException(status_code=404, detail="no trajectory recorded")
     if ctx.team_id is not None and row.team_id != ctx.team_id:
         raise HTTPException(
-            status_code=403, detail="trajectory belongs to another team",
+            status_code=403,
+            detail="trajectory belongs to another team",
         )
 
     settings = request.app.state.settings
@@ -726,6 +762,8 @@ async def append_events(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
     """Append a batch of typed trajectory events to `trial_events`.
 
@@ -767,13 +805,15 @@ async def append_events(
         worker_id = UUID(payload["worker_id"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"worker_id required: {exc}",
+            status_code=400,
+            detail=f"worker_id required: {exc}",
         ) from exc
 
     events = payload.get("events")
     if not isinstance(events, list) or not events:
         raise HTTPException(
-            status_code=400, detail="events must be a non-empty list",
+            status_code=400,
+            detail="events must be a non-empty list",
         )
     if len(events) > _MAX_BATCH:
         raise HTTPException(
@@ -828,32 +868,42 @@ async def append_events(
         if len(repr(evt_payload)) > _MAX_PAYLOAD_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=(
-                    f"events[{i}].payload exceeds "
-                    f"{_MAX_PAYLOAD_BYTES} bytes"
-                ),
+                detail=(f"events[{i}].payload exceeds {_MAX_PAYLOAD_BYTES} bytes"),
             )
-        rows.append({
-            "trial_id": trial_id,
-            "seq": seq,
-            "kind": kind,
-            "source": source,
-            "schema_version": schema_version,
-            "payload": evt_payload,
-        })
+        rows.append(
+            {
+                "trial_id": trial_id,
+                "seq": seq,
+                "kind": kind,
+                "source": source,
+                "schema_version": schema_version,
+                "payload": evt_payload,
+            }
+        )
 
     # Fence check: refuse the whole batch if the trial's current
     # worker_id doesn't match. Worker reclaim nulls worker_id, so a
     # reclaim mid-batch surfaces here as a 409.
     async with request.app.state.session_factory() as session:
-        owner_row = (await session.execute(
-            select(TrialRow.worker_id).where(TrialRow.id == trial_id),
-        )).one_or_none()
+        await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="trajectory",
+            lock=True,
+        )
+        owner_row = (
+            await session.execute(
+                select(TrialRow.worker_id).where(TrialRow.id == trial_id),
+            )
+        ).one_or_none()
         if owner_row is None:
             raise HTTPException(status_code=404, detail="trial not found")
         if owner_row[0] != worker_id:
             raise HTTPException(
-                status_code=409, detail="worker lost claim",
+                status_code=409,
+                detail="worker lost claim",
             )
 
         lifecycle_authority_id = await ensure_trial_event_lifecycle_authority(

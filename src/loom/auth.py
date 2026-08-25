@@ -100,6 +100,8 @@ class AuthContext:
     execution_spec_digest: str | None = None
     control_binding_snapshot_digest: str | None = None
     execution_authorization_digest: str | None = None
+    service_execution_lease_id: UUID | None = None
+    service_execution_generation: int | None = None
     # Browser-session principal fields (#326). They stay None for
     # bearer/worker/step auth so the existing token path remains stable.
     user_id: UUID | None = None
@@ -147,6 +149,8 @@ def mint_step_jwt(
     execution_spec_digest: str | None = None,
     control_binding_snapshot_digest: str | None = None,
     execution_authorization_digest: str | None = None,
+    service_execution_lease_id: UUID | None = None,
+    service_execution_generation: int | None = None,
 ) -> str:
     """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`
     and optionally `provider_connection_id` (cluster-deploy.md /
@@ -177,8 +181,17 @@ def mint_step_jwt(
     if trial_id is not None:
         payload["trial_id"] = str(trial_id)
         payload["subject_kind"] = "trial"
+        if (service_execution_lease_id is None) != (service_execution_generation is None):
+            raise ValueError("service execution JWT authority must be complete")
+        if service_execution_lease_id is not None:
+            if service_execution_generation is None or service_execution_generation <= 0:
+                raise ValueError("service execution generation must be positive")
+            payload["service_execution_lease_id"] = str(service_execution_lease_id)
+            payload["service_execution_generation"] = service_execution_generation
     else:
         assert execution_attempt_id is not None
+        if service_execution_lease_id is not None or service_execution_generation is not None:
+            raise ValueError("service execution authority is only valid for trial JWTs")
         payload["execution_attempt_id"] = str(execution_attempt_id)
         payload["subject_kind"] = "execution_attempt"
         if step_jwt_id is not None:
@@ -230,6 +243,21 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
             or execution_attempt_lease_epoch <= 0
         ):
             raise ValueError("invalid execution attempt lease epoch")
+        raw_service_lease_id = payload.get("service_execution_lease_id")
+        service_execution_lease_id = (
+            UUID(raw_service_lease_id) if isinstance(raw_service_lease_id, str) else None
+        )
+        service_execution_generation = payload.get("service_execution_generation")
+        if (service_execution_lease_id is None) != (service_execution_generation is None):
+            raise ValueError("incomplete service execution JWT authority")
+        if service_execution_generation is not None and (
+            not isinstance(service_execution_generation, int)
+            or isinstance(service_execution_generation, bool)
+            or service_execution_generation <= 0
+        ):
+            raise ValueError("invalid service execution generation")
+        if raw_trial_id is None and service_execution_lease_id is not None:
+            raise ValueError("service execution authority requires a trial subject")
     except (TypeError, ValueError) as exc:
         raise jwt.InvalidTokenError("invalid execution-attempt JWT authority") from exc
     return AuthContext(
@@ -240,9 +268,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
         trial_id=UUID(raw_trial_id) if isinstance(raw_trial_id, str) else None,
         execution_attempt_id=(
-            UUID(raw_execution_attempt_id)
-            if isinstance(raw_execution_attempt_id, str)
-            else None
+            UUID(raw_execution_attempt_id) if isinstance(raw_execution_attempt_id, str) else None
         ),
         step_id=payload["step_id"],
         provider_connection_id=provider_connection_id,
@@ -264,6 +290,8 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
             if isinstance(payload.get("execution_authorization_digest"), str)
             else None
         ),
+        service_execution_lease_id=service_execution_lease_id,
+        service_execution_generation=service_execution_generation,
     )
 
 

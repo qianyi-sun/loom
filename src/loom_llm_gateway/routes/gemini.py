@@ -17,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from loom.auth import verify_bearer_token
 from loom.models.types import ModelSpec
 from loom_llm_gateway.dialect import DIALECTS
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -52,6 +53,8 @@ async def gemini_generate_content(
             authorization,
             signing_key=signing_key,
         )
+        if ctx is not None:
+            await authorize_trial_execution_dispatch(session, ctx)
     if ctx is None or "llm:call" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized")
     if ctx.trial_id is None or ctx.step_id is None or ctx.team_id is None:

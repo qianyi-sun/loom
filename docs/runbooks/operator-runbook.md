@@ -184,6 +184,40 @@ restore database and object objects coherently, reapply runtime secrets, run
 the current migration Job, and pass health plus representative trial checks
 before traffic resumes.
 
+### Service execution recovery and retention
+
+The `0113` service-execution tables are part of the ordinary PostgreSQL backup;
+never export or restore them separately from `trials`, lifecycle authorities,
+artifacts, and usage rows. Before a release or recovery, record counts grouped
+by execution target, desired state, observed state, cleanup state, and command
+state. Do not include trial or lease IDs in shared logs.
+
+After restore and before resuming submissions:
+
+1. migrate the restored database to the current schema and confirm it is at
+   Alembic head;
+2. keep every execution target disabled until its independent health probe is
+   fresh;
+3. compare each nonterminal lease with its command outbox and provider
+   inventory by deterministic provider-scope, namespace, Job, and execution
+   unit keys;
+4. redeliver pending or expired command claims with their original
+   idempotency keys; never synthesize a new lease or generation to hide an
+   ambiguous provider action;
+5. quarantine unknown provider objects and mark missing expected objects as a
+   reconciliation error; do not adopt either by name;
+6. require revoked generations to fail Gateway, heartbeat, artifact,
+   trajectory, usage, and result writes before enabling any target.
+
+Retention runs only through the lifecycle GC inventory/approval path after
+object deletion has been verified. Its metadata delete order is
+`execution_leases` first (database cascades command, event, and history rows),
+then resource usage, trial events, LLM calls, artifacts, Trials, and Batches.
+Never delete command/event/history rows independently, and never downgrade
+`0113` while any execution class, target, or lease exists. A failed provider
+cleanup remains `pending`, `in_progress`, or `blocked`; it is operational debt,
+not permission to purge its authority record.
+
 ## Production release
 
 Production is promoted from a pinned `dev` candidate; it is not deployed from

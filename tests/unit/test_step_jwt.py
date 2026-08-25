@@ -21,8 +21,11 @@ def test_round_trip() -> None:
     team = uuid4()
     trial = uuid4()
     token = mint_step_jwt(
-        team_id=team, trial_id=trial, step_id="main",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=team,
+        trial_id=trial,
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
     )
     assert token.startswith("loom_step_")
     ctx = verify_step_jwt(token, signing_key=_KEY)
@@ -36,8 +39,11 @@ def test_round_trip() -> None:
 
 def test_expired_rejected() -> None:
     token = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="main",
-        ttl_sec=-1, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=-1,
+        signing_key=_KEY,
     )
     with pytest.raises(jwt.ExpiredSignatureError):
         verify_step_jwt(token, signing_key=_KEY)
@@ -45,8 +51,11 @@ def test_expired_rejected() -> None:
 
 def test_bad_signature_rejected() -> None:
     token = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="main",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
     )
     with pytest.raises(jwt.InvalidSignatureError):
         verify_step_jwt(token, signing_key="y" * 32)
@@ -61,15 +70,18 @@ def test_authcontext_backwards_compat_fields_present() -> None:
     """The existing token_hash/type/scopes/team_id/expires_at fields MUST
     remain on AuthContext so Plans 17-20 (service layer) keep working."""
     token = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="main",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
     # New optional fields
     assert ctx.trial_id is not None
     assert ctx.step_id is not None
     # Existing fields still present
-    assert ctx.token_hash == b""   # synthetic for JWT branch — no DB row
+    assert ctx.token_hash == b""  # synthetic for JWT branch — no DB row
     assert isinstance(ctx.scopes, list)
     assert ctx.expires_at is not None
 
@@ -82,8 +94,11 @@ def test_authcontext_backwards_compat_fields_present() -> None:
 def test_mint_without_provider_connection_id_omits_claim() -> None:
     """Default mint stays compatible with the legacy unbound JWT shape."""
     token = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="main",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
     assert ctx.provider_connection_id is None
@@ -116,8 +131,11 @@ def test_mint_with_provider_connection_id_roundtrips() -> None:
     """Issue #72: connection_id passed at mint surfaces on verify."""
     conn = uuid4()
     token = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="main",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
         provider_connection_id=conn,
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
@@ -131,8 +149,11 @@ def test_mint_with_provider_connection_id_does_not_affect_other_claims() -> None
     trial_id = uuid4()
     conn = uuid4()
     token = mint_step_jwt(
-        team_id=team_id, trial_id=trial_id, step_id="step-1",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=team_id,
+        trial_id=trial_id,
+        step_id="step-1",
+        ttl_sec=60,
+        signing_key=_KEY,
         provider_connection_id=conn,
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
@@ -146,8 +167,11 @@ def test_mint_with_provider_connection_id_does_not_affect_other_claims() -> None
 def test_explicit_none_provider_connection_id_equivalent_to_omitted() -> None:
     """Passing None explicitly stays equivalent to omitting the kwarg."""
     a = mint_step_jwt(
-        team_id=uuid4(), trial_id=uuid4(), step_id="s",
-        ttl_sec=60, signing_key=_KEY,
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="s",
+        ttl_sec=60,
+        signing_key=_KEY,
         provider_connection_id=None,
     )
     ctx = verify_step_jwt(a, signing_key=_KEY)
@@ -216,3 +240,54 @@ def test_execution_attempt_dispatch_authority_round_trips() -> None:
     assert ctx.control_binding_snapshot_digest == binding_digest
     assert ctx.execution_authorization_digest == authorization_digest
     assert ctx.provider_connection_id_bound is True
+
+
+def test_service_execution_authority_round_trips_for_trial_jwt() -> None:
+    lease_id = uuid4()
+    token = mint_step_jwt(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        step_id="main",
+        ttl_sec=60,
+        signing_key=_KEY,
+        service_execution_lease_id=lease_id,
+        service_execution_generation=7,
+    )
+
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+
+    assert ctx.service_execution_lease_id == lease_id
+    assert ctx.service_execution_generation == 7
+
+
+@pytest.mark.parametrize(
+    ("lease_id", "generation"),
+    [(uuid4(), None), (None, 1), (uuid4(), 0)],
+)
+def test_service_execution_authority_must_be_complete_and_positive(
+    lease_id,  # type: ignore[no-untyped-def]
+    generation,  # type: ignore[no-untyped-def]
+) -> None:
+    with pytest.raises(ValueError, match="service execution"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="main",
+            ttl_sec=60,
+            signing_key=_KEY,
+            service_execution_lease_id=lease_id,
+            service_execution_generation=generation,
+        )
+
+
+def test_service_execution_authority_cannot_be_attached_to_attempt_jwt() -> None:
+    with pytest.raises(ValueError, match="only valid for trial"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            execution_attempt_id=uuid4(),
+            step_id="stage",
+            ttl_sec=60,
+            signing_key=_KEY,
+            service_execution_lease_id=uuid4(),
+            service_execution_generation=1,
+        )

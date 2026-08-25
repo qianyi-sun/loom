@@ -2135,12 +2135,8 @@ class TaskImageBuildGrant(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
     bound_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    released_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True
-    )
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=True
-    )
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
 class TaskImageBuildGrantEvent(Base):
@@ -2285,9 +2281,7 @@ class TaskImagePublicationEvidence(Base):
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    materialization_attempt_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), nullable=False
-    )
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -3682,6 +3676,309 @@ class Trial(Base):
         ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
+    )
+
+
+class ServiceExecutionClass(Base):
+    """Immutable provider-neutral service execution capability snapshot."""
+
+    __tablename__ = "execution_classes"
+    __table_args__ = (
+        CheckConstraint(
+            "id ~ '^[a-z0-9][a-z0-9-]{0,79}$'",
+            name="execution_classes_id_check",
+        ),
+        CheckConstraint(
+            "schema_version = 'loom.execution-class.v1'",
+            name="execution_classes_schema_check",
+        ),
+        CheckConstraint(
+            "spec_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="execution_classes_digest_check",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    spec_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class ServiceExecutionTarget(Base):
+    """Provider-bound desired and observed regional execution target."""
+
+    __tablename__ = "execution_targets"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version = 'loom.execution-target.v1'",
+            name="execution_targets_schema_check",
+        ),
+        CheckConstraint(
+            "desired_state IN ('disabled','active','draining','retired')",
+            name="execution_targets_desired_check",
+        ),
+        CheckConstraint(
+            "health_status IN ('unknown','healthy','unhealthy','stale')",
+            name="execution_targets_health_check",
+        ),
+        Index(
+            "execution_targets_placement_idx",
+            "environment",
+            "desired_state",
+            "health_status",
+            "region",
+            "id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    logical_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_class_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_classes.id", ondelete="RESTRICT"), nullable=False
+    )
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    spec_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_domain: Mapped[str] = mapped_column(Text, nullable=False)
+    data_residency: Mapped[str] = mapped_column(Text, nullable=False)
+    desired_state: Mapped[str] = mapped_column(Text, nullable=False, default="disabled")
+    observed_state: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    health_status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    health_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    health_error_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ServiceExecutionLease(Base):
+    """One immutable identity and current authority generation per trial attempt."""
+
+    __tablename__ = "execution_leases"
+    __table_args__ = (
+        CheckConstraint("attempt > 0", name="execution_leases_attempt_check"),
+        CheckConstraint("generation > 0", name="execution_leases_generation_check"),
+        CheckConstraint(
+            "desired_state IN ('create','start','cancel','timeout','retry','finalize',"
+            "'delete_pending','deleted')",
+            name="execution_leases_desired_check",
+        ),
+        CheckConstraint(
+            "cleanup_state IN ('not_requested','pending','in_progress','complete','blocked')",
+            name="execution_leases_cleanup_check",
+        ),
+        CheckConstraint(
+            "(cleanup_state = 'not_requested' AND cleanup_requested_at IS NULL "
+            "AND cleanup_deadline_at IS NULL) OR "
+            "(cleanup_state <> 'not_requested' AND cleanup_requested_at IS NOT NULL "
+            "AND cleanup_deadline_at IS NOT NULL "
+            "AND cleanup_deadline_at > cleanup_requested_at)",
+            name="execution_leases_cleanup_time_check",
+        ),
+        UniqueConstraint("trial_id", "attempt", name="execution_leases_trial_attempt_uidx"),
+        Index(
+            "execution_leases_trial_authoritative_uidx",
+            "trial_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        Index("execution_leases_team_created_idx", "team_id", "created_at", "id"),
+        Index(
+            "execution_leases_reconcile_idx",
+            "desired_state",
+            "observed_state",
+            "updated_at",
+            "id",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, unique=True)
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="RESTRICT"), nullable=False
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_class_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_classes.id", ondelete="RESTRICT"), nullable=False
+    )
+    target_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT")
+    )
+    workload_requirements_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    workload_requirements_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    desired_state: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_state: Mapped[str] = mapped_column(Text, nullable=False)
+    cleanup_state: Mapped[str] = mapped_column(Text, nullable=False)
+    cleanup_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cleanup_deadline_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    provider_scope_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    namespace_name: Mapped[str] = mapped_column(Text, nullable=False)
+    job_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    execution_unit_key: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), nullable=False, unique=True
+    )
+    deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_event_ordinal: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0"), default=0
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finalized_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    error_class: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ServiceExecutionCommand(Base):
+    """At-least-once durable actuator command."""
+
+    __tablename__ = "execution_commands"
+    __table_args__ = (
+        CheckConstraint("generation > 0", name="execution_commands_generation_check"),
+        CheckConstraint("sequence > 0", name="execution_commands_sequence_check"),
+        UniqueConstraint(
+            "lease_id",
+            "generation",
+            "sequence",
+            name="execution_commands_lease_generation_sequence_uidx",
+        ),
+        Index(
+            "execution_commands_delivery_idx",
+            "state",
+            "available_at",
+            "created_at",
+            "id",
+            postgresql_where=text("state IN ('pending','leased')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    command_type: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    delivery_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    acknowledgement_sha256: Mapped[str | None] = mapped_column(Text)
+    last_error_code: Mapped[str | None] = mapped_column(Text)
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ServiceExecutionEvent(Base):
+    """Bounded replay-safe observation from one execution generation."""
+
+    __tablename__ = "execution_events"
+    __table_args__ = (
+        CheckConstraint(
+            "ordinal BETWEEN 1 AND 10000",
+            name="execution_events_ordinal_check",
+        ),
+        UniqueConstraint(
+            "lease_id",
+            "generation",
+            "ordinal",
+            name="execution_events_lease_generation_ordinal_uidx",
+        ),
+        Index("execution_events_lease_observed_idx", "lease_id", "observed_at", "ordinal"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ServiceExecutionLeaseHistory(Base):
+    """Database-triggered bounded desired/observed transition history."""
+
+    __tablename__ = "execution_lease_history"
+    __table_args__ = (
+        CheckConstraint(
+            "transition_ordinal BETWEEN 1 AND 20000",
+            name="execution_lease_history_ordinal_check",
+        ),
+        UniqueConstraint(
+            "lease_id",
+            "transition_ordinal",
+            name="execution_lease_history_lease_ordinal_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transition_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    desired_state: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_state: Mapped[str] = mapped_column(Text, nullable=False)
+    cleanup_state: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
 

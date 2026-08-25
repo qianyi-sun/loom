@@ -1,9 +1,9 @@
 # Nebius service execution contract
 
-Status: accepted target architecture for issue #1548. The schemas and inventory
-are implemented in this repository; durable leases, the actuator, Nebius
-infrastructure, live canaries, cutover, and retirement remain separately
-authorized work.
+Status: accepted target architecture for issue #1548, with the provider-neutral
+durable execution control plane from #1540 implemented but not traffic-enabled.
+The Nebius actuator, infrastructure, live canaries, cutover, and retirement
+remain separately authorized work.
 
 ## Decision
 
@@ -114,6 +114,55 @@ cross environments or leave EU residency to recover capacity.
 These target records are desired logical bindings, not evidence that any
 Nebius project, cluster, node group, runtime class, or capacity exists.
 
+## Durable execution authority
+
+Migration `0113` persists the complete provider-neutral desired/observed state
+without making a Nebius or Kubernetes call:
+
+- immutable `execution_classes` and environment/regional `execution_targets`;
+- one `execution_leases` identity per `(trial, attempt)`, with a generation
+  that can advance only by one and can never regain authority after revocation;
+- at-least-once `execution_commands`, atomically required by a deferred
+  database constraint whenever desired state changes;
+- idempotent `execution_events` and database-generated
+  `execution_lease_history` snapshots.
+
+The reservation transaction locks a queued Trial, increments its attempt,
+creates the lease, and appends the `create` command. A crash before commit
+leaves all four effects absent. Command consumers use bounded delivery leases;
+an expired claim redelivers the same command and idempotency key. Exact event
+and acknowledgement replay is accepted, while changed replay is rejected.
+Event arrival may be out of order: all valid events are retained, but only a
+higher event ordinal may advance the current projection.
+
+Lease identity includes deterministic provider scope, namespace, Job, and
+execution-unit keys. `create`, `start`, `cancel`, `timeout`, `retry`,
+`finalize`, `delete_pending`, and `deleted` are explicit desired transitions.
+Cancel, timeout, retry, and delete revoke the prior generation before the
+command can be observed and persist a five-minute cleanup deadline for the
+execution unit/seat release. Missing that deadline remains cleanup debt and
+cannot make a new generation authoritative. The same lease/generation fence is checked by step
+token minting, Gateway dispatch, worker heartbeat, artifacts, trajectory,
+resource usage, and final-result writeback. Legacy Trials with no execution
+lease retain their existing path; once any lease exists, missing fence headers
+fail closed.
+
+Event and command payloads are database-bounded at 64 KiB. An execution lease
+accepts at most 10,000 event ordinals and 20,000 projected history transitions;
+operator projections also return at most 500 event and 500 history rows. These
+limits are contract errors, not invitations to discard older authority.
+Prometheus service-execution metrics aggregate by command type or surface and
+never use trial, lease, Job, namespace, or team identifiers as labels.
+
+The schema downgrade is permitted only when every execution class, target, and
+lease row has been deliberately removed. An image rollback is forward-schema
+compatible; schema rollback requires the protected backup/restore process.
+Lifecycle deletion first removes `execution_leases`, which cascades commands,
+events, and history, and only then deletes usage/events/calls/artifacts, Trial,
+and Batch metadata after object deletion has been verified. Operators must not
+manually delete an outbox or provider object to force convergence. See the
+[operator runbook](../runbooks/operator-runbook.md#service-execution-recovery-and-retention).
+
 ## Hostile-code isolation
 
 The accepted class requires `sandboxed_runtime`. A normal shared-kernel Pod,
@@ -217,7 +266,8 @@ The only accepted order is:
 
 1. Merge this contract, generated schemas/inventory, and terminology map.
 2. Add immutable requirements, target, lease, attempt-generation, and
-   reconciliation persistence under #1540 without changing traffic.
+   reconciliation persistence under #1540 without changing traffic. Complete
+   in repository; traffic remains disabled pending later gates.
 3. Implement the fail-closed Nebius actuator and observed-state reconciler.
 4. Provision development infrastructure, then prove sandbox/runtime and
    workload conversion; provisioning authority is separate from repository

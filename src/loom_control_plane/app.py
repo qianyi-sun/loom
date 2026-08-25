@@ -46,6 +46,7 @@ from loom_control_plane.routes import (
     health,
     pipeline_catalog,
     resource_usage,
+    service_executions,
     state,
     step_tokens,
     task_image_materializations,
@@ -274,6 +275,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(pipeline_catalog.router)
     app.include_router(trials.router)
     app.include_router(resource_usage.router)
+    app.include_router(service_executions.router)
     app.include_router(workers.router)
     app.include_router(state.router)
     app.include_router(trajectory.router)
