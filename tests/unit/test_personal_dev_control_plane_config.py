@@ -374,6 +374,19 @@ def test_profile_accepts_no_ingress_controller_source_cidrs(
     assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
 
 
+def test_profile_defaults_omitted_acme_solver_port_for_rollback_compatibility(
+    tmp_path: Path,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: text.replace("acme_http01_solver_port = 8089\n", "", 1),
+    )
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.network.acme_http01_solver_port == 8089
+
+
 @pytest.mark.parametrize(
     "cidrs",
     [
