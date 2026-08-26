@@ -15,6 +15,7 @@ from loom_control_plane.service_execution import (
     acknowledge_execution_command,
     claim_execution_commands,
     defer_execution_command,
+    mark_execution_output_unavailable,
     record_kubernetes_observation,
 )
 from loom_execution_actuator.contracts import (
@@ -49,6 +50,10 @@ _FAILURE_REASONS = frozenset(
 )
 _DELETE_COMMANDS = frozenset({"cancel", "timeout", "retry", "delete"})
 _CLEANUP_DESIRED_STATES = frozenset({"cancel", "timeout", "retry", "delete_pending"})
+
+
+class _ExecutionOutputPendingError(ActuatorContractError):
+    pass
 
 
 class ExecutionActuator:
@@ -116,6 +121,17 @@ class ExecutionActuator:
             raise ActuatorContractError("Kubernetes Job UID changed")
         if lease.pod_uid is not None and observation.pod_uid not in {None, lease.pod_uid}:
             raise ActuatorContractError("Kubernetes Pod UID changed")
+        summary = observation.termination_summary
+        if summary is not None and summary.output_committed:
+            if (
+                lease.output_commit_state != "committed"
+                or summary.output_upload_session_id != lease.output_upload_session_id
+                or summary.output_manifest_sha256 != lease.output_manifest_sha256
+                or summary.output_marker_sha256 != lease.output_marker_sha256
+            ):
+                raise ActuatorContractError(
+                    "Kubernetes termination output does not match durable commit"
+                )
 
     async def _persist_observation(
         self,
@@ -125,6 +141,11 @@ class ExecutionActuator:
         now: datetime,
     ) -> None:
         self._validate_observation(lease, observation)
+        if (
+            observation.normalized_state == NormalizedJobState.DELETED
+            and lease.desired_state in _CLEANUP_DESIRED_STATES
+        ):
+            await self._close_output_before_delete(lease, now=now)
         if observation.normalized_state in _FAILURE_REASONS:
             KUBERNETES_PENDING_TOTAL.labels(reason=observation.normalized_state.value).inc()
         async with self._sessions() as session:
@@ -134,6 +155,26 @@ class ExecutionActuator:
                 generation=lease.generation,
                 payload=observation.event_payload(),
                 observed_at=now,
+            )
+            await session.commit()
+
+    async def _close_output_before_delete(
+        self,
+        lease: ServiceExecutionLease,
+        *,
+        now: datetime,
+    ) -> None:
+        if lease.output_commit_state in {"committed", "unavailable"}:
+            return
+        if lease.cleanup_deadline_at is None or now < lease.cleanup_deadline_at:
+            raise _ExecutionOutputPendingError("durable output window remains open")
+        async with self._sessions() as session:
+            await mark_execution_output_unavailable(
+                session,
+                lease_id=lease.id,
+                expected_generation=lease.generation,
+                reason="cleanup_deadline_elapsed",
+                now=now,
             )
             await session.commit()
 
@@ -171,11 +212,16 @@ class ExecutionActuator:
         return created
 
     async def _delete(
-        self, lease: ServiceExecutionLease, observation: KubernetesJobObservation
+        self,
+        lease: ServiceExecutionLease,
+        observation: KubernetesJobObservation,
+        *,
+        now: datetime,
     ) -> None:
         self._validate_observation(lease, observation)
         if observation.job_uid is None:
             raise ActuatorContractError("cannot delete a Job without exact UID")
+        await self._close_output_before_delete(lease, now=now)
         with KUBERNETES_API_SECONDS.labels(operation="delete").time():
             await self._kubernetes.delete_job(
                 namespace=self._target.namespace,
@@ -208,7 +254,11 @@ class ExecutionActuator:
         *,
         now: datetime,
     ) -> None:
-        if isinstance(exc, KubernetesApiError):
+        if isinstance(exc, _ExecutionOutputPendingError):
+            delay = 5
+            max_deliveries = 100
+            code = "output_pending"
+        elif isinstance(exc, KubernetesApiError):
             status_class = (
                 f"{exc.status_code // 100}xx" if exc.status_code is not None else "transport"
             )
@@ -252,7 +302,7 @@ class ExecutionActuator:
             elif command.command_type in _DELETE_COMMANDS:
                 observation = await self._get(lease)
                 if observation is not None:
-                    await self._delete(lease, observation)
+                    await self._delete(lease, observation, now=now)
                 else:
                     observation = KubernetesJobObservation(
                         namespace=self._target.namespace,
@@ -327,7 +377,7 @@ class ExecutionActuator:
             try:
                 self._validate_observation(matched_lease, observation)
                 if matched_lease.desired_state == "deleted":
-                    await self._delete(matched_lease, observation)
+                    await self._delete(matched_lease, observation, now=current_time)
                     drift += 1
                 else:
                     await self._persist_observation(matched_lease, observation, now=current_time)
@@ -355,7 +405,10 @@ class ExecutionActuator:
                 reason="JobMissing",
                 message="expected exact Kubernetes Job was not listed",
             )
-            await self._persist_observation(lease, missing, now=current_time)
+            try:
+                await self._persist_observation(lease, missing, now=current_time)
+            except (ActuatorContractError, ServiceExecutionConflict):
+                continue
         KUBERNETES_ORPHAN_COUNT.set(drift)
         KUBERNETES_RECONCILE_CONVERGED.set(1 if drift == 0 else 0)
         return drift

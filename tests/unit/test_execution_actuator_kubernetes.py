@@ -65,6 +65,10 @@ def _pod(
             "phase_count": 2,
             "finished_at": datetime.now(UTC).isoformat(),
             "result_path": "result.json",
+            "output_committed": True,
+            "output_upload_session_id": "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+            "output_manifest_sha256": "sha256:" + "3" * 64,
+            "output_marker_sha256": "sha256:" + "4" * 64,
         }
     )
     effective_terminated_reason = terminated_reason or (
@@ -100,6 +104,7 @@ def _pod(
         spec=_ns(node_name="node-a"),
         status=_ns(
             phase=phase,
+            pod_ip="10.24.7.19",
             reason=reason,
             message=f"{reason} message" if reason else None,
             conditions=[scheduled] if scheduled else [],
@@ -291,7 +296,6 @@ def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> Non
         ("kube-system", "k8s-app", "kube-dns", 53, "UDP"),
         ("kube-system", "k8s-app", "kube-dns", 53, "TCP"),
         ("loom", "app", "loom-llm-gateway", 9100, "TCP"),
-        ("loom", "app", "loom-minio", 9000, "TCP"),
     }
     actual: set[tuple[str, str, str, int, str]] = set()
     for rule in allow["spec"]["egress"]:
@@ -316,10 +320,7 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
         for document in documents
         if document["kind"] == "NetworkPolicy"
     }
-    for name, port in (
-        ("loom-llm-gateway", 9100),
-        ("loom-minio", 9000),
-    ):
+    for name, port in (("loom-llm-gateway", 9100),):
         policy = policies[name]
         ingress = next(
             rule for rule in policy["spec"]["ingress"] if rule["ports"][0]["port"] == port
@@ -340,3 +341,12 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "execution-unit"}},
             }
         ]
+    minio = policies["loom-minio"]
+    assert not any(
+        peer.get("namespaceSelector", {})
+        .get("matchLabels", {})
+        .get("kubernetes.io/metadata.name")
+        == "loom-nebius-staging"
+        for rule in minio["spec"]["ingress"]
+        for peer in rule["from"]
+    )

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,6 +23,14 @@ class ExecutionTerminationSummaryV1(BaseModel):
     phase_count: int = Field(ge=0, le=64)
     finished_at: datetime
     result_path: str = Field(pattern=r"^result\.json$")
+    output_committed: bool
+    output_upload_session_id: UUID | None = None
+    output_manifest_sha256: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    output_marker_sha256: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
 
     @model_validator(mode="after")
     def _terminal_state_is_consistent(self) -> ExecutionTerminationSummaryV1:
@@ -29,6 +38,15 @@ class ExecutionTerminationSummaryV1(BaseModel):
             raise ValueError("termination summary partial-evidence flag does not match status")
         if self.status == "succeeded" and self.phase_count == 0:
             raise ValueError("successful termination summary has no completed phase")
+        evidence = (
+            self.output_upload_session_id,
+            self.output_manifest_sha256,
+            self.output_marker_sha256,
+        )
+        if self.output_committed != all(item is not None for item in evidence):
+            raise ValueError("termination summary output commit evidence is incomplete")
+        if self.status == "succeeded" and not self.output_committed:
+            raise ValueError("successful termination summary lacks durable output")
         return self
 
 
@@ -66,6 +84,7 @@ class KubernetesJobObservation(BaseModel):
     normalized_state: NormalizedJobState
     job_uid: str | None = Field(default=None, min_length=1, max_length=128)
     pod_uid: str | None = Field(default=None, min_length=1, max_length=128)
+    pod_ip: str | None = Field(default=None, min_length=3, max_length=45)
     resource_version: str | None = Field(default=None, min_length=1, max_length=128)
     node_name: str | None = Field(default=None, min_length=1, max_length=253)
     scheduled_at: datetime | None = None

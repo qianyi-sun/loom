@@ -33,9 +33,9 @@ cluster, node group, CNI policy, RuntimeClass, trust key, credential, or route.
 | Pod lifecycle | Namespace actuator | It may create/read/delete Jobs and read Pods in one namespace. It cannot read Secrets, exec, read logs, mutate policy, nodes, namespaces, or cluster resources. |
 | Workload identity | Control Plane and Gateway | A service token is at most 600 seconds, has a unique audit ID, explicitly binds even a null provider route, and atomically carries lease, generation, role, candidate, task, command, and runtime digests. Gateway re-reads all current authority before upstream dispatch. |
 | Cloud and upstream credentials | Nodes, registry, Gateway, object service | Nodes pull images. Pods receive no Kubernetes token, image-pull credential, Nebius key, registry key, or raw model-provider key. Model calls use only Gateway. |
-| Network | CNI NetworkPolicy | Attempt Pods are selected by `app.kubernetes.io/component=execution-unit`, denied ingress and egress by default, then allowed only DNS, Gateway TCP/9100, and object storage TCP/9000 through exact namespace and Pod selectors. |
+| Network | CNI NetworkPolicy | Attempt Pods are selected by `app.kubernetes.io/component=execution-unit`, denied ingress and egress by default, then allowed only DNS and Gateway TCP/9100 through exact namespace and Pod selectors. Object storage is Gateway-only. |
 | Image supply chain | Control Plane trust roots | Every unique task, runtime, and sidecar digest needs fresh Ed25519-signed Linux/x86_64 evidence naming SBOM, provenance, vulnerability-report, and policy digests. Unknown signers, missing/extra images, expiry, tamper, or high/critical/unknown severity reject reservation. |
-| Result and cleanup | Loom generation fence | Gateway calls and every state/artifact/result surface require the current generation. Cancellation/retry revokes it before cleanup. UID-preconditioned deletion prevents deleting a reused object. |
+| Result and cleanup | Loom generation fence | Gateway calls require the current credential generation. Output commit is bound to the observed Pod/resource generation and has a bounded post-revocation flush window. Job deletion waits for committed output or records explicit unavailability at the cleanup deadline; UID preconditions prevent deleting a reused object. |
 
 The generic `loom-egress-proxy` is intentionally not reachable from attempt
 Pods: it is a provider forward proxy intended for Gateway and direct access
@@ -54,7 +54,7 @@ keys remain in the trusted build system and never enter Loom or a workload.
 | Threat | Severity before controls | Repository control | Residual disposition / owner |
 | --- | --- | --- | --- |
 | Container or shared-kernel escape | Critical | Sandbox RuntimeClass is mandatory; restricted Pod context; no host namespace/path/device/privilege. | **Traffic blocker.** Exact Nebius runtime has not yet passed hostile tests. Nebius infrastructure owner. |
-| Cloud metadata, control-plane, or lateral movement | Critical | Default-deny ingress/egress; no IP blocks; only exact DNS/Gateway/object peers. | Packet behavior must be accepted on the target CNI. Nebius infrastructure owner. |
+| Cloud metadata, control-plane, or lateral movement | Critical | Default-deny ingress/egress; no IP blocks; only exact DNS and Gateway peers. | Packet behavior must be accepted on the target CNI. Nebius infrastructure owner. |
 | Kubernetes or registry credential theft | Critical | Attempt service-account automount false; no Secret RBAC; no imagePullSecrets; node identity performs pulls. | Verify projected-token paths absent and node identity is image-pull-only. Nebius infrastructure owner. |
 | Raw model-provider credential theft | Critical | Provider credentials stay behind Gateway; workload token contains no provider secret; Gateway rechecks provider binding. | No direct generic egress proxy route. Loom platform owner. |
 | Stale attempt replay after cancel/retry | High | Lease/generation, role, immutable runtime identity, provider binding, 600-second TTL, unique JWT audit ID, live DB recheck. | Clock and revocation latency acceptance required. Loom platform owner. |
@@ -85,6 +85,28 @@ to expire, then remove the old public key. A compromised key is removed
 immediately, its targets are disabled, active generations are revoked, and
 affected image digests are quarantined before re-enablement.
 
+## Repository credential and output path
+
+The Gateway now owns a credential-free workload broker. It binds the direct
+network peer to the current observed Pod IP, Pod UID, lease, resource
+generation, and role. The Job, Secret, task environment, and frozen runtime
+plan contain no step token. PID 1 removes broker identity from every child
+environment, is non-dumpable on Linux, and keeps refreshed tokens only inside a
+loopback proxy. That proxy accepts only the explicit model-call route set and
+rejects broker, admin, health, metrics, and other Gateway paths before minting
+a token. Provider keys remain exclusively in Gateway.
+
+The same broker accepts a canonical bounded output inventory, streams parts
+through the common Artifact commit protocol, verifies object size/hash readback
+and the semantic `result.json` identity, then writes one immutable manifest and
+commit marker. The termination summary names the durable session and digests.
+An ordinary successful termination without matching durable evidence fails
+closed. Cancellation revokes model-call authority immediately but leaves only a
+five-minute output flush window; deletion then requires committed evidence or
+an explicit `unavailable` ledger state.
+
+These are repository controls, not live acceptance.
+
 ## Explicit remaining live gates
 
 - prove a supported Kata, gVisor, or separately reviewed sandbox RuntimeClass
@@ -93,11 +115,11 @@ affected image digests are quarantined before re-enablement.
   Gateway, object-store, stale-token, cleanup, and performance matrix;
 - configure and rotate real image-admission public keys and verify admission
   logs/retention;
-- wire the short-lived token into the Pod through a reviewed credential-free
-  broker. A token is never embedded in the Job, Secret, environment, or frozen
-  runtime plan;
-- complete bounded artifact/trajectory upload and commit. A local runtime
-  result or completed Job is not durable output acceptance.
+- prove the broker peer identity, PID-1 `/proc` isolation, token refresh,
+  semantic output commit, post-revocation flush, and cleanup-deadline behavior
+  on the exact sandbox runtime/CNI/object service;
+- prove trajectory, usage, diagnostics, and any declared extra artifacts use
+  the same bounded committed inventory in a real canary.
 
 Until all gates pass, `deploy/k8s/nebius-execution-actuator.yaml` remains at
 zero replicas and the target stays non-executable.

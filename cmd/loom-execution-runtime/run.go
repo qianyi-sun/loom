@@ -66,6 +66,10 @@ type terminationSummary struct {
 	PhaseCount            int       `json:"phase_count"`
 	FinishedAt            time.Time `json:"finished_at"`
 	ResultPath            string    `json:"result_path"`
+	OutputCommitted       bool      `json:"output_committed"`
+	OutputUploadSessionID string    `json:"output_upload_session_id,omitempty"`
+	OutputManifestSHA256  string    `json:"output_manifest_sha256,omitempty"`
+	OutputMarkerSHA256    string    `json:"output_marker_sha256,omitempty"`
 }
 
 type boundedWriter struct {
@@ -109,7 +113,12 @@ func (w *boundedWriter) evidence(path string) streamEvidence {
 	}
 }
 
-func runPlan(ctx context.Context, p plan, workspace, outputRoot string) (resultManifest, error) {
+func runPlan(
+	ctx context.Context,
+	p plan,
+	workspace, outputRoot string,
+	trustedEnvironment map[string]string,
+) (resultManifest, error) {
 	started := time.Now().UTC()
 	result := resultManifest{
 		SchemaVersion: "loom.execution-runtime-result.v1", RuntimeContractSHA256: p.RuntimeContractSHA256,
@@ -147,6 +156,7 @@ func runPlan(ctx context.Context, p plan, workspace, outputRoot string) (resultM
 		evidence, err := runPhase(
 			ctx, item, ordinal+1, workspace, outputRoot,
 			p.MaxLogBytesPerStream, time.Duration(p.TerminationGraceSec)*time.Second,
+			trustedEnvironment,
 		)
 		result.Phases = append(result.Phases, evidence)
 		if err != nil {
@@ -161,7 +171,15 @@ func runPlan(ctx context.Context, p plan, workspace, outputRoot string) (resultM
 	return result, nil
 }
 
-func runPhase(parent context.Context, item phase, ordinal int, workspace, outputRoot string, limit int64, terminationGrace time.Duration) (phaseEvidence, error) {
+func runPhase(
+	parent context.Context,
+	item phase,
+	ordinal int,
+	workspace, outputRoot string,
+	limit int64,
+	terminationGrace time.Duration,
+	trustedEnvironment map[string]string,
+) (phaseEvidence, error) {
 	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
 	directory := filepath.Clean(item.WorkingDirectory)
@@ -185,14 +203,31 @@ func runPhase(parent context.Context, item phase, ordinal int, workspace, output
 	stderr := &boundedWriter{file: stderrFile, hash: sha256.New(), console: os.Stderr, limit: limit}
 	command := exec.Command(item.Argv[0], item.Argv[1:]...)
 	command.Dir = directory
-	command.Env = append([]string{}, os.Environ()...)
-	names := make([]string, 0, len(item.Environment))
-	for name := range item.Environment {
+	environment := map[string]string{}
+	for _, entry := range os.Environ() {
+		name, value, found := strings.Cut(entry, "=")
+		if found && !strings.HasPrefix(name, "LOOM_EXECUTION_") {
+			environment[name] = value
+		}
+	}
+	for name, value := range item.Environment {
+		if !strings.HasPrefix(name, "LOOM_EXECUTION_") {
+			environment[name] = value
+		}
+	}
+	// Runtime-owned broker settings are appended last in canonical order and
+	// cannot be overridden by an admitted task plan.
+	for name, value := range trustedEnvironment {
+		environment[name] = value
+	}
+	names := make([]string, 0, len(environment))
+	for name := range environment {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	command.Env = make([]string, 0, len(names))
 	for _, name := range names {
-		command.Env = append(command.Env, name+"="+item.Environment[name])
+		command.Env = append(command.Env, name+"="+environment[name])
 	}
 	command.Stdout, command.Stderr = stdout, stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -261,19 +296,30 @@ func writeResult(path string, result resultManifest) error {
 	return writeJSONAtomic(path, result)
 }
 
-func writeTerminationSummary(path string, result resultManifest) error {
+func writeTerminationSummary(
+	path string,
+	result resultManifest,
+	output *outputCommitEvidence,
+) error {
+	summary := terminationSummary{
+		SchemaVersion:         "loom.execution-termination-summary.v1",
+		RuntimeContractSHA256: result.RuntimeContractSHA256,
+		CommandIdentitySHA256: result.CommandIdentitySHA256,
+		ExecutionRole:         result.ExecutionRole,
+		Status:                result.Status,
+		PartialEvidence:       result.PartialEvidence,
+		PhaseCount:            len(result.Phases),
+		FinishedAt:            result.FinishedAt,
+		ResultPath:            "result.json",
+	}
+	if output != nil {
+		summary.OutputCommitted = true
+		summary.OutputUploadSessionID = output.UploadSessionID
+		summary.OutputManifestSHA256 = output.ManifestSHA256
+		summary.OutputMarkerSHA256 = output.CommittedMarkerSHA256
+	}
 	payload, err := json.Marshal(
-		terminationSummary{
-			SchemaVersion:         "loom.execution-termination-summary.v1",
-			RuntimeContractSHA256: result.RuntimeContractSHA256,
-			CommandIdentitySHA256: result.CommandIdentitySHA256,
-			ExecutionRole:         result.ExecutionRole,
-			Status:                result.Status,
-			PartialEvidence:       result.PartialEvidence,
-			PhaseCount:            len(result.Phases),
-			FinishedAt:            result.FinishedAt,
-			ResultPath:            "result.json",
-		},
+		summary,
 	)
 	if err != nil {
 		return err

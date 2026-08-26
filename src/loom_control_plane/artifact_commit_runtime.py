@@ -43,6 +43,7 @@ from loom.pipeline.artifact_commit import (
     PartReceiptV1,
     ProducerAuthV1,
     ProfileCalibrationEvidenceProducerV1,
+    ServiceExecutionOutputProducerV1,
     UploadAuthV1,
     UploadFilePlanV1,
     _FileState,
@@ -121,6 +122,16 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         )
     elif isinstance(producer, CheckpointProducerV1):
         values["checkpoint_sequence"] = producer.checkpoint_sequence
+    elif isinstance(producer, ServiceExecutionOutputProducerV1):
+        values.update(
+            service_execution_lease_id=producer.service_execution_lease_id,
+            service_execution_generation=producer.service_execution_generation,
+            service_execution_role=producer.service_execution_role,
+            service_execution_runtime_contract_sha256=producer.runtime_contract_sha256,
+            service_execution_candidate_sha=producer.candidate_sha,
+            service_execution_task_revision_sha256=producer.task_revision_sha256,
+            service_execution_command_identity_sha256=producer.command_identity_sha256,
+        )
     elif isinstance(producer, InputImportProducerV1):
         values.update(
             pipeline_input_import_id=producer.pipeline_input_import_id,
@@ -188,6 +199,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             "pipeline_run_id",
             "pipeline_stage_run_id",
             "execution_attempt_id",
+            "service_execution_lease_id",
             "pipeline_input_import_id",
             "pipeline_input_materialization_id",
             "pipeline_acceptance_authorization_id",
@@ -393,6 +405,24 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                 execution_attempt_id=cast(UUID, row.execution_attempt_id),
                 attempt_number=cast(int, row.attempt_number),
                 checkpoint_sequence=cast(int, row.checkpoint_sequence),
+            )
+        if row.commit_kind == "service_execution_output":
+            return ServiceExecutionOutputProducerV1(
+                commit_kind="service_execution_output",
+                team_id=row.team_id,
+                service_execution_lease_id=cast(UUID, row.service_execution_lease_id),
+                service_execution_generation=cast(int, row.service_execution_generation),
+                service_execution_role=cast(Any, row.service_execution_role),
+                runtime_contract_sha256=cast(
+                    str, row.service_execution_runtime_contract_sha256
+                ),
+                candidate_sha=cast(str, row.service_execution_candidate_sha),
+                task_revision_sha256=cast(
+                    str, row.service_execution_task_revision_sha256
+                ),
+                command_identity_sha256=cast(
+                    str, row.service_execution_command_identity_sha256
+                ),
             )
         if row.commit_kind == "input_import":
             return InputImportProducerV1(

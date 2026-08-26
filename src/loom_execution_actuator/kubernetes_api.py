@@ -64,6 +64,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     terminated_at = getattr(job.status, "completion_time", None)
     node_name = None
     pod_uid = None
+    pod_ip = None
 
     if metadata.deletion_timestamp is not None:
         state = NormalizedJobState.TERMINATING
@@ -80,6 +81,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
 
     if pod is not None:
         pod_uid = str(pod.metadata.uid) if pod.metadata.uid is not None else None
+        pod_ip = getattr(pod.status, "pod_ip", None)
         node_name = getattr(pod.spec, "node_name", None)
         scheduled = _condition(getattr(pod.status, "conditions", None), "PodScheduled")
         scheduled_at = getattr(scheduled, "last_transition_time", None)
@@ -200,6 +202,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         normalized_state=state,
         job_uid=str(metadata.uid) if metadata.uid is not None else None,
         pod_uid=pod_uid,
+        pod_ip=pod_ip,
         resource_version=(
             str(metadata.resource_version) if metadata.resource_version is not None else None
         ),

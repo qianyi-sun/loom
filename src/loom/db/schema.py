@@ -3814,6 +3814,31 @@ class ServiceExecutionLease(Base):
             "pod_terminated_at >= pod_started_at)",
             name="execution_leases_pod_time_order_check",
         ),
+        CheckConstraint(
+            "output_commit_state IN "
+            "('not_started','uploading','committed','unavailable')",
+            name="execution_leases_output_state_check",
+        ),
+        CheckConstraint(
+            "(output_commit_state='not_started' AND output_upload_session_id IS NULL "
+            "AND output_generation IS NULL AND output_manifest_sha256 IS NULL "
+            "AND output_marker_sha256 IS NULL AND output_committed_at IS NULL "
+            "AND output_unavailable_reason IS NULL) OR "
+            "(output_commit_state='uploading' AND output_upload_session_id IS NOT NULL "
+            "AND output_generation > 0 AND output_manifest_sha256 IS NULL "
+            "AND output_marker_sha256 IS NULL AND output_committed_at IS NULL "
+            "AND output_unavailable_reason IS NULL) OR "
+            "(output_commit_state='committed' AND output_upload_session_id IS NOT NULL "
+            "AND output_generation > 0 "
+            "AND output_manifest_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND output_marker_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND output_committed_at IS NOT NULL AND output_unavailable_reason IS NULL) OR "
+            "(output_commit_state='unavailable' AND output_generation > 0 "
+            "AND output_manifest_sha256 IS NULL AND output_marker_sha256 IS NULL "
+            "AND output_committed_at IS NULL "
+            "AND length(output_unavailable_reason) BETWEEN 1 AND 120)",
+            name="execution_leases_output_group_check",
+        ),
         UniqueConstraint(
             "trial_id",
             "attempt",
@@ -3880,6 +3905,7 @@ class ServiceExecutionLease(Base):
     )
     job_uid: Mapped[str | None] = mapped_column(Text)
     pod_uid: Mapped[str | None] = mapped_column(Text)
+    pod_ip: Mapped[str | None] = mapped_column(INET)
     kubernetes_resource_version: Mapped[str | None] = mapped_column(Text)
     node_name: Mapped[str | None] = mapped_column(Text)
     deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -3893,6 +3919,17 @@ class ServiceExecutionLease(Base):
     )
     revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     finalized_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    output_commit_state: Mapped[str] = mapped_column(
+        Text, nullable=False, default="not_started", server_default=text("'not_started'")
+    )
+    output_upload_session_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+    )
+    output_generation: Mapped[int | None] = mapped_column(BigInteger)
+    output_manifest_sha256: Mapped[str | None] = mapped_column(Text)
+    output_marker_sha256: Mapped[str | None] = mapped_column(Text)
+    output_committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    output_unavailable_reason: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     error_class: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(Text)
@@ -6130,7 +6167,7 @@ class ArtifactUploadSession(Base):
     __tablename__ = "artifact_upload_sessions"
     __table_args__ = (
         CheckConstraint(
-            "commit_kind IN ('final_output','checkpoint','input_import','input_materialization',"
+            "commit_kind IN ('final_output','checkpoint','service_execution_output','input_import','input_materialization',"
             "'acceptance_evidence','profile_calibration_evidence')",
             name="artifact_upload_sessions_kind_check",
         ),
@@ -6153,6 +6190,7 @@ class ArtifactUploadSession(Base):
             "AND pipeline_input_import_id IS NULL AND pipeline_input_materialization_id IS NULL "
             "AND pipeline_acceptance_authorization_id IS NULL "
             "AND pipeline_profile_calibration_authorization_id IS NULL AND actor_user_id IS NULL "
+            "AND service_execution_lease_id IS NULL "
             "AND stage_result_json IS NOT NULL AND stage_result_digest IS NOT NULL AND inventory_digest IS NOT NULL) OR "
             "(commit_kind='checkpoint' AND pipeline_run_id IS NOT NULL "
             "AND pipeline_stage_run_id IS NOT NULL AND execution_attempt_id IS NOT NULL "
@@ -6160,7 +6198,23 @@ class ArtifactUploadSession(Base):
             "AND pipeline_input_import_id IS NULL AND pipeline_input_materialization_id IS NULL "
             "AND pipeline_acceptance_authorization_id IS NULL "
             "AND pipeline_profile_calibration_authorization_id IS NULL AND actor_user_id IS NULL "
+            "AND service_execution_lease_id IS NULL "
             "AND stage_result_json IS NULL AND stage_result_digest IS NULL AND inventory_digest IS NULL) OR "
+            "(commit_kind='service_execution_output' AND service_execution_lease_id IS NOT NULL "
+            "AND service_execution_generation IS NOT NULL "
+            "AND service_execution_role IN ('attempt','verifier') "
+            "AND service_execution_runtime_contract_sha256 IS NOT NULL "
+            "AND service_execution_candidate_sha IS NOT NULL "
+            "AND service_execution_task_revision_sha256 IS NOT NULL "
+            "AND service_execution_command_identity_sha256 IS NOT NULL "
+            "AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
+            "AND execution_attempt_id IS NULL AND attempt_number IS NULL "
+            "AND checkpoint_sequence IS NULL AND pipeline_input_import_id IS NULL "
+            "AND pipeline_input_materialization_id IS NULL "
+            "AND pipeline_acceptance_authorization_id IS NULL "
+            "AND pipeline_profile_calibration_authorization_id IS NULL "
+            "AND actor_user_id IS NULL AND stage_result_json IS NULL "
+            "AND stage_result_digest IS NULL AND inventory_digest IS NULL) OR "
             "(commit_kind='input_import' AND pipeline_input_import_id IS NOT NULL "
             "AND actor_user_id IS NOT NULL AND pipeline_run_id IS NULL AND pipeline_stage_run_id IS NULL "
             "AND execution_attempt_id IS NULL AND pipeline_input_materialization_id IS NULL "
@@ -6192,6 +6246,23 @@ class ArtifactUploadSession(Base):
         CheckConstraint(
             "state != 'committed_ready' OR commit_kind='final_output'",
             name="artifact_upload_sessions_ready_kind_check",
+        ),
+        CheckConstraint(
+            "(commit_kind='service_execution_output') = "
+            "(service_execution_lease_id IS NOT NULL) AND "
+            "((service_execution_lease_id IS NULL AND service_execution_generation IS NULL "
+            "AND service_execution_role IS NULL "
+            "AND service_execution_runtime_contract_sha256 IS NULL "
+            "AND service_execution_candidate_sha IS NULL "
+            "AND service_execution_task_revision_sha256 IS NULL "
+            "AND service_execution_command_identity_sha256 IS NULL) OR "
+            "(service_execution_lease_id IS NOT NULL AND service_execution_generation > 0 "
+            "AND service_execution_role IN ('attempt','verifier') "
+            "AND service_execution_runtime_contract_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND service_execution_candidate_sha ~ '^[0-9a-f]{40}$' "
+            "AND service_execution_task_revision_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND service_execution_command_identity_sha256 ~ '^sha256:[0-9a-f]{64}$'))",
+            name="artifact_upload_sessions_service_execution_group_check",
         ),
         CheckConstraint(
             "commit_kind != 'profile_calibration_evidence' OR "
@@ -6242,6 +6313,14 @@ class ArtifactUploadSession(Base):
             "idempotency_key",
             unique=True,
             postgresql_where=text("commit_kind='checkpoint'"),
+        ),
+        Index(
+            "artifact_upload_sessions_service_execution_uidx",
+            "service_execution_lease_id",
+            "service_execution_generation",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("commit_kind='service_execution_output'"),
         ),
         Index(
             "artifact_upload_sessions_import_request_uidx",
@@ -6306,6 +6385,15 @@ class ArtifactUploadSession(Base):
     checkpoint_sequence: Mapped[int | None] = mapped_column(BigInteger)
     checkpoint_envelope_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     checkpoint_envelope_digest: Mapped[str | None] = mapped_column(Text)
+    service_execution_lease_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="CASCADE")
+    )
+    service_execution_generation: Mapped[int | None] = mapped_column(BigInteger)
+    service_execution_role: Mapped[str | None] = mapped_column(Text)
+    service_execution_runtime_contract_sha256: Mapped[str | None] = mapped_column(Text)
+    service_execution_candidate_sha: Mapped[str | None] = mapped_column(Text)
+    service_execution_task_revision_sha256: Mapped[str | None] = mapped_column(Text)
+    service_execution_command_identity_sha256: Mapped[str | None] = mapped_column(Text)
     control_producer_kind: Mapped[str | None] = mapped_column(Text)
     control_producer_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     pipeline_input_import_id: Mapped[UUID | None] = mapped_column(

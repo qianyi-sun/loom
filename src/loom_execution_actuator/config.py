@@ -14,6 +14,9 @@ class ExecutionActuatorSettings(BaseSettings):
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
     runtime_class_name: str = Field(min_length=1, max_length=63)
     service_account_name: str = "loom-execution-attempt"
+    credential_broker_url: str = (
+        "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"
+    )
     poll_seconds: float = Field(default=2.0, ge=0.25, le=60)
     full_reconcile_seconds: float = Field(default=30.0, ge=5, le=300)
     watch_timeout_seconds: int = Field(default=15, ge=5, le=60)

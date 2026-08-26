@@ -95,12 +95,6 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-minio-router
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: loom-nebius-staging
-      podSelector:
-        matchLabels:
-          app.kubernetes.io/component: execution-unit
     ports:
     - port: 9000
       protocol: TCP

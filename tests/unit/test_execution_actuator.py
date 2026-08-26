@@ -156,6 +156,18 @@ def test_job_renderer_is_deterministic_restricted_and_lease_scoped() -> None:
         "ephemeral-storage": "4096Mi",
     }
     assert container["terminationMessagePath"] == "/loom/output/termination-message"
+    runtime_env = {item["name"]: item["value"] for item in container["env"]}
+    assert runtime_env == {
+        "LOOM_EXECUTION_BROKER_URL": (
+            "http://loom-llm-gateway.loom.svc.cluster.local:9100"
+            "/internal/service-execution"
+        ),
+        "LOOM_EXECUTION_GENERATION": "1",
+        "LOOM_EXECUTION_LEASE_ID": str(lease.id),
+        "LOOM_EXECUTION_ROLE": "attempt",
+    }
+    assert "TOKEN" not in str(runtime_env)
+    assert "API_KEY" not in str(runtime_env)
     assert container["volumeMounts"][0] == {
         "name": "runtime",
         "mountPath": "/loom/runtime",

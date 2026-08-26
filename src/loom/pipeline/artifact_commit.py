@@ -69,6 +69,7 @@ ARTIFACT_RECONCILIATION_AGE = Histogram(
 CommitKind: TypeAlias = Literal[
     "final_output",
     "checkpoint",
+    "service_execution_output",
     "input_import",
     "input_materialization",
     "acceptance_evidence",
@@ -150,6 +151,22 @@ class CheckpointProducerV1(PipelineModel):
     input_lineage_digests: list[Digest] = Field(default_factory=list)
 
 
+class ServiceExecutionOutputProducerV1(PipelineModel):
+    """Immutable producer identity for one Pod-native execution generation."""
+
+    commit_kind: Literal["service_execution_output"]
+    team_id: UUID
+    service_execution_lease_id: UUID
+    service_execution_generation: PositiveSafeInt
+    service_execution_role: Literal["attempt", "verifier"]
+    runtime_contract_sha256: Digest
+    candidate_sha: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+    task_revision_sha256: Digest
+    command_identity_sha256: Digest
+    input_lineage_artifact_ids: list[UUID] = Field(default_factory=list)
+    input_lineage_digests: list[Digest] = Field(default_factory=list)
+
+
 class InputImportProducerV1(PipelineModel):
     commit_kind: Literal["input_import"]
     team_id: UUID
@@ -226,6 +243,7 @@ class ProfileCalibrationEvidenceProducerV1(PipelineModel):
 CommitProducerV1: TypeAlias = (
     FinalOutputProducerV1
     | CheckpointProducerV1
+    | ServiceExecutionOutputProducerV1
     | InputImportProducerV1
     | InputMaterializationProducerV1
     | AcceptanceEvidenceProducerV1
@@ -567,6 +585,12 @@ def _producer_prefix(producer: CommitProducerV1) -> str:
             f"{producer.pipeline_stage_run_id}/{producer.attempt_number}/checkpoints/"
             f"{producer.checkpoint_sequence:012d}/"
         )
+    if isinstance(producer, ServiceExecutionOutputProducerV1):
+        return (
+            f"service-executions/{producer.team_id}/"
+            f"{producer.service_execution_lease_id}/"
+            f"{producer.service_execution_generation}/output/"
+        )
     if isinstance(producer, InputImportProducerV1):
         return f"pipeline-input-imports/{producer.team_id}/{producer.pipeline_input_import_id}/"
     if isinstance(producer, InputMaterializationProducerV1):
@@ -626,6 +650,7 @@ def _validate_plan(producer: CommitProducerV1, files: Sequence[UploadFilePlanV1]
             raise ArtifactCommitError("invalid_input_import_plan")
     expected_semantic = {
         "checkpoint": "checkpoint.json",
+        "service_execution_output": "result.json",
         "input_materialization": "artifact.json",
         "acceptance_evidence": "evidence.json",
     }.get(kind)
@@ -634,6 +659,14 @@ def _validate_plan(producer: CommitProducerV1, files: Sequence[UploadFilePlanV1]
         for item in files
     ):
         raise ArtifactCommitError("invalid_semantic_document_path")
+    if kind == "service_execution_output":
+        if (
+            len(groups) != 1
+            or any(item.artifact_name != "runtime_evidence" for item in files)
+            or any(item.artifact_type != "loom.execution-runtime-evidence.v1" for item in files)
+            or any(item.producer != "service" for item in files)
+        ):
+            raise ArtifactCommitError("invalid_service_execution_output_plan")
     if kind == "profile_calibration_evidence":
         assert isinstance(producer, ProfileCalibrationEvidenceProducerV1)
         expected_path = f"{producer.profile_calibration_result_kind}.json"

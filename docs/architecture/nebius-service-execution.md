@@ -117,7 +117,7 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113` and `0114` persist the complete provider-neutral
+Migrations `0113`, `0114`, and `0115` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;
@@ -158,6 +158,16 @@ between this plan, the workload requirements, and the persisted execution
 class. The create outbox and history projection retain the same immutable
 identity; an actuator refuses legacy or malformed leases that have no valid
 runtime plan.
+
+`0115` adds the observed Pod IP and one generation-bound service-execution
+Artifact commit ledger. Gateway maps the direct peer to the immutable Pod UID,
+resource generation, role, target health, and frozen runtime identity before it
+mints a short-lived step JWT. The token is returned only to PID 1, removed from
+child environments, protected from same-UID `/proc` reads, and injected by a
+loopback refresh proxy. Output is uploaded to Gateway, not directly to object
+storage. The common multipart protocol verifies per-part and whole-object
+digests, parses and rebinds `result.json`, and writes immutable manifest/marker
+evidence before the lease becomes `committed`.
 
 Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
@@ -260,10 +270,14 @@ its runtime/command/role identity against Job annotations, and retains it in
 the Kubernetes observation event. A completed Job with a missing, malformed,
 or mismatched summary is normalized as failure rather than success.
 
-The runtime result file alone is not durable object-storage acceptance. Until
-#1551 supplies the reviewed credential-free workload identity and #1550 wires
-the bounded uploader/commit protocol, normal Job deletion must not be treated
-as successful artifact, trajectory, usage, diagnostic, or result retention.
+The runtime result file alone is not durable object-storage acceptance. A
+successful Job requires the matching committed upload session, manifest digest,
+and marker digest in both the lease and termination summary. Cancellation and
+retry fence model calls immediately while allowing only the old resource
+generation to flush output until the cleanup deadline. The actuator defers Job
+deletion during that window; at expiry it records explicit output
+unavailability before UID-preconditioned deletion. Live target evidence for
+this repository path remains part of #1551 acceptance.
 
 The #1551 repository security controls and exact remaining live gates are in
 [Nebius hostile-workload security](nebius-execution-security.md). Operators

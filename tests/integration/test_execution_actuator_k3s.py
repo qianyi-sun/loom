@@ -472,7 +472,7 @@ async def test_actuator_api_converges_against_disposable_k3s() -> None:
 
 
 @pytest.mark.timeout(180)
-async def test_attempt_network_policy_allows_only_dns_gateway_and_object_store() -> None:
+async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
     from kubernetes import client, utils
 
     suffix = uuid4().hex[:10]
@@ -669,7 +669,7 @@ async def test_attempt_network_policy_allows_only_dns_gateway_and_object_store()
                 "execution-client",
                 "http://object-store.loom.svc.cluster.local:9000",
             )
-            assert "exit:0" in object_store
+            assert "exit:0" not in object_store
             blocked = await asyncio.to_thread(
                 _pod_probe,
                 core,
@@ -762,6 +762,41 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     automount_service_account_token=False,
                 ),
             )
+            await asyncio.to_thread(
+                core.create_namespaced_pod,
+                namespace,
+                client.V1Pod(
+                    metadata=client.V1ObjectMeta(
+                        name="execution-broker",
+                        labels={"app": "execution-broker"},
+                    ),
+                    spec=client.V1PodSpec(
+                        restart_policy="Never",
+                        service_account_name="loom-execution-attempt",
+                        automount_service_account_token=False,
+                        containers=[
+                            client.V1Container(
+                                name="broker",
+                                image=task_image_ref,
+                                image_pull_policy="IfNotPresent",
+                                command=["/fixture", "broker"],
+                            )
+                        ],
+                    ),
+                ),
+            )
+            await asyncio.to_thread(
+                core.create_namespaced_service,
+                namespace,
+                client.V1Service(
+                    metadata=client.V1ObjectMeta(name="execution-broker"),
+                    spec=client.V1ServiceSpec(
+                        selector={"app": "execution-broker"},
+                        ports=[client.V1ServicePort(port=9100, target_port=9100)],
+                    ),
+                ),
+            )
+            await asyncio.to_thread(_wait_for_pod, core, namespace, "execution-broker")
             node_api = client.NodeV1Api()
             await asyncio.to_thread(
                 node_api.create_runtime_class,
@@ -787,6 +822,10 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                     target_id="disposable-k3s",
                     namespace=namespace,
                     runtime_class_name="loom-sandbox",
+                    credential_broker_url=(
+                        f"http://execution-broker.{namespace}.svc.cluster.local:9100"
+                        "/internal/service-execution"
+                    ),
                 ),
             )
             await api.create_job(namespace=namespace, manifest=manifest)
@@ -888,6 +927,9 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                 label_selector=f"loom.openai.com/lease-id={lease.id}",
             )
             assert len(pods.items) == 1
+            assert observation is not None
+            assert observation.termination_summary is not None
+            assert observation.termination_summary.output_committed is True
             pod = pods.items[0]
             pod_dict = client.ApiClient().sanitize_for_serialization(pod)
             assert "/var/run/docker.sock" not in str(pod_dict)

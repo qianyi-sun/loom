@@ -43,8 +43,8 @@ attempt, prove:
 | --- | --- |
 | Loopback and declared same-Pod sidecar | Allowed only on declared ports. |
 | Cluster DNS UDP/TCP 53 | Allowed through the selected kube-dns Pods. |
-| LLM Gateway TCP/9100 with current token | Allowed; call is attributed to the exact team/trial/step/JWT ID. |
-| Object service TCP/9000 with exact scoped upload authority | Allowed only for the attempt's object scope. |
+| LLM Gateway TCP/9100 through the runtime loopback proxy | Allowed; call is attributed to the exact team/trial/step/JWT ID, while hostile code cannot read the raw token or broker identity. |
+| Object service TCP/9000 | Denied; the trusted Gateway performs bounded upload and commit. |
 | Another attempt Pod/Service, Control Plane, Postgres, xDS, generic egress proxy, Kubernetes API | Denied. |
 | Public IPv4/IPv6, RFC1918, link-local, node IP, service CIDR except named peers, cloud metadata endpoints | Denied. |
 | DNS-selected alternate endpoint or changed-label Pod | Denied. |
@@ -52,15 +52,24 @@ attempt, prove:
 
 Repeat the matrix from two teams and both directions. A timeout alone is weak
 evidence: retain CNI policy verdicts or packet captures from the trusted side
-and prove the intended Gateway/object requests succeeded during the same run.
+and prove the intended Gateway call and Gateway-owned object commit succeeded
+during the same run.
 
 ## Workload identity and revocation matrix
 
-Mint through `/admin/step-tokens` only. Confirm the JWT has a maximum 600-second
-lifetime, a unique `jti`, explicit provider binding including null, and exact
+Use only the service-execution broker path; do not mint or inject a workload
+token through `/admin/step-tokens`. Confirm its audit record proves a maximum
+600-second lifetime, a unique `jti`, explicit provider binding including null, and exact
 team, trial, lease, generation, role, candidate, task revision, command, and
 runtime-contract claims. Confirm the durable `service_execution.step_token.minted`
 audit event has the same non-secret identifiers.
+
+From hostile task code, prove `LOOM_EXECUTION_*` identity is absent, reading
+PID 1 environment through `/proc` is denied, raw broker token issuance cannot
+be completed, and the loopback proxy still refreshes and completes an
+attributed model call. Attempt broker, admin, health, and metrics routes through
+the proxy and prove they fail before a token is minted. Verify no token appears in Job YAML, Secrets, process
+environment, runtime plan, stdout/stderr, termination message, or artifacts.
 
 Then exercise each mutation independently. Every changed value must receive
 403 before any upstream request: team, trial, lease, generation, role, step,

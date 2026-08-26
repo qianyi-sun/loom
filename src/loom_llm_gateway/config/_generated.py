@@ -22,6 +22,7 @@ class GatewaySettings(BaseSettings):
 
     admin_secret_file: Path | None = None
     anthropic_api_key: SecretStr | None = None
+    artifacts_bucket: str = "artifacts"
     bind_host: str = "0.0.0.0"
     bind_port: int = 9100
     db_url: PostgresDsn
@@ -38,9 +39,15 @@ class GatewaySettings(BaseSettings):
     llm_retry_max_backoff_sec: float = 8.0
     log_level: LogLevel = "info"
     metrics_port: int = 9101
+    minio_access_key: SecretStr
+    minio_endpoint: str = "http://loom-minio:9000"
+    minio_region: str = "us-east-1"
+    minio_secret_key: SecretStr
     openai_api_key: SecretStr | None = None
     rate_card_cache_ttl_sec: int = 300
     step_jwt_signing_key: SecretStr
+    storage_auth_kind: str = "static_keys"
+    storage_backend: str = "minio"
     together_api_key: SecretStr | None = None
     upstream_timeout_sec: float = 200.0
 

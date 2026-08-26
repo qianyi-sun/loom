@@ -123,6 +123,7 @@ async def _run() -> None:
             namespace=settings.namespace,
             runtime_class_name=settings.runtime_class_name,
             service_account_name=settings.service_account_name,
+            credential_broker_url=settings.credential_broker_url,
         ),
         controller_id=settings.controller_id,
         command_limit=settings.command_limit,

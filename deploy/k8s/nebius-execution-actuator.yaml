@@ -90,15 +90,6 @@ spec:
               app: loom-llm-gateway
       ports:
         - {protocol: TCP, port: 9100}
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: loom
-          podSelector:
-            matchLabels:
-              app: loom-minio
-      ports:
-        - {protocol: TCP, port: 9000}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -150,6 +141,8 @@ spec:
               value: loom-nebius-staging
             - name: LOOM_EXECUTION_ACTUATOR_RUNTIME_CLASS_NAME
               value: loom-sandbox
+            - name: LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL
+              value: http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution
           ports:
             - name: health
               containerPort: 8093

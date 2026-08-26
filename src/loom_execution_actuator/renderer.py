@@ -33,10 +33,15 @@ class ExecutionTargetRuntime:
     namespace: str
     runtime_class_name: str
     service_account_name: str = "loom-execution-attempt"
+    credential_broker_url: str = (
+        "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"
+    )
 
     def __post_init__(self) -> None:
         if not self.target_id or not self.namespace or not self.runtime_class_name:
             raise ValueError("target, namespace, and sandbox runtime class are required")
+        if not self.credential_broker_url.startswith(("http://", "https://")):
+            raise ValueError("credential broker URL must be HTTP(S)")
 
 
 def _required_positive(requirements: dict[str, Any], key: str) -> int:
@@ -293,6 +298,14 @@ def render_execution_job(
                                 {
                                     "name": "LOOM_EXECUTION_GENERATION",
                                     "value": str(lease.generation),
+                                },
+                                {
+                                    "name": "LOOM_EXECUTION_ROLE",
+                                    "value": lease.execution_role,
+                                },
+                                {
+                                    "name": "LOOM_EXECUTION_BROKER_URL",
+                                    "value": target.credential_broker_url,
                                 },
                             ],
                         }

@@ -16,6 +16,7 @@ from starlette.requests import Request
 from loom.auth import AuthContext, verify_step_jwt
 from loom.db.schema import (
     AdminAuditEvent,
+    Artifact,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
@@ -39,7 +40,10 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
 )
-from loom.pipeline.keys import canonical_digest
+from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
+from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
+from loom.trajectory.storage import FakeObjectStore
+from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -52,6 +56,15 @@ from loom_control_plane.service_execution import (
     reserve_trial_execution,
     set_execution_target_health,
     verify_trial_execution_fence,
+)
+from loom_control_plane.service_execution_output import (
+    ServiceExecutionBrokerError,
+    ServiceExecutionOutputFileV1,
+    ServiceExecutionOutputPrepareV1,
+    ServiceExecutionOutputRouteService,
+    ServiceExecutionPeerV1,
+    authorize_service_execution_peer,
+    mint_service_execution_peer_token,
 )
 from loom_execution_actuator.contracts import (
     KubernetesApiError,
@@ -77,6 +90,9 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessions() as session, session.begin():
+            await session.execute(
+                delete(Artifact).where(Artifact.control_producer_kind == "service_execution")
+            )
             await session.execute(
                 delete(AdminAuditEvent).where(
                     AdminAuditEvent.action == "service_execution.step_token.minted"
@@ -1107,6 +1123,234 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
         await engine.dispose()
 
 
+async def test_observed_pod_broker_commits_semantic_runtime_output(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    signing_key = "b" * 64
+    pod_ip = "10.24.7.19"
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="start",
+                now=now,
+            )
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "running",
+                    "job_uid": "job-uid-1",
+                    "pod_uid": "pod-uid-1",
+                    "pod_ip": pod_ip,
+                    "resource_version": "7",
+                },
+                observed_at=now,
+            )
+            await session.commit()
+
+        identity = ServiceExecutionPeerV1(
+            lease_id=lease.id,
+            generation=1,
+            execution_role="attempt",
+        )
+        async with sessions() as session:
+            authorized = await authorize_service_execution_peer(
+                session,
+                peer_ip=pod_ip,
+                identity=identity,
+                purpose="token",
+            )
+            token, _expires_at, _token_id = await mint_service_execution_peer_token(
+                session,
+                lease=authorized,
+                ttl_seconds=480,
+                signing_key=signing_key,
+                now=now,
+            )
+            await session.commit()
+            session.expunge(authorized)
+        token_context = verify_step_jwt(token, signing_key=signing_key)
+        assert token_context.service_execution_lease_id == lease.id
+        assert token_context.service_execution_generation == 1
+
+        result_document = _runtime_result_payload(authorized, started_at=now)
+        result_document.update(status="runtime_error", partial_evidence=True, phases=[])
+        result_payload = canonical_document(result_document)
+        store = FakeObjectStore()
+        repository = SqlArtifactCommitRepository(
+            session_factory=sessions,
+            store=store,
+            bucket="artifacts",
+        )
+        route = ServiceExecutionOutputRouteService(
+            service=ArtifactCommitService(
+                store=store,
+                bucket="artifacts",
+                repository=repository,
+            ),
+            session_factory=sessions,
+        )
+        prepare = ServiceExecutionOutputPrepareV1(
+            schema_version="loom.service-execution-output-prepare.v1",
+            request_id=uuid4(),
+            **identity.model_dump(),
+            files=(
+                ServiceExecutionOutputFileV1(
+                    relative_path="result.json",
+                    media_type="application/json",
+                    size_bytes=len(result_payload),
+                    sha256=digest_bytes(result_payload),
+                ),
+            ),
+        )
+        grant = await route.prepare(lease=authorized, request=prepare)
+        upload_session_id = UUID(grant["upload_session_id"])
+        upload_token = str(grant["upload_token"])
+
+        async def body():  # type: ignore[no-untyped-def]
+            yield result_payload
+
+        receipt = PartReceiptV1.model_validate(
+            await route.put_part(
+                lease=authorized,
+                session_id=upload_session_id,
+                file_index=0,
+                part_number=1,
+                content_length=len(result_payload),
+                content_sha256=digest_bytes(result_payload),
+                upload_token=upload_token,
+                body=body(),
+            )
+        )
+        await route.complete_file(
+            lease=authorized,
+            session_id=upload_session_id,
+            file_index=0,
+            ordered_parts=(receipt,),
+            upload_token=upload_token,
+        )
+        committed = await route.commit(
+            lease=authorized,
+            session_id=upload_session_id,
+            upload_token=upload_token,
+        )
+        assert committed["state"] == "committed"
+        assert committed["manifest_sha256"].startswith("sha256:")
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            artifact = (
+                await session.execute(
+                    select(Artifact).where(
+                        Artifact.control_producer_kind == "service_execution",
+                        Artifact.control_producer_id == lease.id,
+                    )
+                )
+            ).scalar_one()
+            assert persisted is not None
+            assert persisted.output_commit_state == "committed"
+            assert persisted.output_upload_session_id == upload_session_id
+            assert artifact.content_hash == digest_bytes(result_payload)
+
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionBrokerError, match="not_observed"):
+                await authorize_service_execution_peer(
+                    session,
+                    peer_ip="10.24.7.20",
+                    identity=identity,
+                    purpose="output",
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_revocation_fences_tokens_but_bounds_output_flush(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    pod_ip = "10.24.8.31"
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="start",
+                now=now,
+            )
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "running",
+                    "job_uid": "job-uid-flush",
+                    "pod_uid": "pod-uid-flush",
+                    "pod_ip": pod_ip,
+                },
+                observed_at=now,
+            )
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        identity = ServiceExecutionPeerV1(
+            lease_id=lease.id,
+            generation=1,
+            execution_role="attempt",
+        )
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionBrokerError, match="generation_fenced"):
+                await authorize_service_execution_peer(
+                    session,
+                    peer_ip=pod_ip,
+                    identity=identity,
+                    purpose="token",
+                    now=now + timedelta(seconds=2),
+                )
+            output_lease = await authorize_service_execution_peer(
+                session,
+                peer_ip=pod_ip,
+                identity=identity,
+                purpose="output",
+                now=now + timedelta(minutes=4),
+            )
+            assert output_lease.resource_generation == 1
+            assert output_lease.generation == 2
+            with pytest.raises(ServiceExecutionBrokerError, match="window_closed"):
+                await authorize_service_execution_peer(
+                    session,
+                    peer_ip=pod_ip,
+                    identity=identity,
+                    purpose="output",
+                    now=now + timedelta(minutes=5, seconds=1),
+                )
+    finally:
+        await engine.dispose()
+
+
 async def test_invalid_state_edges_event_bounds_and_payload_bounds_fail_closed(
     postgres_url: str,
 ) -> None:
@@ -1284,9 +1528,13 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             await session.commit()
 
         assert await restarted.run_commands_once(now=now + timedelta(seconds=2)) == 1
+        assert kubernetes.delete_count == 0
+        assert await restarted.run_commands_once(now=now + timedelta(minutes=5, seconds=2)) == 1
         assert kubernetes.delete_count == 1
         assert kubernetes.jobs == {}
-        assert await restarted.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
+        assert await restarted.reconcile_full_once(
+            now=now + timedelta(minutes=5, seconds=3)
+        ) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
@@ -1294,7 +1542,9 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             assert persisted.desired_state == "deleted"
             assert persisted.observed_state == "deleted"
             assert persisted.cleanup_state == "complete"
-            assert persisted.deleted_at == now + timedelta(seconds=3)
+            assert persisted.output_commit_state == "unavailable"
+            assert persisted.output_unavailable_reason == "cleanup_deadline_elapsed"
+            assert persisted.deleted_at == now + timedelta(minutes=5, seconds=3)
     finally:
         await engine.dispose()
 
@@ -1341,7 +1591,7 @@ async def test_actuator_refuses_uid_reuse_and_never_deletes_foreign_scope(
                 now=now + timedelta(seconds=1),
             )
             await session.commit()
-        assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
+        assert await actuator.run_commands_once(now=now + timedelta(minutes=5, seconds=1)) == 1
         assert kubernetes.delete_count == 0
         async with sessions() as session:
             cancel = (
@@ -1370,5 +1620,58 @@ async def test_actuator_refuses_uid_reuse_and_never_deletes_foreign_scope(
         assert await actuator.reconcile_full_once(now=now + timedelta(seconds=2)) >= 1
         assert kubernetes.jobs[foreign.job_name] == foreign
         assert kubernetes.delete_count == 0
+    finally:
+        await engine.dispose()
+
+
+async def test_actuator_records_unavailable_before_accepting_an_already_absent_job(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+                runtime_class_name="loom-sandbox",
+            ),
+            controller_id="actuator-a",
+            command_lease_seconds=5,
+        )
+        assert await actuator.run_commands_once(now=now) == 1
+        kubernetes.jobs.clear()
+        async with sessions() as session:
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
+        async with sessions() as session:
+            pending = await session.get(ServiceExecutionLease, lease.id)
+            assert pending is not None
+            assert pending.observed_state != "deleted"
+            assert pending.output_commit_state == "not_started"
+
+        assert await actuator.run_commands_once(now=now + timedelta(minutes=5, seconds=1)) == 1
+        async with sessions() as session:
+            closed = await session.get(ServiceExecutionLease, lease.id)
+            assert closed is not None
+            assert closed.observed_state == "deleted"
+            assert closed.output_commit_state == "unavailable"
+            assert closed.output_unavailable_reason == "cleanup_deadline_elapsed"
     finally:
         await engine.dispose()

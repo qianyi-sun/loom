@@ -1,9 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +32,71 @@ func main() {
 			response.WriteHeader(http.StatusNoContent)
 		})
 		if err := http.ListenAndServe(":"+os.Args[2], nil); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "broker":
+		http.HandleFunc("/internal/service-execution/outputs/prepare", func(response http.ResponseWriter, request *http.Request) {
+			var prepared struct {
+				Files []struct {
+					RelativePath string `json:"relative_path"`
+				} `json:"files"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&prepared); err != nil {
+				http.Error(response, "invalid prepare", http.StatusBadRequest)
+				return
+			}
+			files := make([]map[string]any, len(prepared.Files))
+			for index, file := range prepared.Files {
+				files[index] = map[string]any{
+					"file_index":    index,
+					"relative_path": file.RelativePath,
+				}
+			}
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"upload_session_id": "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+				"upload_token":      strings.Repeat("u", 48),
+				"token_expires_at":  time.Now().Add(10 * time.Minute).UTC(),
+				"files":             files,
+			})
+		})
+		http.HandleFunc("/internal/service-execution/outputs/", func(response http.ResponseWriter, request *http.Request) {
+			segments := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+			response.Header().Set("Content-Type", "application/json")
+			if request.Method == http.MethodPut && len(segments) >= 8 && segments[len(segments)-2] == "parts" {
+				payload, err := io.ReadAll(request.Body)
+				if err != nil {
+					http.Error(response, "read part", http.StatusBadRequest)
+					return
+				}
+				fileIndex, _ := strconv.Atoi(segments[len(segments)-3])
+				partNumber, _ := strconv.Atoi(segments[len(segments)-1])
+				digest := sha256.Sum256(payload)
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"file_index":  fileIndex,
+					"part_number": partNumber,
+					"size_bytes":  len(payload),
+					"sha256":      "sha256:" + hex.EncodeToString(digest[:]),
+				})
+				return
+			}
+			if strings.HasSuffix(request.URL.Path, "/complete") {
+				_ = json.NewEncoder(response).Encode(map[string]any{"state": "uploaded"})
+				return
+			}
+			if strings.HasSuffix(request.URL.Path, "/commit") {
+				_ = json.NewEncoder(response).Encode(map[string]any{
+					"upload_session_id":       "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+					"manifest_sha256":         "sha256:" + strings.Repeat("1", 64),
+					"committed_marker_sha256": "sha256:" + strings.Repeat("2", 64),
+				})
+				return
+			}
+			http.NotFound(response, request)
+		})
+		if err := http.ListenAndServe(":9100", nil); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

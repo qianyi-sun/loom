@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -146,6 +147,17 @@ def _bounded_optional_text(value: object, limit: int, name: str) -> str | None:
     if not isinstance(value, str) or not value or len(value) > limit:
         raise ServiceExecutionConflict(f"invalid Kubernetes {name}")
     return value
+
+
+def _validated_pod_ip(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ServiceExecutionConflict("invalid Kubernetes pod_ip")
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError as exc:
+        raise ServiceExecutionConflict("invalid Kubernetes pod_ip") from exc
 
 
 def _optional_datetime(value: object, name: str) -> datetime | None:
@@ -570,6 +582,12 @@ async def enqueue_execution_transition(
         raise ServiceExecutionConflict(
             f"invalid execution transition {lease.desired_state} -> {desired_state}"
         )
+    if (
+        lease.desired_state == "finalize"
+        and desired_state == "delete_pending"
+        and lease.output_commit_state != "committed"
+    ):
+        raise ServiceExecutionConflict("durable execution output is not committed")
 
     command_type = _DESIRED_TO_COMMAND[desired_state]
     next_generation = (
@@ -643,6 +661,50 @@ async def enqueue_execution_transition(
     session.add(command)
     await session.flush()
     return command
+
+
+async def mark_execution_output_unavailable(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    expected_generation: int,
+    reason: str,
+    now: datetime | None = None,
+) -> ServiceExecutionLease:
+    """Close a revoked Pod's bounded output window before resource deletion."""
+
+    if not reason or len(reason) > 120:
+        raise ServiceExecutionConflict("invalid output unavailable reason")
+    current_time = now or datetime.now(UTC)
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.id == lease_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    if lease.generation != expected_generation:
+        raise ServiceExecutionFenceError("execution generation is stale")
+    if lease.output_commit_state in {"committed", "unavailable"}:
+        return lease
+    if (
+        lease.revoked_at is None
+        or lease.cleanup_state != "pending"
+        or lease.cleanup_deadline_at is None
+        or current_time < lease.cleanup_deadline_at
+    ):
+        raise ServiceExecutionConflict("execution output window remains open")
+    lease.output_commit_state = "unavailable"
+    lease.output_generation = lease.resource_generation
+    lease.output_manifest_sha256 = None
+    lease.output_marker_sha256 = None
+    lease.output_committed_at = None
+    lease.output_unavailable_reason = reason
+    lease.updated_at = current_time
+    await session.flush()
+    return lease
 
 
 async def claim_execution_commands(
@@ -1013,6 +1075,16 @@ async def record_execution_event(
                 raise ServiceExecutionConflict(f"Kubernetes {field} changed")
             if incoming is not None:
                 setattr(lease, field, incoming)
+        incoming_pod_ip = _validated_pod_ip(payload.get("pod_ip"))
+        current_pod_ip = str(lease.pod_ip) if lease.pod_ip is not None else None
+        if (
+            current_pod_ip is not None
+            and incoming_pod_ip is not None
+            and current_pod_ip != incoming_pod_ip
+        ):
+            raise ServiceExecutionConflict("Kubernetes pod_ip changed")
+        if incoming_pod_ip is not None:
+            lease.pod_ip = incoming_pod_ip
         lease.kubernetes_resource_version = _bounded_optional_text(
             payload.get("resource_version"), 128, "resource_version"
         )
@@ -1241,6 +1313,7 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "execution_unit_key": str(lease.execution_unit_key),
         "job_uid": lease.job_uid,
         "pod_uid": lease.pod_uid,
+        "pod_ip": str(lease.pod_ip) if lease.pod_ip is not None else None,
         "kubernetes_resource_version": lease.kubernetes_resource_version,
         "node_name": lease.node_name,
         "deadline_at": lease.deadline_at.isoformat(),
@@ -1260,6 +1333,17 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         ),
         "revoked_at": lease.revoked_at.isoformat() if lease.revoked_at else None,
         "finalized_at": lease.finalized_at.isoformat() if lease.finalized_at else None,
+        "output_commit_state": lease.output_commit_state,
+        "output_upload_session_id": (
+            str(lease.output_upload_session_id) if lease.output_upload_session_id else None
+        ),
+        "output_generation": lease.output_generation,
+        "output_manifest_sha256": lease.output_manifest_sha256,
+        "output_marker_sha256": lease.output_marker_sha256,
+        "output_committed_at": (
+            lease.output_committed_at.isoformat() if lease.output_committed_at else None
+        ),
+        "output_unavailable_reason": lease.output_unavailable_reason,
         "deleted_at": lease.deleted_at.isoformat() if lease.deleted_at else None,
         "error": (
             {
@@ -1285,6 +1369,7 @@ __all__ = [
     "defer_execution_command",
     "enqueue_execution_transition",
     "execution_lease_projection",
+    "mark_execution_output_unavailable",
     "persist_execution_catalog",
     "record_execution_event",
     "record_kubernetes_observation",

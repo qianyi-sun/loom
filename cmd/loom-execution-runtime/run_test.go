@@ -56,7 +56,7 @@ func TestRunPlanCapturesBoundedEvidenceAndAtomicResult(t *testing.T) {
 		Role: "agent", Argv: []string{"/bin/sh", "-c", "printf 'abcdefghijklmnopqrstuvwxyz0123456789'; printf 'error' >&2"},
 		WorkingDirectory: workspace, TimeoutSeconds: 5, Environment: map[string]string{"LOOM_PHASE": "agent"},
 	}
-	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output)
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,11 @@ func TestRunPlanCapturesBoundedEvidenceAndAtomicResult(t *testing.T) {
 		t.Fatalf("temporary result remains: %v", err)
 	}
 	summaryPath := filepath.Join(output, "termination-message")
-	if err := writeTerminationSummary(summaryPath, result); err != nil {
+	if err := writeTerminationSummary(summaryPath, result, &outputCommitEvidence{
+		UploadSessionID:       "0194d739-8bec-7b7b-88f5-62f7cbd42cb3",
+		ManifestSHA256:        "sha256:" + strings.Repeat("1", 64),
+		CommittedMarkerSHA256: "sha256:" + strings.Repeat("2", 64),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var summary terminationSummary
@@ -97,7 +101,7 @@ func TestRunPlanTimeoutTerminatesProcessGroupAndRetainsPartialEvidence(t *testin
 		WorkingDirectory: workspace, TimeoutSeconds: 1,
 	}
 	started := time.Now()
-	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output)
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
 	if err == nil || result.Status != "timed_out" || !result.PartialEvidence {
 		t.Fatalf("timeout did not fail closed: result=%#v err=%v", result, err)
 	}
@@ -113,7 +117,7 @@ func TestSeparateVerifierFailureHasDistinctDurableStatusAndRoles(t *testing.T) {
 		WorkingDirectory: workspace, TimeoutSeconds: 5,
 	})
 	p.ExecutionRole = "verifier"
-	result, err := runPlan(context.Background(), p, workspace, output)
+	result, err := runPlan(context.Background(), p, workspace, output, nil)
 	if err == nil || result.Status != "verifier_error" || !result.PartialEvidence {
 		t.Fatalf("verifier failure was not retained: result=%#v err=%v", result, err)
 	}
@@ -122,6 +126,35 @@ func TestSeparateVerifierFailureHasDistinctDurableStatusAndRoles(t *testing.T) {
 	}
 	if result.Phases[0].ExitCode != 7 {
 		t.Fatalf("verifier exit status was not retained: %#v", result.Phases[0])
+	}
+}
+
+func TestRunPlanHidesBrokerIdentityAndOwnsGatewayEnvironment(t *testing.T) {
+	t.Setenv("LOOM_EXECUTION_LEASE_ID", "should-not-reach-task")
+	workspace, output := t.TempDir(), t.TempDir()
+	agent := phase{
+		Role: "agent",
+		Argv: []string{
+			"/bin/sh",
+			"-c",
+			`test -z "$LOOM_EXECUTION_LEASE_ID" && test "$OPENAI_BASE_URL" = "http://127.0.0.1:43123/openai/v1"`,
+		},
+		WorkingDirectory: workspace,
+		TimeoutSeconds:   5,
+		Environment: map[string]string{
+			"LOOM_EXECUTION_LEASE_ID": "plan-injection",
+			"OPENAI_BASE_URL":         "http://attacker.invalid",
+		},
+	}
+	result, err := runPlan(
+		context.Background(),
+		testPlan(workspace, agent),
+		workspace,
+		output,
+		map[string]string{"OPENAI_BASE_URL": "http://127.0.0.1:43123/openai/v1"},
+	)
+	if err != nil || result.Status != "succeeded" {
+		t.Fatalf("runtime-owned environment was not enforced: result=%#v err=%v", result, err)
 	}
 }
 
