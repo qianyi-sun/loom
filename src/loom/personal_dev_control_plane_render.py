@@ -3082,6 +3082,10 @@ def _network_policies(
             "ingress": [
                 {
                     "from": [
+                        *(
+                            {"ipBlock": {"cidr": cidr}}
+                            for cidr in profile.network.ingress_controller_source_cidrs
+                        ),
                         {
                             "namespaceSelector": {
                                 "matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}

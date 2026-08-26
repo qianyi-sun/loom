@@ -256,7 +256,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "92b55a14be0eadc760e6fa7c6ad712a6ab2e0ade8454c56f6b4ddaf2492ce0a7"
+        "67fd580b481f55017bba7282ed795a825207d4e8b2c44518cfbe929bf5ef9116"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1042,6 +1042,51 @@ def test_storage_ingress_separates_postgres_and_minio_callers(tmp_path: Path) ->
     assert "loom-dev-instance-controller" in minio_sources
     assert "loom-personal-dev-builder-controller" in minio_sources
     assert "loom-personal-dev-migration" not in minio_sources
+
+
+def test_management_ingress_admits_exact_controller_hosts_and_known_pods(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, rendered, documents = _render(tmp_path)
+    management_ingress = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
+    )
+
+    assert rendered.resource_count == 33
+    assert management_ingress["spec"] == {
+        "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
+        "policyTypes": ["Ingress"],
+        "ingress": [
+            {
+                "from": [
+                    {"ipBlock": {"cidr": "192.168.50.14/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.15/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.16/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.17/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.103/32"}},
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {
+                                "kubernetes.io/metadata.name": "ingress-nginx"
+                            }
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
+                        },
+                    },
+                    {
+                        "podSelector": {
+                            "matchLabels": {"app": "loom-personal-dev-activation-agent"}
+                        }
+                    },
+                ],
+                "ports": [{"protocol": "TCP", "port": 8090}],
+            }
+        ],
+    }
 
 
 def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
