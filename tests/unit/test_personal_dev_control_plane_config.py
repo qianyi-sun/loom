@@ -111,6 +111,14 @@ def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
     return "\n".join(lines).replace("[network]\n", "[network]\n" + entry, 1) + "\n"
 
 
+def _without_ingress_controller_source_cidrs(text: str) -> str:
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.startswith("ingress_controller_source_cidrs = ")
+    ) + "\n"
+
+
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
@@ -341,10 +349,27 @@ def test_profile_rejects_missing_and_duplicate_pools(tmp_path: Path) -> None:
         load_personal_dev_control_plane_profile(duplicate)
 
 
+@pytest.mark.parametrize("form", ["omitted", "explicit_empty"])
+def test_profile_accepts_no_ingress_controller_source_cidrs(
+    tmp_path: Path,
+    form: str,
+) -> None:
+    transform = (
+        _without_ingress_controller_source_cidrs
+        if form == "omitted"
+        else lambda text: _with_ingress_controller_source_cidrs(text, [])
+    )
+    path = _write_profile(tmp_path, transform)
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.network.ingress_controller_source_cidrs == ()
+    assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
+
+
 @pytest.mark.parametrize(
     "cidrs",
     [
-        [],
         ["192.168.50.14/32", "192.168.50.14/32"],
         ["192.168.50.0/24"],
         ["8.8.8.8/32"],
