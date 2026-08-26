@@ -173,8 +173,14 @@ scanner cache, while builder preparation remains false. The protected trusted
 release binds the scanner binary, both databases and metadata files, cache
 identity, checked-in source lock, and immutable cache image. The later
 acceptance and operational plans additionally bind the same RuntimeClass
-profile and finding policy. Shadow, acceptance, and operational status all fail
-until the observed handler, annotation, and complete scheduling selector match.
+profile and finding policy. The launcher profile and scanner finding policy are
+canonical artifacts rendered from the exact trusted-release checkout: they
+bind the release source identity, the authority-bearing launcher source files,
+the fixed offline scanner argv and rejection fields, and the complete scanner
+release identities. Acceptance and operational render/status rederive them and
+reject arbitrary files, source drift, semantic drift, or digest drift. Shadow,
+acceptance, and operational status all fail until the observed handler,
+annotation, and complete scheduling selector match.
 
 ## Configuration and immutable release binding
 
@@ -245,6 +251,17 @@ ceiling remain exact fail-closed bindings.
 The file must be a current-user-owned, non-symlink, single-link regular file
 with mode `0600`, canonical JSON bytes, no trailing newline, and an exact digest
 match. It is control evidence, not a credential.
+
+The storage evidence is produced by the
+[personal-development backup and isolated restore procedure](../runbooks/personal-dev-backup-restore-evidence.md).
+It dumps live Postgres and copies every live MinIO object while the plane is in
+ready shadow with ceiling zero and no personal worker, restores both into
+private disposable Docker resources using the exact trusted-release images,
+and compares schema, per-table row-count state, bucket sets, object keys,
+sizes, and payload digests. The canonical record contains only state digests,
+Secret names/key-name inventory digest, fixed PVC identities, zero-capacity
+observations, and cleanup proof. It rejects Secret values and cannot be
+substituted by readiness, object counts alone, or an operator-authored claim.
 
 Repository implementation does not establish the live prerequisites by
 itself. DNS and TLS, provisioned Secret inventories, the measured gVisor

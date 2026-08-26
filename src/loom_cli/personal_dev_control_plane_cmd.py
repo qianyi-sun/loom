@@ -19,7 +19,18 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from loom.personal_dev_acceptance_evidence import (
+    build_personal_dev_backup_restore_evidence,
+    build_personal_dev_scanner_finding_policy,
+    build_personal_dev_trusted_launcher_profile,
+    load_personal_dev_backup_restore_evidence,
+    validate_personal_dev_policy_evidence,
+)
 from loom.personal_dev_control_plane_config import (
+    PersonalDevAcceptancePlan,
+    PersonalDevControlPlaneProfile,
+    PersonalDevOperationalPlan,
+    PersonalDevTrustedRelease,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
     load_personal_dev_operational_plan,
@@ -39,6 +50,7 @@ from loom.personal_dev_control_plane_status import (
 
 _RENDER_ERROR = "error: personal-dev control-plane render inputs are invalid\n"
 _STATUS_ERROR = "error: personal-dev control-plane status inputs are invalid\n"
+_EVIDENCE_ERROR = "error: personal-dev acceptance evidence inputs are invalid\n"
 _KUBECTL_READ_BYTES = 64 * 1024
 _MAX_KUBECONFIG_BYTES = 1024 * 1024
 _KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
@@ -80,6 +92,170 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_policy_evidence(args: argparse.Namespace) -> int:
+    try:
+        profile = load_personal_dev_control_plane_profile(args.file)
+        release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        if args.personal_dev_control_plane_op == "render-trusted-launcher-profile":
+            value = build_personal_dev_trusted_launcher_profile(
+                profile=profile,
+                release=release,
+                source_root=args.source_root,
+            )
+            kind = "trusted-launcher-profile"
+        else:
+            value = build_personal_dev_scanner_finding_policy(
+                profile=profile,
+                release=release,
+                source_root=args.source_root,
+            )
+            kind = "scanner-finding-policy"
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        digest = hashlib.sha256(payload.encode("ascii")).hexdigest()
+    except (OSError, TypeError, ValueError):
+        sys.stderr.write(_EVIDENCE_ERROR)
+        return 2
+    try:
+        sys.stdout.write(payload)
+    except BrokenPipeError:
+        return 0
+    sys.stderr.write(
+        json.dumps(
+            {
+                "kind": kind,
+                "schema": "loom-personal-dev-policy-evidence-render-v1",
+                "sha256": digest,
+                "source_sha": release.source_sha,
+                "source_tree": release.source_tree,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _assert_isolated_restore_cleanup(args: argparse.Namespace) -> None:
+    containers = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    networks = subprocess.run(
+        ["docker", "network", "ls", "--format", "{{.Name}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    live_containers = set(containers.stdout.splitlines())
+    live_networks = set(networks.stdout.splitlines())
+    if (
+        args.isolated_postgres_name in live_containers
+        or args.isolated_minio_name in live_containers
+        or args.isolated_network_name in live_networks
+    ):
+        raise ValueError("isolated restore cleanup is incomplete")
+
+
+def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
+    try:
+        profile = load_personal_dev_control_plane_profile(args.file)
+        release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        _assert_isolated_restore_cleanup(args)
+        value = build_personal_dev_backup_restore_evidence(
+            profile=profile,
+            release=release,
+            release_sha256=args.trusted_release_sha256,
+            started_at=args.started_at,
+            completed_at=args.completed_at,
+            postgres_dump_path=args.postgres_dump_file,
+            postgres_source_state_path=args.postgres_source_state_file,
+            postgres_restored_state_path=args.postgres_restored_state_file,
+            source_schema_head=args.source_schema_head,
+            restored_schema_head=args.restored_schema_head,
+            minio_source_manifest_path=args.minio_source_manifest_file,
+            minio_restored_manifest_path=args.minio_restored_manifest_file,
+            secret_key_inventory_path=args.secret_key_inventory_file,
+            pre_shadow_status_path=args.pre_shadow_status_file,
+            post_shadow_status_path=args.post_shadow_status_file,
+            storage_inventory_path=args.storage_inventory_file,
+        )
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        digest = hashlib.sha256(payload.encode("ascii")).hexdigest()
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        sys.stderr.write(_EVIDENCE_ERROR)
+        return 2
+    try:
+        sys.stdout.write(payload)
+    except BrokenPipeError:
+        return 0
+    sys.stderr.write(
+        json.dumps(
+            {
+                "kind": "backup-restore-evidence",
+                "schema": "loom-personal-dev-backup-restore-evidence-render-v1",
+                "sha256": digest,
+                "source_sha": release.source_sha,
+                "source_tree": release.source_tree,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _validate_bound_acceptance_evidence(
+    args: argparse.Namespace,
+    *,
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+) -> None:
+    validate_personal_dev_policy_evidence(
+        profile=profile,
+        release=release,
+        plan=plan,
+        source_root=args.source_root,
+        trusted_launcher_profile_path=args.trusted_launcher_profile_file,
+        scanner_finding_policy_path=args.scanner_finding_policy_file,
+    )
+    load_personal_dev_backup_restore_evidence(
+        args.backup_restore_evidence_file,
+        expected_sha256=plan.storage.backup_restore_evidence_sha256,
+        release=release,
+        release_sha256=args.trusted_release_sha256,
+        expected_schema_head=plan.storage.schema_head,
+    )
+
+
 def _render_acceptance(args: argparse.Namespace) -> int:
     try:
         profile = load_personal_dev_control_plane_profile(args.file)
@@ -90,6 +266,12 @@ def _render_acceptance(args: argparse.Namespace) -> int:
         plan = load_personal_dev_acceptance_plan(
             args.acceptance_plan_file,
             args.acceptance_plan_sha256,
+        )
+        _validate_bound_acceptance_evidence(
+            args,
+            profile=profile,
+            release=release,
+            plan=plan,
         )
         rendered = render_acceptance_personal_dev_control_plane(
             profile,
@@ -137,6 +319,12 @@ def _render_operational(args: argparse.Namespace) -> int:
             args.operational_plan_file,
             args.operational_plan_sha256,
         )
+        _validate_bound_acceptance_evidence(
+            args,
+            profile=profile,
+            release=release,
+            plan=plan,
+        )
         rendered = render_operational_personal_dev_control_plane(
             profile,
             release,
@@ -153,9 +341,7 @@ def _render_operational(args: argparse.Namespace) -> int:
                 "schema": "loom-personal-dev-control-plane-render-v1",
                 "source_sha": release.source_sha,
                 "source_tree": release.source_tree,
-                "yaml_sha256": hashlib.sha256(
-                    rendered.yaml_text.encode("utf-8")
-                ).hexdigest(),
+                "yaml_sha256": hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -512,6 +698,12 @@ def _status_acceptance(args: argparse.Namespace) -> int:
             args.acceptance_plan_file,
             args.acceptance_plan_sha256,
         )
+        _validate_bound_acceptance_evidence(
+            args,
+            profile=profile,
+            release=release,
+            plan=plan,
+        )
         # Reconstruct the immutable target even after expiry; the live observer
         # reports actual window state as a blocker instead of hiding cluster drift.
         expected = render_acceptance_personal_dev_control_plane(
@@ -561,6 +753,12 @@ def _status_operational(args: argparse.Namespace) -> int:
             args.operational_plan_file,
             args.operational_plan_sha256,
         )
+        _validate_bound_acceptance_evidence(
+            args,
+            profile=profile,
+            release=release,
+            plan=plan,
+        )
         expected = render_operational_personal_dev_control_plane(
             profile,
             release,
@@ -593,6 +791,33 @@ def _status_operational(args: argparse.Namespace) -> int:
     except BrokenPipeError:
         return 0 if status_value.ready else 1
     return 0 if status_value.ready else 1
+
+
+def _add_bound_evidence_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        required=True,
+        help="Absolute clean checkout root for source-derived evidence validation.",
+    )
+    parser.add_argument(
+        "--trusted-launcher-profile-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical source-derived trusted-launcher profile.",
+    )
+    parser.add_argument(
+        "--scanner-finding-policy-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical source-derived scanner finding policy.",
+    )
+    parser.add_argument(
+        "--backup-restore-evidence-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical completed backup/restore drill evidence.",
+    )
 
 
 def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
@@ -638,6 +863,72 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
     )
     render.set_defaults(handler=_render)
 
+    for operation, description in (
+        (
+            "render-trusted-launcher-profile",
+            "Render the exact source-derived trusted-launcher profile.",
+        ),
+        (
+            "render-scanner-finding-policy",
+            "Render the exact source-derived scanner finding policy.",
+        ),
+    ):
+        policy = operations.add_parser(
+            operation,
+            allow_abbrev=False,
+            help=description,
+        )
+        policy.add_argument(
+            "--file",
+            type=Path,
+            required=True,
+            help="Strict non-secret personal-dev management-plane TOML profile.",
+        )
+        policy.add_argument(
+            "--trusted-release-file",
+            type=Path,
+            required=True,
+            help="Owner-only canonical trusted-release JSON document.",
+        )
+        policy.add_argument(
+            "--trusted-release-sha256",
+            required=True,
+            help="Exact SHA-256 of the canonical trusted-release document.",
+        )
+        policy.add_argument(
+            "--source-root",
+            type=Path,
+            required=True,
+            help="Absolute clean checkout root whose source files are bound.",
+        )
+        policy.set_defaults(handler=_render_policy_evidence)
+
+    backup = operations.add_parser(
+        "render-backup-restore-evidence",
+        allow_abbrev=False,
+        help="Derive canonical evidence from one completed isolated restore drill.",
+    )
+    backup.add_argument("--file", type=Path, required=True)
+    backup.add_argument("--trusted-release-file", type=Path, required=True)
+    backup.add_argument("--trusted-release-sha256", required=True)
+    backup.add_argument("--started-at", required=True)
+    backup.add_argument("--completed-at", required=True)
+    backup.add_argument("--postgres-dump-file", type=Path, required=True)
+    backup.add_argument("--postgres-source-state-file", type=Path, required=True)
+    backup.add_argument("--postgres-restored-state-file", type=Path, required=True)
+    backup.add_argument("--source-schema-head", required=True)
+    backup.add_argument("--restored-schema-head", required=True)
+    backup.add_argument("--minio-source-manifest-file", type=Path, required=True)
+    backup.add_argument("--minio-restored-manifest-file", type=Path, required=True)
+    backup.add_argument("--secret-key-inventory-file", type=Path, required=True)
+    backup.add_argument("--pre-shadow-status-file", type=Path, required=True)
+    backup.add_argument("--post-shadow-status-file", type=Path, required=True)
+    backup.add_argument("--storage-inventory-file", type=Path, required=True)
+    backup.add_argument("--isolated-postgres-name", required=True)
+    backup.add_argument("--isolated-minio-name", required=True)
+    backup.add_argument("--isolated-network-name", required=True)
+    backup.set_defaults(handler=_render_backup_restore_evidence)
+
     render_acceptance = operations.add_parser(
         "render-acceptance",
         allow_abbrev=False,
@@ -671,6 +962,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         required=True,
         help="Exact SHA-256 of the canonical acceptance plan.",
     )
+    _add_bound_evidence_arguments(render_acceptance)
     render_acceptance.set_defaults(handler=_render_acceptance)
 
     render_operational = operations.add_parser(
@@ -706,6 +998,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         required=True,
         help="Exact SHA-256 of the canonical operational plan.",
     )
+    _add_bound_evidence_arguments(render_operational)
     render_operational.set_defaults(handler=_render_operational)
 
     status_parser = operations.add_parser(
@@ -789,6 +1082,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         required=True,
         help="Exact SHA-256 of the canonical acceptance plan.",
     )
+    _add_bound_evidence_arguments(status_acceptance)
     status_acceptance.set_defaults(handler=_status_acceptance)
 
     status_operational = operations.add_parser(
@@ -836,6 +1130,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         required=True,
         help="Exact SHA-256 of the canonical operational plan.",
     )
+    _add_bound_evidence_arguments(status_operational)
     status_operational.set_defaults(handler=_status_operational)
 
 

@@ -13,6 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from loom.personal_dev_acceptance_evidence import (
+    build_personal_dev_scanner_finding_policy,
+    build_personal_dev_trusted_launcher_profile,
+)
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
@@ -103,6 +107,72 @@ def _acceptance_plan(
             separators=(",", ":"),
         ).encode("ascii")
     ).hexdigest()
+    launcher_profile = build_personal_dev_trusted_launcher_profile(
+        profile=profile,
+        release=release,
+        source_root=_ROOT,
+    )
+    scanner_policy = build_personal_dev_scanner_finding_policy(
+        profile=profile,
+        release=release,
+        source_root=_ROOT,
+    )
+    launcher_payload = json.dumps(launcher_profile, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    scanner_payload = json.dumps(scanner_policy, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    launcher_path = tmp_path / "trusted-launcher-profile.json"
+    scanner_path = tmp_path / "scanner-finding-policy.json"
+    launcher_path.write_bytes(launcher_payload)
+    scanner_path.write_bytes(scanner_payload)
+    launcher_path.chmod(0o600)
+    scanner_path.chmod(0o600)
+    backup_value = {
+        "cleanup": {
+            "isolated_minio_absent": True,
+            "isolated_postgres_absent": True,
+        },
+        "completed_at": "2026-08-17T20:55:00Z",
+        "manager": {
+            "executable_new_capacity_ceiling": 0,
+            "personal_worker_count": 0,
+        },
+        "minio": {
+            "backup_manifest_sha256": "a" * 64,
+            "image": release.images.minio,
+            "restored_manifest_sha256": "a" * 64,
+            "restored_object_count": 0,
+            "source_object_count": 0,
+        },
+        "namespace": "loom-dev",
+        "postgres": {
+            "dump_sha256": "b" * 64,
+            "image": release.images.postgres,
+            "restored_schema_head": "0111",
+            "restored_state_sha256": "c" * 64,
+            "source_schema_head": "0111",
+            "source_state_sha256": "c" * 64,
+        },
+        "release_sha256": release_digest,
+        "schema": "loom-personal-dev-backup-restore-evidence-v1",
+        "secrets": {
+            "key_inventory_sha256": "d" * 64,
+            "values_included": False,
+        },
+        "source": {"commit": release.source_sha, "tree": release.source_tree},
+        "started_at": "2026-08-17T20:45:00Z",
+        "storage": {
+            "minio_pvc": "data-loom-dev-minio-0",
+            "postgres_pvc": "data-loom-dev-postgres-0",
+            "storage_class": "longhorn",
+        },
+    }
+    backup_payload = json.dumps(backup_value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    backup_path = tmp_path / "backup-restore-evidence.json"
+    backup_path.write_bytes(backup_payload)
+    backup_path.chmod(0o600)
     value = {
         "acceptance_owner": {
             "team_id": "00000000-0000-0000-0000-000000000201",
@@ -123,12 +193,12 @@ def _acceptance_plan(
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
             "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
-            "scanner_finding_policy_sha256": "3" * 64,
+            "scanner_finding_policy_sha256": hashlib.sha256(scanner_payload).hexdigest(),
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
                 release.scanner.java_database_metadata_sha256
             ),
-            "trusted_launcher_profile_sha256": "e" * 64,
+            "trusted_launcher_profile_sha256": hashlib.sha256(launcher_payload).hexdigest(),
         },
         "manager": {
             "authority_incarnation": "00000000-0000-0000-0000-000000000101",
@@ -161,7 +231,7 @@ def _acceptance_plan(
         "schema_version": 1,
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
-            "backup_restore_evidence_sha256": "b" * 64,
+            "backup_restore_evidence_sha256": hashlib.sha256(backup_payload).hexdigest(),
             "schema_head": "0112",
         },
         "window": {
@@ -293,6 +363,14 @@ def _acceptance_argv(
         str(plan),
         "--acceptance-plan-sha256",
         plan_digest,
+        "--source-root",
+        str(_ROOT),
+        "--trusted-launcher-profile-file",
+        str(plan.parent / "trusted-launcher-profile.json"),
+        "--scanner-finding-policy-file",
+        str(plan.parent / "scanner-finding-policy.json"),
+        "--backup-restore-evidence-file",
+        str(plan.parent / "backup-restore-evidence.json"),
     ]
 
 
@@ -320,6 +398,14 @@ def _acceptance_status_argv(
         str(plan),
         "--acceptance-plan-sha256",
         plan_digest,
+        "--source-root",
+        str(_ROOT),
+        "--trusted-launcher-profile-file",
+        str(plan.parent / "trusted-launcher-profile.json"),
+        "--scanner-finding-policy-file",
+        str(plan.parent / "scanner-finding-policy.json"),
+        "--backup-restore-evidence-file",
+        str(plan.parent / "backup-restore-evidence.json"),
     ]
 
 
@@ -342,6 +428,14 @@ def _operational_argv(
         str(plan),
         "--operational-plan-sha256",
         plan_digest,
+        "--source-root",
+        str(_ROOT),
+        "--trusted-launcher-profile-file",
+        str(plan.parent / "trusted-launcher-profile.json"),
+        "--scanner-finding-policy-file",
+        str(plan.parent / "scanner-finding-policy.json"),
+        "--backup-restore-evidence-file",
+        str(plan.parent / "backup-restore-evidence.json"),
     ]
 
 
@@ -369,6 +463,14 @@ def _operational_status_argv(
         str(plan),
         "--operational-plan-sha256",
         plan_digest,
+        "--source-root",
+        str(_ROOT),
+        "--trusted-launcher-profile-file",
+        str(plan.parent / "trusted-launcher-profile.json"),
+        "--scanner-finding-policy-file",
+        str(plan.parent / "scanner-finding-policy.json"),
+        "--backup-restore-evidence-file",
+        str(plan.parent / "backup-restore-evidence.json"),
     ]
 
 
@@ -409,6 +511,142 @@ def test_render_emits_exact_yaml_and_canonical_evidence(
         "source_tree": "2" * 40,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
     }
+
+
+@pytest.mark.parametrize(
+    ("operation", "kind"),
+    [
+        ("render-trusted-launcher-profile", "trusted-launcher-profile"),
+        ("render-scanner-finding-policy", "scanner-finding-policy"),
+    ],
+)
+def test_render_policy_evidence_is_canonical_and_source_derived(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    kind: str,
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+
+    result = dispatch(
+        [
+            "personal-dev-control-plane",
+            operation,
+            "--file",
+            str(_PROFILE),
+            "--trusted-release-file",
+            str(release_path),
+            "--trusted-release-sha256",
+            release_digest,
+            "--source-root",
+            str(_ROOT),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    value = json.loads(captured.out)
+    assert captured.out == json.dumps(value, sort_keys=True, separators=(",", ":"))
+    evidence = json.loads(captured.err)
+    assert evidence == {
+        "kind": kind,
+        "schema": "loom-personal-dev-policy-evidence-render-v1",
+        "sha256": hashlib.sha256(captured.out.encode("ascii")).hexdigest(),
+        "source_sha": "1" * 40,
+        "source_tree": "2" * 40,
+    }
+
+
+def test_render_backup_restore_evidence_uses_supported_derived_command(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    cleanup_checked: list[bool] = []
+    captured_inputs: dict[str, object] = {}
+    expected = {"schema": "loom-personal-dev-backup-restore-evidence-v1"}
+
+    monkeypatch.setattr(
+        command,
+        "_assert_isolated_restore_cleanup",
+        lambda _args: cleanup_checked.append(True),
+    )
+
+    def build(**kwargs: object) -> dict[str, object]:
+        captured_inputs.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(command, "build_personal_dev_backup_restore_evidence", build)
+    paths = {
+        name: tmp_path / name
+        for name in (
+            "postgres.dump",
+            "postgres.source.tsv",
+            "postgres.restored.tsv",
+            "minio.source.json",
+            "minio.restored.json",
+            "secrets.json",
+            "pre.json",
+            "post.json",
+            "storage.json",
+        )
+    }
+    result = dispatch(
+        [
+            "personal-dev-control-plane",
+            "render-backup-restore-evidence",
+            "--file",
+            str(_PROFILE),
+            "--trusted-release-file",
+            str(release_path),
+            "--trusted-release-sha256",
+            release_digest,
+            "--started-at",
+            "2026-08-26T19:00:00Z",
+            "--completed-at",
+            "2026-08-26T19:05:00Z",
+            "--postgres-dump-file",
+            str(paths["postgres.dump"]),
+            "--postgres-source-state-file",
+            str(paths["postgres.source.tsv"]),
+            "--postgres-restored-state-file",
+            str(paths["postgres.restored.tsv"]),
+            "--source-schema-head",
+            "0111",
+            "--restored-schema-head",
+            "0111",
+            "--minio-source-manifest-file",
+            str(paths["minio.source.json"]),
+            "--minio-restored-manifest-file",
+            str(paths["minio.restored.json"]),
+            "--secret-key-inventory-file",
+            str(paths["secrets.json"]),
+            "--pre-shadow-status-file",
+            str(paths["pre.json"]),
+            "--post-shadow-status-file",
+            str(paths["post.json"]),
+            "--storage-inventory-file",
+            str(paths["storage.json"]),
+            "--isolated-postgres-name",
+            "pg-restore",
+            "--isolated-minio-name",
+            "minio-restore",
+            "--isolated-network-name",
+            "restore-network",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert cleanup_checked == [True]
+    assert captured.out == json.dumps(expected, sort_keys=True, separators=(",", ":"))
+    evidence = json.loads(captured.err)
+    assert evidence["kind"] == "backup-restore-evidence"
+    assert evidence["sha256"] == hashlib.sha256(captured.out.encode("ascii")).hexdigest()
+    assert captured_inputs["postgres_dump_path"] == paths["postgres.dump"]
+    assert captured_inputs["storage_inventory_path"] == paths["storage.json"]
 
 
 def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
