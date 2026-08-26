@@ -841,6 +841,32 @@ def test_preflight_artifact_retirement_receipt_is_no_replace_and_exact(
         )
 
 
+def test_preflight_artifact_retirement_receipt_recovers_exact_temp_link_residue(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    plan_digest = "b" * 64
+    record_digest = "c" * 64
+    receipt = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    residue = receipt.with_name(f".{receipt.name}.{'f' * 32}.tmp")
+    os.link(receipt, residue)
+
+    repeated = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+
+    assert repeated == receipt
+    assert receipt.stat().st_nlink == 1
+    assert not residue.exists()
+
+
 @pytest.mark.parametrize(
     ("expected_plan", "expected_record"),
     (("d" * 64, "c" * 64), ("b" * 64, "d" * 64)),

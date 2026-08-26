@@ -308,6 +308,99 @@ def _publish_immutable(path: Path, payload: Mapping[str, object]) -> Path:
         os.close(directory_fd)
 
 
+def _recover_exact_immutable_temp_link(
+    path: Path,
+    *,
+    expected_payload: bytes,
+    object_name: str,
+) -> None:
+    directory_fd = _open_parent_directory(path.parent)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if before.st_nlink == 1:
+            return
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != _PRIVATE_FILE_MODE
+            or before.st_nlink != 2
+            or before.st_size != len(expected_payload)
+        ):
+            raise RequestStoreError(f"{object_name} temp-link residue is unsafe")
+        chunks: list[bytes] = []
+        remaining = len(expected_payload) + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after_read = os.fstat(descriptor)
+        if _metadata_identity(before) != _metadata_identity(after_read):
+            raise RequestStoreError(f"{object_name} temp-link residue changed during read")
+        if b"".join(chunks) != expected_payload:
+            raise RequestStoreError(f"{object_name} temp-link residue identity drifted")
+        prefix = f".{path.name}."
+        suffix = ".tmp"
+        aliases: list[str] = []
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                if not entry.name.startswith(prefix) or not entry.name.endswith(suffix):
+                    continue
+                token = entry.name[len(prefix) : -len(suffix)]
+                if len(token) != 32 or any(
+                    character not in "0123456789abcdef" for character in token
+                ):
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+                if (metadata.st_dev, metadata.st_ino) == (before.st_dev, before.st_ino):
+                    aliases.append(entry.name)
+        if len(aliases) != 1:
+            raise RequestStoreError(
+                f"{object_name} must be single-link; temp-link residue is ambiguous"
+            )
+        alias_descriptor = os.open(aliases[0], flags, dir_fd=directory_fd)
+        try:
+            if _metadata_identity(os.fstat(alias_descriptor)) != _metadata_identity(before):
+                raise RequestStoreError(f"{object_name} temp-link residue changed during open")
+        finally:
+            os.close(alias_descriptor)
+        os.unlink(aliases[0], dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        after_unlink = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        stable_after = (
+            after_unlink.st_dev,
+            after_unlink.st_ino,
+            after_unlink.st_mode,
+            after_unlink.st_uid,
+            after_unlink.st_gid,
+            after_unlink.st_size,
+            after_unlink.st_mtime_ns,
+        )
+        if stable_after != stable_before or after_unlink.st_nlink != 1:
+            raise RequestStoreError(f"{object_name} temp-link residue did not converge")
+    except RequestStoreError:
+        raise
+    except OSError as exc:
+        raise RequestStoreError(f"could not recover {object_name} temp-link residue") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
 def _replace_mutable(path: Path, payload: Mapping[str, object]) -> Path:
     directory_fd = _open_parent_directory(path.parent)
     temp_name = f".{path.name}.{uuid4().hex}.tmp"
@@ -814,6 +907,12 @@ class RequestStore:
             "preflight artifact retirements directory",
         )
         path = self.preflight_artifact_retirements_root / f"{bundle_digest}.json"
+        payload = {
+            "bundle_digest": bundle_digest,
+            "inventory_record_sha256": inventory_record_sha256,
+            "plan_sha256": plan_sha256,
+            "schema_version": 1,
+        }
         try:
             path.lstat()
         except FileNotFoundError:
@@ -823,18 +922,17 @@ class RequestStore:
                 "could not inspect preflight artifact retirement receipt"
             ) from exc
         else:
+            _recover_exact_immutable_temp_link(
+                path,
+                expected_payload=_json_bytes(payload),
+                object_name="preflight artifact retirement receipt",
+            )
             self.read_preflight_artifact_retirement_receipt(
                 bundle_digest,
                 plan_sha256=plan_sha256,
                 inventory_record_sha256=inventory_record_sha256,
             )
             return path
-        payload = {
-            "bundle_digest": bundle_digest,
-            "inventory_record_sha256": inventory_record_sha256,
-            "plan_sha256": plan_sha256,
-            "schema_version": 1,
-        }
         try:
             return _publish_immutable(path, payload)
         except RequestStoreError as exc:
@@ -874,6 +972,25 @@ class RequestStore:
                 return False
             raise
         path = self.preflight_artifact_retirements_root / f"{bundle_digest}.json"
+        expected = {
+            "bundle_digest": bundle_digest,
+            "inventory_record_sha256": inventory_record_sha256,
+            "plan_sha256": plan_sha256,
+            "schema_version": 1,
+        }
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise RequestStoreError(
+                "could not inspect preflight artifact retirement receipt"
+            ) from exc
+        _recover_exact_immutable_temp_link(
+            path,
+            expected_payload=_json_bytes(expected),
+            object_name="preflight artifact retirement receipt",
+        )
         try:
             payload = _read_json(
                 path,
@@ -884,12 +1001,6 @@ class RequestStore:
             if str(exc) == "preflight artifact retirement receipt does not exist":
                 return False
             raise
-        expected = {
-            "bundle_digest": bundle_digest,
-            "inventory_record_sha256": inventory_record_sha256,
-            "plan_sha256": plan_sha256,
-            "schema_version": 1,
-        }
         if (
             set(payload) != set(expected)
             or payload.get("schema_version") != 1
