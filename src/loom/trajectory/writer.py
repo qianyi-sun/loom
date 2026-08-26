@@ -79,6 +79,7 @@ class TrajectoryWriter:
         self._local_file: Any | None = None  # aiofiles handle
         self._closed = False
         self._remote_committed = False
+        self._remote_version_id: str | None = None
         self.parts_uploaded = 0
         self._next_seq = 0
         # #1186: agents that emit gateway LLMCallEvents (terminus-2) need
@@ -97,6 +98,11 @@ class TrajectoryWriter:
     def remote_committed(self) -> bool:
         """Whether the exact remote object completed successfully."""
         return self._remote_committed
+
+    @property
+    def remote_version_id(self) -> str | None:
+        """Exact object version returned by multipart completion, when any."""
+        return self._remote_version_id
 
     @property
     def llm_call_event_count(self) -> int:
@@ -250,7 +256,12 @@ class TrajectoryWriter:
                         pass
                 else:
                     try:
-                        await self._store.complete_multipart_upload(self._upload)
+                        write_result = (
+                            await self._store.complete_multipart_upload_with_metadata(
+                                self._upload,
+                            )
+                        )
+                        self._remote_version_id = write_result.version_id
                         self._remote_committed = True
                     except Exception as exc:
                         self._upload = None

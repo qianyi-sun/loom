@@ -463,7 +463,9 @@ def test_control_plane_descriptor_and_lineage_helpers() -> None:
         {
             "trajectory_uri": f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
             "checksum_sha256": "f" * 64,
+            "trajectory_version_id": None,
             "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+            "atif_version_id": None,
             "atif_schema_version": "1.7",
             "artifacts": [
                 {
@@ -472,12 +474,14 @@ def test_control_plane_descriptor_and_lineage_helpers() -> None:
                     "key": f"{team_id}/{trial_id}/main/result.txt",
                     "size": "5",
                     "content_hash": "sha256:" + ("2" * 64),
+                    "version_id": None,
                     "share_status": "shared",
                 },
                 {
                     "key": f"{team_id}/{trial_id}/main/debug.log",
                     "role": "raw",
                     "size": "not-int",
+                    "version_id": None,
                     "share_status": "blocked",
                     "blocked_reason": "secret-like content detected",
                 },

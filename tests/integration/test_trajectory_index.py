@@ -98,7 +98,7 @@ def app(
     return create_app(ControlPlaneSettings(_env_file=None))
 
 
-def test_index_patch(app, traj_seed):  # type: ignore[no-untyped-def]
+def test_index_patch(app, traj_seed, postgres_url: str):  # type: ignore[no-untyped-def]
     trial_id, team_id, worker_id, raw = traj_seed
     with TestClient(app) as client:
         r = client.patch(
@@ -111,12 +111,83 @@ def test_index_patch(app, traj_seed):  # type: ignore[no-untyped-def]
                 ),
                 "trajectory_size_bytes": 1024,
                 "trajectory_sha256": "a" * 64,
+                "trajectory_version_id": None,
                 "bytes_uploaded": 1024,
                 "events_count": 25,
                 "checksum_sha256": "a" * 64,
             },
         )
         assert r.status_code == 200
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            lifecycle_object = session.scalars(
+                select(DataLifecycleObject).where(
+                    DataLifecycleObject.object_key
+                    == f"{team_id}/{trial_id}/events.jsonl"
+                )
+            ).one()
+        assert lifecycle_object.version_id is None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("missing_version_kind", ["trajectory", "atif", "artifact"])
+def test_index_patch_rejects_missing_object_version_evidence(
+    app,
+    traj_seed,
+    postgres_url: str,
+    missing_version_kind: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, team_id, worker_id, raw = traj_seed
+    payload: dict[str, object] = {
+        "worker_id": str(worker_id),
+        "trajectory_uri": (
+            f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+        ),
+        "trajectory_size_bytes": 10,
+        "trajectory_sha256": "3" * 64,
+        "trajectory_version_id": None,
+    }
+    if missing_version_kind == "trajectory":
+        del payload["trajectory_version_id"]
+    elif missing_version_kind == "atif":
+        payload.update({
+            "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+            "atif_size_bytes": 20,
+            "atif_sha256": "4" * 64,
+        })
+    else:
+        payload["artifacts"] = [{
+            "step_name": "main",
+            "bucket": "artifacts",
+            "key": f"{team_id}/{trial_id}/main/result.txt",
+            "size": 5,
+            "content_hash": "sha256:" + ("2" * 64),
+        }]
+
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json=payload,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "trajectory_lifecycle_evidence_invalid"
+    )
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            trial = session.get(Trial, trial_id)
+            objects = list(session.scalars(select(DataLifecycleObject)))
+        assert trial is not None
+        assert trial.trajectory_index is None
+        assert objects == []
+    finally:
+        engine.dispose()
 
 
 def test_index_patch_rejects_unclassified_object_evidence(
@@ -135,6 +206,7 @@ def test_index_patch_rejects_unclassified_object_evidence(
                     f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
                 ),
                 "trajectory_size_bytes": 1024,
+                "trajectory_version_id": None,
             },
         )
     assert r.status_code == 409
@@ -227,9 +299,11 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                 ),
                 "trajectory_size_bytes": 10,
                 "trajectory_sha256": "3" * 64,
+                "trajectory_version_id": "trajectory-version-123",
                 "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
                 "atif_size_bytes": 20,
                 "atif_sha256": "4" * 64,
+                "atif_version_id": "atif-version-456",
                 "atif_schema_version": "1.7",
                 "artifacts": [{
                     "step_name": "main",
@@ -237,6 +311,7 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
                     "key": f"{team_id}/{trial_id}/main/result.txt",
                     "size": 5,
                     "content_hash": "sha256:" + ("2" * 64),
+                    "version_id": "artifact-version-789",
                     "share_status": "shared",
                     "blocked_reason": None,
                 }],
@@ -287,17 +362,53 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
         "3" * 64
     )
     assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].size_bytes == 10
+    assert by_object_key[f"{team_id}/{trial_id}/events.jsonl"].version_id == (
+        "trajectory-version-123"
+    )
     assert by_object_key[f"{team_id}/{trial_id}/atif.json"].content_sha256 == (
         "4" * 64
+    )
+    assert by_object_key[f"{team_id}/{trial_id}/atif.json"].version_id == (
+        "atif-version-456"
     )
     result_key = f"{team_id}/{trial_id}/main/result.txt"
     assert by_object_key[result_key].content_sha256 == "2" * 64
     assert by_object_key[result_key].size_bytes == 5
+    assert by_object_key[result_key].version_id == "artifact-version-789"
     engine.dispose()
     assert all(edge.relation == "reused_as_input" for edge in edges)
     assert {edge.child_artifact_id for edge in edges} == {
         artifact.id for artifact in artifacts
     }
+
+
+@pytest.mark.parametrize("malformed_version", ["", " surrounding ", 7, False, {}])
+def test_index_patch_rejects_malformed_object_version_evidence(
+    app,
+    traj_seed,
+    malformed_version: object,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, team_id, worker_id, raw = traj_seed
+
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/trials/{trial_id}/trajectory_index",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "worker_id": str(worker_id),
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+                ),
+                "trajectory_size_bytes": 10,
+                "trajectory_sha256": "3" * 64,
+                "trajectory_version_id": malformed_version,
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == (
+        "trajectory_lifecycle_evidence_invalid"
+    )
 
 
 def test_index_patch_fenced(app, traj_seed):  # type: ignore[no-untyped-def]
@@ -332,9 +443,10 @@ def test_retry_registration_creates_distinct_lifecycle_objects(
                     "trajectory_uri": (
                         f"s3://trajectories/{prefix}/events.jsonl"
                     ),
-                    "trajectory_size_bytes": 100 + attempt,
-                    "trajectory_sha256": str(attempt) * 64,
-                },
+                        "trajectory_size_bytes": 100 + attempt,
+                        "trajectory_sha256": str(attempt) * 64,
+                        "trajectory_version_id": None,
+                    },
             )
             assert response.status_code == 200, response.text
 

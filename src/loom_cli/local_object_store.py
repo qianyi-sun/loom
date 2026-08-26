@@ -14,7 +14,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from loom.trajectory.storage import MultipartUpload, ObjectReadback, _has_traversal
+from loom.trajectory.storage import (
+    MultipartUpload,
+    ObjectReadback,
+    ObjectWriteResult,
+    _has_traversal,
+)
 
 
 @dataclass
@@ -74,6 +79,13 @@ class LocalDiskObjectStore:
         dest.write_bytes(body)
         return f"s3://{upload.bucket}/{upload.key}"
 
+    async def complete_multipart_upload_with_metadata(
+        self,
+        upload: MultipartUpload,
+    ) -> ObjectWriteResult:
+        uri = await self.complete_multipart_upload(upload)
+        return ObjectWriteResult(uri=uri, version_id=None)
+
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None:
         self._multiparts.pop(upload.upload_id, None)
         self._multipart_meta.pop(upload.upload_id, None)
@@ -83,6 +95,16 @@ class LocalDiskObjectStore:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body)
         return f"s3://{bucket}/{key}"
+
+    async def put_object_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: bytes,
+    ) -> ObjectWriteResult:
+        uri = await self.put_object(bucket=bucket, key=key, body=body)
+        return ObjectWriteResult(uri=uri, version_id=None)
 
     async def get_object(self, *, bucket: str, key: str) -> bytes:
         p = self._path(bucket, key)

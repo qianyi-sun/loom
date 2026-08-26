@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -37,6 +38,27 @@ async def test_writer_writes_local_first(tmp_path: Path, store: FakeObjectStore)
         assert ("trajectories", "t/abc/events.jsonl") not in store.objects
     assert ("trajectories", "t/abc/events.jsonl") in store.objects
     assert store.objects[("trajectories", "t/abc/events.jsonl")].count(b"\n") == 1
+
+
+async def test_writer_preserves_completed_multipart_object_version(tmp_path: Path) -> None:
+    class VersionedStore(FakeObjectStore):
+        async def complete_multipart_upload_with_metadata(self, upload):  # type: ignore[no-untyped-def]
+            uri = await super().complete_multipart_upload(upload)
+            return SimpleNamespace(uri=uri, version_id="trajectory-version-123")
+
+    writer = TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl",
+        store=VersionedStore(),
+        bucket="trajectories",
+        key="t/versioned/events.jsonl",
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        await writer.append(_event(0))
+
+    assert writer.remote_committed is True
+    assert writer.remote_version_id == "trajectory-version-123"
 
 
 async def test_writer_replaces_stale_local_attempt_before_upload(

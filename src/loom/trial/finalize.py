@@ -20,6 +20,7 @@ class FinalizedTrajectory:
     uri: str
     sha256: str
     size_bytes: int
+    version_id: str | None
 
 
 async def finalize_trajectory_with_metadata(
@@ -49,11 +50,16 @@ async def finalize_trajectory_with_metadata(
         attempt_count=attempt_count,
     ).atif_key
     body = atif.model_dump_json(indent=2).encode("utf-8")
-    uri = await store.put_object(bucket=bucket, key=key, body=body)
+    write_result = await store.put_object_with_metadata(
+        bucket=bucket,
+        key=key,
+        body=body,
+    )
     return FinalizedTrajectory(
-        uri=uri,
+        uri=write_result.uri,
         sha256=sha256(body).hexdigest(),
         size_bytes=len(body),
+        version_id=write_result.version_id,
     )
 
 

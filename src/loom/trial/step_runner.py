@@ -280,6 +280,7 @@ async def _run_step_impl(
                 key=artifact.key,
                 size=artifact.size,
                 content_hash=artifact.content_hash,
+                version_id=artifact.version_id,
                 share_status=artifact.share_status,
                 blocked_reason=artifact.blocked_reason,
             )

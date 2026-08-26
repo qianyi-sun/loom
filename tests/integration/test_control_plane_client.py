@@ -640,8 +640,9 @@ async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[n
             trajectory_uri=(
                 f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
             ),
-            trajectory_size_bytes=42,
-            trajectory_sha256="1" * 64,
+                trajectory_size_bytes=42,
+                trajectory_sha256="1" * 64,
+                trajectory_version_id=None,
         ) is True
     finally:
         await http.aclose()
@@ -681,18 +682,21 @@ async def test_patch_trajectory_index_persists_result_projection(  # type: ignor
             worker_id=wid,
             result=result_payload,
             trajectory_uri=f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
-            trajectory_size_bytes=42,
-            trajectory_sha256="2" * 64,
-            atif_uri=f"s3://trajectories/{team_id}/{trial_id}/atif.json",
-            atif_size_bytes=84,
-            atif_sha256="3" * 64,
-            artifacts=[{
+                trajectory_size_bytes=42,
+                trajectory_sha256="2" * 64,
+                trajectory_version_id=None,
+                atif_uri=f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+                atif_size_bytes=84,
+                atif_sha256="3" * 64,
+                atif_version_id=None,
+                artifacts=[{
                 "step_name": "main",
                 "bucket": "artifacts",
                 "key": f"{team_id}/{trial_id}/main/result.txt",
-                "size": 5,
-                "content_hash": "sha256:" + ("4" * 64),
-            }],
+                    "size": 5,
+                    "content_hash": "sha256:" + ("4" * 64),
+                    "version_id": None,
+                }],
         ) is True
 
         with engine.begin() as conn:
@@ -755,9 +759,11 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
             "trajectory_uri": f"s3://trajectories/{team_id}/{trial_id}/events.jsonl",
             "trajectory_size_bytes": 42,
             "trajectory_sha256": "5" * 64,
+            "trajectory_version_id": None,
             "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
             "atif_size_bytes": 84,
             "atif_sha256": "6" * 64,
+            "atif_version_id": None,
             "atif_schema_version": "1.7",
             "artifacts": [{
                 "step_name": "main",
@@ -765,6 +771,7 @@ async def test_patch_output_projection_accepts_index_with_trial_id(  # type: ign
                 "key": f"{team_id}/{trial_id}/main/result.txt",
                 "size": 5,
                 "content_hash": "sha256:" + ("7" * 64),
+                "version_id": None,
             }],
         }
         assert await cp.patch_output_projection(
@@ -827,6 +834,7 @@ async def test_patch_output_projection_raises_lifecycle_evidence_conflict(  # ty
                     ),
                     "trajectory_size_bytes": 42,
                     "trajectory_sha256": "8" * 64,
+                    "trajectory_version_id": None,
                 },
             )
 
@@ -879,6 +887,7 @@ async def test_patch_output_projection_returns_false_only_for_claim_fence(  # ty
                 ),
                 "trajectory_size_bytes": 42,
                 "trajectory_sha256": "9" * 64,
+                "trajectory_version_id": None,
             },
         ) is False
     finally:
