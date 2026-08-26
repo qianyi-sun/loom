@@ -423,6 +423,11 @@ def _healthy_fixture(
             "items": cluster,
         },
         _MANAGER: '{"executable_new_capacity_ceiling":0,"status":"ready"}\n',
+        _DEPLOYMENTS: {
+            "apiVersion": "apps/v1",
+            "kind": "DeploymentList",
+            "items": [item for item in namespaced if item["kind"] == "Deployment"],
+        },
     }
     return expected, _FakeRunner(responses)
 
@@ -1885,6 +1890,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
             {"name": "manager", "observed": 1, "ready": True},
             {"name": "namespaced-resources", "observed": 30, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
+            {"name": "personal-workers", "observed": 0, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
         ],
         "input_sha256": expected.input_sha256,
@@ -1893,6 +1899,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         "ready": True,
         "release_sha256": expected.release_sha256,
         "schema": "loom-personal-dev-control-plane-status-v1",
+        "worker_available": False,
     }
     assert [call for call, _timeout in runner.calls] == [
         _CONTEXT,
@@ -1901,13 +1908,60 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         _NAMESPACED,
         _CLUSTER,
         _MANAGER,
+        _DEPLOYMENTS,
     ]
     assert all(1 <= timeout <= 10 for _call, timeout in runner.calls)
     assert sum(call == _NAMESPACES for call, _timeout in runner.calls) == 1
     for command, _timeout in runner.calls:
         assert "secret" not in " ".join(command).casefold()
         assert command[0] in {"config", "get", "--request-timeout=10s"}
-    assert runner.calls[-1][0] == _MANAGER
+    assert runner.calls[-2][0] == _MANAGER
+    assert runner.calls[-1][0] == _DEPLOYMENTS
+
+
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    [
+        ("personal-worker", "unexpected_personal_worker"),
+        ("deployments-wrong-kind", "deployment_inventory_invalid"),
+    ],
+)
+def test_shadow_status_fails_closed_on_personal_worker_inventory(
+    tmp_path: Path,
+    mutation: str,
+    blocker: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    if mutation == "personal-worker":
+        _items(runner, _DEPLOYMENTS).append(
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "name": "loom-worker",
+                    "namespace": "loom-dev-alice",
+                    "labels": {"app": "loom-worker"},
+                },
+                "spec": {
+                    "template": {
+                        "metadata": {"labels": {"app": "loom-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                    }
+                },
+            }
+        )
+    else:
+        deployments = runner.responses[_DEPLOYMENTS]
+        assert isinstance(deployments, dict)
+        deployments["kind"] = "List"
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+    assert result.worker_available is False
+    component = next(item for item in result.components if item.name == "personal-workers")
+    assert component.ready is False
 
 
 def test_status_accepts_installed_lineage_digests_on_generated_stateful_claims(
@@ -2338,7 +2392,7 @@ def test_observer_starts_no_call_when_less_than_one_second_remains(
 ) -> None:
     expected, runner = _healthy_fixture(tmp_path)
     module = importlib.import_module("loom.personal_dev_control_plane_status")
-    ticks = iter([100.0, 159.5, 160.0, 160.0, 160.0, 160.0, 160.0])
+    ticks = iter([100.0, 159.5, 160.0, 160.0, 160.0, 160.0, 160.0, 160.0])
     monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks))
 
     result = _observe(expected, runner)
