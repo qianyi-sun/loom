@@ -2,7 +2,7 @@
 # Converge the fixed service identity used by Loom Slurm jobs on GB10.
 #
 # Run this exact candidate-owned script as root on each node in the GB10 Slurm
-# partition: trt-gb10-1..9 and trt-gb10-11..16.
+# dedicated Loom partition: trt-gb10-1..15.
 # Pass --controller only on trt-gb10-1; that additionally enables the service
 # account's persistent systemd user manager for the controller-local autoscaler.
 set -euo pipefail
@@ -37,9 +37,9 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 case "$node" in
-  trt-gb10-[1-9]|trt-gb10-1[1-6]) ;;
+  trt-gb10-[1-9]|trt-gb10-1[0-5]) ;;
   *)
-    echo "error: node must be one of the GB10 Slurm partition nodes (trt-gb10-1..9 or trt-gb10-11..16)" >&2
+    echo "error: node must be one of the dedicated Loom GB10 partition nodes (trt-gb10-1..15)" >&2
     exit 2
     ;;
 esac

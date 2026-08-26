@@ -59,6 +59,7 @@ def test_authority_is_fixed_to_service_identity_and_real_slurm_partition() -> No
     assert authority.SERVICE_GID == 2007
     assert authority.SLURM_ACCOUNT == "loom-staging"
     assert authority.SLURM_QOS == "loom-staging"
+    assert authority.SLURM_PARTITION == "loom-staging"
     assert authority.CLUSTER_NAME == "trt-gb10"
     assert authority.CONTROLLER_HOST == "gx10-01c7"
     assert authority.SLURM_NODES == tuple(f"trt-gb10-{number}" for number in range(1, 16))
@@ -87,7 +88,7 @@ max_slots = 150
 [worker_pool_autoscaler_policies.actuator_config]
 slurm_cluster_name = "trt-gb10"
 slurm_controller_host = "gx10-01c7"
-partition = "gb10"
+partition = "loom-staging"
 external_runner = true
 slurm_account = "loom-staging"
 qos_normal = "loom-staging"
@@ -277,6 +278,7 @@ def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> No
     assert '"/usr/bin/scancel"' in source
     assert 'f"--account={SLURM_ACCOUNT}"' in source
     assert 'f"--qos={SLURM_QOS}"' in source
+    assert 'f"--partition={SLURM_PARTITION}"' in source
     assert "loom-slurm-job-cgroup-guard.service" in source
     assert '"docker", "info"' in source
 
@@ -329,7 +331,10 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout=("NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE Partitions=gb10 "),
+                stdout=(
+                    "NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE "
+                    "Partitions=gb10,loom-staging "
+                ),
                 stderr="",
             )
         if "/usr/bin/squeue" in argv:
@@ -376,6 +381,7 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
     assert authority.TRIAL_CACHE_REGISTRY_REPO in srun
     assert authority.TRIAL_CACHE_CA_SHA256 in srun
     assert authority.TRIAL_CACHE_CANARY_DIGEST in srun
+    assert "--partition=loom-staging" in srun
 
 
 def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:

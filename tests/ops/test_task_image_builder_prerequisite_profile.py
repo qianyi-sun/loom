@@ -157,7 +157,7 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     )
     assert clusters["gb10"]["architecture"] == "aarch64"
     assert clusters["gb10"]["controller"] == "gx10-01c7"
-    assert clusters["gb10"]["trial_partition"] == "gb10"
+    assert clusters["gb10"]["trial_partition"] == "loom-staging"
     assert clusters["gb10"]["trial_priority_tier"] == 100
     assert clusters["gb10"]["builder_nodes"] == [f"trt-gb10-{number}" for number in range(1, 16)]
     assert clusters["gb10"]["builder_nodes_expression"] == "trt-gb10-[1-15]"
@@ -168,8 +168,9 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     assert clusters["gb10"]["legacy_reservation_node"] == "trt-gb10-2"
     assert clusters["gb10"]["legacy_reservation_partition"] == "gb10"
     assert clusters["gb10"]["trial_partition_anchor"] == (
-        "PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES "
-        "MaxTime=1-00:00:00 State=UP PriorityTier=100"
+        "PartitionName=loom-staging Nodes=trt-gb10-[1-15] Default=NO "
+        "MaxTime=1-00:00:00 State=UP PriorityTier=100 "
+        "AllowAccounts=loom-staging AllowQos=loom-staging OverSubscribe=NO"
     )
     for cluster_id, cluster in clusters.items():
         assert cluster["builder_partition"] == "loom-task-builder"

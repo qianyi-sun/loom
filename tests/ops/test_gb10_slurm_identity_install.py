@@ -45,9 +45,9 @@ def test_installer_pins_non_personal_service_identity_and_shared_roots() -> None
     assert "/shared_work2/qianyi" not in source
 
 
-def test_installer_admits_replacement_node16_and_rejects_debug_node10() -> None:
+def test_installer_admits_canonical_node10_and_rejects_retired_node16() -> None:
     accepted = subprocess.run(
-        [str(INSTALLER), "trt-gb10-16"],
+        [str(INSTALLER), "trt-gb10-10"],
         capture_output=True,
         text=True,
         check=False,
@@ -56,7 +56,7 @@ def test_installer_admits_replacement_node16_and_rejects_debug_node10() -> None:
     assert "node must be one of" not in accepted.stderr
 
     rejected = subprocess.run(
-        [str(INSTALLER), "trt-gb10-10"],
+        [str(INSTALLER), "trt-gb10-16"],
         capture_output=True,
         text=True,
         check=False,

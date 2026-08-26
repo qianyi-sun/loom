@@ -85,6 +85,12 @@ install Slurm bytes, start a supervisor, or enable direct/node-agent task
 capacity. A later authorized candidate-bound rollout must verify the exact
 bundle, Slurm client and munge connectivity before activation.
 
+The checked-in `slurm/` directory is that disabled Pipeline policy bundle, not
+the canonical controller configuration for staging Trial autoscaling. The
+Trial autoscaler uses the dedicated `loom-staging` partition installed by
+`deploy/slurm/converge-loom-gb10-slurm-partition.sh`; the institution-owned
+shared `gb10` partition remains unchanged.
+
 Only tasks declaring `environment.cpu_arch = "arm64"` or `"any"` can run in
 this pool. Missing architecture requirements are treated as `x86_64` and are
 not claimed by GB10 workers.
