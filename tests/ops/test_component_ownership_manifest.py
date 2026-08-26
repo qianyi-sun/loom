@@ -909,7 +909,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 10
+    assert len(rollout_images) == 11
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -926,7 +926,7 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     primary_names = {entry["image_name"] for entry in primary}
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
-    assert len(primary) == 9
+    assert len(primary) == 10
     assert len(auxiliary) == 2
     assert not primary_names & auxiliary_names
     assert auxiliary_names == {
@@ -945,7 +945,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 20
+    assert len(matrix) == 21
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }

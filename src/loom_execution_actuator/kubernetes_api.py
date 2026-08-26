@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 from loom_execution_actuator.contracts import (
+    ExecutionTerminationSummaryV1,
     KubernetesApiError,
     KubernetesJobInventory,
     KubernetesJobObservation,
@@ -15,6 +17,9 @@ _LEASE_LABEL = "loom.openai.com/lease-id"
 _GENERATION_LABEL = "loom.openai.com/generation"
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
 _EXECUTION_UNIT_ANNOTATION = "loom.openai.com/execution-unit-key"
+_RUNTIME_CONTRACT_ANNOTATION = "loom.openai.com/runtime-contract-sha256"
+_COMMAND_IDENTITY_ANNOTATION = "loom.openai.com/command-identity-sha256"
+_EXECUTION_ROLE_ANNOTATION = "loom.openai.com/execution-role"
 
 
 def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
@@ -53,6 +58,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     state = NormalizedJobState.PENDING
     reason: str | None = None
     message: str | None = None
+    termination_summary: ExecutionTerminationSummaryV1 | None = None
     scheduled_at = None
     started_at = getattr(job.status, "start_time", None)
     terminated_at = getattr(job.status, "completion_time", None)
@@ -98,6 +104,25 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                 for status in statuses
                 if getattr(getattr(status, "state", None), "waiting", None) is not None
             ]
+            execution_status = next(
+                (status for status in statuses if getattr(status, "name", None) == "execution"),
+                None,
+            )
+            execution_terminated = getattr(
+                getattr(execution_status, "state", None), "terminated", None
+            )
+            raw_summary = getattr(execution_terminated, "message", None)
+            if raw_summary:
+                try:
+                    if len(raw_summary.encode("utf-8")) > 4096:
+                        raise ValueError("termination summary exceeds 4096 bytes")
+                    termination_summary = ExecutionTerminationSummaryV1.model_validate(
+                        json.loads(raw_summary)
+                    )
+                except (TypeError, ValueError) as exc:
+                    state = NormalizedJobState.FAILED
+                    reason = "InvalidTerminationSummary"
+                    message = str(exc)[:2000]
             if any(getattr(item, "reason", None) == "OOMKilled" for item in terminated):
                 item = next(item for item in terminated if item.reason == "OOMKilled")
                 state, reason, message = (
@@ -143,6 +168,28 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                     pod_message,
                 )
 
+    if termination_summary is not None and (
+        termination_summary.runtime_contract_sha256 != annotations.get(_RUNTIME_CONTRACT_ANNOTATION)
+        or termination_summary.command_identity_sha256
+        != annotations.get(_COMMAND_IDENTITY_ANNOTATION)
+        or termination_summary.execution_role != annotations.get(_EXECUTION_ROLE_ANNOTATION)
+    ):
+        state = NormalizedJobState.FAILED
+        reason = "TerminationSummaryIdentityMismatch"
+        message = "runtime termination summary does not match Job identity"
+    elif state == NormalizedJobState.SUCCEEDED and termination_summary is None:
+        state = NormalizedJobState.FAILED
+        reason = "MissingTerminationSummary"
+        message = "successful runtime Job has no termination summary"
+    elif (
+        state == NormalizedJobState.SUCCEEDED
+        and termination_summary is not None
+        and termination_summary.status != "succeeded"
+    ):
+        state = NormalizedJobState.FAILED
+        reason = "RuntimeReportedFailure"
+        message = f"runtime reported {termination_summary.status}"
+
     return KubernetesJobObservation(
         namespace=metadata.namespace,
         job_name=metadata.name,
@@ -162,6 +209,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
         terminated_at=terminated_at,
         reason=reason,
         message=message,
+        termination_summary=termination_summary,
     )
 
 

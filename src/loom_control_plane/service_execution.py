@@ -23,6 +23,12 @@ from loom.execution_contract import (
     ExecutionClassV1,
     ExecutionTargetV1,
     WorkloadRequirementsV1,
+    evaluate_execution_admission,
+)
+from loom.execution_runtime_contract import (
+    ExecutionRuntimePlanV1,
+    ExecutionRuntimeResultV1,
+    validate_runtime_plan_requirements,
 )
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom_control_plane.metrics import (
@@ -109,6 +115,7 @@ class ExecutionFence:
     generation: int
     trial_id: UUID
     attempt: int
+    execution_role: str
 
 
 @dataclass(frozen=True)
@@ -174,10 +181,12 @@ def _execution_identity(
     trial_id: UUID,
     attempt: int,
     generation: int,
+    execution_role: str,
     namespace_name: str,
     target_id: str,
 ) -> tuple[str, str, str, UUID]:
-    job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}"
+    role_suffix = "a" if execution_role == "attempt" else "v"
+    job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}-{role_suffix}"
     execution_unit_key = canonical_uuid5(
         _EXECUTION_UNIT_NAMESPACE,
         {
@@ -185,6 +194,7 @@ def _execution_identity(
             "trial_id": str(trial_id),
             "attempt": attempt,
             "generation": generation,
+            "execution_role": execution_role,
         },
     )
     provider_scope_key = canonical_digest(
@@ -197,6 +207,15 @@ def _execution_identity(
         persisted=False,
     )
     return provider_scope_key, namespace_name, job_name, execution_unit_key
+
+
+def _runtime_container_roles(runtime_contract: ExecutionRuntimePlanV1) -> list[str]:
+    return [
+        "execution",
+        runtime_contract.main.role,
+        *[sidecar.role_name for sidecar in runtime_contract.sidecars],
+        *(["verifier"] if runtime_contract.verifier is not None else []),
+    ]
 
 
 async def persist_execution_catalog(
@@ -295,20 +314,36 @@ async def reserve_trial_execution(
     execution_class_id: str,
     target_id: str,
     requirements: WorkloadRequirementsV1,
+    runtime_contract: ExecutionRuntimePlanV1,
+    parent_lease_id: UUID | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
 ) -> ServiceExecutionLease:
     """Atomically reserve a trial and append its durable create command."""
 
     current_time = now or datetime.now(UTC)
+    requirements_json = requirements.model_dump(mode="json")
+    requirements_digest = canonical_digest(requirements_json)
+    runtime_contract_json = runtime_contract.canonical_payload()
+    runtime_contract_digest = canonical_digest(runtime_contract_json)
+    execution_role = runtime_contract.execution_role
     existing = (
         await session.execute(
             select(ServiceExecutionLease).where(ServiceExecutionLease.request_id == request_id)
         )
     ).scalar_one_or_none()
     if existing is not None:
-        if existing.trial_id != trial_id:
-            raise ServiceExecutionConflict("reservation request_id changed trial identity")
+        if (
+            existing.trial_id != trial_id
+            or existing.execution_class_id != execution_class_id
+            or existing.target_id != target_id
+            or existing.workload_requirements_sha256 != requirements_digest
+            or existing.runtime_contract_sha256 != runtime_contract_digest
+            or existing.execution_role != execution_role
+            or existing.parent_lease_id != parent_lease_id
+            or existing.deadline_at != deadline_at
+        ):
+            raise ServiceExecutionConflict("reservation request_id changed immutable identity")
         return existing
 
     trial = (
@@ -316,19 +351,57 @@ async def reserve_trial_execution(
     ).scalar_one_or_none()
     if trial is None:
         raise ServiceExecutionConflict("trial not found")
-    if trial.state != "queued":
-        raise ServiceExecutionConflict("trial is not reservable")
-    previous_lease = (
-        await session.execute(
-            select(ServiceExecutionLease)
-            .where(ServiceExecutionLease.trial_id == trial_id)
-            .order_by(ServiceExecutionLease.attempt.desc())
-            .limit(1)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if previous_lease is not None and previous_lease.cleanup_state != "complete":
-        raise ServiceExecutionConflict("previous execution cleanup is not complete")
+    parent_lease: ServiceExecutionLease | None = None
+    if execution_role == "attempt":
+        if parent_lease_id is not None:
+            raise ServiceExecutionConflict("attempt execution cannot have a parent lease")
+        if trial.state != "queued":
+            raise ServiceExecutionConflict("trial is not reservable")
+        previous_lease = (
+            await session.execute(
+                select(ServiceExecutionLease)
+                .where(
+                    ServiceExecutionLease.trial_id == trial_id,
+                    ServiceExecutionLease.execution_role == "attempt",
+                )
+                .order_by(ServiceExecutionLease.attempt.desc())
+                .limit(1)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if previous_lease is not None and previous_lease.cleanup_state != "complete":
+            raise ServiceExecutionConflict("previous execution cleanup is not complete")
+        attempt = trial.attempt_count + 1
+    else:
+        if parent_lease_id is None:
+            raise ServiceExecutionConflict("verifier execution requires a parent lease")
+        parent_lease = (
+            await session.execute(
+                select(ServiceExecutionLease)
+                .where(ServiceExecutionLease.id == parent_lease_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if parent_lease is None or parent_lease.runtime_contract_json is None:
+            raise ServiceExecutionConflict("verifier parent lease is not eligible")
+        try:
+            parent_contract = ExecutionRuntimePlanV1.model_validate(
+                parent_lease.runtime_contract_json
+            )
+        except ValueError as exc:
+            raise ServiceExecutionConflict("verifier parent lease contract is invalid") from exc
+        if (
+            parent_lease.trial_id != trial.id
+            or parent_lease.execution_role != "attempt"
+            or parent_contract.execution_role != "attempt"
+            or parent_contract.verifier_execution != "separate_execution"
+            or parent_contract.candidate_sha != runtime_contract.candidate_sha
+            or parent_contract.task_revision_sha256 != runtime_contract.task_revision_sha256
+        ):
+            raise ServiceExecutionConflict("verifier parent lease is not eligible")
+        if parent_lease.observed_state not in {"finalizing", "finalized"}:
+            raise ServiceExecutionConflict("verifier parent result is not ready")
+        attempt = parent_lease.attempt
     if deadline_at <= current_time:
         raise ServiceExecutionConflict("execution deadline must be in the future")
 
@@ -345,19 +418,28 @@ async def reserve_trial_execution(
     stale_after = int(target.spec_json["health_stale_after_seconds"])
     if target.health_observed_at + timedelta(seconds=stale_after) <= current_time:
         raise ServiceExecutionConflict("execution target health is stale")
+    if runtime_contract.execution_class_id != execution_class_id:
+        raise ServiceExecutionConflict("runtime plan binds a different execution class")
+    class_contract = ExecutionClassV1.model_validate(execution_class.spec_json)
+    admission = evaluate_execution_admission(requirements, class_contract)
+    if not admission.compatible:
+        reason_codes = ",".join(reason.code for reason in admission.reasons)
+        raise ServiceExecutionConflict(f"workload is not admitted: {reason_codes}")
+    try:
+        validate_runtime_plan_requirements(runtime_contract, requirements)
+    except ValueError as exc:
+        raise ServiceExecutionConflict(str(exc)) from exc
 
-    attempt = trial.attempt_count + 1
     generation = 1
     lease_id = uuid4()
     provider_scope, namespace_name, job_name, execution_unit_key = _execution_identity(
         trial_id=trial.id,
         attempt=attempt,
         generation=generation,
+        execution_role=execution_role,
         namespace_name=str(target.spec_json["namespace_name"]),
         target_id=target.id,
     )
-    requirements_json = requirements.model_dump(mode="json")
-    requirements_digest = canonical_digest(requirements_json)
     lease = ServiceExecutionLease(
         id=lease_id,
         request_id=request_id,
@@ -365,12 +447,16 @@ async def reserve_trial_execution(
         team_id=trial.team_id,
         lifecycle_authority_id=trial.lifecycle_authority_id,
         attempt=attempt,
+        execution_role=execution_role,
+        parent_lease_id=parent_lease.id if parent_lease is not None else None,
         generation=generation,
         resource_generation=generation,
         execution_class_id=execution_class_id,
         target_id=target_id,
         workload_requirements_json=requirements_json,
         workload_requirements_sha256=requirements_digest,
+        runtime_contract_json=runtime_contract_json,
+        runtime_contract_sha256=runtime_contract_digest,
         desired_state="create",
         observed_state="reserved",
         cleanup_state="not_requested",
@@ -387,6 +473,8 @@ async def reserve_trial_execution(
         "command_type": "create",
         "trial_id": str(trial.id),
         "attempt": attempt,
+        "execution_role": execution_role,
+        "parent_lease_id": str(parent_lease.id) if parent_lease is not None else None,
         "execution_class_id": execution_class_id,
         "target_id": target_id,
         "provider_scope_key": provider_scope,
@@ -394,6 +482,13 @@ async def reserve_trial_execution(
         "job_name": job_name,
         "execution_unit_key": str(execution_unit_key),
         "workload_requirements_sha256": requirements_digest,
+        "runtime_contract_sha256": runtime_contract_digest,
+        "candidate_sha": runtime_contract.candidate_sha,
+        "task_revision_sha256": runtime_contract.task_revision_sha256,
+        "task_image_ref": runtime_contract.task_image_ref,
+        "runtime_image_ref": runtime_contract.runtime_image_ref,
+        "command_identity_sha256": runtime_contract.command_identity_sha256,
+        "container_roles": _runtime_container_roles(runtime_contract),
         "deadline_at": deadline_at.isoformat(),
     }
     command = ServiceExecutionCommand(
@@ -414,11 +509,12 @@ async def reserve_trial_execution(
     session.add(lease)
     await session.flush()
     session.add(command)
-    trial.state = "claimed"
-    trial.attempt_count = attempt
-    trial.claimed_at = current_time
-    trial.pre_start_heartbeat_at = None
-    trial.worker_id = None
+    if execution_role == "attempt":
+        trial.state = "claimed"
+        trial.attempt_count = attempt
+        trial.claimed_at = current_time
+        trial.pre_start_heartbeat_at = None
+        trial.worker_id = None
     await session.flush()
     return lease
 
@@ -498,6 +594,8 @@ async def enqueue_execution_transition(
         "command_type": command_type,
         "trial_id": str(lease.trial_id),
         "attempt": lease.attempt,
+        "execution_role": lease.execution_role,
+        "parent_lease_id": str(lease.parent_lease_id) if lease.parent_lease_id else None,
         "target_id": lease.target_id,
         "provider_scope_key": lease.provider_scope_key,
         "namespace_name": lease.namespace_name,
@@ -681,7 +779,11 @@ async def verify_trial_execution_fence(
     if lease_id is not None:
         statement = statement.where(ServiceExecutionLease.id == lease_id)
     else:
-        statement = statement.order_by(ServiceExecutionLease.attempt.desc()).limit(1)
+        statement = (
+            statement.where(ServiceExecutionLease.execution_role == "attempt")
+            .order_by(ServiceExecutionLease.attempt.desc())
+            .limit(1)
+        )
     if lock:
         statement = statement.with_for_update()
     lease = (await session.execute(statement)).scalar_one_or_none()
@@ -703,6 +805,7 @@ async def verify_trial_execution_fence(
         generation=lease.generation,
         trial_id=lease.trial_id,
         attempt=lease.attempt,
+        execution_role=lease.execution_role,
     )
 
 
@@ -764,6 +867,43 @@ async def record_execution_event(
     ).scalar_one_or_none()
     if lease is None:
         raise ServiceExecutionConflict("execution lease not found")
+    if event_kind == "result_reported":
+        if lease.runtime_contract_json is None or lease.runtime_contract_sha256 is None:
+            raise ServiceExecutionConflict("runtime result has no lease-bound contract")
+        try:
+            runtime_contract = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+            runtime_result = ExecutionRuntimeResultV1.model_validate(payload)
+        except ValueError as exc:
+            raise ServiceExecutionConflict("runtime result contract is invalid") from exc
+        identity_matches = (
+            runtime_result.runtime_contract_sha256 == lease.runtime_contract_sha256
+            and runtime_result.candidate_sha == runtime_contract.candidate_sha
+            and runtime_result.task_revision_sha256 == runtime_contract.task_revision_sha256
+            and runtime_result.command_identity_sha256 == runtime_contract.command_identity_sha256
+            and runtime_result.execution_role == lease.execution_role
+            and runtime_result.execution_class_id == lease.execution_class_id
+            and runtime_result.task_image_ref == runtime_contract.task_image_ref
+            and runtime_result.runtime_image_ref == runtime_contract.runtime_image_ref
+            and runtime_result.runtime_binary_sha256 == runtime_contract.runtime_binary_sha256
+            and list(runtime_result.container_roles) == _runtime_container_roles(runtime_contract)
+        )
+        expected_phase_roles = [
+            *[phase.role for phase in runtime_contract.setup],
+            runtime_contract.main.role,
+            *([runtime_contract.verifier.role] if runtime_contract.verifier else []),
+        ]
+        actual_phase_roles = [phase.role for phase in runtime_result.phases]
+        phases_match = actual_phase_roles == expected_phase_roles[: len(actual_phase_roles)]
+        if runtime_result.status == "succeeded":
+            phases_match = phases_match and len(actual_phase_roles) == len(expected_phase_roles)
+        if not identity_matches or not phases_match:
+            raise ServiceExecutionConflict("runtime result identity does not match lease")
+        if any(
+            stream.bytes_saved > runtime_contract.max_log_bytes_per_stream
+            for phase in runtime_result.phases
+            for stream in (phase.stdout, phase.stderr)
+        ):
+            raise ServiceExecutionConflict("runtime result exceeds lease log bounds")
     await verify_trial_execution_fence(
         session,
         trial_id=lease.trial_id,
@@ -1000,10 +1140,41 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "lease_id": str(lease.id),
         "trial_id": str(lease.trial_id),
         "attempt": lease.attempt,
+        "execution_role": lease.execution_role,
+        "parent_lease_id": str(lease.parent_lease_id) if lease.parent_lease_id else None,
         "generation": lease.generation,
         "resource_generation": lease.resource_generation,
         "execution_class_id": lease.execution_class_id,
         "target_id": lease.target_id,
+        "runtime_contract_sha256": lease.runtime_contract_sha256,
+        "runtime_identity": (
+            {
+                "candidate_sha": lease.runtime_contract_json.get("candidate_sha"),
+                "task_revision_sha256": lease.runtime_contract_json.get("task_revision_sha256"),
+                "task_image_ref": lease.runtime_contract_json.get("task_image_ref"),
+                "runtime_image_ref": lease.runtime_contract_json.get("runtime_image_ref"),
+                "execution_role": lease.runtime_contract_json.get("execution_role"),
+                "command_identity_sha256": lease.runtime_contract_json.get(
+                    "command_identity_sha256"
+                ),
+                "container_roles": [
+                    "execution",
+                    lease.runtime_contract_json.get("main", {}).get("role"),
+                    *[
+                        item.get("role_name")
+                        for item in lease.runtime_contract_json.get("sidecars", [])
+                        if isinstance(item, dict) and isinstance(item.get("role_name"), str)
+                    ],
+                    *(
+                        ["verifier"]
+                        if lease.runtime_contract_json.get("verifier") is not None
+                        else []
+                    ),
+                ],
+            }
+            if lease.runtime_contract_json is not None
+            else None
+        ),
         "desired_state": lease.desired_state,
         "observed_state": lease.observed_state,
         "cleanup_state": lease.cleanup_state,

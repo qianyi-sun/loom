@@ -30,6 +30,12 @@ from loom.execution_contract import (
     VerifierTopology,
     WorkloadRequirementsV1,
 )
+from loom.execution_runtime_contract import (
+    ContainerResourcesV1,
+    ExecutionRuntimePlanV1,
+    ProcessPhaseV1,
+)
+from loom.pipeline.keys import canonical_digest
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -175,7 +181,9 @@ def _target(suffix: str) -> ExecutionTargetV1:
     )
 
 
-def _requirements() -> WorkloadRequirementsV1:
+def _requirements(
+    *, verifier_topology: VerifierTopology = VerifierTopology.IN_ATTEMPT
+) -> WorkloadRequirementsV1:
     return WorkloadRequirementsV1(
         operating_system="linux",
         cpu_architecture="x86_64",
@@ -189,7 +197,7 @@ def _requirements() -> WorkloadRequirementsV1:
         image_materialization=ImageMaterialization.IMMUTABLE_OCI,
         image_ref="registry.example/loom/task@sha256:" + "a" * 64,
         sidecar_count=0,
-        verifier_topology=VerifierTopology.IN_ATTEMPT,
+        verifier_topology=verifier_topology,
         custom_dns=False,
         extra_hosts=False,
         tmpfs=True,
@@ -200,6 +208,104 @@ def _requirements() -> WorkloadRequirementsV1:
         host_devices=False,
         host_specialized=False,
     )
+
+
+def _runtime_contract(
+    *,
+    execution_role: str = "attempt",
+    verifier_execution: str = "in_attempt",
+) -> ExecutionRuntimePlanV1:
+    resources = ContainerResourcesV1(
+        cpu_millis=1000,
+        memory_mib=1024,
+        ephemeral_storage_mib=2048,
+    )
+    return ExecutionRuntimePlanV1(
+        candidate_sha="1" * 40,
+        task_revision_sha256="sha256:" + "2" * 64,
+        command_identity_sha256="sha256:" + "3" * 64,
+        execution_role=execution_role,
+        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        composition="init_payload",
+        task_image_ref="registry.example/loom/task@sha256:" + "a" * 64,
+        runtime_image_ref="registry.example/loom/runtime@sha256:" + "b" * 64,
+        runtime_binary_sha256="sha256:" + "c" * 64,
+        task_resources=resources,
+        workspace_mib=1024,
+        runtime_volume_mib=32,
+        main=ProcessPhaseV1(
+            role="agent" if execution_role == "attempt" else "verifier",
+            argv=("/bin/true",),
+            working_directory="/workspace",
+            timeout_seconds=60,
+        ),
+        verifier_execution=verifier_execution,
+        verifier=(
+            ProcessPhaseV1(
+                role="verifier",
+                argv=("/bin/true",),
+                working_directory="/workspace",
+                timeout_seconds=60,
+            )
+            if verifier_execution == "in_attempt"
+            else None
+        ),
+    )
+
+
+def _runtime_result_payload(
+    lease: ServiceExecutionLease,
+    *,
+    started_at: datetime,
+) -> dict[str, object]:
+    assert lease.runtime_contract_json is not None
+    assert lease.runtime_contract_sha256 is not None
+    plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+    phases: list[dict[str, object]] = []
+    for ordinal, role in enumerate(("agent", "verifier"), start=1):
+        phases.append(
+            {
+                "role": role,
+                "ordinal": ordinal,
+                "started_at": started_at.isoformat(),
+                "finished_at": (started_at + timedelta(seconds=ordinal)).isoformat(),
+                "exit_code": 0,
+                "signal": None,
+                "timed_out": False,
+                "stdout": {
+                    "path": f"{ordinal:02d}-{role}.stdout",
+                    "sha256": "sha256:" + "4" * 64,
+                    "bytes_seen": 10,
+                    "bytes_saved": 10,
+                    "truncated": False,
+                },
+                "stderr": {
+                    "path": f"{ordinal:02d}-{role}.stderr",
+                    "sha256": "sha256:" + "5" * 64,
+                    "bytes_seen": 0,
+                    "bytes_saved": 0,
+                    "truncated": False,
+                },
+            }
+        )
+    return {
+        "schema_version": "loom.execution-runtime-result.v1",
+        "runtime_contract_sha256": lease.runtime_contract_sha256,
+        "candidate_sha": plan.candidate_sha,
+        "task_revision_sha256": plan.task_revision_sha256,
+        "command_identity_sha256": plan.command_identity_sha256,
+        "execution_role": plan.execution_role,
+        "container_roles": ["execution", "agent", "verifier"],
+        "task_image_ref": plan.task_image_ref,
+        "runtime_image_ref": plan.runtime_image_ref,
+        "runtime_binary_sha256": plan.runtime_binary_sha256,
+        "execution_class_id": plan.execution_class_id,
+        "status": "succeeded",
+        "started_at": started_at.isoformat(),
+        "finished_at": (started_at + timedelta(seconds=3)).isoformat(),
+        "phases": phases,
+        "partial_evidence": False,
+    }
 
 
 async def _seed_ready_trial(
@@ -254,6 +360,9 @@ async def _reserve(
     target: ExecutionTargetV1,
     now: datetime,
     request_id: UUID | None = None,
+    requirements: WorkloadRequirementsV1 | None = None,
+    runtime_contract: ExecutionRuntimePlanV1 | None = None,
+    parent_lease_id: UUID | None = None,
 ) -> ServiceExecutionLease:
     return await reserve_trial_execution(
         session,
@@ -261,7 +370,9 @@ async def _reserve(
         trial_id=trial_id,
         execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
         target_id=target.target_id,
-        requirements=_requirements(),
+        requirements=requirements or _requirements(),
+        runtime_contract=runtime_contract or _runtime_contract(),
+        parent_lease_id=parent_lease_id,
         deadline_at=now + timedelta(hours=1),
         now=now,
     )
@@ -323,6 +434,153 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 request_id=request_id,
             )
             assert replay.id == lease_id
+    finally:
+        await engine.dispose()
+
+
+async def test_separate_verifier_is_a_parent_bound_execution_lease(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            parent = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+                runtime_contract=_runtime_contract(verifier_execution="separate_execution"),
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            await record_execution_event(
+                session,
+                lease_id=parent.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={"normalized_state": "succeeded"},
+                observed_at=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            verifier = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now + timedelta(seconds=2),
+                requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+                runtime_contract=_runtime_contract(
+                    execution_role="verifier",
+                    verifier_execution="skipped",
+                ),
+                parent_lease_id=parent.id,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            rows = (
+                (
+                    await session.execute(
+                        select(ServiceExecutionLease)
+                        .where(ServiceExecutionLease.trial_id == trial_id)
+                        .order_by(ServiceExecutionLease.execution_role)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert trial is not None
+            assert (trial.state, trial.attempt_count) == ("claimed", 1)
+            assert [item.execution_role for item in rows] == ["attempt", "verifier"]
+            assert verifier.parent_lease_id == parent.id
+            assert verifier.attempt == parent.attempt
+            assert verifier.job_name.endswith("-v")
+            assert rows[0].job_name.endswith("-a")
+
+        async with sessions() as session:
+            mismatched = _runtime_contract(
+                execution_role="verifier",
+                verifier_execution="skipped",
+            )
+            mismatched = ExecutionRuntimePlanV1.model_validate(
+                {**mismatched.canonical_payload(), "candidate_sha": "9" * 40}
+            )
+            with pytest.raises(ServiceExecutionConflict, match="parent lease is not eligible"):
+                await _reserve(
+                    session,
+                    trial_id=trial_id,
+                    target=target,
+                    now=now + timedelta(seconds=3),
+                    requirements=_requirements(
+                        verifier_topology=VerifierTopology.SEPARATE_EXECUTION
+                    ),
+                    runtime_contract=mismatched,
+                    parent_lease_id=parent.id,
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_runtime_result_identity_is_fenced_and_durably_reported(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="start",
+                now=now,
+            )
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="finalize",
+                now=now,
+            )
+            await session.commit()
+
+        payload = _runtime_result_payload(lease, started_at=now)
+        async with sessions() as session:
+            event, duplicate = await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="result_reported",
+                payload=payload,
+                observed_at=now + timedelta(seconds=3),
+            )
+            await session.commit()
+            assert duplicate is False
+            assert event.payload_sha256 == canonical_digest(payload)
+
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict, match="identity"):
+                await record_execution_event(
+                    session,
+                    lease_id=lease.id,
+                    generation=1,
+                    ordinal=2,
+                    event_kind="result_reported",
+                    payload={**payload, "candidate_sha": "9" * 40},
+                    observed_at=now + timedelta(seconds=4),
+                )
     finally:
         await engine.dispose()
 

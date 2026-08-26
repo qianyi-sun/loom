@@ -23,6 +23,7 @@ from loom.execution_contract import (
     ExecutionTopologyV1,
     WorkloadRequirementsV1,
 )
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -62,6 +63,8 @@ class ReservationBody(_StrictBody):
     execution_class_id: str
     target_id: str
     requirements: WorkloadRequirementsV1
+    runtime_contract: ExecutionRuntimePlanV1
+    parent_lease_id: UUID | None = None
     deadline_at: datetime
 
 
@@ -195,6 +198,8 @@ async def create_execution_reservation(
                 execution_class_id=body.execution_class_id,
                 target_id=body.target_id,
                 requirements=body.requirements,
+                runtime_contract=body.runtime_contract,
+                parent_lease_id=body.parent_lease_id,
                 deadline_at=body.deadline_at,
             )
             await session.commit()
@@ -351,7 +356,10 @@ async def get_trial_execution(
         lease = (
             await session.execute(
                 select(ServiceExecutionLease)
-                .where(ServiceExecutionLease.trial_id == trial_id)
+                .where(
+                    ServiceExecutionLease.trial_id == trial_id,
+                    ServiceExecutionLease.execution_role == "attempt",
+                )
                 .order_by(ServiceExecutionLease.attempt.desc())
                 .limit(1)
             )

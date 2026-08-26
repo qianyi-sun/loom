@@ -109,7 +109,10 @@ async def authorize_trial_execution_dispatch(
     statement = (
         select(ServiceExecutionLease, Trial)
         .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
-        .where(ServiceExecutionLease.trial_id == ctx.trial_id)
+        .where(
+            ServiceExecutionLease.trial_id == ctx.trial_id,
+            ServiceExecutionLease.execution_role == "attempt",
+        )
         .order_by(ServiceExecutionLease.attempt.desc())
         .limit(1)
     )

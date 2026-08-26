@@ -45,6 +45,7 @@ _PERL_BASE_COMPONENTS = (
 )
 _EMPTY_COMPONENTS = (
     "behavior-stage1-sim",
+    "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
     "staging-admin-browser-smoke",

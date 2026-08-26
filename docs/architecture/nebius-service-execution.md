@@ -117,12 +117,14 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migration `0113` persists the complete provider-neutral desired/observed state
-without making a Nebius or Kubernetes call:
+Migrations `0113` and `0114` persist the complete provider-neutral
+desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;
-- one `execution_leases` identity per `(trial, attempt)`, with a generation
-  that can advance only by one and can never regain authority after revocation;
+- one attempt `execution_leases` identity per `(trial, attempt)` and, when
+  required, one parent-bound verifier identity for the same attempt; each has
+  a generation that can advance only by one and can never regain authority
+  after revocation;
 - at-least-once `execution_commands`, atomically required by a deferred
   database constraint whenever desired state changes;
 - idempotent `execution_events` and database-generated
@@ -147,6 +149,15 @@ token minting, Gateway dispatch, worker heartbeat, artifacts, trajectory,
 resource usage, and final-result writeback. Legacy Trials with no execution
 lease retain their existing path; once any lease exists, missing fence headers
 fail closed.
+
+`0114` additionally freezes the canonical Pod-native runtime plan and digest on
+the lease. The plan binds candidate, task revision, command identity, execution
+role, task/runtime image digests, resources, process phases, sidecars, probes,
+volume/output bounds, and verifier topology. Reservation rejects any drift
+between this plan, the workload requirements, and the persisted execution
+class. The create outbox and history projection retain the same immutable
+identity; an actuator refuses legacy or malformed leases that have no valid
+runtime plan.
 
 Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
@@ -221,6 +232,39 @@ terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom
 success or changes retry policy outside the fenced control-plane transition.
 
+The #1550 renderer consumes only the lease-frozen
+`loom.execution-runtime-plan.v1`. For the supported `init_payload` composition
+it creates a digest-pinned runtime materializer, verifies the static runtime
+binary digest, writes the plan and binary into a bounded `emptyDir`, and starts
+the task image with that runtime as PID 1 through a read-only runtime mount.
+Workspace, runtime, output, termination grace, log, artifact, and
+ephemeral-storage bounds are explicit.
+Declared sidecars render as ordered Kubernetes native sidecar init containers
+(`restartPolicy: Always`) with digest-pinned images, resources,
+startup/readiness probes, dropped capabilities, and no service-account token.
+Unsupported compositions fail closed.
+
+The static runtime emits bounded per-phase stdout/stderr evidence and an
+atomically renamed `loom.execution-runtime-result.v1` manifest. It distinguishes
+setup, task, verifier, timeout, cancellation, and runtime failures, preserves
+signal/exit/timestamp/truncation evidence, and repeats the exact lease-bound
+runtime identity. The control plane validates `result_reported` against the
+frozen contract, expected phase order, container roles, and log bounds before
+accepting the idempotent event. A changed candidate, command, image, role,
+phase, or digest is rejected.
+
+After the full result file is committed, the runtime writes a separate bounded
+termination summary to kubelet's termination-message file. The actuator reads
+that summary through ordinary Pod status (never Pod exec or log RBAC), checks
+its runtime/command/role identity against Job annotations, and retains it in
+the Kubernetes observation event. A completed Job with a missing, malformed,
+or mismatched summary is normalized as failure rather than success.
+
+The runtime result file alone is not durable object-storage acceptance. Until
+#1551 supplies the reviewed credential-free workload identity and #1550 wires
+the bounded uploader/commit protocol, normal Job deletion must not be treated
+as successful artifact, trajectory, usage, diagnostic, or result retention.
+
 `deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
 replicas. Repository merge cannot scale it or create its referenced database
 secret, namespace in a live target, runtime class, cluster, or cloud resource.
@@ -236,8 +280,9 @@ with explicit readiness, resource, network, and image contracts. Undeclared
 service discovery and cross-trial sharing are forbidden.
 
 An in-attempt verifier runs after the agent inside the same sandbox and
-workspace. A verifier requiring stronger separation runs as a second leased
-Job with a fresh writable workspace and read-only immutable input artifacts.
+workspace. A verifier requiring stronger separation runs as a second,
+parent-bound `execution_role=verifier` lease and Job for the same trial attempt,
+with a fresh writable workspace and read-only immutable input artifacts.
 The task Job publishes artifact digests; the verifier consumes only those
 digests and publishes a signed result reference. It does not attach to the
 task container, mount another trial's volume, or receive agent/provider

@@ -3768,6 +3768,15 @@ class ServiceExecutionLease(Base):
     __tablename__ = "execution_leases"
     __table_args__ = (
         CheckConstraint("attempt > 0", name="execution_leases_attempt_check"),
+        CheckConstraint(
+            "execution_role IN ('attempt','verifier')",
+            name="execution_leases_role_check",
+        ),
+        CheckConstraint(
+            "(execution_role = 'attempt' AND parent_lease_id IS NULL) OR "
+            "(execution_role = 'verifier' AND parent_lease_id IS NOT NULL)",
+            name="execution_leases_parent_role_check",
+        ),
         CheckConstraint("generation > 0", name="execution_leases_generation_check"),
         CheckConstraint(
             "resource_generation > 0 AND resource_generation <= generation",
@@ -3805,12 +3814,17 @@ class ServiceExecutionLease(Base):
             "pod_terminated_at >= pod_started_at)",
             name="execution_leases_pod_time_order_check",
         ),
-        UniqueConstraint("trial_id", "attempt", name="execution_leases_trial_attempt_uidx"),
+        UniqueConstraint(
+            "trial_id",
+            "attempt",
+            "execution_role",
+            name="execution_leases_trial_attempt_role_uidx",
+        ),
         Index(
             "execution_leases_trial_authoritative_uidx",
             "trial_id",
             unique=True,
-            postgresql_where=text("revoked_at IS NULL"),
+            postgresql_where=text("revoked_at IS NULL AND execution_role = 'attempt'"),
         ),
         Index("execution_leases_team_created_idx", "team_id", "created_at", "id"),
         Index(
@@ -3836,6 +3850,11 @@ class ServiceExecutionLease(Base):
         ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_role: Mapped[str] = mapped_column(Text, nullable=False, default="attempt")
+    parent_lease_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="RESTRICT"),
+    )
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     resource_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     execution_class_id: Mapped[str] = mapped_column(
@@ -3846,6 +3865,8 @@ class ServiceExecutionLease(Base):
     )
     workload_requirements_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     workload_requirements_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    runtime_contract_sha256: Mapped[str | None] = mapped_column(Text)
     desired_state: Mapped[str] = mapped_column(Text, nullable=False)
     observed_state: Mapped[str] = mapped_column(Text, nullable=False)
     cleanup_state: Mapped[str] = mapped_column(Text, nullable=False)

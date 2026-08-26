@@ -8,6 +8,30 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class ExecutionTerminationSummaryV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = Field(pattern=r"^loom\.execution-termination-summary\.v1$")
+    runtime_contract_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    command_identity_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    execution_role: str = Field(pattern=r"^(attempt|verifier)$")
+    status: str = Field(
+        pattern=r"^(succeeded|setup_error|task_error|verifier_error|timed_out|cancelled|runtime_error)$"
+    )
+    partial_evidence: bool
+    phase_count: int = Field(ge=0, le=64)
+    finished_at: datetime
+    result_path: str = Field(pattern=r"^result\.json$")
+
+    @model_validator(mode="after")
+    def _terminal_state_is_consistent(self) -> ExecutionTerminationSummaryV1:
+        if self.partial_evidence != (self.status != "succeeded"):
+            raise ValueError("termination summary partial-evidence flag does not match status")
+        if self.status == "succeeded" and self.phase_count == 0:
+            raise ValueError("successful termination summary has no completed phase")
+        return self
+
+
 class ActuatorContractError(RuntimeError):
     pass
 
@@ -49,6 +73,7 @@ class KubernetesJobObservation(BaseModel):
     terminated_at: datetime | None = None
     reason: str | None = Field(default=None, max_length=120)
     message: str | None = Field(default=None, max_length=2000)
+    termination_summary: ExecutionTerminationSummaryV1 | None = None
 
     @model_validator(mode="after")
     def _timestamps_are_ordered(self) -> KubernetesJobObservation:

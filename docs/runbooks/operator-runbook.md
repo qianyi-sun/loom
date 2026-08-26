@@ -186,7 +186,8 @@ before traffic resumes.
 
 ### Service execution recovery and retention
 
-The `0113` service-execution tables are part of the ordinary PostgreSQL backup;
+The `0113` service-execution tables and `0114` immutable runtime contracts are
+part of the ordinary PostgreSQL backup;
 never export or restore them separately from `trials`, lifecycle authorities,
 artifacts, and usage rows. Before a release or recovery, record counts grouped
 by execution target, desired state, observed state, cleanup state, and command
@@ -214,7 +215,8 @@ object deletion has been verified. Its metadata delete order is
 `execution_leases` first (database cascades command, event, and history rows),
 then resource usage, trial events, LLM calls, artifacts, Trials, and Batches.
 Never delete command/event/history rows independently, and never downgrade
-`0113` while any execution class, target, or lease exists. A failed provider
+`0113` while any execution class, target, or lease exists. Never downgrade
+`0114` while a runtime-bound or verifier lease exists. A failed provider
 cleanup remains `pending`, `in_progress`, or `blocked`; it is operational debt,
 not permission to purge its authority record.
 
@@ -286,8 +288,9 @@ is cancellation of reconciliation, not rollback and not proof that Jobs were
 deleted. Recovery uses the same database generations and command idempotency
 keys; never bump a generation, clear an outbox row, or remove a finalizer to
 hide ambiguity. Image rollback may run the previous compatible digest against
-the forward schema; schema downgrade still requires all `0111` authority rows
-to be deliberately removed through the protected recovery process.
+the forward schema; schema downgrade still requires all `0113`/`0114`
+authority rows to be deliberately removed through the protected recovery
+process.
 
 ## Production release
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,9 @@ def _job(*, conditions: list[Any] | None = None, deleting: bool = False) -> Any:
             annotations={
                 "loom.openai.com/target-id": "nebius-eu-north1-staging",
                 "loom.openai.com/execution-unit-key": ("00000000-0000-0000-0000-000000000002"),
+                "loom.openai.com/runtime-contract-sha256": "sha256:" + "1" * 64,
+                "loom.openai.com/command-identity-sha256": "sha256:" + "2" * 64,
+                "loom.openai.com/execution-role": "attempt",
             },
             namespace="loom-nebius-staging",
             name="loom-unit-a1-g1",
@@ -50,6 +54,22 @@ def _pod(
     terminated_reason: str | None = None,
     deleting: bool = False,
 ) -> Any:
+    succeeded_summary = json.dumps(
+        {
+            "schema_version": "loom.execution-termination-summary.v1",
+            "runtime_contract_sha256": "sha256:" + "1" * 64,
+            "command_identity_sha256": "sha256:" + "2" * 64,
+            "execution_role": "attempt",
+            "status": "succeeded",
+            "partial_evidence": False,
+            "phase_count": 2,
+            "finished_at": datetime.now(UTC).isoformat(),
+            "result_path": "result.json",
+        }
+    )
+    effective_terminated_reason = terminated_reason or (
+        "Completed" if phase == "Succeeded" else None
+    )
     state = _ns(
         waiting=(
             _ns(reason=waiting_reason, message=f"{waiting_reason} message")
@@ -57,8 +77,17 @@ def _pod(
             else None
         ),
         terminated=(
-            _ns(reason=terminated_reason, message=f"{terminated_reason} message", finished_at=None)
-            if terminated_reason
+            _ns(
+                reason=effective_terminated_reason,
+                message=(
+                    succeeded_summary
+                    if phase == "Succeeded" and terminated_reason is None
+                    else f"{effective_terminated_reason} message"
+                ),
+                finished_at=None,
+                exit_code=0 if phase == "Succeeded" else 1,
+            )
+            if effective_terminated_reason
             else None
         ),
     )
@@ -75,7 +104,11 @@ def _pod(
             message=f"{reason} message" if reason else None,
             conditions=[scheduled] if scheduled else [],
             start_time=None,
-            container_statuses=[_ns(state=state)] if waiting_reason or terminated_reason else [],
+            container_statuses=(
+                [_ns(name="execution", state=state)]
+                if waiting_reason or effective_terminated_reason
+                else []
+            ),
         ),
     )
 
@@ -119,7 +152,7 @@ def _pod(
         (
             _job(conditions=[_ns(type="Complete", reason=None, message=None)]),
             [],
-            NormalizedJobState.SUCCEEDED,
+            NormalizedJobState.FAILED,
         ),
     ],
 )
@@ -132,6 +165,19 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.normalized_state is expected
     assert observation.job_uid == "job-uid"
     assert observation.resource_version == "42"
+
+
+def test_termination_summary_is_identity_bound_and_retained() -> None:
+    job = _job(conditions=[_ns(type="Complete", reason=None, message=None)])
+    observation = _normalize(job, [_pod(phase="Succeeded")])
+    assert observation.normalized_state is NormalizedJobState.SUCCEEDED
+    assert observation.termination_summary is not None
+    assert observation.termination_summary.phase_count == 2
+
+    job.metadata.annotations["loom.openai.com/command-identity-sha256"] = "sha256:" + "9" * 64
+    rejected = _normalize(job, [_pod(phase="Succeeded")])
+    assert rejected.normalized_state is NormalizedJobState.FAILED
+    assert rejected.reason == "TerminationSummaryIdentityMismatch"
 
 
 def test_kubernetes_error_translation_handles_non_integer_status() -> None:
