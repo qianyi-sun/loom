@@ -357,6 +357,40 @@ def _manifest_inventory(bundle_digest: str) -> dict[str, object]:
     }
 
 
+def _legacy_manifest_inventory() -> dict[str, object]:
+    inventory = _manifest_inventory("7" * 64)
+    inventory.pop("artifact_bundle_sha256")
+    inventory["schema_version"] = 1
+    inventory["inventory_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "dry_run_sha256": inventory["dry_run_sha256"],
+                "plan_sha256": inventory["plan_sha256"],
+                "version": "v1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return inventory
+
+
+def _append_manifest_events(
+    journal: ManifestOwnershipJournal,
+    request_id: str,
+    events: tuple[tuple[str, dict[str, object]], ...],
+) -> None:
+    for offset, (event, evidence) in enumerate(events):
+        journal.append(
+            request_id,
+            {
+                "event": event,
+                "observed_at": (NOW + timedelta(seconds=offset)).isoformat(),
+                "evidence": evidence,
+            },
+        )
+
+
 def _write_private_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     for directory in (path.parent.parent, path.parent):
@@ -662,6 +696,327 @@ def test_installed_maintenance_inventory_pins_only_inflight_exact_claims(
         maintenance()
 
 
+def test_installed_maintenance_inventory_accepts_terminal_v2_subset_cleanup(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _manifest_inventory("7" * 64)
+    resources = inventory["resources"]
+    assert isinstance(resources, list)
+    second = dict(resources[0])
+    second["identity"] = "v1|ConfigMap|loom-staging|second"
+    second["uid"] = "22222222-2222-4222-8222-222222222222"
+    resources.append(second)
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    _append_manifest_events(
+        journal,
+        request_id,
+        (
+            (
+                "inventory-approved",
+                {
+                    "inventory_sha256": inventory["inventory_sha256"],
+                    "plan_sha256": inventory["plan_sha256"],
+                    "starting_epoch": 7,
+                },
+            ),
+            ("epoch-claimed", {"observed_epoch": 8}),
+            ("ownership-adopted", {"adoption_sha256": "a" * 64}),
+            (
+                "managed-fields-cleaned",
+                {"cleanup_count": 1, "cleanup_sha256": "b" * 64},
+            ),
+            ("network-policies-converged", {"network_sha256": "c" * 64}),
+            (
+                "live-state-verified",
+                {"attempts": 1, "post_apply_sha256": "d" * 64},
+            ),
+            (
+                "completed",
+                {"final_dry_run_sha256": "e" * 64, "observed_epoch": 8},
+            ),
+        ),
+    )
+
+    assert (
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+        == ()
+    )
+
+
+@pytest.mark.parametrize(
+    "events",
+    (
+        (
+            ("inventory-approved", {}),
+            ("failed", {"failure_class": "ValueError"}),
+        ),
+        (
+            ("inventory-approved", {}),
+            ("epoch-claimed", {"observed_epoch": 8}),
+            ("ownership-adopted", {"adoption_sha256": "a" * 64}),
+            ("network-policies-converged", {"network_sha256": "b" * 64}),
+            ("live-state-verified", {"post_apply_sha256": "c" * 64}),
+            (
+                "failed",
+                {
+                    "failure_class": "RuntimeError",
+                    "failure_code": "manifest_ownership.final-no-force-dry-run.failed",
+                },
+            ),
+        ),
+        (
+            ("inventory-approved", {}),
+            ("epoch-claimed", {"observed_epoch": 8}),
+            ("ownership-adopted", {"adoption_sha256": "a" * 64}),
+            ("network-policies-converged", {"network_sha256": "b" * 64}),
+            (
+                "live-state-verified",
+                {"attempts": 1, "post_apply_sha256": "c" * 64},
+            ),
+            (
+                "completed",
+                {"final_dry_run_sha256": "d" * 64, "observed_epoch": 8},
+            ),
+        ),
+        (
+            ("inventory-approved", {}),
+            ("epoch-claimed", {"observed_epoch": 8}),
+            ("ownership-adopted", {"adoption_sha256": "a" * 64}),
+            (
+                "managed-fields-cleaned",
+                {"cleanup_count": 1, "cleanup_sha256": "b" * 64},
+            ),
+            ("network-policies-converged", {"network_sha256": "c" * 64}),
+            (
+                "live-state-verified",
+                {"attempts": 1, "post_apply_sha256": "d" * 64},
+            ),
+            (
+                "completed",
+                {"final_dry_run_sha256": "e" * 64, "observed_epoch": 8},
+            ),
+        ),
+    ),
+    ids=(
+        "initial-failure-evidence",
+        "stage-coded-failure",
+        "retry-aware-completion",
+        "managed-fields-completion",
+    ),
+)
+def test_installed_maintenance_inventory_ignores_exact_terminal_v1_journals(
+    tmp_path: Path,
+    events: tuple[tuple[str, dict[str, object]], ...],
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _legacy_manifest_inventory()
+    bound_events = (
+        (
+            events[0][0],
+            {
+                **events[0][1],
+                "inventory_sha256": inventory["inventory_sha256"],
+                "plan_sha256": inventory["plan_sha256"],
+                "starting_epoch": 7,
+            },
+        ),
+        *events[1:],
+    )
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    _append_manifest_events(journal, request_id, bound_events)
+
+    assert (
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+        == ()
+    )
+
+
+@pytest.mark.parametrize("publish_approval", (False, True))
+def test_installed_maintenance_inventory_rejects_nonterminal_v1_journal(
+    tmp_path: Path,
+    publish_approval: bool,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _legacy_manifest_inventory()
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    if publish_approval:
+        _append_manifest_events(
+            journal,
+            request_id,
+            (
+                (
+                    "inventory-approved",
+                    {
+                        "inventory_sha256": inventory["inventory_sha256"],
+                        "plan_sha256": inventory["plan_sha256"],
+                        "starting_epoch": 7,
+                    },
+                ),
+            ),
+        )
+
+    with pytest.raises(PreflightArtifactReferenceInventoryError):
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+
+
+@pytest.mark.parametrize("case", ("digest-drift", "unknown-field"))
+def test_installed_maintenance_inventory_rejects_malformed_v1_inventory(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _legacy_manifest_inventory()
+    if case == "digest-drift":
+        inventory["inventory_sha256"] = "f" * 64
+    else:
+        inventory["unknown"] = "field"
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    _append_manifest_events(
+        journal,
+        request_id,
+        (
+            (
+                "inventory-approved",
+                {
+                    "inventory_sha256": inventory["inventory_sha256"],
+                    "plan_sha256": inventory["plan_sha256"],
+                    "starting_epoch": 7,
+                },
+            ),
+            ("failed", {"failure_class": "ValueError"}),
+        ),
+    )
+
+    with pytest.raises(PreflightArtifactReferenceInventoryError, match="inventory"):
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+
+
+def test_installed_maintenance_inventory_rejects_unknown_v1_event_profile(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _legacy_manifest_inventory()
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    _append_manifest_events(
+        journal,
+        request_id,
+        (
+            (
+                "inventory-approved",
+                {
+                    "inventory_sha256": inventory["inventory_sha256"],
+                    "plan_sha256": inventory["plan_sha256"],
+                    "starting_epoch": 7,
+                },
+            ),
+            ("epoch-claimed", {"observed_epoch": 8}),
+            ("ownership-adopted", {"adoption_sha256": "a" * 64}),
+            (
+                "managed-fields-cleaned",
+                {"cleanup_count": 1, "cleanup_sha256": "b" * 64},
+            ),
+            ("network-policies-converged", {"network_sha256": "c" * 64}),
+            ("live-state-verified", {"post_apply_sha256": "d" * 64}),
+            (
+                "completed",
+                {"final_dry_run_sha256": "e" * 64, "observed_epoch": 8},
+            ),
+        ),
+    )
+
+    with pytest.raises(PreflightArtifactReferenceInventoryError, match="events"):
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_installed_maintenance_inventory_rejects_noninteger_manifest_schema(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    config = make_config(tmp_path)
+    config.state_root.mkdir(parents=True, mode=0o700)
+    config.state_root.chmod(0o700)
+    service_uid = os.geteuid()
+    request_id = "req-manifest-ownership-12345678"
+    inventory = _legacy_manifest_inventory()
+    inventory["schema_version"] = schema_version
+    inventory["inventory_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "dry_run_sha256": inventory["dry_run_sha256"],
+                "plan_sha256": inventory["plan_sha256"],
+                "version": f"v{schema_version}",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    journal = ManifestOwnershipJournal(config.state_root, service_uid=service_uid)
+    journal.publish_inventory(request_id, inventory)
+    _append_manifest_events(
+        journal,
+        request_id,
+        (
+            (
+                "inventory-approved",
+                {
+                    "inventory_sha256": inventory["inventory_sha256"],
+                    "plan_sha256": inventory["plan_sha256"],
+                    "starting_epoch": 7,
+                },
+            ),
+            ("failed", {"failure_class": "ValueError"}),
+        ),
+    )
+
+    with pytest.raises(PreflightArtifactReferenceInventoryError, match="inventory is invalid"):
+        InstalledMaintenanceReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+        )()
+
+
 def test_installed_maintenance_inventory_rejects_unknown_or_changing_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -828,7 +1183,7 @@ def test_installed_maintenance_inventory_rejects_producer_impossible_events(
         events[-1][1]["observed_epoch"] = 9
     elif case == "wrong-cleanup-count":
         events = events[:4]
-        events[-1][1]["cleanup_count"] = 0
+        events[-1][1]["cleanup_count"] = 2
     elif case == "wrong-completed-epoch":
         events[-1][1]["observed_epoch"] = 9
     journal = ManifestOwnershipJournal(
