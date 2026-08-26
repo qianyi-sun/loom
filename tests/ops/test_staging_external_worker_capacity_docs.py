@@ -30,6 +30,7 @@ def test_staging_external_pool_ceilings_match_current_policy() -> None:
     assert policies["gb10"]["enabled"] is True
     assert policies["gb10"]["min_slots"] == 0
     assert policies["gb10"]["max_slots"] == 150
+    assert policies["gb10"]["actuator_config"]["partition"] == "loom-staging"
     assert policies["oldlab"]["enabled"] is True
     assert policies["oldlab"]["min_slots"] == 0
     assert policies["oldlab"]["max_slots"] == 18

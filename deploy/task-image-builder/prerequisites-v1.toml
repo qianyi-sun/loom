@@ -136,7 +136,7 @@ id = "gb10"
 slurm_cluster = "trt-gb10"
 architecture = "aarch64"
 controller = "gx10-01c7"
-trial_partition = "gb10"
+trial_partition = "loom-staging"
 trial_priority_tier = 100
 builder_partition = "loom-task-builder"
 builder_priority_tier = 200
@@ -158,7 +158,7 @@ builder_nodes = [
   "trt-gb10-15",
 ]
 builder_nodes_expression = "trt-gb10-[1-15]"
-trial_partition_anchor = "PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
+trial_partition_anchor = "PartitionName=loom-staging Nodes=trt-gb10-[1-15] Default=NO MaxTime=1-00:00:00 State=UP PriorityTier=100 AllowAccounts=loom-staging AllowQos=loom-staging OverSubscribe=NO"
 builder_partition_line = "PartitionName=loom-task-builder Nodes=trt-gb10-[1-15] Default=NO MaxTime=02:00:00 State=UP PriorityTier=200 AllowAccounts=loom-task-builder AllowGroups=loom-task-builder OverSubscribe=NO"
 slurm_account = "loom-task-builder"
 slurm_qos = "loom-task-image-builder-rootless-gb10"

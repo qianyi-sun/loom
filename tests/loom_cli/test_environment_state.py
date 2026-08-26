@@ -288,7 +288,7 @@ def test_committed_slurm_pools_carry_containment_contract() -> None:
             assert conc * cpus <= cfg["requested_cpus"]
             assert conc * mem <= cfg["requested_memory_mib"]
             if policy["pool_name"] == "gb10":
-                # The physical GB10 partition is capped at MaxTime=1-00:00:00;
+                # GB10 worker partitions are capped at MaxTime=1-00:00:00;
                 # a larger request is rejected by sbatch before any worker can
                 # register, so every environment must stay within that bound.
                 assert cfg["time_limit"] == "1-00:00:00"
@@ -2255,7 +2255,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert gb10_policy["max_slots"] == 150
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
-    assert gb10_policy["actuator_config"]["partition"] == "gb10"
+    assert gb10_policy["actuator_config"]["partition"] == "loom-staging"
     assert gb10_policy["actuator_config"]["allowed_nodes"] == [
         "trt-gb10-1",
         "trt-gb10-2",

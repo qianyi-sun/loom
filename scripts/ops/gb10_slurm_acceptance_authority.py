@@ -23,6 +23,7 @@ SERVICE_UID = 995
 SERVICE_GID = 2007
 SLURM_ACCOUNT = "loom-staging"
 SLURM_QOS = "loom-staging"
+SLURM_PARTITION = "loom-staging"
 CLUSTER_NAME = "trt-gb10"
 CONTROLLER_HOST = "gx10-01c7"
 # Loom's canonical GB10 inventory remains nodes 1-15 even while a node is busy
@@ -132,7 +133,7 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
     expected_config = {
         "slurm_cluster_name": CLUSTER_NAME,
         "slurm_controller_host": CONTROLLER_HOST,
-        "partition": "gb10",
+        "partition": SLURM_PARTITION,
         "external_runner": True,
         "slurm_account": SLURM_ACCOUNT,
         "qos_normal": SLURM_QOS,
@@ -422,8 +423,11 @@ def _probe_nodes(
     deferred_busy: list[str] = []
     for index, node in enumerate(SLURM_NODES, start=1):
         node_config = _run(["/usr/bin/scontrol", "show", "node", node, "-o"]).stdout
-        if re.search(r"(?:^| )Partitions=[^ ]*\bgb10\b", node_config) is None:
-            raise AcceptanceError(f"canonical node is outside GB10 partition: {node}")
+        partition_pattern = rf"(?:^| )Partitions=[^ ]*\b{re.escape(SLURM_PARTITION)}\b"
+        if re.search(partition_pattern, node_config) is None:
+            raise AcceptanceError(
+                f"canonical node is outside {SLURM_PARTITION} partition: {node}"
+            )
         job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
         command = [
             "runuser",
@@ -439,7 +443,7 @@ def _probe_nodes(
             "--cpus-per-task=1",
             "--mem=128M",
             "--time=00:02:00",
-            "--partition=gb10",
+            f"--partition={SLURM_PARTITION}",
             f"--account={SLURM_ACCOUNT}",
             f"--qos={SLURM_QOS}",
             f"--nodelist={node}",

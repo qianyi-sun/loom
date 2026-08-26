@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Converge the shared GB10 partition to Loom's canonical nodes 1-15.
+# Add Loom's dedicated GB10 staging partition without changing shared jobs.
 set -euo pipefail
 
 CONTROLLER="gx10-01c7"
 CLUSTER="trt-gb10"
 CONFIG="/etc/slurm/slurm.conf"
 STATE_ROOT="/var/lib/loom-gb10-slurm-authority"
-BACKUP="$STATE_ROOT/slurm.conf.before-canonical-nodes-1-15"
+BACKUP="$STATE_ROOT/slurm.conf.before-loom-staging-partition"
 CONFIG_OWNER="root"
 CONFIG_GROUP="root"
 STATE_OWNER="root"
 STATE_GROUP="root"
-OLD_LINE="PartitionName=gb10 Nodes=trt-gb10-[1-9,11-16] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
-NEW_LINE="PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
+SHARED_ANCHOR_LINE="PartitionName=gb10 Nodes=trt-gb10-[1-9,11-16] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
+PARTITION="loom-staging"
+PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-gb10-[1-15] Default=NO MaxTime=1-00:00:00 State=UP PriorityTier=100 AllowAccounts=loom-staging AllowQos=loom-staging OverSubscribe=NO"
 EXPECTED_NODES="$(printf 'trt-gb10-%s\n' {1..15})"
 
 loom_gb10_restore_backup_and_fail() {
@@ -36,15 +37,53 @@ loom_gb10_fail_readback() {
   exit 1
 }
 
+loom_gb10_live_partition_is_exact() {
+  local expected
+  local field
+  local live_nodes
+  local nodes_expression=""
+  local partition_state
+
+  partition_state="$(scontrol show partition "$PARTITION" -o)" || return 1
+  for expected in \
+    "PartitionName=$PARTITION" \
+    "AllowAccounts=loom-staging" \
+    "AllowQos=loom-staging" \
+    "Default=NO" \
+    "MaxTime=1-00:00:00" \
+    "PriorityTier=100" \
+    "OverSubscribe=NO" \
+    "State=UP"; do
+    grep -E "(^|[[:space:]])$expected([[:space:]]|$)" \
+      <<<"$partition_state" >/dev/null || return 1
+  done
+  for field in $partition_state; do
+    case "$field" in
+      Nodes=*) nodes_expression="${field#Nodes=}" ;;
+    esac
+  done
+  [ -n "$nodes_expression" ] || return 1
+  live_nodes="$(scontrol show hostnames "$nodes_expression")" || return 1
+  [ "$live_nodes" = "$EXPECTED_NODES" ] || return 1
+  scontrol show node trt-gb10-10 -o \
+    | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null \
+    || return 1
+  if scontrol show node trt-gb10-16 -o \
+    | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null; then
+    return 1
+  fi
+}
+
 loom_gb10_converge_partition() {
+  local anchor_count
   local expected
   local field
   local live_nodes
   local named_count
-  local new_count
+  local partition_count
+  local shared_named_count
   local nodes_expression
-  local old_count
-  local partition_changed=0
+  local partition_added=0
   local partition_state
   local temporary=""
 
@@ -60,10 +99,15 @@ loom_gb10_converge_partition() {
     exit 1
   fi
 
-  old_count="$(grep -Fxc "$OLD_LINE" "$CONFIG" || true)"
-  new_count="$(grep -Fxc "$NEW_LINE" "$CONFIG" || true)"
-  named_count="$(grep -Ec '^PartitionName=gb10([[:space:]]|$)' "$CONFIG" || true)"
-  if [ "$old_count" = "1" ] && [ "$new_count" = "0" ] && [ "$named_count" = "1" ]; then
+  anchor_count="$(grep -Fxc "$SHARED_ANCHOR_LINE" "$CONFIG" || true)"
+  shared_named_count="$(grep -Ec '^PartitionName=gb10([[:space:]]|$)' "$CONFIG" || true)"
+  partition_count="$(grep -Fxc "$PARTITION_LINE" "$CONFIG" || true)"
+  named_count="$(grep -Ec "^PartitionName=$PARTITION([[:space:]]|$)" "$CONFIG" || true)"
+  if [ "$anchor_count" != "1" ] || [ "$shared_named_count" != "1" ]; then
+    echo "error: shared GB10 partition anchor is not exact" >&2
+    exit 1
+  fi
+  if [ "$partition_count" = "0" ] && [ "$named_count" = "0" ]; then
     install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0755 "$STATE_ROOT"
     if [ -e "$BACKUP" ]; then
       if [ -L "$BACKUP" ] \
@@ -78,8 +122,8 @@ loom_gb10_converge_partition() {
     fi
     temporary="$(mktemp "$(dirname "$CONFIG")/.slurm.conf.XXXXXX")"
     trap 'if [ -n "${temporary:-}" ] && [ -e "$temporary" ]; then unlink "$temporary"; fi' EXIT
-    awk -v old="$OLD_LINE" -v new="$NEW_LINE" \
-      '{ print ($0 == old ? new : $0) }' "$CONFIG" >"$temporary"
+    awk -v anchor="$SHARED_ANCHOR_LINE" -v partition="$PARTITION_LINE" \
+      '{ print; if ($0 == anchor) print partition }' "$CONFIG" >"$temporary"
     chown "$CONFIG_OWNER:$CONFIG_GROUP" "$temporary"
     chmod 0644 "$temporary"
     mv "$temporary" "$CONFIG"
@@ -87,35 +131,43 @@ loom_gb10_converge_partition() {
     trap - EXIT
     if ! scontrol reconfigure; then
       loom_gb10_restore_backup_and_fail \
-        "Slurm rejected the canonical GB10 partition update"
+        "Slurm rejected the dedicated GB10 staging partition"
     fi
-    partition_changed=1
-  elif [ "$old_count" != "0" ] \
-    || [ "$new_count" != "1" ] \
-    || [ "$named_count" != "1" ]; then
-    echo "error: GB10 partition line does not match the bounded transition" >&2
+    partition_added=1
+  elif [ "$partition_count" != "1" ] || [ "$named_count" != "1" ]; then
+    echo "error: dedicated GB10 staging partition line does not match authority" >&2
     exit 1
   fi
 
-  if [ "$(grep -Fxc "$NEW_LINE" "$CONFIG" || true)" != "1" ]; then
+  if [ "$(grep -Fxc "$PARTITION_LINE" "$CONFIG" || true)" != "1" ]; then
     loom_gb10_fail_readback \
-      "durable GB10 partition readback failed" "$partition_changed"
+      "durable GB10 staging partition readback failed" "$partition_added"
   fi
-  if ! partition_state="$(scontrol show partition gb10 -o)"; then
+  if [ "$partition_added" = "0" ] \
+    && ! loom_gb10_live_partition_is_exact; then
+    if ! scontrol reconfigure; then
+      echo "error: Slurm rejected the canonical durable GB10 staging partition reload" >&2
+      exit 1
+    fi
+  fi
+  if ! partition_state="$(scontrol show partition "$PARTITION" -o)"; then
     loom_gb10_fail_readback \
-      "live GB10 partition readback is unavailable" "$partition_changed"
+      "live GB10 staging partition readback is unavailable" "$partition_added"
   fi
   for expected in \
-    "PartitionName=gb10" \
-    "Default=YES" \
+    "PartitionName=$PARTITION" \
+    "AllowAccounts=loom-staging" \
+    "AllowQos=loom-staging" \
+    "Default=NO" \
     "MaxTime=1-00:00:00" \
     "PriorityTier=100" \
+    "OverSubscribe=NO" \
     "State=UP"; do
     if ! grep -E \
       "(^|[[:space:]])$expected([[:space:]]|$)" \
       <<<"$partition_state" >/dev/null; then
       loom_gb10_fail_readback \
-        "live GB10 partition readback is incomplete" "$partition_changed"
+        "live GB10 staging partition readback is incomplete" "$partition_added"
     fi
   done
   nodes_expression=""
@@ -126,28 +178,29 @@ loom_gb10_converge_partition() {
   done
   if [ -z "$nodes_expression" ]; then
     loom_gb10_fail_readback \
-      "live GB10 partition readback is incomplete" "$partition_changed"
+      "live GB10 staging partition readback is incomplete" "$partition_added"
   fi
   if ! live_nodes="$(scontrol show hostnames "$nodes_expression")"; then
     loom_gb10_fail_readback \
-      "live GB10 partition node expansion failed" "$partition_changed"
+      "live GB10 staging partition node expansion failed" "$partition_added"
   fi
   if [ "$live_nodes" != "$EXPECTED_NODES" ]; then
     loom_gb10_fail_readback \
-      "live GB10 partition node set is not exact" "$partition_changed"
+      "live GB10 partition node set is not exact" "$partition_added"
   fi
   if ! scontrol show node trt-gb10-10 -o \
-    | grep -E '(^| )Partitions=([^ ]*,)?gb10(,| )' >/dev/null; then
+    | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null; then
     loom_gb10_fail_readback \
-      "live GB10 partition membership did not converge for trt-gb10-10" \
-      "$partition_changed"
+      "dedicated GB10 staging partition membership did not converge for trt-gb10-10" \
+      "$partition_added"
   fi
   if scontrol show node trt-gb10-16 -o \
-    | grep -E '(^| )Partitions=([^ ]*,)?gb10(,| )' >/dev/null; then
+    | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null; then
     loom_gb10_fail_readback \
-      "live GB10 partition still includes trt-gb10-16" "$partition_changed"
+      "dedicated GB10 staging partition still includes trt-gb10-16" \
+      "$partition_added"
   fi
-  printf 'converged canonical GB10 shared partition: trt-gb10-[1-15]\n'
+  printf 'converged dedicated GB10 staging partition: trt-gb10-[1-15]\n'
 }
 
 main() {
