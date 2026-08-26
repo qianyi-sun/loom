@@ -47,6 +47,59 @@ roleRef:
   kind: Role
   name: loom-execution-actuator
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-execution-attempt-default-deny
+  namespace: loom-nebius-staging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: execution-unit
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loom-execution-attempt-egress
+  namespace: loom-nebius-staging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: execution-unit
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: loom
+          podSelector:
+            matchLabels:
+              app: loom-llm-gateway
+      ports:
+        - {protocol: TCP, port: 9100}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: loom
+          podSelector:
+            matchLabels:
+              app: loom-minio
+      ports:
+        - {protocol: TCP, port: 9000}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

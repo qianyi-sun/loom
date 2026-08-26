@@ -25,6 +25,11 @@ from loom.execution_contract import (
     WorkloadRequirementsV1,
     evaluate_execution_admission,
 )
+from loom.execution_image_admission import (
+    ImageAdmissionError,
+    ImageAdmissionKeyring,
+    verify_execution_image_admission,
+)
 from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     ExecutionRuntimeResultV1,
@@ -116,6 +121,10 @@ class ExecutionFence:
     trial_id: UUID
     attempt: int
     execution_role: str
+    runtime_contract_sha256: str | None
+    candidate_sha: str | None
+    task_revision_sha256: str | None
+    command_identity_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -315,6 +324,7 @@ async def reserve_trial_execution(
     target_id: str,
     requirements: WorkloadRequirementsV1,
     runtime_contract: ExecutionRuntimePlanV1,
+    image_admission_keyring: ImageAdmissionKeyring,
     parent_lease_id: UUID | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
@@ -345,6 +355,20 @@ async def reserve_trial_execution(
         ):
             raise ServiceExecutionConflict("reservation request_id changed immutable identity")
         return existing
+
+    try:
+        verify_execution_image_admission(
+            runtime_contract.image_admission,
+            required_image_refs=(
+                runtime_contract.task_image_ref,
+                runtime_contract.runtime_image_ref,
+                *(sidecar.image_ref for sidecar in runtime_contract.sidecars),
+            ),
+            keyring=image_admission_keyring,
+            now=current_time,
+        )
+    except ImageAdmissionError as exc:
+        raise ServiceExecutionConflict(str(exc)) from exc
 
     trial = (
         await session.execute(select(Trial).where(Trial.id == trial_id).with_for_update())
@@ -800,12 +824,30 @@ async def verify_trial_execution_fence(
     if not valid:
         SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL.labels(surface=surface).inc()
         raise ServiceExecutionFenceError("execution lease generation is not authoritative")
+    runtime_contract: ExecutionRuntimePlanV1 | None = None
+    if lease.runtime_contract_json is not None and lease.runtime_contract_sha256 is not None:
+        try:
+            candidate = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+            if canonical_digest(candidate.canonical_payload()) == lease.runtime_contract_sha256:
+                runtime_contract = candidate
+        except ValueError:
+            runtime_contract = None
     return ExecutionFence(
         lease_id=lease.id,
         generation=lease.generation,
         trial_id=lease.trial_id,
         attempt=lease.attempt,
         execution_role=lease.execution_role,
+        runtime_contract_sha256=(
+            lease.runtime_contract_sha256 if runtime_contract is not None else None
+        ),
+        candidate_sha=runtime_contract.candidate_sha if runtime_contract is not None else None,
+        task_revision_sha256=(
+            runtime_contract.task_revision_sha256 if runtime_contract is not None else None
+        ),
+        command_identity_sha256=(
+            runtime_contract.command_identity_sha256 if runtime_contract is not None else None
+        ),
     )
 
 
@@ -1135,6 +1177,42 @@ async def refresh_service_execution_metrics(
 
 
 def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
+    runtime_identity: dict[str, Any] | None = None
+    if lease.runtime_contract_json is not None and lease.runtime_contract_sha256 is not None:
+        try:
+            plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+            if canonical_digest(plan.canonical_payload()) == lease.runtime_contract_sha256:
+                runtime_identity = {
+                    "candidate_sha": plan.candidate_sha,
+                    "task_revision_sha256": plan.task_revision_sha256,
+                    "task_image_ref": plan.task_image_ref,
+                    "runtime_image_ref": plan.runtime_image_ref,
+                    "execution_role": plan.execution_role,
+                    "command_identity_sha256": plan.command_identity_sha256,
+                    "container_roles": _runtime_container_roles(plan),
+                    "image_admission_sha256": canonical_digest(
+                        plan.image_admission.model_dump(mode="json")
+                    ),
+                    "image_admissions": [
+                        {
+                            "image_ref": item.statement.image_ref,
+                            "signing_key_id": item.signing_key_id,
+                            "sbom_sha256": item.statement.sbom_sha256,
+                            "provenance_sha256": item.statement.provenance_sha256,
+                            "vulnerability_report_sha256": (
+                                item.statement.vulnerability_report_sha256
+                            ),
+                            "policy_sha256": item.statement.policy_sha256,
+                            "highest_vulnerability_severity": (
+                                item.statement.highest_vulnerability_severity
+                            ),
+                            "expires_at": item.statement.expires_at.isoformat(),
+                        }
+                        for item in plan.image_admission.admissions
+                    ],
+                }
+        except ValueError:
+            runtime_identity = None
     return {
         "schema_version": "loom.execution-lease-projection.v1",
         "lease_id": str(lease.id),
@@ -1147,34 +1225,7 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "execution_class_id": lease.execution_class_id,
         "target_id": lease.target_id,
         "runtime_contract_sha256": lease.runtime_contract_sha256,
-        "runtime_identity": (
-            {
-                "candidate_sha": lease.runtime_contract_json.get("candidate_sha"),
-                "task_revision_sha256": lease.runtime_contract_json.get("task_revision_sha256"),
-                "task_image_ref": lease.runtime_contract_json.get("task_image_ref"),
-                "runtime_image_ref": lease.runtime_contract_json.get("runtime_image_ref"),
-                "execution_role": lease.runtime_contract_json.get("execution_role"),
-                "command_identity_sha256": lease.runtime_contract_json.get(
-                    "command_identity_sha256"
-                ),
-                "container_roles": [
-                    "execution",
-                    lease.runtime_contract_json.get("main", {}).get("role"),
-                    *[
-                        item.get("role_name")
-                        for item in lease.runtime_contract_json.get("sidecars", [])
-                        if isinstance(item, dict) and isinstance(item.get("role_name"), str)
-                    ],
-                    *(
-                        ["verifier"]
-                        if lease.runtime_contract_json.get("verifier") is not None
-                        else []
-                    ),
-                ],
-            }
-            if lease.runtime_contract_json is not None
-            else None
-        ),
+        "runtime_identity": runtime_identity,
         "desired_state": lease.desired_state,
         "observed_state": lease.observed_state,
         "cleanup_state": lease.cleanup_state,

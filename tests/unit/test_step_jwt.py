@@ -188,6 +188,7 @@ def test_explicit_null_provider_binding_roundtrips() -> None:
         signing_key=_KEY,
         provider_connection_id=None,
         provider_connection_id_bound=True,
+        step_jwt_id=uuid4(),
     )
     ctx = verify_step_jwt(token, signing_key=_KEY)
     assert ctx.provider_connection_id is None
@@ -244,20 +245,39 @@ def test_execution_attempt_dispatch_authority_round_trips() -> None:
 
 def test_service_execution_authority_round_trips_for_trial_jwt() -> None:
     lease_id = uuid4()
+    token_id = uuid4()
+    runtime_contract_sha256 = "sha256:" + "a" * 64
+    candidate_sha = "b" * 40
+    task_revision_sha256 = "sha256:" + "c" * 64
+    command_identity_sha256 = "sha256:" + "d" * 64
     token = mint_step_jwt(
         team_id=uuid4(),
         trial_id=uuid4(),
-        step_id="main",
+        step_id="agent",
         ttl_sec=60,
         signing_key=_KEY,
+        provider_connection_id_bound=True,
+        step_jwt_id=token_id,
         service_execution_lease_id=lease_id,
         service_execution_generation=7,
+        service_execution_role="attempt",
+        service_execution_runtime_contract_sha256=runtime_contract_sha256,
+        service_execution_candidate_sha=candidate_sha,
+        service_execution_task_revision_sha256=task_revision_sha256,
+        service_execution_command_identity_sha256=command_identity_sha256,
     )
 
     ctx = verify_step_jwt(token, signing_key=_KEY)
 
     assert ctx.service_execution_lease_id == lease_id
+    assert ctx.step_jwt_id == token_id
     assert ctx.service_execution_generation == 7
+    assert ctx.service_execution_role == "attempt"
+    assert ctx.service_execution_runtime_contract_sha256 == runtime_contract_sha256
+    assert ctx.service_execution_candidate_sha == candidate_sha
+    assert ctx.service_execution_task_revision_sha256 == task_revision_sha256
+    assert ctx.service_execution_command_identity_sha256 == command_identity_sha256
+    assert ctx.provider_connection_id_bound is True
 
 
 @pytest.mark.parametrize(
@@ -272,7 +292,7 @@ def test_service_execution_authority_must_be_complete_and_positive(
         mint_step_jwt(
             team_id=uuid4(),
             trial_id=uuid4(),
-            step_id="main",
+            step_id="agent",
             ttl_sec=60,
             signing_key=_KEY,
             service_execution_lease_id=lease_id,
@@ -290,4 +310,68 @@ def test_service_execution_authority_cannot_be_attached_to_attempt_jwt() -> None
             signing_key=_KEY,
             service_execution_lease_id=uuid4(),
             service_execution_generation=1,
+        )
+
+
+def test_service_execution_authority_requires_short_bound_identity() -> None:
+    identity = {
+        "service_execution_lease_id": uuid4(),
+        "service_execution_generation": 1,
+        "service_execution_role": "attempt",
+        "service_execution_runtime_contract_sha256": "sha256:" + "a" * 64,
+        "service_execution_candidate_sha": "b" * 40,
+        "service_execution_task_revision_sha256": "sha256:" + "c" * 64,
+        "service_execution_command_identity_sha256": "sha256:" + "d" * 64,
+        "step_jwt_id": uuid4(),
+    }
+    with pytest.raises(ValueError, match="provider route"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="agent",
+            ttl_sec=60,
+            signing_key=_KEY,
+            **identity,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="TTL"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="agent",
+            ttl_sec=601,
+            signing_key=_KEY,
+            provider_connection_id_bound=True,
+            **identity,  # type: ignore[arg-type]
+        )
+
+
+def test_service_execution_authority_rejects_incomplete_or_wrong_step_identity() -> None:
+    with pytest.raises(ValueError, match="complete"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="agent",
+            ttl_sec=60,
+            signing_key=_KEY,
+            provider_connection_id_bound=True,
+            step_jwt_id=uuid4(),
+            service_execution_lease_id=uuid4(),
+            service_execution_generation=1,
+        )
+    with pytest.raises(ValueError, match="step"):
+        mint_step_jwt(
+            team_id=uuid4(),
+            trial_id=uuid4(),
+            step_id="main",
+            ttl_sec=60,
+            signing_key=_KEY,
+            provider_connection_id_bound=True,
+            step_jwt_id=uuid4(),
+            service_execution_lease_id=uuid4(),
+            service_execution_generation=1,
+            service_execution_role="attempt",
+            service_execution_runtime_contract_sha256="sha256:" + "a" * 64,
+            service_execution_candidate_sha="b" * 40,
+            service_execution_task_revision_sha256="sha256:" + "c" * 64,
+            service_execution_command_identity_sha256="sha256:" + "d" * 64,
         )

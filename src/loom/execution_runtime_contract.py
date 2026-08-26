@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
+from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -136,6 +137,7 @@ class ExecutionRuntimePlanV1(_Strict):
     task_image_ref: str
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
+    image_admission: ExecutionImageAdmissionBundleV1
     run_as_user: int = Field(default=65532, gt=0, le=2_147_483_647)
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from pydantic import SecretStr
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
-from loom.auth import AuthContext
+from loom.auth import AuthContext, verify_step_jwt
 from loom.db.schema import (
+    AdminAuditEvent,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
@@ -42,6 +46,7 @@ from loom_control_plane.service_execution import (
     acknowledge_execution_command,
     claim_execution_commands,
     enqueue_execution_transition,
+    execution_lease_projection,
     persist_execution_catalog,
     record_execution_event,
     reserve_trial_execution,
@@ -57,6 +62,10 @@ from loom_execution_actuator.contracts import (
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
+from tests.support.execution_image_admission import (
+    IMAGE_ADMISSION_KEYRING,
+    signed_image_admission_bundle,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +77,11 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with sessions() as session, session.begin():
+            await session.execute(
+                delete(AdminAuditEvent).where(
+                    AdminAuditEvent.action == "service_execution.step_token.minted"
+                )
+            )
             owned_trials = select(Trial.id).join(Team).where(Team.name.like("service-execution-%"))
             await session.execute(
                 delete(ServiceExecutionLease).where(
@@ -214,12 +228,15 @@ def _runtime_contract(
     *,
     execution_role: str = "attempt",
     verifier_execution: str = "in_attempt",
+    now: datetime | None = None,
 ) -> ExecutionRuntimePlanV1:
     resources = ContainerResourcesV1(
         cpu_millis=1000,
         memory_mib=1024,
         ephemeral_storage_mib=2048,
     )
+    task_image_ref = "registry.example/loom/task@sha256:" + "a" * 64
+    runtime_image_ref = "registry.example/loom/runtime@sha256:" + "b" * 64
     return ExecutionRuntimePlanV1(
         candidate_sha="1" * 40,
         task_revision_sha256="sha256:" + "2" * 64,
@@ -227,9 +244,10 @@ def _runtime_contract(
         execution_role=execution_role,
         execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
         composition="init_payload",
-        task_image_ref="registry.example/loom/task@sha256:" + "a" * 64,
-        runtime_image_ref="registry.example/loom/runtime@sha256:" + "b" * 64,
+        task_image_ref=task_image_ref,
+        runtime_image_ref=runtime_image_ref,
         runtime_binary_sha256="sha256:" + "c" * 64,
+        image_admission=signed_image_admission_bundle((task_image_ref, runtime_image_ref), now=now),
         task_resources=resources,
         workspace_mib=1024,
         runtime_volume_mib=32,
@@ -371,7 +389,8 @@ async def _reserve(
         execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
         target_id=target.target_id,
         requirements=requirements or _requirements(),
-        runtime_contract=runtime_contract or _runtime_contract(),
+        runtime_contract=runtime_contract or _runtime_contract(now=now),
+        image_admission_keyring=IMAGE_ADMISSION_KEYRING,
         parent_lease_id=parent_lease_id,
         deadline_at=now + timedelta(hours=1),
         now=now,
@@ -425,6 +444,14 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             assert len(commands) == 1
             assert (commands[0].command_type, commands[0].state) == ("create", "pending")
             assert history_count == 1
+            projection = execution_lease_projection(persisted)
+            assert projection["runtime_identity"]["image_admission_sha256"].startswith("sha256:")
+            assert {
+                item["image_ref"] for item in projection["runtime_identity"]["image_admissions"]
+            } == {
+                "registry.example/loom/task@sha256:" + "a" * 64,
+                "registry.example/loom/runtime@sha256:" + "b" * 64,
+            }
 
             replay = await _reserve(
                 session,
@@ -967,12 +994,31 @@ async def test_gateway_dispatch_is_rejected_immediately_after_generation_revocat
             team_id=lease.team_id,
             expires_at=now + timedelta(minutes=10),
             trial_id=trial_id,
-            step_id="main",
+            step_id="agent",
+            provider_connection_id=None,
+            provider_connection_id_bound=True,
+            step_jwt_id=uuid4(),
             service_execution_lease_id=lease.id,
             service_execution_generation=1,
+            service_execution_role="attempt",
+            service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
+            service_execution_candidate_sha="1" * 40,
+            service_execution_task_revision_sha256="sha256:" + "2" * 64,
+            service_execution_command_identity_sha256="sha256:" + "3" * 64,
         )
         async with sessions() as session:
             await authorize_trial_execution_dispatch(session, ctx)
+            for changed in (
+                replace(ctx, provider_connection_id_bound=False),
+                replace(ctx, service_execution_candidate_sha="9" * 40),
+                replace(
+                    ctx,
+                    service_execution_runtime_contract_sha256="sha256:" + "9" * 64,
+                ),
+                replace(ctx, service_execution_command_identity_sha256="sha256:" + "9" * 64),
+            ):
+                with pytest.raises(HTTPException, match="service execution dispatch forbidden"):
+                    await authorize_trial_execution_dispatch(session, changed)
             await enqueue_execution_transition(
                 session,
                 lease_id=lease.id,
@@ -989,6 +1035,74 @@ async def test_gateway_dispatch_is_rejected_immediately_after_generation_revocat
             ) as exc_info:
                 await authorize_trial_execution_dispatch(session, ctx)
             assert exc_info.value.status_code == 403
+    finally:
+        await engine.dispose()
+
+
+async def test_service_step_token_freezes_identity_and_persists_audit(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_control_plane.routes import step_tokens
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    signing_key = "s" * 64
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+
+        auth = AuthContext(
+            token_hash=b"w" * 32,
+            type="worker",
+            scopes=["worker:report"],
+            team_id=None,
+            expires_at=None,
+        )
+
+        async def verified_auth(*args, **kwargs):  # type: ignore[no-untyped-def]
+            del args, kwargs
+            return auth
+
+        monkeypatch.setattr(step_tokens, "verify_bearer_token", verified_auth)
+        app = FastAPI()
+        app.state.session_factory = sessions
+        app.state.settings = SimpleNamespace(step_jwt_signing_key=SecretStr(signing_key))
+        request = Request({"type": "http", "app": app, "headers": []})
+        response = await step_tokens.issue_step_token(
+            request,
+            step_tokens._IssueStepTokenRequest(
+                team_id=lease.team_id,
+                trial_id=trial_id,
+                step_id="agent",
+                ttl_sec=600,
+            ),
+            authorization="Bearer ignored",
+            execution_lease_id=lease.id,
+            execution_generation=lease.generation,
+        )
+
+        ctx = verify_step_jwt(response["token"], signing_key=signing_key)
+        assert ctx.step_jwt_id is not None
+        assert ctx.provider_connection_id_bound is True
+        assert ctx.service_execution_lease_id == lease.id
+        assert ctx.service_execution_generation == lease.generation
+        assert ctx.service_execution_role == "attempt"
+        assert ctx.service_execution_runtime_contract_sha256 == lease.runtime_contract_sha256
+        async with sessions() as session:
+            audit = (
+                await session.execute(
+                    select(AdminAuditEvent).where(
+                        AdminAuditEvent.action == "service_execution.step_token.minted",
+                        AdminAuditEvent.target_id == str(lease.id),
+                    )
+                )
+            ).scalar_one()
+            assert audit.event_metadata["step_jwt_id"] == str(ctx.step_jwt_id)
+            assert audit.event_metadata["generation"] == lease.generation
     finally:
         await engine.dispose()
 

@@ -18,6 +18,9 @@ requires the `sandboxed_runtime` class described in
 [Nebius service execution](nebius-service-execution.md); a shared-kernel Pod
 fails closed, and #1551 must empirically accept the actual RuntimeClass before
 live workloads are enabled. There is no ordinary-Pod fallback.
+The threat register, workload-identity contract, image admission rules, and
+live acceptance matrix are in
+[Nebius hostile-workload security](nebius-execution-security.md).
 
 ## Container network policies
 

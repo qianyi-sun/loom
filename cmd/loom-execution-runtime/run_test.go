@@ -14,15 +14,35 @@ import (
 )
 
 func testPlan(workspace string, agent phase) plan {
+	now := time.Now().UTC()
+	taskImage := "registry/task@sha256:" + strings.Repeat("3", 64)
+	runtimeImage := "registry/runtime@sha256:" + strings.Repeat("4", 64)
+	admission := func(imageRef string) signedImageAdmission {
+		return signedImageAdmission{
+			Statement: imageAdmissionStatement{
+				SchemaVersion: "loom.image-admission-statement.v1", ImageRef: imageRef,
+				Platform: "linux/x86_64", SBOMSHA256: "sha256:" + strings.Repeat("7", 64),
+				ProvenanceSHA256:             "sha256:" + strings.Repeat("8", 64),
+				VulnerabilityReportSHA256:    "sha256:" + strings.Repeat("9", 64),
+				PolicySHA256:                 "sha256:" + strings.Repeat("a", 64),
+				HighestVulnerabilitySeverity: "medium", IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+			},
+			SigningKeyID: "test-builder", SignatureBase64: base64.StdEncoding.EncodeToString(make([]byte, 64)),
+		}
+	}
 	return plan{
 		SchemaVersion: "loom.execution-runtime-plan.v1", CandidateSHA: strings.Repeat("1", 40),
 		TaskRevisionSHA256:    "sha256:" + strings.Repeat("2", 64),
 		CommandIdentitySHA256: "sha256:" + strings.Repeat("6", 64), ExecutionRole: "attempt",
 		ExecutionClassID: "linux-amd64-cpu-pod-v1", Composition: "init_payload",
-		TaskImageRef:        "registry/task@sha256:" + strings.Repeat("3", 64),
-		RuntimeImageRef:     "registry/runtime@sha256:" + strings.Repeat("4", 64),
+		TaskImageRef:        taskImage,
+		RuntimeImageRef:     runtimeImage,
 		RuntimeBinarySHA256: "sha256:" + strings.Repeat("5", 64),
-		RunAsUser:           65532, RunAsGroup: 65532, FSGroup: 65532,
+		ImageAdmission: executionImageAdmission{
+			SchemaVersion: "loom.execution-image-admission.v1",
+			Admissions:    []signedImageAdmission{admission(taskImage), admission(runtimeImage)},
+		},
+		RunAsUser: 65532, RunAsGroup: 65532, FSGroup: 65532,
 		TaskResources: resources{CPUMillis: 100, MemoryMiB: 128, EphemeralStorageMiB: 128},
 		WorkspaceMiB:  128, RuntimeVolumeMiB: 32, TerminationGraceSec: 1,
 		Main: agent, VerifierExecution: "skipped", Sidecars: []sidecar{},
@@ -134,6 +154,34 @@ func TestPlanValidationMatchesBoundedWorkspaceAndSidecarContract(t *testing.T) {
 	}}
 	if err := p.validate(); err == nil {
 		t.Fatal("reserved sidecar role was accepted")
+	}
+}
+
+func TestPlanValidationRejectsImageAdmissionDriftAndExpiry(t *testing.T) {
+	base := func() plan {
+		return testPlan("/workspace", phase{
+			Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 1,
+		})
+	}
+	p := base()
+	p.ImageAdmission.Admissions = p.ImageAdmission.Admissions[:1]
+	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "coverage") {
+		t.Fatalf("missing image admission accepted: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.HighestVulnerabilitySeverity = "high"
+	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "vulnerability") {
+		t.Fatalf("high vulnerability admission accepted: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.ExpiresAt = time.Now().Add(-time.Minute)
+	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "lifetime") {
+		t.Fatalf("expired image admission accepted: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].SignatureBase64 = "not-base64"
+	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("malformed image admission signature accepted: %v", err)
 	}
 }
 

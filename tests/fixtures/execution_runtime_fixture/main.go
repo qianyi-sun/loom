@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -12,6 +13,39 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "idle":
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "server":
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "server port is required")
+			os.Exit(2)
+		}
+		http.HandleFunc("/", func(response http.ResponseWriter, _ *http.Request) {
+			response.WriteHeader(http.StatusNoContent)
+		})
+		if err := http.ListenAndServe(":"+os.Args[2], nil); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "probe-report":
+		if len(os.Args) != 3 {
+			fmt.Println("exit:1")
+			return
+		}
+		client := &http.Client{Timeout: 3 * time.Second}
+		response, err := client.Get(os.Args[2])
+		if err != nil {
+			fmt.Println("exit:1")
+			return
+		}
+		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 400 {
+			fmt.Println("exit:1")
+			return
+		}
+		fmt.Println("exit:0")
 	case "sidecar":
 		http.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 			response.WriteHeader(http.StatusNoContent)

@@ -240,6 +240,14 @@ def test_actuator_manifest_is_namespace_scoped_and_inert() -> None:
             "verbs": ["get", "list", "watch"],
         },
     ]
+    assert not (
+        {"secrets", "configmaps", "serviceaccounts"}
+        & {resource for rule in role["rules"] for resource in rule["resources"]}
+    )
+    assert not (
+        {"patch", "update", "exec", "impersonate"}
+        & {verb for rule in role["rules"] for verb in rule["verbs"]}
+    )
     attempt = next(
         document
         for document in documents
@@ -252,3 +260,83 @@ def test_actuator_manifest_is_namespace_scoped_and_inert() -> None:
     pod = deployment["spec"]["template"]["spec"]
     assert pod["securityContext"]["runAsNonRoot"] is True
     assert pod["containers"][0]["readinessProbe"]["httpGet"]["path"] == "/readyz"
+
+
+def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> None:
+    actuator_documents = list(
+        yaml.safe_load_all(
+            (_ROOT / "deploy/k8s/nebius-execution-actuator.yaml").read_text(encoding="utf-8")
+        )
+    )
+    policies = {
+        document["metadata"]["name"]: document
+        for document in actuator_documents
+        if document["kind"] == "NetworkPolicy"
+    }
+    selector = {"app.kubernetes.io/component": "execution-unit"}
+    deny = policies["loom-execution-attempt-default-deny"]
+    assert deny["metadata"]["namespace"] == "loom-nebius-staging"
+    assert deny["spec"] == {
+        "podSelector": {"matchLabels": selector},
+        "policyTypes": ["Ingress", "Egress"],
+        "ingress": [],
+        "egress": [],
+    }
+
+    allow = policies["loom-execution-attempt-egress"]
+    assert allow["spec"]["podSelector"] == {"matchLabels": selector}
+    assert allow["spec"]["policyTypes"] == ["Egress"]
+    assert "ingress" not in allow["spec"]
+    expected = {
+        ("kube-system", "k8s-app", "kube-dns", 53, "UDP"),
+        ("kube-system", "k8s-app", "kube-dns", 53, "TCP"),
+        ("loom", "app", "loom-llm-gateway", 9100, "TCP"),
+        ("loom", "app", "loom-minio", 9000, "TCP"),
+    }
+    actual: set[tuple[str, str, str, int, str]] = set()
+    for rule in allow["spec"]["egress"]:
+        assert len(rule["to"]) == 1
+        peer = rule["to"][0]
+        assert "ipBlock" not in peer
+        namespace = peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
+        pod_labels = peer["podSelector"]["matchLabels"]
+        assert len(pod_labels) == 1
+        label_name, label_value = next(iter(pod_labels.items()))
+        for port in rule["ports"]:
+            actual.add((namespace, label_name, label_value, port["port"], port["protocol"]))
+    assert actual == expected
+
+
+def test_platform_network_policies_admit_only_execution_units_from_nebius_namespace() -> None:
+    documents = list(
+        yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))
+    )
+    policies = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "NetworkPolicy"
+    }
+    for name, port in (
+        ("loom-llm-gateway", 9100),
+        ("loom-minio", 9000),
+    ):
+        policy = policies[name]
+        ingress = next(
+            rule for rule in policy["spec"]["ingress"] if rule["ports"][0]["port"] == port
+        )
+        nebius_peers = [
+            peer
+            for peer in ingress["from"]
+            if peer.get("namespaceSelector", {})
+            .get("matchLabels", {})
+            .get("kubernetes.io/metadata.name")
+            == "loom-nebius-staging"
+        ]
+        assert nebius_peers == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "loom-nebius-staging"}
+                },
+                "podSelector": {"matchLabels": {"app.kubernetes.io/component": "execution-unit"}},
+            }
+        ]

@@ -11,8 +11,10 @@ from loom.execution_runtime_contract import (
     SidecarContainerV1,
     VerifierExecution,
 )
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 _IMAGE = "registry.example/runtime@sha256:" + "a" * 64
+_RUNTIME_IMAGE = "registry.example/loom-runtime@sha256:" + "b" * 64
 _RESOURCES = ContainerResourcesV1(
     cpu_millis=1000,
     memory_mib=1024,
@@ -39,8 +41,9 @@ def _plan(**updates: object) -> ExecutionRuntimePlanV1:
         "execution_class_id": "linux-amd64-cpu-pod-v1",
         "composition": "init_payload",
         "task_image_ref": _IMAGE,
-        "runtime_image_ref": "registry.example/loom-runtime@sha256:" + "b" * 64,
+        "runtime_image_ref": _RUNTIME_IMAGE,
         "runtime_binary_sha256": "sha256:" + "c" * 64,
+        "image_admission": signed_image_admission_bundle((_IMAGE, _RUNTIME_IMAGE)),
         "task_resources": _RESOURCES,
         "workspace_mib": 4096,
         "runtime_volume_mib": 128,

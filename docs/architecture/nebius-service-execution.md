@@ -265,6 +265,12 @@ The runtime result file alone is not durable object-storage acceptance. Until
 the bounded uploader/commit protocol, normal Job deletion must not be treated
 as successful artifact, trajectory, usage, diagnostic, or result retention.
 
+The #1551 repository security controls and exact remaining live gates are in
+[Nebius hostile-workload security](nebius-execution-security.md). Operators
+must use the corresponding
+[security acceptance and incident runbook](../runbooks/nebius-execution-security.md);
+merge or manifest rendering is not target acceptance.
+
 `deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
 replicas. Repository merge cannot scale it or create its referenced database
 secret, namespace in a live target, runtime class, cluster, or cloud resource.

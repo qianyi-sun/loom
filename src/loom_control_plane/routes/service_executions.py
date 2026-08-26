@@ -23,6 +23,7 @@ from loom.execution_contract import (
     ExecutionTopologyV1,
     WorkloadRequirementsV1,
 )
+from loom.execution_image_admission import ImageAdmissionError, ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
@@ -189,6 +190,15 @@ async def create_execution_reservation(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     await _admin(request, authorization)
+    try:
+        image_admission_keyring = ImageAdmissionKeyring.from_json(
+            request.app.state.settings.execution_image_admission_public_keys_json
+        )
+    except ImageAdmissionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="execution image admission trust is unavailable",
+        ) from exc
     async with request.app.state.session_factory() as session:
         try:
             lease = await reserve_trial_execution(
@@ -199,6 +209,7 @@ async def create_execution_reservation(
                 target_id=body.target_id,
                 requirements=body.requirements,
                 runtime_contract=body.runtime_contract,
+                image_admission_keyring=image_admission_keyring,
                 parent_lease_id=body.parent_lease_id,
                 deadline_at=body.deadline_at,
             )

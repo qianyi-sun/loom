@@ -16,6 +16,8 @@ from loom.db.schema import (
     ServiceExecutionLease,
     Trial,
 )
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.pipeline.keys import canonical_digest
 
 
 def _control_binding_digest(execution_spec: dict[str, object] | None) -> str | None:
@@ -124,19 +126,40 @@ async def authorize_trial_execution_dispatch(
             return
         raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
     lease, trial = row
-    authorized = (
-        ctx.service_execution_lease_id is not None
-        and ctx.service_execution_generation is not None
-        and lease.id == ctx.service_execution_lease_id
-        and lease.generation == ctx.service_execution_generation
-        and lease.team_id == ctx.team_id
-        and lease.attempt == trial.attempt_count
-        and lease.revoked_at is None
-        and lease.deleted_at is None
-        and lease.desired_state in {"create", "start", "finalize"}
-        and lease.observed_state in {"created", "running", "finalizing"}
-        and trial.state in {"claimed", "running"}
-    )
+    try:
+        runtime_contract = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+        runtime_contract_sha256 = canonical_digest(runtime_contract.canonical_payload())
+        authorized = (
+            ctx.service_execution_lease_id is not None
+            and ctx.service_execution_generation is not None
+            and ctx.step_jwt_id is not None
+            and ctx.service_execution_role == "attempt"
+            and ctx.step_id == "agent"
+            and ctx.provider_connection_id_bound
+            and ctx.service_execution_runtime_contract_sha256 is not None
+            and ctx.service_execution_candidate_sha is not None
+            and ctx.service_execution_task_revision_sha256 is not None
+            and ctx.service_execution_command_identity_sha256 is not None
+            and lease.id == ctx.service_execution_lease_id
+            and lease.generation == ctx.service_execution_generation
+            and lease.team_id == ctx.team_id
+            and lease.attempt == trial.attempt_count
+            and lease.execution_role == ctx.service_execution_role
+            and lease.runtime_contract_sha256 == runtime_contract_sha256
+            and runtime_contract_sha256 == ctx.service_execution_runtime_contract_sha256
+            and runtime_contract.candidate_sha == ctx.service_execution_candidate_sha
+            and runtime_contract.task_revision_sha256 == ctx.service_execution_task_revision_sha256
+            and runtime_contract.command_identity_sha256
+            == ctx.service_execution_command_identity_sha256
+            and trial.provider_connection_id == ctx.provider_connection_id
+            and lease.revoked_at is None
+            and lease.deleted_at is None
+            and lease.desired_state in {"create", "start", "finalize"}
+            and lease.observed_state in {"created", "running", "finalizing"}
+            and trial.state in {"claimed", "running"}
+        )
+    except (TypeError, ValueError):
+        authorized = False
     if not authorized:
         raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
 

@@ -10,6 +10,10 @@ from pydantic import ValidationError
 
 from loom.db.schema import ServiceExecutionLease
 from loom.execution_contract import WorkloadRequirementsV1
+from loom.execution_image_admission import (
+    ImageAdmissionError,
+    validate_execution_image_admission_bundle,
+)
 from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     ProbeV1,
@@ -136,6 +140,18 @@ def render_execution_job(
     storage_mib = _required_positive(requirements, "ephemeral_storage_mib")
     plan = _runtime_plan(lease)
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    try:
+        validate_execution_image_admission_bundle(
+            plan.image_admission,
+            required_image_refs=(
+                plan.task_image_ref,
+                plan.runtime_image_ref,
+                *(sidecar.image_ref for sidecar in plan.sidecars),
+            ),
+            now=current_time,
+        )
+    except ImageAdmissionError as exc:
+        raise ActuatorContractError(str(exc)) from exc
     active_deadline = int((lease.deadline_at - current_time).total_seconds())
     if active_deadline <= 0:
         raise ActuatorContractError("execution deadline has expired")
@@ -160,6 +176,9 @@ def render_execution_job(
         "loom.openai.com/task-revision-sha256": plan.task_revision_sha256,
         "loom.openai.com/command-identity-sha256": plan.command_identity_sha256,
         "loom.openai.com/execution-role": plan.execution_role,
+        "loom.openai.com/image-admission-sha256": canonical_digest(
+            plan.image_admission.model_dump(mode="json")
+        ),
     }
     if lease.parent_lease_id is not None:
         annotations["loom.openai.com/parent-lease-id"] = str(lease.parent_lease_id)

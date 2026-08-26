@@ -31,6 +31,7 @@ from loom.execution_runtime_contract import (
 from loom.pipeline.keys import canonical_digest
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
@@ -65,6 +66,7 @@ def _lease(namespace: str) -> ServiceExecutionLease:
         host_devices=False,
         host_specialized=False,
     )
+    runtime_image_ref = "invalid.local/runtime@sha256:" + "b" * 64
     runtime = ExecutionRuntimePlanV1(
         candidate_sha="1" * 40,
         task_revision_sha256="sha256:" + "2" * 64,
@@ -72,8 +74,9 @@ def _lease(namespace: str) -> ServiceExecutionLease:
         execution_class_id="linux-amd64-cpu-pod-v1",
         composition="init_payload",
         task_image_ref=image_ref,
-        runtime_image_ref="invalid.local/runtime@sha256:" + "b" * 64,
+        runtime_image_ref=runtime_image_ref,
         runtime_binary_sha256="sha256:" + "c" * 64,
+        image_admission=signed_image_admission_bundle((image_ref, runtime_image_ref), now=now),
         task_resources=ContainerResourcesV1(
             cpu_millis=100,
             memory_mib=128,
@@ -176,6 +179,7 @@ def _executable_lease(
         task_image_ref=task_image_ref,
         runtime_image_ref=runtime_image_ref,
         runtime_binary_sha256=runtime_binary_sha256,
+        image_admission=signed_image_admission_bundle((task_image_ref, runtime_image_ref), now=now),
         task_resources=resources,
         workspace_mib=128,
         runtime_volume_mib=32,
@@ -355,6 +359,38 @@ def _import_image(container: object, *, tag: str, root: Path, ordinal: int) -> s
     raise AssertionError(f"imported image {tag} is absent from k3s inventory")
 
 
+def _wait_for_pod(core: object, namespace: str, name: str) -> object:
+    deadline = time.monotonic() + 60
+    last_phase = "missing"
+    while time.monotonic() < deadline:
+        pod = core.read_namespaced_pod(name, namespace)
+        last_phase = pod.status.phase
+        if last_phase == "Running" and any(
+            condition.type == "Ready" and condition.status == "True"
+            for condition in (pod.status.conditions or [])
+        ):
+            return pod
+        time.sleep(0.25)
+    raise AssertionError(f"Pod {namespace}/{name} did not become ready: {last_phase}")
+
+
+def _pod_probe(core: object, namespace: str, name: str, url: str) -> str:
+    from kubernetes.stream import stream
+
+    return str(
+        stream(
+            core.connect_get_namespaced_pod_exec,
+            name,
+            namespace,
+            command=["/fixture", "probe-report", url],
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+        )
+    )
+
+
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
     from kubernetes import client
 
@@ -433,6 +469,241 @@ async def test_actuator_api_converges_against_disposable_k3s() -> None:
             raise AssertionError("Kubernetes Job did not disappear after exact-UID deletion")
     finally:
         await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
+async def test_attempt_network_policy_allows_only_dns_gateway_and_object_store() -> None:
+    from kubernetes import client, utils
+
+    suffix = uuid4().hex[:10]
+    fixture_tag = f"docker.io/library/loom-network-fixture:{suffix}"
+    container = None
+    try:
+        platform = await asyncio.to_thread(_docker_platform)
+        await asyncio.to_thread(
+            _build_image,
+            tag=fixture_tag,
+            dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile",
+            platform=platform,
+        )
+        with tempfile.TemporaryDirectory(prefix="loom-network-k3s-") as temporary:
+            root = Path(temporary)
+            container = await asyncio.to_thread(_start_k3s)
+            _, core, _ = await asyncio.to_thread(_load_client, container)
+            dns_deadline = time.monotonic() + 60
+            dns_pods = []
+            while time.monotonic() < dns_deadline:
+                dns_pods = (
+                    await asyncio.to_thread(
+                        core.list_namespaced_pod,
+                        "kube-system",
+                        label_selector="k8s-app=kube-dns",
+                    )
+                ).items
+                if dns_pods:
+                    break
+                await asyncio.sleep(0.25)
+            if not dns_pods:
+                raise AssertionError("disposable k3s did not create a CoreDNS Pod")
+            await asyncio.to_thread(
+                _wait_for_pod,
+                core,
+                "kube-system",
+                dns_pods[0].metadata.name,
+            )
+            image_ref = await asyncio.to_thread(
+                _import_image,
+                container,
+                tag=fixture_tag,
+                root=root,
+                ordinal=1,
+            )
+            attempt_namespace = "loom-nebius-staging"
+            platform_namespace = "loom"
+            for namespace in (attempt_namespace, platform_namespace):
+                await asyncio.to_thread(
+                    core.create_namespace,
+                    client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)),
+                )
+                await asyncio.to_thread(
+                    core.create_namespaced_service_account,
+                    namespace,
+                    client.V1ServiceAccount(
+                        metadata=client.V1ObjectMeta(name="network-fixture"),
+                        automount_service_account_token=False,
+                    ),
+                )
+
+            repo_root = Path(__file__).resolve().parents[2]
+            api_client = client.ApiClient()
+            attempt_documents = yaml.safe_load_all(
+                (repo_root / "deploy/k8s/nebius-execution-actuator.yaml").read_text()
+            )
+            for document in attempt_documents:
+                if document and document.get("kind") == "NetworkPolicy":
+                    await asyncio.to_thread(utils.create_from_dict, api_client, document)
+            platform_documents = yaml.safe_load_all(
+                (repo_root / "deploy/k8s/network-policies.yaml").read_text()
+            )
+            for document in platform_documents:
+                if (
+                    document
+                    and document.get("kind") == "NetworkPolicy"
+                    and document["metadata"]["name"] in {"loom-llm-gateway", "loom-minio"}
+                ):
+                    await asyncio.to_thread(utils.create_from_dict, api_client, document)
+
+            def pod(name: str, namespace: str, labels: dict[str, str], command: list[str]):
+                return client.V1Pod(
+                    metadata=client.V1ObjectMeta(
+                        name=name,
+                        namespace=namespace,
+                        labels=labels,
+                    ),
+                    spec=client.V1PodSpec(
+                        restart_policy="Never",
+                        service_account_name="network-fixture",
+                        automount_service_account_token=False,
+                        containers=[
+                            client.V1Container(
+                                name="main",
+                                image=image_ref,
+                                image_pull_policy="IfNotPresent",
+                                command=command,
+                            )
+                        ],
+                    ),
+                )
+
+            pods = (
+                pod(
+                    "gateway",
+                    platform_namespace,
+                    {"app": "loom-llm-gateway"},
+                    ["/fixture", "server", "9100"],
+                ),
+                pod(
+                    "object-store",
+                    platform_namespace,
+                    {"app": "loom-minio"},
+                    ["/fixture", "server", "9000"],
+                ),
+                pod(
+                    "blocked-service",
+                    platform_namespace,
+                    {"app": "blocked-service"},
+                    ["/fixture", "server", "8080"],
+                ),
+                pod(
+                    "execution-client",
+                    attempt_namespace,
+                    {"app.kubernetes.io/component": "execution-unit"},
+                    ["/fixture", "idle"],
+                ),
+                pod(
+                    "execution-server",
+                    attempt_namespace,
+                    {"app.kubernetes.io/component": "execution-unit"},
+                    ["/fixture", "server", "8080"],
+                ),
+                pod(
+                    "probe",
+                    attempt_namespace,
+                    {"app": "probe"},
+                    ["/fixture", "idle"],
+                ),
+            )
+            for item in pods:
+                await asyncio.to_thread(
+                    core.create_namespaced_pod,
+                    item.metadata.namespace,
+                    item,
+                )
+            for name, selector, port in (
+                ("gateway", {"app": "loom-llm-gateway"}, 9100),
+                ("object-store", {"app": "loom-minio"}, 9000),
+                ("blocked-service", {"app": "blocked-service"}, 8080),
+            ):
+                await asyncio.to_thread(
+                    core.create_namespaced_service,
+                    platform_namespace,
+                    client.V1Service(
+                        metadata=client.V1ObjectMeta(name=name),
+                        spec=client.V1ServiceSpec(
+                            selector=selector,
+                            ports=[client.V1ServicePort(port=port, target_port=port)],
+                        ),
+                    ),
+                )
+            ready = {
+                item.metadata.name: await asyncio.to_thread(
+                    _wait_for_pod,
+                    core,
+                    item.metadata.namespace,
+                    item.metadata.name,
+                )
+                for item in pods
+            }
+            await asyncio.sleep(3)
+
+            direct_gateway = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "execution-client",
+                f"http://{ready['gateway'].status.pod_ip}:9100",
+            )
+            allowed = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "execution-client",
+                "http://gateway.loom.svc.cluster.local:9100",
+            )
+            assert "exit:0" in direct_gateway, f"direct Gateway peer was denied: {direct_gateway}"
+            assert "exit:0" in allowed, f"DNS Gateway peer was denied: {allowed}"
+            object_store = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "execution-client",
+                "http://object-store.loom.svc.cluster.local:9000",
+            )
+            assert "exit:0" in object_store
+            blocked = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "execution-client",
+                "http://blocked-service.loom.svc.cluster.local:8080",
+            )
+            assert "exit:0" not in blocked
+            public = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "execution-client",
+                "http://1.1.1.1:80",
+            )
+            assert "exit:0" not in public
+            execution_ip = ready["execution-server"].status.pod_ip
+            ingress = await asyncio.to_thread(
+                _pod_probe,
+                core,
+                attempt_namespace,
+                "probe",
+                f"http://{execution_ip}:8080",
+            )
+            assert "exit:0" not in ingress
+    finally:
+        if container is not None:
+            await asyncio.to_thread(container.stop)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "image", "rm", "--force", fixture_tag],
+            capture_output=True,
+            check=False,
+        )
 
 
 @pytest.mark.timeout(300)

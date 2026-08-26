@@ -23,6 +23,7 @@ from loom.execution_runtime_contract import (
 from loom.pipeline.keys import canonical_digest
 from loom_execution_actuator.contracts import ActuatorContractError
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 
 def _lease() -> ServiceExecutionLease:
@@ -51,6 +52,7 @@ def _lease() -> ServiceExecutionLease:
         host_devices=False,
         host_specialized=False,
     )
+    runtime_image_ref = "registry.example/runtime@sha256:" + "b" * 64
     runtime = ExecutionRuntimePlanV1(
         candidate_sha="1" * 40,
         task_revision_sha256="sha256:" + "2" * 64,
@@ -59,8 +61,11 @@ def _lease() -> ServiceExecutionLease:
         execution_class_id="linux-amd64-cpu-pod-v1",
         composition="init_payload",
         task_image_ref=requirements.image_ref or "",
-        runtime_image_ref="registry.example/runtime@sha256:" + "b" * 64,
+        runtime_image_ref=runtime_image_ref,
         runtime_binary_sha256="sha256:" + "c" * 64,
+        image_admission=signed_image_admission_bundle(
+            (requirements.image_ref or "", runtime_image_ref), now=now
+        ),
         task_resources=ContainerResourcesV1(
             cpu_millis=1500,
             memory_mib=2048,
@@ -125,6 +130,10 @@ def test_job_renderer_is_deterministic_restricted_and_lease_scoped() -> None:
 
     assert first == second
     assert first["metadata"]["name"] == lease.job_name
+    assert (
+        first["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/component"]
+        == "execution-unit"
+    )
     assert first["spec"]["backoffLimit"] == 0
     pod = first["spec"]["template"]["spec"]
     assert pod["restartPolicy"] == "Never"
@@ -212,7 +221,13 @@ def test_job_renderer_maps_ordered_native_sidecar_and_bounded_volumes() -> None:
         readiness_probe=ProbeV1(kind="tcp", port=5432),
     )
     runtime_json = ExecutionRuntimePlanV1.model_validate(
-        {**plan.canonical_payload(), "sidecars": [sidecar.model_dump(mode="json")]}
+        {
+            **plan.canonical_payload(),
+            "sidecars": [sidecar.model_dump(mode="json")],
+            "image_admission": signed_image_admission_bundle(
+                (plan.task_image_ref, plan.runtime_image_ref, sidecar.image_ref)
+            ).model_dump(mode="json"),
+        }
     ).canonical_payload()
     lease.runtime_contract_json = runtime_json
     lease.runtime_contract_sha256 = canonical_digest(runtime_json)

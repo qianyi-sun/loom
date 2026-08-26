@@ -49,6 +49,12 @@ required    = true
 secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
 description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
 
+[service_config.execution_image_admission_public_keys_json]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = '{"schema_version":1,"keys":[]}'
+description = "Bounded Ed25519 public-key registry for signed execution image admission evidence. The empty default intentionally rejects every service-execution reservation."
+
 [service_config.storage_backend]
 used_by     = ["control-plane", "loom-service", "worker"]
 python_type = "str"

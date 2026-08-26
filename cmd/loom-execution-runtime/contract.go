@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
@@ -18,6 +20,7 @@ var (
 	candidate     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	execClass     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,79}$`)
 	roleName      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	keyID         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	envName       = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 	secretEnv     = regexp.MustCompile(`(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)`)
 	workspacePath = regexp.MustCompile(`^/workspace(?:/[-A-Za-z0-9._]+)*$`)
@@ -59,32 +62,57 @@ type sidecar struct {
 	DependsOn      []string          `json:"depends_on"`
 }
 
+type imageAdmissionStatement struct {
+	SchemaVersion                string    `json:"schema_version"`
+	ImageRef                     string    `json:"image_ref"`
+	Platform                     string    `json:"platform"`
+	SBOMSHA256                   string    `json:"sbom_sha256"`
+	ProvenanceSHA256             string    `json:"provenance_sha256"`
+	VulnerabilityReportSHA256    string    `json:"vulnerability_report_sha256"`
+	PolicySHA256                 string    `json:"policy_sha256"`
+	HighestVulnerabilitySeverity string    `json:"highest_vulnerability_severity"`
+	IssuedAt                     time.Time `json:"issued_at"`
+	ExpiresAt                    time.Time `json:"expires_at"`
+}
+
+type signedImageAdmission struct {
+	Statement       imageAdmissionStatement `json:"statement"`
+	SigningKeyID    string                  `json:"signing_key_id"`
+	SignatureBase64 string                  `json:"signature_base64"`
+}
+
+type executionImageAdmission struct {
+	SchemaVersion string                 `json:"schema_version"`
+	Admissions    []signedImageAdmission `json:"admissions"`
+}
+
 type plan struct {
-	SchemaVersion         string    `json:"schema_version"`
-	CandidateSHA          string    `json:"candidate_sha"`
-	TaskRevisionSHA256    string    `json:"task_revision_sha256"`
-	CommandIdentitySHA256 string    `json:"command_identity_sha256"`
-	ExecutionRole         string    `json:"execution_role"`
-	ExecutionClassID      string    `json:"execution_class_id"`
-	Composition           string    `json:"composition"`
-	TaskImageRef          string    `json:"task_image_ref"`
-	RuntimeImageRef       string    `json:"runtime_image_ref"`
-	RuntimeBinarySHA256   string    `json:"runtime_binary_sha256"`
-	RunAsUser             int64     `json:"run_as_user"`
-	RunAsGroup            int64     `json:"run_as_group"`
-	FSGroup               int64     `json:"fs_group"`
-	TaskResources         resources `json:"task_resources"`
-	WorkspaceMiB          int64     `json:"workspace_mib"`
-	RuntimeVolumeMiB      int64     `json:"runtime_volume_mib"`
-	TerminationGraceSec   int64     `json:"termination_grace_seconds"`
-	Setup                 []phase   `json:"setup"`
-	Main                  phase     `json:"main"`
-	VerifierExecution     string    `json:"verifier_execution"`
-	Verifier              *phase    `json:"verifier"`
-	Sidecars              []sidecar `json:"sidecars"`
-	MaxLogBytesPerStream  int64     `json:"max_log_bytes_per_stream"`
-	MaxArtifactBytes      int64     `json:"max_artifact_bytes"`
-	RuntimeContractSHA256 string    `json:"-"`
+	SchemaVersion         string                  `json:"schema_version"`
+	CandidateSHA          string                  `json:"candidate_sha"`
+	TaskRevisionSHA256    string                  `json:"task_revision_sha256"`
+	CommandIdentitySHA256 string                  `json:"command_identity_sha256"`
+	ExecutionRole         string                  `json:"execution_role"`
+	ExecutionClassID      string                  `json:"execution_class_id"`
+	Composition           string                  `json:"composition"`
+	TaskImageRef          string                  `json:"task_image_ref"`
+	RuntimeImageRef       string                  `json:"runtime_image_ref"`
+	RuntimeBinarySHA256   string                  `json:"runtime_binary_sha256"`
+	ImageAdmission        executionImageAdmission `json:"image_admission"`
+	RunAsUser             int64                   `json:"run_as_user"`
+	RunAsGroup            int64                   `json:"run_as_group"`
+	FSGroup               int64                   `json:"fs_group"`
+	TaskResources         resources               `json:"task_resources"`
+	WorkspaceMiB          int64                   `json:"workspace_mib"`
+	RuntimeVolumeMiB      int64                   `json:"runtime_volume_mib"`
+	TerminationGraceSec   int64                   `json:"termination_grace_seconds"`
+	Setup                 []phase                 `json:"setup"`
+	Main                  phase                   `json:"main"`
+	VerifierExecution     string                  `json:"verifier_execution"`
+	Verifier              *phase                  `json:"verifier"`
+	Sidecars              []sidecar               `json:"sidecars"`
+	MaxLogBytesPerStream  int64                   `json:"max_log_bytes_per_stream"`
+	MaxArtifactBytes      int64                   `json:"max_artifact_bytes"`
+	RuntimeContractSHA256 string                  `json:"-"`
 }
 
 func loadPlan(path string) (plan, error) {
@@ -190,6 +218,58 @@ func (p plan) validate() error {
 			return err
 		}
 		known[item.RoleName] = true
+	}
+	requiredImages := []string{p.TaskImageRef, p.RuntimeImageRef}
+	for _, item := range p.Sidecars {
+		requiredImages = append(requiredImages, item.ImageRef)
+	}
+	if err := p.ImageAdmission.validate(requiredImages, time.Now().UTC()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (bundle executionImageAdmission) validate(requiredImages []string, now time.Time) error {
+	if bundle.SchemaVersion != "loom.execution-image-admission.v1" ||
+		len(bundle.Admissions) == 0 || len(bundle.Admissions) > 34 {
+		return fmt.Errorf("invalid image admission bundle")
+	}
+	required := map[string]bool{}
+	for _, imageRef := range requiredImages {
+		required[imageRef] = true
+	}
+	actual := map[string]bool{}
+	for _, admission := range bundle.Admissions {
+		statement := admission.Statement
+		if actual[statement.ImageRef] || !required[statement.ImageRef] ||
+			statement.SchemaVersion != "loom.image-admission-statement.v1" ||
+			statement.Platform != "linux/x86_64" || !digestImage.MatchString(statement.ImageRef) ||
+			!sha256Value.MatchString(statement.SBOMSHA256) ||
+			!sha256Value.MatchString(statement.ProvenanceSHA256) ||
+			!sha256Value.MatchString(statement.VulnerabilityReportSHA256) ||
+			!sha256Value.MatchString(statement.PolicySHA256) ||
+			!keyID.MatchString(admission.SigningKeyID) {
+			return fmt.Errorf("invalid image admission identity")
+		}
+		if statement.HighestVulnerabilitySeverity != "none" &&
+			statement.HighestVulnerabilitySeverity != "negligible" &&
+			statement.HighestVulnerabilitySeverity != "low" &&
+			statement.HighestVulnerabilitySeverity != "medium" {
+			return fmt.Errorf("image admission vulnerability policy failed")
+		}
+		signature, err := base64.StdEncoding.Strict().DecodeString(admission.SignatureBase64)
+		if err != nil || len(signature) != 64 {
+			return fmt.Errorf("invalid image admission signature encoding")
+		}
+		if statement.IssuedAt.IsZero() || statement.ExpiresAt.IsZero() ||
+			!statement.ExpiresAt.After(statement.IssuedAt) ||
+			statement.IssuedAt.After(now.Add(5*time.Minute)) || !statement.ExpiresAt.After(now) {
+			return fmt.Errorf("invalid image admission lifetime")
+		}
+		actual[statement.ImageRef] = true
+	}
+	if len(actual) != len(required) {
+		return fmt.Errorf("image admission coverage does not match runtime images")
 	}
 	return nil
 }
