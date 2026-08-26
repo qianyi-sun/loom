@@ -747,6 +747,149 @@ def test_backup_retention_claim_rejects_existing_active_pointer(tmp_path: Path) 
     assert store.read_backup_retention_claim() is None
 
 
+def test_preflight_artifact_retention_claim_is_exact_idempotent_and_blocks_active(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    plan_digest = "a" * 64
+    bundle_digests = ("c" * 64, "b" * 64)
+
+    path = store.claim_preflight_artifact_retention(plan_digest, bundle_digests)
+    repeated = store.claim_preflight_artifact_retention(
+        plan_digest,
+        tuple(reversed(bundle_digests)),
+    )
+
+    assert path == repeated == tmp_path / "preflight-artifact-retention-claim.json"
+    assert store.read_preflight_artifact_retention_claim() == (
+        plan_digest,
+        ("b" * 64, "c" * 64),
+    )
+    with pytest.raises(RequestStoreError, match="another preflight artifact retention claim"):
+        store.claim_preflight_artifact_retention("d" * 64, bundle_digests)
+    with pytest.raises(RequestStoreError, match="artifact retention maintenance"):
+        store.set_active(ActivePointer("req-blocked", 1, "unit-blocked", "pending"))
+    with pytest.raises(RequestStoreError, match="identity does not match"):
+        store.clear_preflight_artifact_retention_claim("d" * 64)
+
+    assert store.clear_preflight_artifact_retention_claim(plan_digest) is True
+    assert store.clear_preflight_artifact_retention_claim(plan_digest) is False
+    assert store.read_preflight_artifact_retention_claim() is None
+    store.set_active(ActivePointer("req-allowed", 1, "unit-allowed", "pending"))
+
+
+def test_preflight_artifact_retention_claim_rejects_active_duplicate_and_unbounded_set(
+    tmp_path: Path,
+) -> None:
+    active_store = RequestStore(tmp_path / "active")
+    pointer = ActivePointer("req-active", 1, "unit-active", "pending")
+    active_store.set_active(pointer)
+    with pytest.raises(RequestStoreError, match="active rollout blocks"):
+        active_store.claim_preflight_artifact_retention("a" * 64, ())
+    assert active_store.read_active() == pointer
+    assert active_store.read_preflight_artifact_retention_claim() is None
+
+    store = RequestStore(tmp_path / "bounds")
+    maximum = tuple(f"{index:064x}" for index in range(32))
+    store.claim_preflight_artifact_retention("a" * 64, maximum)
+    assert store.read_preflight_artifact_retention_claim() == ("a" * 64, maximum)
+    assert store.clear_preflight_artifact_retention_claim("a" * 64)
+    with pytest.raises(RequestStoreError, match="bundle digests are invalid"):
+        store.claim_preflight_artifact_retention("a" * 64, (maximum[0], maximum[0]))
+    with pytest.raises(RequestStoreError, match="at most 32"):
+        store.claim_preflight_artifact_retention(
+            "a" * 64,
+            (*maximum, f"{32:064x}"),
+        )
+
+
+def test_preflight_artifact_retirement_receipt_is_no_replace_and_exact(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    plan_digest = "b" * 64
+    record_digest = "c" * 64
+
+    assert not store.read_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    path = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    repeated = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+
+    assert path == repeated == tmp_path / "preflight-artifact-retirements" / f"{bundle_digest}.json"
+    assert store.read_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    with pytest.raises(RequestStoreError, match="receipt identity drifted"):
+        store.publish_preflight_artifact_retirement_receipt(
+            bundle_digest,
+            plan_sha256="d" * 64,
+            inventory_record_sha256=record_digest,
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected_plan", "expected_record"),
+    (("d" * 64, "c" * 64), ("b" * 64, "d" * 64)),
+)
+def test_preflight_artifact_retirement_receipt_rejects_other_authority(
+    tmp_path: Path,
+    expected_plan: str,
+    expected_record: str,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256="b" * 64,
+        inventory_record_sha256="c" * 64,
+    )
+
+    with pytest.raises(RequestStoreError, match="receipt identity drifted"):
+        store.read_preflight_artifact_retirement_receipt(
+            bundle_digest,
+            plan_sha256=expected_plan,
+            inventory_record_sha256=expected_record,
+        )
+
+
+def test_preflight_artifact_retention_authority_rejects_hard_link_aliases(
+    tmp_path: Path,
+) -> None:
+    claim_store = RequestStore(tmp_path / "claim")
+    claim = claim_store.claim_preflight_artifact_retention("a" * 64, ("b" * 64,))
+    os.link(claim, claim.with_name("claim-alias.json"))
+    with pytest.raises(RequestStoreError, match="single-link"):
+        claim_store.read_preflight_artifact_retention_claim()
+
+    receipt_store = RequestStore(tmp_path / "receipt")
+    receipt = receipt_store.publish_preflight_artifact_retirement_receipt(
+        "a" * 64,
+        plan_sha256="b" * 64,
+        inventory_record_sha256="c" * 64,
+    )
+    os.link(receipt, receipt.with_name("receipt-alias.json"))
+    with pytest.raises(RequestStoreError, match="single-link"):
+        receipt_store.read_preflight_artifact_retirement_receipt(
+            "a" * 64,
+            plan_sha256="b" * 64,
+            inventory_record_sha256="c" * 64,
+        )
+
+
 def test_request_and_attempt_inventory_is_exact_sorted_and_typed(tmp_path: Path) -> None:
     store = RequestStore(tmp_path)
     second_request_id = "stg-20260713-bcdef234"

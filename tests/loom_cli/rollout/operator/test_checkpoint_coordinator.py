@@ -568,6 +568,25 @@ def test_retention_claim_blocks_checkpoint_before_any_side_effect(tmp_path: Path
     assert store.read_backup_rotation() == before
 
 
+def test_artifact_retention_claim_blocks_checkpoint_before_any_side_effect(
+    tmp_path: Path,
+) -> None:
+    retired: list[BackupRetirementRecord] = []
+    activated: list[str] = []
+    coordinator, creator, store, job = _coordinator(tmp_path, retired=retired)
+    coordinator.activate_payload = lambda record: activated.append(record.payload_id)
+    store.claim_preflight_artifact_retention("f" * 64, ("a" * 64,))
+    before = store.read_backup_rotation()
+
+    with pytest.raises(CheckpointCoordinatorError, match="artifact retention maintenance"):
+        coordinator(_request(), job, lambda: False)
+
+    assert creator.calls == []
+    assert activated == []
+    assert retired == []
+    assert store.read_backup_rotation() == before
+
+
 def test_cancel_after_manifest_seals_candidate_without_promotion(tmp_path: Path) -> None:
     calls = 0
 
