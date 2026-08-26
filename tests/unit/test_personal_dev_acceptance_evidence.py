@@ -96,9 +96,9 @@ def _inputs(tmp_path: Path):  # type: ignore[no-untyped-def]
         "postgres": {
             "dump_sha256": "2" * 64,
             "image": release.images.postgres,
-            "restored_schema_head": "0111",
+            "restored_schema_head": "0112",
             "restored_state_sha256": "3" * 64,
-            "source_schema_head": "0111",
+            "source_schema_head": "0112",
             "source_state_sha256": "3" * 64,
         },
         "release_sha256": release_sha256,
@@ -233,7 +233,7 @@ def test_backup_restore_evidence_requires_equal_restored_state_and_cleanup(
         expected_sha256=plan.storage.backup_restore_evidence_sha256,
         release=release,
         release_sha256=release_sha256,
-        expected_schema_head="0111",
+        expected_schema_head="0112",
     )
     assert evidence.postgres.source_state_sha256 == evidence.postgres.restored_state_sha256
     assert evidence.minio.source_object_count == 0
@@ -247,7 +247,7 @@ def test_backup_restore_evidence_requires_equal_restored_state_and_cleanup(
             expected_sha256=changed_sha256,
             release=release,
             release_sha256=release_sha256,
-            expected_schema_head="0111",
+            expected_schema_head="0112",
         )
 
 
@@ -270,7 +270,7 @@ def test_evidence_loader_rejects_noncanonical_or_non_owner_only_file(tmp_path: P
             expected_sha256=plan.storage.backup_restore_evidence_sha256,
             release=release,
             release_sha256=release_sha256,
-            expected_schema_head="0111",
+            expected_schema_head="0112",
         )
 
 
@@ -407,8 +407,8 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         postgres_dump_path=postgres_dump,
         postgres_source_state_path=source_state,
         postgres_restored_state_path=restored_state,
-        source_schema_head="0111",
-        restored_schema_head="0111",
+        source_schema_head="0112",
+        restored_schema_head="0112",
         minio_source_manifest_path=source_manifest,
         minio_restored_manifest_path=restored_manifest,
         secret_key_inventory_path=secret_path,
@@ -436,8 +436,8 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
             postgres_dump_path=postgres_dump,
             postgres_source_state_path=source_state,
             postgres_restored_state_path=restored_state,
-            source_schema_head="0111",
-            restored_schema_head="0111",
+            source_schema_head="0112",
+            restored_schema_head="0112",
             minio_source_manifest_path=source_manifest,
             minio_restored_manifest_path=restored_manifest,
             secret_key_inventory_path=secret_path,

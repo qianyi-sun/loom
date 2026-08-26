@@ -158,7 +158,7 @@ capture_live_postgres_state "$postgres_source_state"
 source_schema_head="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec \
   "$postgres_pod" -c postgres -- /bin/sh -euc \
   'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "SELECT version_num FROM alembic_version"')"
-test "$source_schema_head" = 0111
+test "$source_schema_head" = 0112
 
 suffix="$(printf '%s' "$trusted_release_sha256" | cut -c1-12)"
 postgres_restore="loom-personal-dev-pg-restore-$suffix"
