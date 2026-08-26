@@ -113,8 +113,10 @@ def _acceptance_plan(
     tmp_path: Path,
     release_path: Path,
     release_digest: str,
+    *,
+    profile_path: Path = _PROFILE,
 ):
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
     shadow = render_shadow_personal_dev_control_plane(profile, release)
     protocol_sha256 = hashlib.sha256(
@@ -367,12 +369,14 @@ def _acceptance_argv(
     digest: str,
     plan: Path,
     plan_digest: str,
+    *,
+    profile: Path = _PROFILE,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
         "render-acceptance",
         "--file",
-        str(_PROFILE),
+        str(profile),
         "--trusted-release-file",
         str(release),
         "--trusted-release-sha256",
@@ -769,6 +773,78 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def test_render_acceptance_loads_v2_two_owner_local_input_without_shape_change(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    profile_path = tmp_path / "personal-dev-control-plane-v2.toml"
+    profile_path.write_text(
+        _PROFILE.read_text(encoding="utf-8")
+        .replace("global_live_instances = 16", "global_live_instances = 2")
+        .replace("builder_global_concurrency = 4", "builder_global_concurrency = 2"),
+        encoding="utf-8",
+    )
+    profile_path.chmod(0o600)
+    plan_path, _plan_digest, v1_plan = _acceptance_plan(
+        tmp_path,
+        release_path,
+        release_digest,
+        profile_path=profile_path,
+    )
+    profile = load_personal_dev_control_plane_profile(profile_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    v1_expected = render_acceptance_personal_dev_control_plane(
+        profile,
+        release,
+        v1_plan,
+        now=_NOW,
+    )
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    owner_1 = {
+        "team_id": "00000000-0000-0000-0000-000000000006",
+        "user_id": "00000000-0000-0000-0000-000000000005",
+    }
+    value["acceptance_owners"] = sorted(
+        [owner_0, owner_1],
+        key=lambda item: (item["team_id"], item["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    plan_path.write_bytes(payload)
+    plan_path.chmod(0o600)
+    plan_digest = hashlib.sha256(payload).hexdigest()
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_digest)
+    expected = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
+
+    result = dispatch(
+        _acceptance_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            profile=profile_path,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == expected.yaml_text
+    assert expected.resource_count == v1_expected.resource_count
+    assert {
+        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
+        for item in yaml.safe_load_all(expected.yaml_text)
+        if item and item["kind"] != "Job"
+    } == {
+        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
+        for item in yaml.safe_load_all(v1_expected.yaml_text)
+        if item and item["kind"] != "Job"
     }
 
 

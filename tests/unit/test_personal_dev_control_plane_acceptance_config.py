@@ -176,6 +176,22 @@ def _plan_value(
     }
 
 
+def _v2_plan_value(value: dict[str, Any]) -> dict[str, Any]:
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    owner_1 = {
+        "team_id": "00000000-0000-0000-0000-000000000006",
+        "user_id": "00000000-0000-0000-0000-000000000005",
+    }
+    value["acceptance_owners"] = sorted(
+        [owner_0, owner_1],
+        key=lambda item: (item["team_id"], item["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    return value
+
+
 def _write_plan(
     tmp_path: Path,
     value: object,
@@ -226,6 +242,7 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
     assert str(plan.acceptance_owner.user_id) == (
         "00000000-0000-0000-0000-000000000301"
     )
+    assert plan.acceptance_owners == (plan.acceptance_owner,)
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
     validate_personal_dev_acceptance_plan(
@@ -235,6 +252,84 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         plan,
         now=_NOW,
     )
+
+
+def test_acceptance_plan_v2_requires_exactly_two_sorted_owners(tmp_path: Path) -> None:
+    _profile, _release, value = _inputs(tmp_path)
+    path, digest = _write_plan(tmp_path, _v2_plan_value(value))
+
+    plan = load_personal_dev_acceptance_plan(path, digest)
+
+    assert plan.schema_version == 2
+    assert [str(owner.team_id) for owner in plan.acceptance_owners] == [
+        "00000000-0000-0000-0000-000000000006",
+        "00000000-0000-0000-0000-000000000201",
+    ]
+    assert plan.canonical_bytes() == path.read_bytes()
+    assert plan.sha256 == digest
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        _ = plan.acceptance_owner
+
+
+def test_acceptance_plan_v1_preserves_historically_valid_lower_global_limits(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, value = _inputs(tmp_path)
+    value["quotas"]["global_live_instances"] = 1
+    value["quotas"]["per_owner_live_instances"] = 1
+    value["quotas"]["builder_global_concurrency"] = 1
+    path, digest = _write_plan(tmp_path, value)
+
+    plan = load_personal_dev_acceptance_plan(path, digest)
+
+    assert plan.schema_version == 1
+    assert plan.quotas.global_live_instances == 1
+    assert plan.quotas.builder_global_concurrency == 1
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.update(acceptance_owners=value["acceptance_owners"][:1]),
+        lambda value: value.update(
+            acceptance_owners=[*value["acceptance_owners"], value["acceptance_owners"][0]]
+        ),
+        lambda value: value["acceptance_owners"][1].update(
+            user_id=value["acceptance_owners"][0]["user_id"]
+        ),
+        lambda value: value["acceptance_owners"][1].update(
+            team_id=value["acceptance_owners"][0]["team_id"]
+        ),
+        lambda value: value["acceptance_owners"][0].update(
+            team_id="00000000-0000-0000-0000-000000000000"
+        ),
+        lambda value: value["acceptance_owners"][0].update(
+            user_id="{00000000-0000-0000-0000-000000000005}"
+        ),
+        lambda value: value.update(acceptance_owners=list(reversed(value["acceptance_owners"]))),
+        lambda value: value.update(
+            acceptance_owner={
+                "team_id": "00000000-0000-0000-0000-000000000007",
+                "user_id": "00000000-0000-0000-0000-000000000008",
+            }
+        ),
+        lambda value: value["quotas"].update(global_live_instances=1),
+        lambda value: value["quotas"].update(builder_global_concurrency=1),
+        lambda value: value["quotas"].update(per_owner_live_instances=0),
+        lambda value: value["quotas"].update(builder_per_owner_concurrency=0),
+    ],
+)
+def test_acceptance_plan_v2_rejects_invalid_owner_contract(
+    tmp_path: Path,
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
+    _profile, _release, value = _inputs(tmp_path)
+    value = _v2_plan_value(value)
+    mutate(value)
+    path, digest = _write_plan(tmp_path, value)
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        load_personal_dev_acceptance_plan(path, digest)
 
 
 @pytest.mark.parametrize(
