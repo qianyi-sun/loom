@@ -106,6 +106,27 @@ def _exact_sha256(content_hash: str) -> str:
     return digest
 
 
+def _object_version_id(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise TrajectoryLifecycleEvidenceError(
+            f"{field} must be null or a normalized non-empty string"
+        )
+    return value
+
+
+def _required_object_version_id(
+    payload: dict[str, Any],
+    *,
+    key: str,
+    field: str,
+) -> str | None:
+    if key not in payload:
+        raise TrajectoryLifecycleEvidenceError(f"{field} is required")
+    return _object_version_id(payload[key], field=field)
+
+
 def _share_status(value: Any, default: str = "pending_scan") -> str:
     if isinstance(value, str) and value in _VALID_SHARE_STATUS:
         return value
@@ -128,6 +149,7 @@ def _trajectory_storage_from_uri(
     filename: TrajectoryObjectFilename,
     media_type: str,
     size_bytes: int = 0,
+    version_id: Any = None,
 ) -> dict[str, Any]:
     try:
         key = resolve_trajectory_object_key(
@@ -145,6 +167,10 @@ def _trajectory_storage_from_uri(
         "key": key,
         "media_type": media_type,
         "size_bytes": max(int(size_bytes), 0),
+        "version_id": _object_version_id(
+            version_id,
+            field=f"{filename} version_id",
+        ),
     }
 
 
@@ -205,6 +231,11 @@ def _artifact_storage_from_item(
             else "application/octet-stream"
         ),
         "size_bytes": size_bytes,
+        "version_id": _required_object_version_id(
+            item,
+            key="version_id",
+            field="artifact version_id",
+        ),
     }
 
 
@@ -291,6 +322,11 @@ def _artifact_descriptors_from_index(
                 filename="events.jsonl",
                 media_type="application/x-ndjson",
                 size_bytes=index_payload.get("trajectory_size_bytes", 0),
+                version_id=_required_object_version_id(
+                    index_payload,
+                    key="trajectory_version_id",
+                    field="events.jsonl version_id",
+                ),
             ),
             share_status=trial_share_status,
             safety_state=trial_safety,
@@ -313,6 +349,11 @@ def _artifact_descriptors_from_index(
                 filename="atif.json",
                 media_type="application/json",
                 size_bytes=index_payload.get("atif_size_bytes", 0),
+                version_id=_required_object_version_id(
+                    index_payload,
+                    key="atif_version_id",
+                    field="atif.json version_id",
+                ),
             ),
             share_status=trial_share_status,
             safety_state=trial_safety,
@@ -539,6 +580,7 @@ async def _sync_typed_artifacts_from_index(
         bucket = storage.get("bucket")
         object_key = storage.get("key")
         size_bytes = storage.get("size_bytes")
+        version_id = storage.get("version_id")
         if (
             not isinstance(bucket, str)
             or not bucket
@@ -556,7 +598,7 @@ async def _sync_typed_artifacts_from_index(
             authority_id=lifecycle_authority_id,
             bucket=bucket,
             object_key=object_key,
-            version_id=None,
+            version_id=version_id,
             content_sha256=_exact_sha256(artifact.content_hash),
             size_bytes=size_bytes,
             created_at=artifact.created_at,

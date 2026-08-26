@@ -1,6 +1,7 @@
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -109,6 +110,53 @@ async def test_finalize_returns_exact_object_metadata(
     assert finalized.uri == "s3://trajectories/team/trial-10/atif.json"
     assert finalized.size_bytes == len(body)
     assert finalized.sha256 == hashlib.sha256(body).hexdigest()
+
+
+async def test_finalize_preserves_post_upload_object_version(tmp_path: Path) -> None:
+    class VersionedStore(FakeObjectStore):
+        async def put_object_with_metadata(
+            self,
+            *,
+            bucket: str,
+            key: str,
+            body: bytes,
+        ) -> object:
+            uri = await super().put_object(bucket=bucket, key=key, body=body)
+            return SimpleNamespace(uri=uri, version_id="atif-version-123")
+
+    local = tmp_path / "events.jsonl"
+    store = VersionedStore()
+    writer = TrajectoryWriter(
+        local_path=local,
+        store=store,
+        bucket="x",
+        key="x",
+        min_part_bytes=0,
+    )
+    trial_uuid = uuid4()
+    async with writer:
+        await writer.append(TrialStartEvent(
+            **_ev(0, trial_uuid),
+            task_id="t",
+            agent_name="oracle",
+            agent_mode="out-of-box",
+        ))
+        await writer.append(TrialEndEvent(
+            **_ev(1, trial_uuid),
+            final_state="succeeded",
+        ))
+
+    finalized = await finalize_trajectory_with_metadata(
+        local_path=local,
+        store=store,
+        team_id="team",
+        trial_id="trial-versioned",
+        task_id="t",
+        agent_name="oracle",
+        agent_version="1.0",
+    )
+
+    assert finalized.version_id == "atif-version-123"
 
 
 async def test_finalize_attempt_uploads_immutable_atif_identity(

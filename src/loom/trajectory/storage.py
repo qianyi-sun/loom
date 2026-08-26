@@ -12,7 +12,7 @@ import json
 import stat
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -272,6 +272,28 @@ class ObjectReadback:
     checksum_sha256: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectWriteResult:
+    """Exact identity returned by an object-store write."""
+
+    uri: str
+    version_id: str | None
+
+
+def _object_write_version_id(response: object) -> str | None:
+    """Return normalized S3 version evidence, preserving an absent value."""
+    if not isinstance(response, Mapping) or "VersionId" not in response:
+        return None
+    version_id = response["VersionId"]
+    if (
+        not isinstance(version_id, str)
+        or not version_id
+        or version_id != version_id.strip()
+    ):
+        raise ValueError("object write returned malformed VersionId evidence")
+    return version_id
+
+
 class ObjectStore(Protocol):
     """Trajectory + artifact storage. Multipart for streaming writes; put_object
     for one-shot uploads; presign_put for client-driven uploads (workers ship
@@ -305,9 +327,22 @@ class ObjectStore(Protocol):
         """Returns the final object URI (s3://bucket/key)."""
         ...
 
+    async def complete_multipart_upload_with_metadata(
+        self,
+        upload: MultipartUpload,
+    ) -> ObjectWriteResult: ...
+
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None: ...
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str: ...
+
+    async def put_object_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: bytes,
+    ) -> ObjectWriteResult: ...
 
     async def get_object(self, *, bucket: str, key: str) -> bytes: ...
 
@@ -438,12 +473,29 @@ class FakeObjectStore:
         self.objects[(upload.bucket, upload.key)] = b"".join(p[1] for p in parts)
         return f"s3://{upload.bucket}/{upload.key}"
 
+    async def complete_multipart_upload_with_metadata(
+        self,
+        upload: MultipartUpload,
+    ) -> ObjectWriteResult:
+        uri = await self.complete_multipart_upload(upload)
+        return ObjectWriteResult(uri=uri, version_id=None)
+
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None:
         self._multiparts.pop(upload.upload_id, None)
 
     async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
         self.objects[(bucket, key)] = body
         return f"s3://{bucket}/{key}"
+
+    async def put_object_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: bytes,
+    ) -> ObjectWriteResult:
+        uri = await self.put_object(bucket=bucket, key=key, body=body)
+        return ObjectWriteResult(uri=uri, version_id=None)
 
     async def get_object(self, *, bucket: str, key: str) -> bytes:
         if (bucket, key) not in self.objects:
@@ -769,9 +821,12 @@ class MinioObjectStore:
         etag = await self._run_client_call("upload_part", _do)
         upload.parts.append((part_number, etag))
 
-    async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
-        def _do(client: Any) -> None:
-            client.complete_multipart_upload(
+    async def complete_multipart_upload_with_metadata(
+        self,
+        upload: MultipartUpload,
+    ) -> ObjectWriteResult:
+        def _do(client: Any) -> object:
+            return client.complete_multipart_upload(
                 Bucket=upload.bucket,
                 Key=upload.key,
                 UploadId=upload.upload_id,
@@ -783,8 +838,14 @@ class MinioObjectStore:
                 },
             )
 
-        await self._run_client_call("complete_multipart_upload", _do)
-        return f"s3://{upload.bucket}/{upload.key}"
+        response = await self._run_client_call("complete_multipart_upload", _do)
+        return ObjectWriteResult(
+            uri=f"s3://{upload.bucket}/{upload.key}",
+            version_id=_object_write_version_id(response),
+        )
+
+    async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
+        return (await self.complete_multipart_upload_with_metadata(upload)).uri
 
     async def abort_multipart_upload(self, upload: MultipartUpload) -> None:
         def _do(client: Any) -> None:
@@ -796,12 +857,26 @@ class MinioObjectStore:
 
         await self._run_client_call("abort_multipart_upload", _do)
 
-    async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
-        def _do(client: Any) -> None:
-            client.put_object(Bucket=bucket, Key=key, Body=body)
+    async def put_object_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: bytes,
+    ) -> ObjectWriteResult:
+        def _do(client: Any) -> object:
+            return client.put_object(Bucket=bucket, Key=key, Body=body)
 
-        await self._run_client_call("put_object", _do)
-        return f"s3://{bucket}/{key}"
+        response = await self._run_client_call("put_object", _do)
+        return ObjectWriteResult(
+            uri=f"s3://{bucket}/{key}",
+            version_id=_object_write_version_id(response),
+        )
+
+    async def put_object(self, *, bucket: str, key: str, body: bytes) -> str:
+        return (
+            await self.put_object_with_metadata(bucket=bucket, key=key, body=body)
+        ).uri
 
     async def get_object(self, *, bucket: str, key: str) -> bytes:
         def _do(client: Any) -> bytes:

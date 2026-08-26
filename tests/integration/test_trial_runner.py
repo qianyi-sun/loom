@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -722,6 +723,26 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     team_id = uuid4()
     driver = FakeDriver(exec_handler=handler)
     driver.filesystem[PurePosixPath("/workspace/result.txt")] = b"hello"
+    class VersionedStore(FakeObjectStore):
+        async def put_object_with_metadata(
+            self,
+            *,
+            bucket: str,
+            key: str,
+            body: bytes,
+        ) -> object:
+            uri = await super().put_object(bucket=bucket, key=key, body=body)
+            version_id = (
+                "artifact-version-789"
+                if bucket == "artifacts"
+                else "atif-version-456"
+            )
+            return SimpleNamespace(uri=uri, version_id=version_id)
+
+        async def complete_multipart_upload_with_metadata(self, upload):  # type: ignore[no-untyped-def]
+            uri = await super().complete_multipart_upload(upload)
+            return SimpleNamespace(uri=uri, version_id="trajectory-version-123")
+
     runner = LocalTrialRunner(
         trial_id=trial_id,
         team_id=team_id,
@@ -734,7 +755,7 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
             task_dir=task_dir, trial_id=trial_id
         ),
         verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
-        object_store=FakeObjectStore(),
+        object_store=VersionedStore(),
         gateway_client=FakeLLMGatewayClient(scripted=[]),
         local_trajectory_root=tmp_path / "trajectories",
         state_patch_callback=fake_state_patch,
@@ -761,6 +782,12 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     assert projection["trajectory_index"]["atif_size_bytes"] == (
         result.atif_size_bytes
     )
+    assert projection["trajectory_index"]["trajectory_version_id"] == (
+        "trajectory-version-123"
+    )
+    assert projection["trajectory_index"]["atif_version_id"] == (
+        "atif-version-456"
+    )
     assert isinstance(result.trajectory_sha256, str)
     assert len(result.trajectory_sha256) == 64
     assert result.trajectory_size_bytes is not None
@@ -779,6 +806,7 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
                 "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e"
                 "1b161e5c1fa7425e73043362938b9824"
             ),
+            "version_id": "artifact-version-789",
             "share_status": "shared",
             "blocked_reason": None,
         }

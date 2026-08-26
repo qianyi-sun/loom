@@ -68,6 +68,7 @@ class ArtifactRef(BaseModel):
     key: str
     size: int = Field(ge=0)
     content_hash: str | None = None
+    version_id: str | None = None
     share_status: Literal["pending_scan", "shared", "blocked"] = "pending_scan"
     blocked_reason: str | None = None
 
@@ -102,8 +103,10 @@ class TrialResult(BaseModel):
     trajectory_uri: str | None = None
     trajectory_sha256: str | None = None
     trajectory_size_bytes: int | None = None
+    trajectory_version_id: str | None = None
     atif_uri: str | None = None
     atif_sha256: str | None = None
     atif_size_bytes: int | None = None
+    atif_version_id: str | None = None
     atif_schema_version: str | None = None
     artifacts_prefix: str | None = None
