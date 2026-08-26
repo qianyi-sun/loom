@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,9 +12,11 @@ import pytest
 from loom import personal_dev_acceptance_evidence as acceptance_evidence
 from loom.personal_dev_acceptance_evidence import (
     PersonalDevAcceptanceEvidenceError,
+    PersonalDevAcceptanceResultV2,
     build_personal_dev_backup_restore_evidence,
     build_personal_dev_scanner_finding_policy,
     build_personal_dev_trusted_launcher_profile,
+    load_personal_dev_acceptance_result,
     load_personal_dev_backup_restore_evidence,
     validate_personal_dev_policy_evidence,
 )
@@ -650,3 +653,468 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
 def test_postgres_state_rejects_incomplete_or_noncanonical_inventory(payload: str) -> None:
     with pytest.raises(PersonalDevAcceptanceEvidenceError):
         acceptance_evidence._validate_postgres_state(payload.encode("ascii"))
+
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_RESULT_IDENTITIES = (
+    {
+        "artifacts_bucket": "loom-dev-owner-a-artifacts",
+        "database": "loom_dev_owner_a",
+        "environment": "dev-owner-a",
+        "namespace": "loom-dev-owner-a",
+        "route_host": "owner-a.dev.yylx.world",
+        "route_path": "/dev-owner-a",
+        "task_bucket": "loom-dev-owner-a-tasks",
+        "trajectories_bucket": "loom-dev-owner-a-trajectories",
+        "worker_control_plane_host": "cp-owner-a.dev.yylx.world",
+        "worker_gateway_host": "gw-owner-a.dev.yylx.world",
+        "worker_pool": "dev-owner-a",
+    },
+    {
+        "artifacts_bucket": "loom-dev-owner-b-artifacts",
+        "database": "loom_dev_owner_b",
+        "environment": "dev-owner-b",
+        "namespace": "loom-dev-owner-b",
+        "route_host": "owner-b.dev.yylx.world",
+        "route_path": "/dev-owner-b",
+        "task_bucket": "loom-dev-owner-b-tasks",
+        "trajectories_bucket": "loom-dev-owner-b-trajectories",
+        "worker_control_plane_host": "cp-owner-b.dev.yylx.world",
+        "worker_gateway_host": "gw-owner-b.dev.yylx.world",
+        "worker_pool": "dev-owner-b",
+    },
+)
+
+
+def _result_plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+    (
+        _profile,
+        _release,
+        _release_sha256,
+        v1_plan,
+        _source_root,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    value["acceptance_owners"] = sorted(
+        [
+            owner_0,
+            {
+                "team_id": "00000000-0000-0000-0000-000000000006",
+                "user_id": "00000000-0000-0000-0000-000000000005",
+            },
+        ],
+        key=lambda owner: (owner["team_id"], owner["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    plan_root = tmp_path / "result-plan"
+    plan_root.mkdir()
+    plan_path, plan_sha256 = _write_plan(plan_root, value)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
+    return plan, v1_plan
+
+
+def _result_snapshot(
+    plan,  # type: ignore[no-untyped-def]
+    owner_index: int,
+    *,
+    phase: str,
+) -> dict[str, object]:
+    owner = plan.acceptance_owners[owner_index]
+    name = f"owner-{'a' if owner_index == 0 else 'b'}"
+    subject = f"00000000-0000-0000-0000-000000000{100 if owner_index == 0 else 200}"
+    incarnation = f"00000000-0000-0000-0000-000000000{101 if owner_index == 0 else 201}"
+    initial_candidate = "9" * 64 if owner_index == 0 else "b" * 64
+    updated_candidate = "a" * 64 if owner_index == 0 else "c" * 64
+    updated_max = 3 if owner_index == 0 else 4
+    values = {
+        "initial": {
+            "candidate_sha": initial_candidate,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 1,
+            "status": "ready",
+        },
+        "updated": {
+            "candidate_sha": updated_candidate,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 2,
+            "keep_data": False,
+            "max_slots": updated_max,
+            "operation_epoch": 2,
+            "status": "ready",
+        },
+        "destroyed": {
+            "candidate_sha": updated_candidate,
+            "capacity_prepared": False,
+            "capacity_status": "shadow",
+            "deployment_generation": 2,
+            "keep_data": owner_index == 1,
+            "max_slots": updated_max,
+            "operation_epoch": 3,
+            "status": "deleted",
+        },
+        "redeployed": {
+            "candidate_sha": "d" * 64,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 4,
+            "status": "ready",
+        },
+        "final_destroyed": {
+            "candidate_sha": "d" * 64,
+            "capacity_prepared": False,
+            "capacity_status": "shadow",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 5,
+            "status": "deleted",
+        },
+    }
+    selected = values[phase]
+    if owner_index == 1 and phase in {"redeployed", "final_destroyed"}:
+        incarnation = "00000000-0000-0000-0000-000000000202"
+    return {
+        "application_status": selected["status"],
+        "candidate_sha": selected["candidate_sha"],
+        "capacity_prepared": selected["capacity_prepared"],
+        "capacity_status": selected["capacity_status"],
+        "deployment_generation": selected["deployment_generation"],
+        "identity": deepcopy(_RESULT_IDENTITIES[owner_index]),
+        "keep_data": selected["keep_data"],
+        "max_slots": selected["max_slots"],
+        "min_slots": 0,
+        "name": name,
+        "operation_epoch": selected["operation_epoch"],
+        "owner_team_id": str(owner.team_id),
+        "owner_user_id": str(owner.user_id),
+        "status": selected["status"],
+        "subject_id": subject,
+        "subject_incarnation": incarnation,
+        "worker_available": False,
+    }
+
+
+def _result_value(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    owner_results: list[dict[str, object]] = []
+    for owner_index in range(2):
+        owner_results.append(
+            {
+                "destroyed": _result_snapshot(plan, owner_index, phase="destroyed"),
+                "final_destroyed": (
+                    _result_snapshot(plan, owner_index, phase="final_destroyed")
+                    if owner_index == 1
+                    else None
+                ),
+                "initial": _result_snapshot(plan, owner_index, phase="initial"),
+                "redeployed": (
+                    _result_snapshot(plan, owner_index, phase="redeployed")
+                    if owner_index == 1
+                    else None
+                ),
+                "updated": _result_snapshot(plan, owner_index, phase="updated"),
+            }
+        )
+    denials: list[dict[str, object]] = []
+    for actor_index, target_index in ((0, 1), (1, 0)):
+        actor = plan.acceptance_owners[actor_index]
+        target = plan.acceptance_owners[target_index]
+        for operation in ("read", "update", "destroy"):
+            denials.append(
+                {
+                    "actor_team_id": str(actor.team_id),
+                    "actor_user_id": str(actor.user_id),
+                    "exit_code": 1,
+                    "operation": operation,
+                    "stderr_sha256": "f" * 64,
+                    "stdout_sha256": _EMPTY_SHA256,
+                    "target_after_sha256": "e" * 64,
+                    "target_before_sha256": "e" * 64,
+                    "target_environment": f"owner-{'a' if target_index == 0 else 'b'}",
+                    "target_team_id": str(target.team_id),
+                    "target_user_id": str(target.user_id),
+                }
+            )
+    return {
+        "acceptance_manifest_sha256": "a" * 64,
+        "acceptance_plan_sha256": plan.sha256,
+        "cross_owner_denials": denials,
+        "owners": owner_results,
+        "release_sha256": plan.release.trusted_release_sha256,
+        "schema": "loom-personal-dev-zero-capacity-acceptance-result-v2",
+        "shadow_manifest_sha256": plan.release.shadow_manifest_sha256,
+        "status_sha256s": {
+            "after_denials": "1" * 64,
+            "after_destroy": "2" * 64,
+            "after_initial": "3" * 64,
+            "after_redeploy": "4" * 64,
+            "after_updates": "5" * 64,
+            "pre_deploy": "6" * 64,
+            "pre_rollback": "7" * 64,
+            "rollback_shadow": "8" * 64,
+        },
+    }
+
+
+def _load_result(tmp_path: Path, value: object, plan) -> PersonalDevAcceptanceResultV2:  # type: ignore[no-untyped-def]
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, value)
+    return load_personal_dev_acceptance_result(
+        path,
+        sha256,
+        plan=plan,
+        expected_acceptance_manifest_sha256="a" * 64,
+    )
+
+
+def test_acceptance_result_v2_loads_canonical_concurrent_owner_evidence(
+    tmp_path: Path,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+
+    result = _load_result(tmp_path, value, plan)
+
+    assert result.canonical_bytes() == json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    assert result.owners[0].updated.max_slots == 3
+    assert result.owners[1].updated.max_slots == 4
+    assert result.owners[1].redeployed is not None
+    assert result.owners[1].redeployed.subject_id == result.owners[1].initial.subject_id
+    assert (
+        result.owners[1].redeployed.subject_incarnation
+        != result.owners[1].initial.subject_incarnation
+    )
+
+
+@pytest.mark.parametrize("unsafe_kind", ["mode", "hardlink", "symlink", "race"])
+def test_acceptance_result_v2_rejects_unsafe_file_metadata_or_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_kind: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, _result_value(plan))
+    if unsafe_kind == "mode":
+        path.chmod(0o644)
+    elif unsafe_kind == "hardlink":
+        (tmp_path / "acceptance-result-link.json").hardlink_to(path)
+    elif unsafe_kind == "symlink":
+        target = path
+        path = tmp_path / "acceptance-result-symlink.json"
+        path.symlink_to(target)
+    else:
+        real_read = acceptance_evidence.os.read
+        changed = False
+
+        def racing_read(descriptor: int, size: int) -> bytes:
+            nonlocal changed
+            payload = real_read(descriptor, size)
+            if not changed:
+                changed = True
+                path.touch()
+            return payload
+
+        monkeypatch.setattr(acceptance_evidence.os, "read", racing_read)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize("encoding", ["wrong-digest", "duplicate", "noncanonical"])
+def test_acceptance_result_v2_rejects_untrusted_json_encoding(
+    tmp_path: Path,
+    encoding: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, _result_value(plan))
+    if encoding == "wrong-digest":
+        sha256 = "f" * 64
+    elif encoding == "duplicate":
+        payload = path.read_bytes().replace(
+            b'"schema":',
+            b'"schema":"loom-personal-dev-zero-capacity-acceptance-result-v2","schema":',
+            1,
+        )
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    else:
+        payload = path.read_bytes() + b"\n"
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+_RESULT_MUTATIONS = (
+    "extra-field",
+    "missing-field",
+    "snapshot-extra-field",
+    "snapshot-missing-field",
+    "owner-order",
+    "identity-mismatch",
+    "malformed-name",
+    "malformed-uuid",
+    "malformed-digest",
+    "manifest-binding",
+    "release-binding",
+    "plan-binding",
+    "shadow-binding",
+    "denial-incomplete",
+    "denial-duplicate",
+    "denial-reordered",
+    "denial-wrong-target",
+    "denial-success",
+    "denial-wrong-exit",
+    "denial-nonempty-stdout",
+    "denial-empty-stderr",
+    "denial-state-change",
+    "worker-available",
+    "nonzero-minimum",
+    "wrong-initial-maximum",
+    "wrong-updated-maximum",
+    "candidate-regression",
+    "generation-regression",
+    "epoch-regression",
+    "cross-owner-identity-equality",
+    "owner0-keep-data",
+    "owner1-no-keep-data",
+    "owner0-redeploy",
+    "rotated-subject",
+    "unrotated-incarnation",
+    "missing-final-destroy",
+)
+
+
+def _mutate_result(value: dict[str, object], mutation: str) -> None:
+    owners = value["owners"]  # type: ignore[assignment]
+    denials = value["cross_owner_denials"]  # type: ignore[assignment]
+    if mutation == "extra-field":
+        value["unexpected"] = True
+    elif mutation == "missing-field":
+        del value["status_sha256s"]
+    elif mutation == "snapshot-extra-field":
+        owners[0]["initial"]["unexpected"] = True
+    elif mutation == "snapshot-missing-field":
+        del owners[0]["initial"]["capacity_prepared"]
+    elif mutation == "owner-order":
+        owners.reverse()
+    elif mutation == "identity-mismatch":
+        owners[0]["initial"]["identity"]["namespace"] = "loom-dev-wrong"
+    elif mutation == "malformed-name":
+        owners[0]["initial"]["name"] = "INVALID"
+    elif mutation == "malformed-uuid":
+        owners[0]["initial"]["subject_id"] = "not-a-uuid"
+    elif mutation == "malformed-digest":
+        owners[0]["initial"]["candidate_sha"] = "A" * 64
+    elif mutation == "manifest-binding":
+        value["acceptance_manifest_sha256"] = "9" * 64
+    elif mutation == "release-binding":
+        value["release_sha256"] = "9" * 64
+    elif mutation == "plan-binding":
+        value["acceptance_plan_sha256"] = "9" * 64
+    elif mutation == "shadow-binding":
+        value["shadow_manifest_sha256"] = "9" * 64
+    elif mutation == "denial-incomplete":
+        denials.pop()
+    elif mutation == "denial-duplicate":
+        denials[-1] = deepcopy(denials[0])
+    elif mutation == "denial-reordered":
+        denials[0], denials[1] = denials[1], denials[0]
+    elif mutation == "denial-wrong-target":
+        denials[0]["target_environment"] = "owner-a"
+    elif mutation == "denial-success":
+        denials[0]["exit_code"] = 0
+    elif mutation == "denial-wrong-exit":
+        denials[0]["exit_code"] = 2
+    elif mutation == "denial-nonempty-stdout":
+        denials[0]["stdout_sha256"] = "1" * 64
+    elif mutation == "denial-empty-stderr":
+        denials[0]["stderr_sha256"] = _EMPTY_SHA256
+    elif mutation == "denial-state-change":
+        denials[0]["target_after_sha256"] = "d" * 64
+    elif mutation == "worker-available":
+        owners[0]["updated"]["worker_available"] = True
+    elif mutation == "nonzero-minimum":
+        owners[0]["initial"]["min_slots"] = 1
+    elif mutation == "wrong-initial-maximum":
+        owners[0]["initial"]["max_slots"] = 1
+    elif mutation == "wrong-updated-maximum":
+        owners[1]["updated"]["max_slots"] = 3
+    elif mutation == "candidate-regression":
+        owners[0]["updated"]["candidate_sha"] = owners[0]["initial"]["candidate_sha"]
+    elif mutation == "generation-regression":
+        owners[0]["updated"]["deployment_generation"] = 1
+    elif mutation == "epoch-regression":
+        owners[0]["updated"]["operation_epoch"] = 1
+    elif mutation == "cross-owner-identity-equality":
+        for phase in ("initial", "updated", "destroyed", "redeployed", "final_destroyed"):
+            owners[1][phase]["name"] = "owner-a"
+            owners[1][phase]["identity"] = deepcopy(_RESULT_IDENTITIES[0])
+        for denial in denials[:3]:
+            denial["target_environment"] = "owner-a"
+    elif mutation == "owner0-keep-data":
+        owners[0]["destroyed"]["keep_data"] = True
+    elif mutation == "owner1-no-keep-data":
+        owners[1]["destroyed"]["keep_data"] = False
+    elif mutation == "owner0-redeploy":
+        owners[0]["redeployed"] = deepcopy(owners[1]["redeployed"])
+    elif mutation == "rotated-subject":
+        owners[1]["redeployed"]["subject_id"] = (
+            "00000000-0000-0000-0000-000000000999"
+        )
+    elif mutation == "unrotated-incarnation":
+        owners[1]["redeployed"]["subject_incarnation"] = owners[1]["destroyed"][
+            "subject_incarnation"
+        ]
+    elif mutation == "missing-final-destroy":
+        owners[1]["final_destroyed"] = None
+
+
+@pytest.mark.parametrize("mutation", _RESULT_MUTATIONS)
+def test_acceptance_result_v2_rejects_contract_or_transition_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    _mutate_result(value, mutation)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+def test_acceptance_result_v2_rejects_single_owner_v1_plan(tmp_path: Path) -> None:
+    plan, v1_plan = _result_plan(tmp_path)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, _result_value(plan), v1_plan)
