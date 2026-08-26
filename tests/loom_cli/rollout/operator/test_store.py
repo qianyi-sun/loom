@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.operator import store as store_module
 from loom_cli.rollout.operator.backup_job import (
     BackupJobEnvelope,
     BackupJobState,
@@ -744,6 +745,299 @@ def test_backup_retention_claim_rejects_existing_active_pointer(tmp_path: Path) 
 
     assert store.read_active() == pointer
     assert store.read_backup_retention_claim() is None
+
+
+def test_preflight_artifact_retention_claim_is_exact_idempotent_and_blocks_active(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    plan_digest = "a" * 64
+    bundle_digests = ("c" * 64, "b" * 64)
+
+    path = store.claim_preflight_artifact_retention(plan_digest, bundle_digests)
+    repeated = store.claim_preflight_artifact_retention(
+        plan_digest,
+        tuple(reversed(bundle_digests)),
+    )
+
+    assert path == repeated == tmp_path / "preflight-artifact-retention-claim.json"
+    assert store.read_preflight_artifact_retention_claim() == (
+        plan_digest,
+        ("b" * 64, "c" * 64),
+    )
+    with pytest.raises(RequestStoreError, match="another preflight artifact retention claim"):
+        store.claim_preflight_artifact_retention("d" * 64, bundle_digests)
+    with pytest.raises(RequestStoreError, match="artifact retention maintenance"):
+        store.set_active(ActivePointer("req-blocked", 1, "unit-blocked", "pending"))
+    with pytest.raises(RequestStoreError, match="identity does not match"):
+        store.clear_preflight_artifact_retention_claim("d" * 64)
+
+    assert store.clear_preflight_artifact_retention_claim(plan_digest) is True
+    assert store.clear_preflight_artifact_retention_claim(plan_digest) is False
+    assert store.read_preflight_artifact_retention_claim() is None
+    store.set_active(ActivePointer("req-allowed", 1, "unit-allowed", "pending"))
+
+
+def test_preflight_artifact_retention_claim_rejects_active_duplicate_and_unbounded_set(
+    tmp_path: Path,
+) -> None:
+    active_store = RequestStore(tmp_path / "active")
+    pointer = ActivePointer("req-active", 1, "unit-active", "pending")
+    active_store.set_active(pointer)
+    with pytest.raises(RequestStoreError, match="active rollout blocks"):
+        active_store.claim_preflight_artifact_retention("a" * 64, ())
+    assert active_store.read_active() == pointer
+    assert active_store.read_preflight_artifact_retention_claim() is None
+
+    store = RequestStore(tmp_path / "bounds")
+    maximum = tuple(f"{index:064x}" for index in range(32))
+    store.claim_preflight_artifact_retention("a" * 64, maximum)
+    assert store.read_preflight_artifact_retention_claim() == ("a" * 64, maximum)
+    assert store.clear_preflight_artifact_retention_claim("a" * 64)
+    with pytest.raises(RequestStoreError, match="bundle digests are invalid"):
+        store.claim_preflight_artifact_retention("a" * 64, (maximum[0], maximum[0]))
+    with pytest.raises(RequestStoreError, match="at most 32"):
+        store.claim_preflight_artifact_retention(
+            "a" * 64,
+            (*maximum, f"{32:064x}"),
+        )
+
+
+def test_preflight_artifact_retirement_receipt_is_no_replace_and_exact(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    plan_digest = "b" * 64
+    record_digest = "c" * 64
+
+    assert not store.read_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    path = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    repeated = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+
+    assert path == repeated == tmp_path / "preflight-artifact-retirements" / f"{bundle_digest}.json"
+    assert store.read_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    with pytest.raises(RequestStoreError, match="receipt identity drifted"):
+        store.publish_preflight_artifact_retirement_receipt(
+            bundle_digest,
+            plan_sha256="d" * 64,
+            inventory_record_sha256=record_digest,
+        )
+
+
+def test_preflight_artifact_retirement_receipt_recovers_exact_temp_link_residue(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    plan_digest = "b" * 64
+    record_digest = "c" * 64
+    receipt = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+    residue = receipt.with_name(f".{receipt.name}.{'f' * 32}.tmp")
+    os.link(receipt, residue)
+
+    repeated = store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256=plan_digest,
+        inventory_record_sha256=record_digest,
+    )
+
+    assert repeated == receipt
+    assert receipt.stat().st_nlink == 1
+    assert not residue.exists()
+
+
+@pytest.mark.parametrize(
+    ("expected_plan", "expected_record"),
+    (("d" * 64, "c" * 64), ("b" * 64, "d" * 64)),
+)
+def test_preflight_artifact_retirement_receipt_rejects_other_authority(
+    tmp_path: Path,
+    expected_plan: str,
+    expected_record: str,
+) -> None:
+    store = RequestStore(tmp_path)
+    bundle_digest = "a" * 64
+    store.publish_preflight_artifact_retirement_receipt(
+        bundle_digest,
+        plan_sha256="b" * 64,
+        inventory_record_sha256="c" * 64,
+    )
+
+    with pytest.raises(RequestStoreError, match="receipt identity drifted"):
+        store.read_preflight_artifact_retirement_receipt(
+            bundle_digest,
+            plan_sha256=expected_plan,
+            inventory_record_sha256=expected_record,
+        )
+
+
+def test_preflight_artifact_retention_authority_rejects_hard_link_aliases(
+    tmp_path: Path,
+) -> None:
+    claim_store = RequestStore(tmp_path / "claim")
+    claim = claim_store.claim_preflight_artifact_retention("a" * 64, ("b" * 64,))
+    os.link(claim, claim.with_name("claim-alias.json"))
+    with pytest.raises(RequestStoreError, match="single-link"):
+        claim_store.read_preflight_artifact_retention_claim()
+
+    receipt_store = RequestStore(tmp_path / "receipt")
+    receipt = receipt_store.publish_preflight_artifact_retirement_receipt(
+        "a" * 64,
+        plan_sha256="b" * 64,
+        inventory_record_sha256="c" * 64,
+    )
+    os.link(receipt, receipt.with_name("receipt-alias.json"))
+    with pytest.raises(RequestStoreError, match="single-link"):
+        receipt_store.read_preflight_artifact_retirement_receipt(
+            "a" * 64,
+            plan_sha256="b" * 64,
+            inventory_record_sha256="c" * 64,
+        )
+
+
+def test_request_and_attempt_inventory_is_exact_sorted_and_typed(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    second_request_id = "stg-20260713-bcdef234"
+    store.create_request(make_request(request_id=second_request_id))
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    store.publish_attempt_envelope(
+        make_envelope(
+            attempt_number=2,
+            attempt_operator="qianyi",
+            attempt_uid=2003,
+            resume=True,
+        )
+    )
+
+    assert store.request_ids() == (REQUEST_ID, second_request_id)
+    assert store.attempt_numbers(REQUEST_ID) == (1, 2)
+    assert store.attempt_numbers(second_request_id) == ()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["unknown-file", "symlink"])
+def test_request_inventory_rejects_unknown_or_aliased_entry(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_request())
+    unsafe = tmp_path / "requests" / "unknown-entry"
+    if unsafe_kind == "unknown-file":
+        unsafe.write_text("unknown\n")
+    else:
+        unsafe.symlink_to(tmp_path / "outside")
+
+    with pytest.raises(RequestStoreError, match="unsafe entry"):
+        store.request_ids()
+
+
+def test_request_inventory_rejects_malformed_typed_identity(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    path = store.create_request(make_request())
+    path.write_text('{"schema_version":1}\n', encoding="utf-8")
+
+    with pytest.raises(RequestStoreError, match="missing keys"):
+        store.request_ids()
+
+
+def test_request_inventory_binds_scan_to_validated_directory_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RequestStore(tmp_path / "store")
+    second_request_id = "stg-20260713-bcdef234"
+    store.create_request(make_request())
+    store.create_request(make_request(request_id=second_request_id))
+    redirected = RequestStore(tmp_path / "redirected")
+    redirected.create_request(make_request())
+    original_scandir = store_module.os.scandir
+
+    def redirect_path_scan(path):  # type: ignore[no-untyped-def]
+        return original_scandir(redirected.requests_root if path == store.requests_root else path)
+
+    monkeypatch.setattr(store_module.os, "scandir", redirect_path_scan)
+
+    assert store.request_ids() == (REQUEST_ID, second_request_id)
+
+
+def test_attempt_inventory_binds_scan_to_validated_directory_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RequestStore(tmp_path / "store")
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    store.publish_attempt_envelope(
+        make_envelope(
+            attempt_number=2,
+            attempt_operator="qianyi",
+            attempt_uid=2003,
+            resume=True,
+        )
+    )
+    redirected = RequestStore(tmp_path / "redirected")
+    redirected.create_request(make_request())
+    redirected.publish_attempt_envelope(make_envelope())
+    attempts = store.requests_root / REQUEST_ID / "attempts"
+    redirected_attempts = redirected.requests_root / REQUEST_ID / "attempts"
+    original_scandir = store_module.os.scandir
+
+    def redirect_path_scan(path):  # type: ignore[no-untyped-def]
+        return original_scandir(redirected_attempts if path == attempts else path)
+
+    monkeypatch.setattr(store_module.os, "scandir", redirect_path_scan)
+
+    assert store.attempt_numbers(REQUEST_ID) == (1, 2)
+
+
+def test_attempt_inventory_rejects_gap_and_missing_envelope(tmp_path: Path) -> None:
+    gap_store = RequestStore(tmp_path / "gap")
+    gap_store.create_request(make_request())
+    gap_store.publish_attempt_envelope(make_envelope())
+    attempt_three = gap_store.requests_root / REQUEST_ID / "attempts" / "3"
+    attempt_three.mkdir(mode=0o700)
+    with pytest.raises(RequestStoreError, match="consecutive"):
+        gap_store.attempt_numbers(REQUEST_ID)
+
+    missing_store = RequestStore(tmp_path / "missing")
+    missing_store.create_request(make_request())
+    missing = missing_store.requests_root / REQUEST_ID / "attempts" / "1"
+    missing.mkdir(parents=True, mode=0o700)
+    missing.parent.chmod(0o700)
+    with pytest.raises(RequestStoreError, match="envelope"):
+        missing_store.attempt_numbers(REQUEST_ID)
+
+
+def test_attempt_inventory_rejects_unknown_entry(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    (store.requests_root / REQUEST_ID / "attempts" / "notes").write_text("unsafe\n")
+
+    with pytest.raises(RequestStoreError, match="unsafe entry"):
+        store.attempt_numbers(REQUEST_ID)
 
 
 def test_concurrent_active_reservation_has_exactly_one_winner(tmp_path: Path) -> None:

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -164,7 +168,12 @@ class PreflightArtifactStore:
     def __init__(self, state_root: Path | str, *, service_uid: int | None = None) -> None:
         self.state_root = Path(state_root)
         self.root = self.state_root / "preflight-artifacts"
+        self.lifecycle_lock_path = self.state_root / "preflight-artifacts.lock"
         self.service_uid = os.geteuid() if service_uid is None else service_uid
+        self._held_lifecycle_lock: ContextVar[str | None] = ContextVar(
+            f"preflight_artifact_lifecycle_lock_{id(self)}",
+            default=None,
+        )
         if (
             not self.state_root.is_absolute()
             or ".." in self.state_root.parts
@@ -173,6 +182,35 @@ class PreflightArtifactStore:
             raise PreflightArtifactStoreError("preflight artifact store authority is invalid")
 
     def publish(
+        self,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+        mutation_epoch: int,
+        images: ImageArtifactSet,
+        manifests: ManifestArtifact,
+        migration: MigrationManifestArtifact,
+        production_defaults: ProductionDefaultsArtifact,
+        migration_plan_sha256: str,
+        migration_target_revision: str,
+        browser_report_schema_sha256: str,
+    ) -> PreflightArtifactPublication:
+        _ensure_private_directory(self.state_root, service_uid=self.service_uid, parents=True)
+        with self.exclusive_lifecycle_lock():
+            return self._publish_locked(
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                mutation_epoch=mutation_epoch,
+                images=images,
+                manifests=manifests,
+                migration=migration,
+                production_defaults=production_defaults,
+                migration_plan_sha256=migration_plan_sha256,
+                migration_target_revision=migration_target_revision,
+                browser_report_schema_sha256=browser_report_schema_sha256,
+            )
+
+    def _publish_locked(
         self,
         *,
         candidate_sha: str,
@@ -262,6 +300,10 @@ class PreflightArtifactStore:
         return publication
 
     def read(self, bundle_digest: str) -> PreflightArtifactPublication:
+        with self.shared_lifecycle_lock():
+            return self._read_locked(bundle_digest)
+
+    def _read_locked(self, bundle_digest: str) -> PreflightArtifactPublication:
         if _SHA256_RE.fullmatch(bundle_digest) is None:
             raise PreflightArtifactStoreError("preflight artifact digest is invalid")
         _require_private_directory(self.state_root, service_uid=self.service_uid)
@@ -347,6 +389,30 @@ class PreflightArtifactStore:
         )
 
     def load(
+        self,
+        *,
+        bundle_digest: str,
+        candidate_sha: str,
+        candidate_tree: str,
+        mutation_epoch: int,
+        image_tag: str,
+        namespace: str,
+        image_run: DockerRunner,
+        container_registry_push: str = "",
+    ) -> LoadedPreflightArtifacts:
+        with self.shared_lifecycle_lock():
+            return self._load_locked(
+                bundle_digest=bundle_digest,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+                mutation_epoch=mutation_epoch,
+                image_tag=image_tag,
+                namespace=namespace,
+                image_run=image_run,
+                container_registry_push=container_registry_push,
+            )
+
+    def _load_locked(
         self,
         *,
         bundle_digest: str,
@@ -480,6 +546,82 @@ class PreflightArtifactStore:
         _ensure_private_directory(self.state_root, service_uid=self.service_uid, parents=True)
         _ensure_private_directory(self.root, service_uid=self.service_uid)
 
+    def shared_lifecycle_lock(self) -> AbstractContextManager[None]:
+        """Hold one shared lock across a complete multi-file artifact read."""
+        return self._lifecycle_lock("shared")
+
+    def exclusive_lifecycle_lock(self) -> AbstractContextManager[None]:
+        """Exclude readers and publishers during publication or retirement."""
+        return self._lifecycle_lock("exclusive")
+
+    @contextmanager
+    def _lifecycle_lock(self, requested: str) -> Iterator[None]:
+        held = self._held_lifecycle_lock.get()
+        if held == "exclusive" or held == requested == "shared":
+            yield
+            return
+        if held == "shared":
+            raise PreflightArtifactStoreError(
+                "preflight artifact lifecycle lock cannot be promoted"
+            )
+        _require_private_directory(self.state_root, service_uid=self.service_uid)
+        created = False
+        create_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        existing_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            try:
+                descriptor = os.open(
+                    self.lifecycle_lock_path,
+                    create_flags,
+                    _PRIVATE_FILE_MODE,
+                )
+                created = True
+            except FileExistsError:
+                descriptor = os.open(self.lifecycle_lock_path, existing_flags)
+        except OSError as exc:
+            raise PreflightArtifactStoreError(
+                "preflight artifact lifecycle lock is unsafe"
+            ) from exc
+        locked = False
+        token = None
+        try:
+            if created:
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+                os.fsync(descriptor)
+                _fsync_directory(self.state_root)
+            before = os.fstat(descriptor)
+            _require_safe_lifecycle_lock(before, service_uid=self.service_uid)
+            fcntl.flock(
+                descriptor,
+                fcntl.LOCK_SH if requested == "shared" else fcntl.LOCK_EX,
+            )
+            locked = True
+            after = os.fstat(descriptor)
+            _require_safe_lifecycle_lock(after, service_uid=self.service_uid)
+            if _metadata_identity(after) != _metadata_identity(before):
+                raise PreflightArtifactStoreError(
+                    "preflight artifact lifecycle lock changed during acquisition"
+                )
+            token = self._held_lifecycle_lock.set(requested)
+            yield
+        except PreflightArtifactStoreError:
+            raise
+        except OSError as exc:
+            raise PreflightArtifactStoreError("preflight artifact lifecycle lock failed") from exc
+        finally:
+            if token is not None:
+                self._held_lifecycle_lock.reset(token)
+            if locked:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
 
 def _descriptor(
     *,
@@ -592,8 +734,7 @@ def _parse_descriptor(value: Mapping[str, object], *, bundle_digest: str) -> _Pa
         or not manifest_image_names
         or manifest_image_names != sorted(set(manifest_image_names))
         or any(
-            not isinstance(name, str) or name not in image_digests
-            for name in manifest_image_names
+            not isinstance(name, str) or name not in image_digests for name in manifest_image_names
         )
         or any(
             not isinstance(key, str) or not isinstance(item, str) or not item.startswith("sha256:")
@@ -681,6 +822,30 @@ def _ensure_private_directory(path: Path, *, service_uid: int, parents: bool = F
         path.chmod(_PRIVATE_DIRECTORY_MODE)
         _fsync_directory(path.parent)
     _require_private_directory(path, service_uid=service_uid)
+
+
+def _require_safe_lifecycle_lock(metadata: os.stat_result, *, service_uid: int) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != service_uid
+        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+        or metadata.st_nlink != 1
+    ):
+        raise PreflightArtifactStoreError("preflight artifact lifecycle lock is unsafe")
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _require_private_directory(path: Path, *, service_uid: int) -> None:
