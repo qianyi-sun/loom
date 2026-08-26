@@ -33,6 +33,9 @@ capacity workflow.
 - **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
   — plan-bound enablement, single-owner two-environment lifecycle acceptance, exact
   zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
+- **[Personal-development backup and isolated restore evidence](personal-dev-backup-restore-evidence.md)**
+  — owner-only Postgres and MinIO backup, isolated exact-image restore, semantic
+  state comparison, cleanup proof, and canonical plan-bound evidence.
 - **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
   — separately gated zero-ceiling manager and two-pool preparation evidence.
 - **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**

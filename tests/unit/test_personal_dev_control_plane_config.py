@@ -160,6 +160,7 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
         "192.168.50.103/32",
     )
     assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
+    assert profile.network.acme_http01_solver_port == 8089
     assert profile.protocol_versions == {
         "capacity-agent": "v1",
         "claim-guard": "v1",
@@ -294,6 +295,12 @@ def test_profile_rejects_invalid_storage_lineage_digest(
         lambda text: text.replace(
             'capacity_manager_pod_label_key = "app.kubernetes.io/name"',
             'capacity_manager_pod_label_key = "/name"',
+        ),
+        lambda text: text.replace(
+            "acme_http01_solver_port = 8089", "acme_http01_solver_port = 0"
+        ),
+        lambda text: text.replace(
+            "acme_http01_solver_port = 8089", "acme_http01_solver_port = 8090"
         ),
         lambda text: text.replace(
             'kubernetes_api_cidr = "10.43.0.1/32"', 'kubernetes_api_cidr = "0.0.0.0/0"'

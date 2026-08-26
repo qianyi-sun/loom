@@ -3095,12 +3095,77 @@ def _network_policies(
             "egress": [dns, postgres, minio, manager, api],
         },
     )
+    capacity_manager_ingress = policy(
+        "loom-personal-dev-capacity-manager-ingress",
+        {
+            "podSelector": {
+                "matchLabels": {
+                    profile.network.capacity_manager_pod_label_key: (
+                        profile.network.capacity_manager_pod_label_value
+                    )
+                }
+            },
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {"app": "loom-personal-dev-management"}
+                            }
+                        }
+                    ],
+                    "ports": [
+                        {
+                            "protocol": "TCP",
+                            "port": profile.network.capacity_manager_port,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
     migration = policy(
         "loom-personal-dev-migration-egress",
         {
             "podSelector": {"matchLabels": {"app": "loom-personal-dev-migration"}},
             "policyTypes": ["Egress"],
             "egress": [dns, postgres],
+        },
+    )
+    acme_http01_ingress = policy(
+        "loom-personal-dev-acme-http01-ingress",
+        {
+            "podSelector": {
+                "matchLabels": {"acme.cert-manager.io/http01-solver": "true"}
+            },
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [
+                        *(
+                            {"ipBlock": {"cidr": cidr}}
+                            for cidr in profile.network.ingress_controller_source_cidrs
+                        ),
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": "ingress-nginx"
+                                }
+                            },
+                            "podSelector": {
+                                "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
+                            },
+                        },
+                    ],
+                    "ports": [
+                        {
+                            "protocol": "TCP",
+                            "port": profile.network.acme_http01_solver_port,
+                        }
+                    ],
+                }
+            ],
         },
     )
     management_ingress = policy(
@@ -3157,6 +3222,8 @@ def _network_policies(
         postgres_ingress,
         minio_ingress,
         management,
+        capacity_manager_ingress,
+        acme_http01_ingress,
         management_ingress,
         migration,
         activation,

@@ -30,7 +30,9 @@ then exercises two concurrent isolated environments under one authenticated
 acceptance owner, with distinct source snapshots, lifecycle operations,
 namespaces, storage identities, and capacity publications. Acceptance requires
 `worker_available=false` and an exact global executable-new-capacity ceiling of
-zero throughout. Its plan pins
+zero throughout. Its plan also binds the completed
+[owner-only isolated backup/restore evidence](../runbooks/personal-dev-backup-restore-evidence.md)
+and exact source-derived launcher and scanner policies. Its plan pins
 the manager configuration epoch as a monotonic floor rather than a constant:
 every personal projection advances the global epoch, and other environments
 share the same authority, so advancement is valid while regression fails the

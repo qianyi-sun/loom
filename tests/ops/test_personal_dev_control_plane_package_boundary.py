@@ -38,9 +38,7 @@ def _sidecar_status(**changes: str) -> bytes:
         "Seccomp": "0",
     }
     fields.update(changes)
-    return "".join(f"{name}:\t{value}\n" for name, value in fields.items()).encode(
-        "ascii"
-    )
+    return "".join(f"{name}:\t{value}\n" for name, value in fields.items()).encode("ascii")
 
 
 def _sidecar_launcher() -> dict[str, object]:
@@ -60,6 +58,17 @@ def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> Non
     assert "def activate" not in source
     assert "loom-dev-shared" not in source
     assert '"cidr": "0.0.0.0/0"' not in source
+
+
+def test_shadow_package_pins_the_exact_acme_http01_solver_boundary() -> None:
+    profile = _read("deploy/dev-fleet/personal-dev-control-plane.toml")
+    source = _read("src/loom/personal_dev_control_plane_render.py")
+
+    assert "acme_http01_solver_port = 8089" in profile
+    assert '"loom-personal-dev-acme-http01-ingress"' in source
+    assert '"acme.cert-manager.io/http01-solver": "true"' in source
+    assert "profile.network.ingress_controller_source_cidrs" in source
+    assert "profile.network.acme_http01_solver_port" in source
 
 
 def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -> None:
@@ -95,14 +104,8 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     ownership = _read("config/component-ownership.toml")
 
     assert "rootlesskit version 3.0.1" in dockerfile
-    assert (
-        "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc"
-        in dockerfile
-    )
-    assert (
-        "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce"
-        in dockerfile
-    )
+    assert "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc" in dockerfile
+    assert "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce" in dockerfile
     assert "ARG TARGETARCH" in dockerfile
     assert "/usr/bin/buildctl" in dockerfile
     assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile
@@ -139,9 +142,7 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
         assert path in {state / "home", tmp_path / "runtime"}
         assert (uid, gid) == (1000, 1000)
 
-    launcher["_main"].__globals__["_ensure_private_directory"] = (
-        accept_private_directory
-    )
+    launcher["_main"].__globals__["_ensure_private_directory"] = accept_private_directory
     with pytest.raises(RuntimeError, match="returned"):
         launcher["_main"](
             gvisor_marker=marker,
@@ -494,12 +495,76 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert 'kind == "Job" and migration_name.fullmatch(name)' in runbook
     assert "live_identity_set" in runbook
     assert 'test ! -s "$live_identities"' in runbook
-    assert 'cmp -s "$live_identities" "$previous_identities"' in runbook
+    assert "assert_live_identity_delta" in runbook
+    assert "loom-personal-dev-acme-http01-ingress" in runbook
+    assert "loom-personal-dev-capacity-manager-ingress" in runbook
+    assert 'test ! -s "$live_unexpected_identities"' in runbook
+    assert 'cmp -s "$live_missing_identities" "$allowed_missing_identities"' in runbook
     assert 'cmp -s "$current_identities_tmp" "$previous_identities_tmp"' in runbook
     assert "rollback_diff_status=0" in runbook
     assert "|| rollback_diff_status=$?" in runbook
     assert 'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1' in runbook
     assert 'sha256sum "$rollback_status_evidence"' in runbook
+
+
+@pytest.mark.parametrize(
+    ("live_variant", "expected_returncode"),
+    [
+        ("exact", 0),
+        ("both-reviewed-missing", 0),
+        ("one-reviewed-missing", 1),
+        ("unreviewed-missing", 1),
+        ("live-only", 1),
+    ],
+)
+def test_personal_management_identity_delta_allows_only_the_exact_first_transition(
+    tmp_path: Path,
+    live_variant: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    start = runbook.index("assert_live_identity_delta() {")
+    end = runbook.index("\n}\n\nassert_forward_identity_contract", start) + 2
+    function_source = runbook[start:end]
+    base = '["v1","Service","loom-dev","loom-personal-dev-management"]'
+    reviewed = [
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-acme-http01-ingress"]',
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-capacity-manager-ingress"]',
+    ]
+    previous_values = sorted([base, *reviewed])
+    live_values = list(previous_values)
+    if live_variant == "both-reviewed-missing":
+        live_values = [base]
+    elif live_variant == "one-reviewed-missing":
+        live_values = sorted([base, reviewed[0]])
+    elif live_variant == "unreviewed-missing":
+        live_values = list(reviewed)
+    elif live_variant == "live-only":
+        live_values = sorted([*previous_values, '["v1","Secret","loom-dev","unexpected"]'])
+
+    paths = {
+        name: tmp_path / f"{name}.txt"
+        for name in ("previous", "live", "allowed", "missing", "unexpected")
+    }
+    paths["previous"].write_text("\n".join(previous_values) + "\n", encoding="utf-8")
+    paths["live"].write_text("\n".join(live_values) + "\n", encoding="utf-8")
+    paths["allowed"].write_text("\n".join(reviewed) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            function_source
+            + '\nassert_live_identity_delta "$1" "$2" "$3" "$4" "$5"',
+            "identity-delta-test",
+            *(str(paths[name]) for name in paths),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -559,9 +624,9 @@ def test_personal_management_storage_inventory_producer_handles_kubectl_output(
         "  shift\n"
         "done\n"
         'test -n "$live_inventory"\n'
-        "jq -e --argjson expected \"$EXPECTED_ITEMS\" "
-        "'.apiVersion == \"v1\" and .kind == \"List\" and "
-        "(.items | length) == $expected' \"$live_inventory\" >/dev/null\n",
+        'jq -e --argjson expected "$EXPECTED_ITEMS" '
+        '\'.apiVersion == "v1" and .kind == "List" and '
+        '(.items | length) == $expected\' "$live_inventory" >/dev/null\n',
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)
@@ -843,8 +908,7 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
     assert 'test -x "$loom_cli"' in runbook
     assert 'test -x "$python_cli"' in runbook
     assert (
-        'scanner_cache_lock="$repo/deploy/dev-fleet/'
-        'personal-dev-scanner-cache-lock.json"'
+        'scanner_cache_lock="$repo/deploy/dev-fleet/personal-dev-scanner-cache-lock.json"'
     ) in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
     assert 'scanner_cache_lock_sha256="$(sha256sum "$scanner_cache_lock"' in runbook
@@ -869,18 +933,15 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
     assert '"worker_available":false' in runbook
     assert '"manager_ceiling":0' in runbook
 
-    assert (
-        'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"'
-        in runbook
-    )
+    assert 'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"' in runbook
     assert 'primary_name="<owner-primary-personal-name>"' in runbook
     assert 'retained_name="<owner-retained-personal-name>"' in runbook
     assert 'XDG_CONFIG_HOME="$owner_xdg"' in runbook
     assert runbook.count("loom auth whoami") == 1
     assert "primary_deploy_pid=$!" in runbook
     assert "retained_deploy_pid=$!" in runbook
-    assert "wait \"$primary_deploy_pid\"" in runbook
-    assert "wait \"$retained_deploy_pid\"" in runbook
+    assert 'wait "$primary_deploy_pid"' in runbook
+    assert 'wait "$retained_deploy_pid"' in runbook
     assert "primary_update_pid=$!" in runbook
     assert "retained_update_pid=$!" in runbook
     assert runbook.count("--min-slots 0") >= 5
@@ -888,8 +949,8 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
     assert '--source-root "$retained_source_v1"' in normalized
     assert '--source-root "$primary_source_v2"' in normalized
     assert '--source-root "$retained_source_v2"' in normalized
-    assert '.acceptance_owner.user_id' in runbook
-    assert '.acceptance_owner.team_id' in runbook
+    assert ".acceptance_owner.user_id" in runbook
+    assert ".acceptance_owner.team_id" in runbook
     assert 'loom dev status "$retained_name"' in normalized
     assert 'loom dev status "$primary_name"' in normalized
     assert 'loom dev destroy "$primary_name" --format json' in normalized
@@ -899,14 +960,12 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
     assert ".subject_id != $previous" in runbook
 
     assert 'shadow_render="$evidence_dir/reviewed-rollback-shadow.yaml"' in runbook
-    assert '.release.shadow_manifest_sha256' in runbook
+    assert ".release.shadow_manifest_sha256" in runbook
     assert 'cmp -s "$shadow_render_recheck" "$shadow_render"' in runbook
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
     assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
     assert "--field-manager=loom-personal-dev-control-plane" in normalized
-    assert runbook.count(
-        "rollout status deployment/loom-personal-dev-management"
-    ) >= 2
+    assert runbook.count("rollout status deployment/loom-personal-dev-management") >= 2
     assert "capture_scanner_cache_init_status" in runbook
     assert runbook.count("personal-dev-scanner-cache-init") >= 2
 
@@ -1005,7 +1064,71 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
     assert 'test -x "$loom_cli"' in runbook
     assert runbook.count('"$loom_cli" admin personal-dev-control-plane') >= 7
+    assert "operational_evidence_args=(" in runbook
+    assert '--source-root "$repo"' in runbook
+    assert '--trusted-launcher-profile-file "$trusted_launcher_profile"' in runbook
+    assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
+    assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
+    assert runbook.count('"${operational_evidence_args[@]}"') == 3
+    assert 'test "$solver_port" = 8089' in runbook
+    assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
+    assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
+    assert '(.spec | has("egress") | not)' in runbook
+    assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
+
+
+def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:
+    runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
+
+    assert "render-trusted-launcher-profile" in runbook
+    assert "render-scanner-finding-policy" in runbook
+    assert "acceptance_evidence_args=(" in runbook
+    assert '--source-root "$repo"' in runbook
+    assert '--trusted-launcher-profile-file "$trusted_launcher_profile"' in runbook
+    assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
+    assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
+    assert runbook.count('"${acceptance_evidence_args[@]}"') == 4
+    assert "<absolute-owner-only-trusted-launcher-profile>" not in runbook
+    assert "<absolute-owner-only-scanner-finding-policy>" not in runbook
+
+
+def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> None:
+    runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
+    runbook_index = _read("docs/runbooks/README.md")
+    fleet = _read("deploy/dev-fleet/README.md")
+    architecture = _read("docs/architecture/personal-dev-management-plane-deployment.md")
+
+    for document in (runbook_index, fleet, architecture):
+        assert "personal-dev-backup-restore-evidence.md" in document
+    assert "set -euo pipefail" in runbook
+    assert "umask 077" in runbook
+    assert "trap cleanup_restore_resources EXIT" in runbook
+    assert "trap - EXIT" in runbook
+    assert 'rm -f "$restore_env"' in runbook
+    assert 'test ! -e "$restore_env"' in runbook
+    assert 'docker run --detach --network none --name "$postgres_restore"' in runbook
+    assert '"$postgres_image"' in runbook
+    assert "pg_restore -U postgres -d postgres" in runbook
+    assert 'cmp -s "$postgres_source_state" "$postgres_restored_state"' in runbook
+    assert 'docker network create --internal "$restore_network"' in runbook
+    assert "--network-alias minio-restore" in runbook
+    assert '"$minio_image" server /data' in runbook
+    assert '"$minio_client_image" -euc' in runbook
+    assert 'mc_live cat "local/$bucket/$key"' in runbook
+    assert 'mc_restore pipe "restore/$bucket/$key"' in runbook
+    assert 'mc_restore cat "restore/$bucket/$key"' in runbook
+    assert 'cmp -s "$minio_source_manifest" "$minio_restored_manifest"' in runbook
+    assert "render-backup-restore-evidence" in runbook
+    assert '--pre-shadow-status-file "$evidence_dir/pre-backup.shadow-status.json"' in runbook
+    assert '--post-shadow-status-file "$evidence_dir/post-restore.shadow-status.json"' in runbook
+    assert '--storage-inventory-file "$evidence_dir/storage-inventory.json"' in runbook
+    assert '--isolated-postgres-name "$postgres_restore"' in runbook
+    assert '--isolated-minio-name "$minio_restore"' in runbook
+    assert '--isolated-network-name "$restore_network"' in runbook
+    assert "Use the identical bucket/object loop" not in runbook
+    assert 'test -f "$minio_restored_manifest"' not in runbook
+    assert "kubectl cp" not in runbook.casefold()
 
 
 def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
@@ -1025,10 +1148,7 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert runbook.count("capture_runtime_node_state") >= 3
     assert "assert_node_cordon_state()" in runbook
     assert runbook.count("assert_node_cordon_state") >= 8
-    assert (
-        'get "node/$node" -o json > "$evidence_dir/$node.node-after.json"'
-        not in normalized
-    )
+    assert 'get "node/$node" -o json > "$evidence_dir/$node.node-after.json"' not in normalized
     assert 'test -z "$(git status' not in runbook
     assert "<absolute-existing-owner-only-evidence-root-outside-repository>" in runbook
     assert "artifacts/personal-dev" not in runbook
@@ -1056,14 +1176,8 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert "verify-active" in runbook
     assert " remove " in normalized
     assert "systemctl restart k3s-agent" in normalized
-    assert (
-        "loom.dev/personal-dev-runtime-profile-a="
-        "6ee2c283e5bf0783e192787522ea9550"
-    ) in runbook
-    assert (
-        "loom.dev/personal-dev-runtime-profile-b="
-        "caadff4131590cc0a26dbf7dd2a6869b"
-    ) in runbook
+    assert ("loom.dev/personal-dev-runtime-profile-a=6ee2c283e5bf0783e192787522ea9550") in runbook
+    assert ("loom.dev/personal-dev-runtime-profile-b=caadff4131590cc0a26dbf7dd2a6869b") in runbook
     assert (
         "loom.dev/personal-dev-runtime-profile-sha256="
         "6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"
@@ -1090,8 +1204,7 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert "installer_sha256" in runbook
     assert "profile_module_sha256" in runbook
     assert (
-        "/usr/bin/install -o root -g root -m 0600 "
-        "'$remote_stage/gvisor-release-20260810.0.tar.bz2'"
+        "/usr/bin/install -o root -g root -m 0600 '$remote_stage/gvisor-release-20260810.0.tar.bz2'"
     ) in normalized
     assert '"regular file:0:0:600:1"' in runbook
     assert "PYTHONPATH='$remote_stage'" not in runbook
@@ -1100,12 +1213,10 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert runbook.count("assert_no_runtimeclass_consumers") >= 5
     assert "assert_runtimeclass_absent" in runbook
     assert runbook.count("assert_runtimeclass_absent") >= 6
-    runtimeclass_absence_check = runbook.split(
-        "assert_runtimeclass_absent() {", 1
-    )[1].split("\n}", 1)[0]
-    assert "--ignore-not-found -o name" in " ".join(
-        runtimeclass_absence_check.split()
-    )
+    runtimeclass_absence_check = runbook.split("assert_runtimeclass_absent() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "--ignore-not-found -o name" in " ".join(runtimeclass_absence_check.split())
     assert "> /dev/null 2>&1" not in runtimeclass_absence_check
     assert "assert_node_staging()" in runbook
     assert runbook.count('assert_node_staging "$node"') >= 4
@@ -1124,9 +1235,9 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert "runtime_class_sha256" in runbook
     assert "remove_node_runtime_identity" in runbook
     assert runbook.count('remove_node_runtime_identity "$node"') >= 2
-    assert 'loom.dev/personal-dev-runtime-profile-a-' not in runbook
-    assert 'loom.dev/personal-dev-runtime-profile-b-' not in runbook
-    assert 'loom.dev/personal-dev-runtime-profile-sha256-' not in runbook
+    assert "loom.dev/personal-dev-runtime-profile-a-" not in runbook
+    assert "loom.dev/personal-dev-runtime-profile-b-" not in runbook
+    assert "loom.dev/personal-dev-runtime-profile-sha256-" not in runbook
     assert "--type=merge" in runbook
     assert "reviewed_runtime_diff_sha256='<reviewed-runtime-diff-sha256>'" in runbook
     assert 'test "$runtime_diff_status" -eq 1' in runbook
@@ -1218,8 +1329,7 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
         }
 
     healthy_nodes = {
-        "items": [node("control", control_plane=True)]
-        + [node(name) for name in agent_names]
+        "items": [node("control", control_plane=True)] + [node(name) for name in agent_names]
     }
 
     def evaluate_nodes(payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
@@ -1246,9 +1356,7 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     assert evaluate_nodes(drifted_nodes).returncode != 0
 
     network_policy_filters = [
-        value
-        for value in jq_filters
-        if 'kind: "List"' in value and 'name: "build-egress"' in value
+        value for value in jq_filters if 'kind: "List"' in value and 'name: "build-egress"' in value
     ]
     assert len(network_policy_filters) == 1
     smoke_policies = json.loads(
@@ -1408,9 +1516,7 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     sidecar_mounts = {mount["name"] for mount in sidecar["volumeMounts"]}
     assert client_mounts == {"buildkit-run", "script", "tmp-client", "workspace"}
     assert sidecar_mounts == {"buildkit-run", "buildkit-state", "tmp-buildkit"}
-    assert not {"attempt-capability", "contract", "script", "workspace"} & (
-        sidecar_mounts
-    )
+    assert not {"attempt-capability", "contract", "script", "workspace"} & (sidecar_mounts)
     assert not {"buildkit-state", "tmp-buildkit"} & client_mounts
 
 
@@ -1418,9 +1524,7 @@ def test_personal_dev_builder_runtime_configmap_rendering_executes(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
-    start = runbook.index(
-        'buildkit_configmap="$evidence_dir/buildkit-conformance.configmap.json"'
-    )
+    start = runbook.index('buildkit_configmap="$evidence_dir/buildkit-conformance.configmap.json"')
     end_marker = 'chmod 0600 "$buildkit_configmap"'
     end = runbook.index(end_marker, start) + len(end_marker)
     rendering = runbook[start:end]
@@ -1439,14 +1543,14 @@ def test_personal_dev_builder_runtime_configmap_rendering_executes(
             f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
             f"merged_source_sha={merged_source_sha}\n"
             "kubectl() {\n"
-            "  test \"$*\" = \"--kubeconfig /dev/null --namespace "
+            '  test "$*" = "--kubeconfig /dev/null --namespace '
             "loom-runtime-smoke create configmap buildkit-conformance "
-            "--from-file=run.sh=$buildkit_script --dry-run=client -o json\"\n"
+            '--from-file=run.sh=$buildkit_script --dry-run=client -o json"\n'
             "  printf '%s\\n' "
-            "'{\"apiVersion\":\"v1\",\"data\":{\"run.sh\":\"#!/bin/sh\\nexit 0\\n\"},"
-            "\"kind\":\"ConfigMap\",\"metadata\":{\"creationTimestamp\":null,"
-            "\"name\":\"buildkit-conformance\",\"namespace\":"
-            "\"loom-runtime-smoke\"}}'\n"
+            '\'{"apiVersion":"v1","data":{"run.sh":"#!/bin/sh\\nexit 0\\n"},'
+            '"kind":"ConfigMap","metadata":{"creationTimestamp":null,'
+            '"name":"buildkit-conformance","namespace":'
+            '"loom-runtime-smoke"}}\'\n'
             "}\n"
             f"{rendering}\n"
         ),
@@ -1457,9 +1561,7 @@ def test_personal_dev_builder_runtime_configmap_rendering_executes(
     assert behavior.returncode == 0, behavior.stderr
 
     rendered = json.loads(
-        (evidence_dir / "buildkit-conformance.configmap.json").read_text(
-            encoding="utf-8"
-        )
+        (evidence_dir / "buildkit-conformance.configmap.json").read_text(encoding="utf-8")
     )
     assert rendered["metadata"]["namespace"] == "loom-runtime-smoke"
     assert rendered["metadata"]["labels"] == {
@@ -1476,12 +1578,7 @@ def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() ->
     marker = "assert_dns_hostname_identity() {"
     start = runbook.index(marker)
     function = runbook[start:].split("\n}", 1)[0] + "\n}"
-    assert (
-        runbook.count(
-            'assert_dns_hostname_identity "$observed_hostname" "$node"'
-        )
-        == 2
-    )
+    assert runbook.count('assert_dns_hostname_identity "$observed_hostname" "$node"') == 2
 
     behavior = subprocess.run(
         ["bash", "-seu", "--"],
@@ -1560,15 +1657,11 @@ def test_personal_dev_builder_runtime_remote_staging_directories_are_private(
             '  test "$#" -eq 2\n'
             '  test "$1" = target\n'
             '  /bin/bash -ceu -- "$2"\n'
-            "}\n"
-            + command.group(0)
-            + "\n"
-            + 'for directory in "$remote_stage" '
+            "}\n" + command.group(0) + "\n" + 'for directory in "$remote_stage" '
             '"$remote_stage/scripts" "$remote_stage/scripts/ops"; do\n'
             + '  mode="$(stat -c %a "$directory")"\n'
             + '  test "$mode" = 700 || { '
-            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n'
-            + "done\n"
+            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n' + "done\n"
         ),
         text=True,
         capture_output=True,
@@ -1581,10 +1674,7 @@ def test_personal_dev_builder_runtime_root_staging_directories_are_private(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
-    root_stage_evidence = (
-        'printf \'%s\\n\' "$root_stage" > '
-        '"$evidence_dir/$node.root-stage.txt"'
-    )
+    root_stage_evidence = 'printf \'%s\\n\' "$root_stage" > "$evidence_dir/$node.root-stage.txt"'
     command_start = runbook.index(
         'ssh "${ssh_run_options[@]}" "$target" \\\n',
         runbook.index(root_stage_evidence),
@@ -1634,16 +1724,12 @@ def test_personal_dev_builder_runtime_root_staging_directories_are_private(
             '  test "$#" -eq 2\n'
             '  test "$1" = target\n'
             '  eval "$2"\n'
-            "}\n"
-            + command
-            + "\n"
-            + 'for directory in "$root_stage_base" '
+            "}\n" + command + "\n" + 'for directory in "$root_stage_base" '
             '"${root_stage%/*}" "$root_stage" '
             '"$root_stage/scripts" "$root_stage/scripts/ops"; do\n'
             + '  mode="$(stat -c %a "$directory")"\n'
             + '  test "$mode" = 700 || { '
-            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n'
-            + "done\n"
+            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n' + "done\n"
         ),
         text=True,
         capture_output=True,
@@ -1702,7 +1788,7 @@ def test_personal_dev_builder_runtime_staging_cleanup_handles_live_siblings(
             '  cleanup_node_staging "$node"\n'
             '  test ! -e "$remote_stage"\n'
             '  test ! -e "$actual_root_base/$merged_source_sha/$node"\n'
-            "  if test \"$number\" = 2; then\n"
+            '  if test "$number" = 2; then\n'
             '    test -d "$actual_root_base/$merged_source_sha/trt-eai-oldlab-3"\n'
             "  fi\n"
             "done\n"
@@ -1748,7 +1834,7 @@ def test_personal_dev_builder_runtime_captures_logs_before_failed_conformance_st
             + '  case " $* " in\n'
             + '    *" wait "*) return 1 ;;\n'
             + '    *" get pod/buildkit-conformance "*) '
-            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + 'printf \'%s\\n\' \'{"status":{"phase":"Failed"}}\' ;;\n'
             + '    *" logs "*" -c conformance "*) printf "client failure\\n" ;;\n'
             + '    *" logs "*" -c buildkitd "*) printf "sidecar failure\\n" ;;\n'
             + "    *) return 1 ;;\n"
@@ -1776,9 +1862,7 @@ def test_personal_dev_builder_runtime_captures_log_before_failed_gvisor_probe_st
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
     loop = runbook.index('for node in "${nodes[@]}"; do', runbook.index("## 6."))
-    start = runbook.index(
-        'kubectl --kubeconfig "$kubeconfig" create -f "$manifest"', loop
-    )
+    start = runbook.index('kubectl --kubeconfig "$kubeconfig" create -f "$manifest"', loop)
     end = runbook.index("  assert_smoke_namespace_owned", start)
     failure_path = runbook[start:end]
     evidence_dir = tmp_path / "evidence"
@@ -1810,7 +1894,7 @@ def test_personal_dev_builder_runtime_captures_log_before_failed_gvisor_probe_st
             + '    *" create "*) return 0 ;;\n'
             + '    *" wait "*) return 1 ;;\n'
             + '    *" get pod/gvisor-smoke-2 "*) '
-            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + 'printf \'%s\\n\' \'{"status":{"phase":"Failed"}}\' ;;\n'
             + '    *" logs "*) printf "gvisor failure\\n" ;;\n'
             + "    *) return 1 ;;\n"
             + "  esac\n"
@@ -1824,9 +1908,7 @@ def test_personal_dev_builder_runtime_captures_log_before_failed_gvisor_probe_st
     )
 
     assert behavior.returncode != 0
-    assert (evidence_dir / "gvisor-smoke-2.log").read_text(
-        encoding="utf-8"
-    ) == "gvisor failure\n"
+    assert (evidence_dir / "gvisor-smoke-2.log").read_text(encoding="utf-8") == "gvisor failure\n"
 
 
 def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() -> None:
@@ -1835,8 +1917,7 @@ def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() 
     controller_filters = [
         value
         for value in jq_filters
-        if 'select(.kind == "Deployment")' in value
-        and "desiredNumberScheduled" in value
+        if 'select(.kind == "Deployment")' in value and "desiredNumberScheduled" in value
     ]
     pod_filters = [
         value
@@ -1848,9 +1929,7 @@ def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() 
     assert len(controller_filters) == 1
     assert len(pod_filters) == 1
 
-    def evaluate(
-        jq_filter: str, payload: dict[str, object]
-    ) -> subprocess.CompletedProcess[str]:
+    def evaluate(jq_filter: str, payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["jq", "-e", jq_filter],
             input=json.dumps(payload),
@@ -1930,9 +2009,7 @@ def test_personal_dev_builder_runtime_runbook_is_indexed_and_architecture_linked
 
 
 def test_release_bound_scanner_cache_is_architecture_linked_and_inert() -> None:
-    management = _read(
-        "docs/architecture/personal-dev-management-plane-deployment.md"
-    )
+    management = _read("docs/architecture/personal-dev-management-plane-deployment.md")
     environments = _read("docs/architecture/multi-dev-environments.md")
     fleet = _read("deploy/dev-fleet/README.md")
 
@@ -1943,9 +2020,7 @@ def test_release_bound_scanner_cache_is_architecture_linked_and_inert() -> None:
         assert "ceiling" in lowered and "zero" in lowered
     for document in (management, environments):
         assert "personal-dev-scanner-cache-preparation.md" in document
-    assert "remain separate operational gates" in " ".join(
-        management.casefold().split()
-    )
+    assert "remain separate operational gates" in " ".join(management.casefold().split())
     assert "remain separate operational gates" in " ".join(fleet.casefold().split())
 
 

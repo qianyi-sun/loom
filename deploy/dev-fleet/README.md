@@ -61,7 +61,8 @@ management plane to an owner-only acceptance plan, exact global-manager
 execution identity, a monotonic configuration-epoch floor, ceiling zero,
 reviewed builder/scanner inputs, and an immutable rollback shadow. Live DNS,
 Secret provisioning, measured gVisor, candidate GHCR publication,
-backup/restore evidence, and single-owner acceptance remain separate operational
+the [isolated backup/restore drill](../../docs/runbooks/personal-dev-backup-restore-evidence.md),
+and single-owner acceptance remain separate operational
 gates. Repository assets alone do not authorize their mutation or the live
 acceptance apply.
 
