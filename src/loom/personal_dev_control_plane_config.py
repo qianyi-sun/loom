@@ -59,6 +59,18 @@ _PRINCIPAL_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?")
 _KEY_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _SCHEMA_HEAD = re.compile(r"[0-9]{4}")
 _CANONICAL_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_PRIVATE_USE_IPV4_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_PRIVATE_USE_IPV6_NETWORK = ipaddress.ip_network("fc00::/7")
+
+
+def _is_private_use_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in _PRIVATE_USE_IPV4_NETWORKS)
+    return address in _PRIVATE_USE_IPV6_NETWORK
 
 
 class _StrictModel(BaseModel):
@@ -296,7 +308,7 @@ class _NetworkInput(_StrictModel):
             if (
                 cidr != str(network)
                 or network.prefixlen != network.max_prefixlen
-                or not address.is_private
+                or not _is_private_use_address(address)
                 or address.is_loopback
                 or address.is_link_local
                 or address.is_multicast

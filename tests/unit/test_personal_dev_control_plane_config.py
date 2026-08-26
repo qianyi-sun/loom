@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 from collections.abc import Callable
@@ -368,6 +369,42 @@ def test_profile_rejects_non_host_or_unsafe_ingress_controller_sources(
 
     with pytest.raises(ValidationError):
         load_personal_dev_control_plane_profile(path)
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "0.0.0.1/32",
+        "198.18.0.1/32",
+        "198.51.100.1/32",
+        "2001:db8::1/128",
+    ],
+)
+def test_profile_rejects_special_use_sources_that_is_private_would_accept(
+    tmp_path: Path,
+    cidr: str,
+) -> None:
+    """Replacing explicit private-use membership with is_private must fail this matrix."""
+
+    assert ipaddress.ip_network(cidr, strict=True).network_address.is_private
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(text, [cidr]),
+    )
+
+    with pytest.raises(ValidationError):
+        load_personal_dev_control_plane_profile(path)
+
+
+def test_profile_accepts_ipv6_ula_ingress_controller_source(tmp_path: Path) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(text, ["fd00::1/128"]),
+    )
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.network.ingress_controller_source_cidrs == ("fd00::1/128",)
 
 
 @pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "empty", "oversized"])
