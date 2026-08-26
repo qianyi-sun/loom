@@ -8,7 +8,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
+from loom.personal_dev_runtime import (
+    PersonalDevAcceptanceInterlockError,
+    PersonalDevOperationalInterlockError,
+)
 from loom_service.personal_dev_lifecycle import build_personal_dev_capacity_runtime
 from loom_service.routes.health import router as health_router
 
@@ -26,6 +29,7 @@ def test_acceptance_binding_is_rejected_before_opening_capacity_credentials(
     settings = SimpleNamespace(
         dev_instances_enabled=True,
         personal_dev_builder_enabled=True,
+        personal_dev_runtime_mode="acceptance",
         personal_dev_acceptance_binding_json="{}",
         personal_dev_acceptance_plan_sha256="a" * 64,
     )
@@ -86,6 +90,47 @@ def test_acceptance_readiness_reports_ready_only_after_a_fresh_manager_check() -
     assert response.json() == {"blockers": [], "status": "ready"}
 
 
+def test_operational_readiness_is_secret_free_and_fails_closed_on_drift() -> None:
+    class _Interlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            assert now.tzinfo == UTC
+            raise PersonalDevOperationalInterlockError(
+                "capacity-manager-binding-drift"
+            )
+
+    app = FastAPI()
+    app.state.personal_dev_operational_interlock = _Interlock()
+    app.include_router(health_router, prefix="/api/v1")
+
+    response = TestClient(app).get("/api/v1/health/personal-dev-operational")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "blockers": ["capacity-manager-binding-drift"],
+        "status": "not-ready",
+    }
+
+
+def test_operational_readiness_reports_ready_after_a_fresh_manager_check() -> None:
+    calls = 0
+
+    class _Interlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            nonlocal calls
+            calls += 1
+            assert now.tzinfo == UTC
+
+    app = FastAPI()
+    app.state.personal_dev_operational_interlock = _Interlock()
+    app.include_router(health_router, prefix="/api/v1")
+
+    response = TestClient(app).get("/api/v1/health/personal-dev-operational")
+
+    assert calls == 1
+    assert response.status_code == 200
+    assert response.json() == {"blockers": [], "status": "ready"}
+
+
 def test_service_startup_closes_owned_projector_when_interlock_rejects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -121,6 +166,7 @@ def test_service_startup_closes_owned_projector_when_interlock_rejects(
     interlock = _Interlock()
     capacity_runtime = SimpleNamespace(
         acceptance_interlock=interlock,
+        operational_interlock=None,
         installer=object(),
         projector=projector,
         status_reader=object(),
@@ -173,6 +219,7 @@ def test_service_startup_closes_owned_projector_when_interlock_rejects(
             minio_secret_key="minio-secret",
             dev_instances_enabled=True,
             personal_dev_builder_enabled=True,
+            personal_dev_runtime_mode="acceptance",
             personal_dev_activation_public_key_file=key_file,
             personal_dev_activation_public_key_sha256="b" * 64,
         )

@@ -49,6 +49,12 @@ _ACCEPTANCE_MANAGER_FIELDS = {
     "execution_state",
     "observer_principal_id",
 }
+_OPERATIONAL_BINDING_FIELDS = {
+    "acceptance_result_sha256",
+    "manager",
+    "operational_plan_sha256",
+    "schema_version",
+}
 
 PersonalDevAcceptanceBlockerCode = Literal[
     "acceptance-binding-invalid",
@@ -64,6 +70,22 @@ class PersonalDevAcceptanceInterlockError(RuntimeError):
     """One stable secret-free blocker for the acceptance runtime gate."""
 
     def __init__(self, code: PersonalDevAcceptanceBlockerCode) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+PersonalDevOperationalBlockerCode = Literal[
+    "operational-binding-invalid",
+    "operational-time-invalid",
+    "capacity-manager-unavailable",
+    "capacity-manager-binding-drift",
+]
+
+
+class PersonalDevOperationalInterlockError(RuntimeError):
+    """One stable secret-free blocker for durable personal development."""
+
+    def __init__(self, code: PersonalDevOperationalBlockerCode) -> None:
         self.code = code
         super().__init__(code)
 
@@ -98,6 +120,15 @@ class PersonalDevAcceptanceRuntimeBinding:
     expected_manager: PersonalDevCapacityManagerBinding
     started_at: datetime
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevOperationalRuntimeBinding:
+    """Parsed, canonical, non-expiring zero-capacity runtime configuration."""
+
+    operational_plan_sha256: str
+    acceptance_result_sha256: str
+    expected_manager: PersonalDevCapacityManagerBinding
 
 
 def parse_personal_dev_acceptance_runtime_binding(
@@ -178,6 +209,82 @@ def parse_personal_dev_acceptance_runtime_binding(
     )
 
 
+def parse_personal_dev_operational_runtime_binding(
+    binding_json: str,
+    expected_plan_sha256: str,
+) -> PersonalDevOperationalRuntimeBinding:
+    """Parse a durable binding before opening any owned network client."""
+
+    try:
+        if (
+            not isinstance(binding_json, str)
+            or not 0 < len(binding_json.encode("ascii")) <= _ACCEPTANCE_BINDING_MAX_BYTES
+            or _ACCEPTANCE_DIGEST_RE.fullmatch(expected_plan_sha256) is None
+            or expected_plan_sha256 == "0" * 64
+        ):
+            raise ValueError
+        document = json.loads(
+            binding_json,
+            object_pairs_hook=_unique_acceptance_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        canonical = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        if (
+            not isinstance(document, dict)
+            or set(document) != _OPERATIONAL_BINDING_FIELDS
+            or canonical != binding_json
+            or type(document["schema_version"]) is not int
+            or document["schema_version"] != 1
+            or document["operational_plan_sha256"] != expected_plan_sha256
+            or not isinstance(document["acceptance_result_sha256"], str)
+            or _ACCEPTANCE_DIGEST_RE.fullmatch(document["acceptance_result_sha256"]) is None
+            or document["acceptance_result_sha256"] == "0" * 64
+        ):
+            raise ValueError
+        manager = document["manager"]
+        if not isinstance(manager, dict) or set(manager) != _ACCEPTANCE_MANAGER_FIELDS:
+            raise ValueError
+        raw_authority = manager["authority_incarnation"]
+        if not isinstance(raw_authority, str):
+            raise ValueError
+        authority = UUID(raw_authority)
+        if str(authority) != raw_authority:
+            raise ValueError
+        expected_manager = PersonalDevCapacityManagerBinding(
+            authority_incarnation=authority,
+            observer_principal_id=manager["observer_principal_id"],
+            configuration_epoch=manager["configuration_epoch"],
+            execution_state=manager["execution_state"],
+            execution_epoch=manager["execution_epoch"],
+            executable_new_capacity_ceiling=manager["executable_new_capacity_ceiling"],
+        )
+        if (
+            expected_manager.execution_state not in {"shadow", "prepared", "drain-only"}
+            or expected_manager.executable_new_capacity_ceiling != 0
+        ):
+            raise ValueError
+    except (
+        AttributeError,
+        RecursionError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        raise PersonalDevOperationalInterlockError("operational-binding-invalid") from None
+    return PersonalDevOperationalRuntimeBinding(
+        operational_plan_sha256=expected_plan_sha256,
+        acceptance_result_sha256=document["acceptance_result_sha256"],
+        expected_manager=expected_manager,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PersonalDevAcceptanceInterlock:
     """Continuously bind personal operations to one zero-capacity manager."""
@@ -237,6 +344,60 @@ class PersonalDevAcceptanceInterlock:
             raise PersonalDevAcceptanceInterlockError("capacity-manager-unavailable") from None
         if not observed.satisfies_acceptance_boundary(self.expected_manager):
             raise PersonalDevAcceptanceInterlockError("capacity-manager-binding-drift")
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevOperationalInterlock:
+    """Continuously bind durable personal operations to zero-capacity authority."""
+
+    projector: PersonalDevManagerBindingReader
+    operational_plan_sha256: str
+    acceptance_result_sha256: str
+    expected_manager: PersonalDevCapacityManagerBinding
+
+    @classmethod
+    def from_binding(
+        cls,
+        *,
+        projector: PersonalDevManagerBindingReader,
+        binding: PersonalDevOperationalRuntimeBinding,
+    ) -> PersonalDevOperationalInterlock:
+        if not callable(getattr(projector, "current_manager_binding", None)) or not isinstance(
+            binding, PersonalDevOperationalRuntimeBinding
+        ):
+            raise PersonalDevOperationalInterlockError("operational-binding-invalid")
+        return cls(
+            projector=projector,
+            operational_plan_sha256=binding.operational_plan_sha256,
+            acceptance_result_sha256=binding.acceptance_result_sha256,
+            expected_manager=binding.expected_manager,
+        )
+
+    @classmethod
+    def from_json(
+        cls,
+        *,
+        projector: PersonalDevManagerBindingReader,
+        binding_json: str,
+        expected_plan_sha256: str,
+    ) -> PersonalDevOperationalInterlock:
+        return cls.from_binding(
+            projector=projector,
+            binding=parse_personal_dev_operational_runtime_binding(
+                binding_json,
+                expected_plan_sha256,
+            ),
+        )
+
+    async def assert_ready(self, *, now: datetime) -> None:
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise PersonalDevOperationalInterlockError("operational-time-invalid")
+        try:
+            observed = await self.projector.current_manager_binding()
+        except Exception:
+            raise PersonalDevOperationalInterlockError("capacity-manager-unavailable") from None
+        if not observed.satisfies_acceptance_boundary(self.expected_manager):
+            raise PersonalDevOperationalInterlockError("capacity-manager-binding-drift")
 
 
 class ReusablePersonalDevSecretVault(Protocol):
@@ -393,8 +554,13 @@ __all__ = [
     "PersonalDevAcceptanceInterlockError",
     "PersonalDevAcceptanceRuntimeBinding",
     "PersonalDevManagerBindingReader",
+    "PersonalDevOperationalBlockerCode",
+    "PersonalDevOperationalInterlock",
+    "PersonalDevOperationalInterlockError",
+    "PersonalDevOperationalRuntimeBinding",
     "PersonalDevPreparationRuntime",
     "PersonalDevRuntimeConfig",
     "ReusablePersonalDevSecretVault",
     "parse_personal_dev_acceptance_runtime_binding",
+    "parse_personal_dev_operational_runtime_binding",
 ]

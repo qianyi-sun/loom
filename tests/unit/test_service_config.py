@@ -41,6 +41,9 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.dev_reload is False
     assert s.personal_dev_acceptance_binding_json == "{}"
     assert s.personal_dev_acceptance_plan_sha256 == ""
+    assert s.personal_dev_runtime_mode == "shadow"
+    assert s.personal_dev_operational_binding_json == "{}"
+    assert s.personal_dev_operational_plan_sha256 == ""
     assert s.personal_dev_activation_public_key_sha256 == ""
 
 

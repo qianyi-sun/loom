@@ -27,6 +27,10 @@ def _settings(tmp_path: Path, **overrides: object) -> LoomServiceSettings:
         "minio_access_key": "access",
         "minio_secret_key": "secret",
         "dev_instances_enabled": True,
+        "personal_dev_builder_enabled": True,
+        "personal_dev_runtime_mode": "acceptance",
+        "personal_dev_acceptance_binding_json": _acceptance_binding(),
+        "personal_dev_acceptance_plan_sha256": "a" * 64,
         "dev_instance_database_admin_url": "postgresql+psycopg://admin:pw@db/postgres",
         "dev_instance_candidate_sha": "a1b2c3d" + "0" * 33,
         "dev_instance_deployment_generation": 4,
@@ -74,7 +78,12 @@ def _acceptance_binding() -> str:
 
 
 def test_controller_wiring_is_absent_by_default(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, dev_instances_enabled=False)
+    settings = _settings(
+        tmp_path,
+        dev_instances_enabled=False,
+        personal_dev_builder_enabled=False,
+        personal_dev_runtime_mode="shadow",
+    )
     assert build_dev_instance_provisioner_factory(settings, minio_client=_Minio()) is None
     assert build_personal_dev_preparation_runtime(settings, minio_client=_Minio()) is None
     assert build_personal_dev_capacity_runtime(settings) is None

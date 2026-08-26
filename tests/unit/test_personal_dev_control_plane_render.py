@@ -18,13 +18,18 @@ from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlanError,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
+    load_personal_dev_operational_plan,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
     render_acceptance_personal_dev_control_plane,
+    render_operational_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
-from loom.personal_dev_runtime import parse_personal_dev_acceptance_runtime_binding
+from loom.personal_dev_runtime import (
+    parse_personal_dev_acceptance_runtime_binding,
+    parse_personal_dev_operational_runtime_binding,
+)
 from loom_service.app import _validated_v1_workload_contract
 from loom_service.config import LoomServiceSettings
 
@@ -204,6 +209,36 @@ def _acceptance_render(tmp_path: Path):
         hashlib.sha256(payload).hexdigest(),
     )
     rendered = render_acceptance_personal_dev_control_plane(
+        profile,
+        release,
+        plan,
+        now=_NOW,
+    )
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+    return profile, release, plan, shadow, rendered, documents
+
+
+def _operational_render(tmp_path: Path):
+    profile, release, acceptance, shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    value = acceptance.canonical_value()
+    value.pop("acceptance_owners")
+    value.pop("window")
+    value["approval"] = {
+        "acceptance_result_sha256": "4" * 64,
+        "approved_at": "2026-08-17T20:30:00Z",
+        "rollback_evidence_sha256": "5" * 64,
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "operational-plan.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    plan = load_personal_dev_operational_plan(
+        path,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    rendered = render_operational_personal_dev_control_plane(
         profile,
         release,
         plan,
@@ -515,6 +550,39 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     }
     assert "loom-worker" not in workload_names
     assert "loom-capacity-manager" not in workload_names
+
+
+def test_operational_render_is_durable_but_remains_zero_capacity(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, plan, shadow, rendered, documents = _operational_render(tmp_path)
+    deployments = {
+        item["metadata"]["name"]: item
+        for item in documents
+        if item["kind"] == "Deployment"
+    }
+    management = deployments["loom-personal-dev-management"]
+    container = management["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item.get("value") for item in container["env"] if "value" in item}
+
+    assert rendered.input_sha256 != shadow.input_sha256
+    assert env["LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE"] == "operational"
+    assert env["LOOM_SVC_DEV_INSTANCES_ENABLED"] == "true"
+    assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED"] == "true"
+    assert env["LOOM_SVC_K8S_WORKER_ENABLED"] == "false"
+    assert env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256"] == plan.sha256
+    assert env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON"] == (
+        plan.manager_runtime_json()
+    )
+    binding = parse_personal_dev_operational_runtime_binding(
+        env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON"],
+        plan.sha256,
+    )
+    assert binding.acceptance_result_sha256 == "4" * 64
+    assert deployments["loom-personal-dev-activation-agent"]["spec"]["replicas"] == 1
+    assert container["readinessProbe"]["httpGet"]["path"] == (
+        "/api/v1/health/personal-dev-operational"
+    )
 
 
 def _rendered_management_literal_environment(

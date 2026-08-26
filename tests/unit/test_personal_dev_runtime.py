@@ -14,6 +14,8 @@ from loom.personal_dev_capacity import (
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlock,
     PersonalDevAcceptanceInterlockError,
+    PersonalDevOperationalInterlock,
+    PersonalDevOperationalInterlockError,
 )
 
 _PLAN_SHA256 = "a" * 64
@@ -220,3 +222,74 @@ async def test_acceptance_interlock_rejects_naive_observation_time() -> None:
         await interlock.assert_ready(now=datetime(2026, 8, 17, 12, 0))
 
     assert exc.value.code == "acceptance-time-invalid"
+
+
+def _operational_binding_json(**manager_overrides: object) -> str:
+    manager: dict[str, object] = {
+        "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+        "configuration_epoch": 7,
+        "executable_new_capacity_ceiling": 0,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "observer_principal_id": "personal-dev-lifecycle",
+    }
+    manager.update(manager_overrides)
+    return json.dumps(
+        {
+            "acceptance_result_sha256": "b" * 64,
+            "manager": manager,
+            "operational_plan_sha256": _PLAN_SHA256,
+            "schema_version": 1,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+async def test_operational_interlock_has_no_expiry_but_rechecks_manager() -> None:
+    projector = _Projector(replace(_manager_binding(), configuration_epoch=99))
+    interlock = PersonalDevOperationalInterlock.from_json(
+        projector=projector,  # type: ignore[arg-type]
+        binding_json=_operational_binding_json(),
+        expected_plan_sha256=_PLAN_SHA256,
+    )
+
+    await interlock.assert_ready(now=datetime(2036, 8, 17, 12, 0, tzinfo=UTC))
+
+    assert projector.calls == 1
+    assert interlock.acceptance_result_sha256 == "b" * 64
+
+
+@pytest.mark.parametrize(
+    "binding_json",
+    [
+        _operational_binding_json() + "\n",
+        _operational_binding_json(executable_new_capacity_ceiling=1),
+        _operational_binding_json(execution_state="active", execution_epoch=1),
+        _operational_binding_json().replace('"acceptance_result_sha256":"' + "b" * 64 + '"', '"acceptance_result_sha256":"' + "0" * 64 + '"'),
+    ],
+)
+def test_operational_interlock_rejects_ambiguous_or_executable_binding(
+    binding_json: str,
+) -> None:
+    with pytest.raises(PersonalDevOperationalInterlockError) as exc:
+        PersonalDevOperationalInterlock.from_json(
+            projector=_Projector(_manager_binding()),  # type: ignore[arg-type]
+            binding_json=binding_json,
+            expected_plan_sha256=_PLAN_SHA256,
+        )
+
+    assert exc.value.code == "operational-binding-invalid"
+
+
+async def test_operational_interlock_fails_closed_on_manager_drift() -> None:
+    interlock = PersonalDevOperationalInterlock.from_json(
+        projector=_Projector(replace(_manager_binding(), execution_state="prepared", execution_epoch=1)),  # type: ignore[arg-type]
+        binding_json=_operational_binding_json(),
+        expected_plan_sha256=_PLAN_SHA256,
+    )
+
+    with pytest.raises(PersonalDevOperationalInterlockError) as exc:
+        await interlock.assert_ready(now=_NOW)
+
+    assert exc.value.code == "capacity-manager-binding-drift"

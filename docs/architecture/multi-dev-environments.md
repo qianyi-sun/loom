@@ -35,8 +35,27 @@ every personal projection advances the global epoch, and other environments
 share the same authority, so advancement is valid while regression fails the
 acceptance interlock.
 
-Both shadow and acceptance also prepare one release-bound scanner cache, as
-specified by the
+Acceptance is deliberately temporary. Its runbook destroys the acceptance
+environments and reapplies the byte-reviewed shadow before the bounded window
+closes; an acceptance manifest must not be left running as the development
+service. After that complete acceptance-and-rollback result exists, the
+[durable zero-capacity launch](../runbooks/personal-dev-durable-launch.md) uses
+a separate canonical operational plan. `render-operational` enables the
+personal controller and restricted builder and runs one activation-agent
+replica without an acceptance-window expiry. `status-operational` continuously
+rechecks the immutable release and operational-plan bindings, the exact global
+manager authority and execution boundary, executable ceiling `0`, and absence
+of a personal worker. Only after that status and the byte-reviewed shadow
+rollback evidence pass may the personal application plane remain enabled.
+
+Operational readiness means that authenticated owners may build, deploy,
+update, inspect, and destroy personal applications. It does not make a task
+runnable: `worker_available` remains `false`, no temporary worker is permitted,
+and x86_64, arm64, and architecture-neutral task execution remain blocked on
+the separately reviewed #906/#822 capacity work.
+
+Shadow, acceptance, and operational mode all prepare the same
+release-bound scanner cache described by the
 [scanner-cache preparation architecture](personal-dev-scanner-cache-preparation.md).
 Trusted-release schema 2 adds `personal_dev_scanner_cache` and binds the
 checked-in lock, Trivy binary, databases, metadata, and framed cache identity.

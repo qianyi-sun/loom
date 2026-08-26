@@ -47,7 +47,10 @@ from loom.personal_dev_environment_store import (
     SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
-from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
+from loom.personal_dev_runtime import (
+    PersonalDevAcceptanceInterlockError,
+    PersonalDevOperationalInterlockError,
+)
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
 from loom_service.dev_instance_access import (
@@ -64,7 +67,48 @@ ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
 
 
 async def _assert_personal_dev_acceptance(request: Request) -> None:
-    if getattr(request.app.state, "personal_dev_acceptance_required", False) is not True:
+    mode = getattr(request.app.state, "personal_dev_runtime_mode", None)
+    enablement_required = getattr(
+        request.app.state,
+        "personal_dev_enablement_required",
+        None,
+    )
+    if enablement_required is None:
+        # Preserve the owner-local request harness contract while old callers
+        # migrate to the explicit runtime mode.
+        enablement_required = getattr(
+            request.app.state,
+            "personal_dev_acceptance_required",
+            False,
+        )
+        if enablement_required and mode is None:
+            mode = "acceptance"
+    if enablement_required is not True:
+        return
+    if mode == "operational":
+        interlock = getattr(
+            request.app.state,
+            "personal_dev_operational_interlock",
+            None,
+        )
+        assert_ready = getattr(interlock, "assert_ready", None)
+        if not callable(assert_ready):
+            raise HTTPException(
+                status_code=503,
+                detail="personal-dev operational operational-interlock-unavailable",
+            )
+        try:
+            await assert_ready(now=datetime.now(UTC))
+        except PersonalDevOperationalInterlockError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"personal-dev operational {exc.code}",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="personal-dev operational operational-interlock-unavailable",
+            ) from None
         return
     interlock = getattr(request.app.state, "personal_dev_acceptance_interlock", None)
     assert_ready = getattr(interlock, "assert_ready", None)

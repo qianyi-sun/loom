@@ -16,14 +16,17 @@ import yaml
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
+    load_personal_dev_operational_plan,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
     render_acceptance_personal_dev_control_plane,
+    render_operational_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
 from loom.personal_dev_control_plane_status import (
     PersonalDevAcceptanceStatus,
+    PersonalDevOperationalStatus,
     PersonalDevShadowComponent,
     PersonalDevShadowStatus,
 )
@@ -181,6 +184,32 @@ def _acceptance_plan(
     return path, digest, load_personal_dev_acceptance_plan(path, digest)
 
 
+def _operational_plan(
+    tmp_path: Path,
+    release_path: Path,
+    release_digest: str,
+):
+    _path, _digest, acceptance = _acceptance_plan(
+        tmp_path,
+        release_path,
+        release_digest,
+    )
+    value = acceptance.canonical_value()
+    value.pop("acceptance_owners")
+    value.pop("window")
+    value["approval"] = {
+        "acceptance_result_sha256": "4" * 64,
+        "approved_at": "2026-08-17T20:00:00Z",
+        "rollback_evidence_sha256": "5" * 64,
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "operational-plan.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    digest = hashlib.sha256(payload).hexdigest()
+    return path, digest, load_personal_dev_operational_plan(path, digest)
+
+
 def _reviewed_kubeconfig(tmp_path: Path) -> Path:
     path = tmp_path / "reviewed-kubeconfig"
     path.write_text(
@@ -300,6 +329,55 @@ def _acceptance_status_argv(
     ]
 
 
+def _operational_argv(
+    release: Path,
+    digest: str,
+    plan: Path,
+    plan_digest: str,
+) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "render-operational",
+        "--file",
+        str(_PROFILE),
+        "--trusted-release-file",
+        str(release),
+        "--trusted-release-sha256",
+        digest,
+        "--operational-plan-file",
+        str(plan),
+        "--operational-plan-sha256",
+        plan_digest,
+    ]
+
+
+def _operational_status_argv(
+    release: Path,
+    digest: str,
+    plan: Path,
+    plan_digest: str,
+    kubeconfig: Path,
+) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "status-operational",
+        "--namespace",
+        "loom-dev",
+        "--kubeconfig",
+        str(kubeconfig),
+        "--file",
+        str(_PROFILE),
+        "--trusted-release-file",
+        str(release),
+        "--trusted-release-sha256",
+        digest,
+        "--operational-plan-file",
+        str(plan),
+        "--operational-plan-sha256",
+        plan_digest,
+    ]
+
+
 def test_render_emits_exact_yaml_and_canonical_evidence(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -371,6 +449,44 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
         "acceptance_plan_sha256": plan.sha256,
         "input_sha256": expected.input_sha256,
         "mode": "acceptance",
+        "release_sha256": expected.release_sha256,
+        "resource_count": expected.resource_count,
+        "schema": "loom-personal-dev-control-plane-render-v1",
+        "source_sha": "1" * 40,
+        "source_tree": "2" * 40,
+        "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def test_render_operational_emits_durable_plan_binding(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    plan_path, plan_digest, plan = _operational_plan(
+        tmp_path,
+        release_path,
+        release_digest,
+    )
+    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    expected = render_operational_personal_dev_control_plane(
+        profile,
+        release,
+        plan,
+        now=_NOW,
+    )
+
+    result = dispatch(_operational_argv(release_path, release_digest, plan_path, plan_digest))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == expected.yaml_text
+    evidence = json.loads(captured.err)
+    assert evidence == {
+        "input_sha256": expected.input_sha256,
+        "mode": "operational",
+        "operational_plan_sha256": plan.sha256,
         "release_sha256": expected.release_sha256,
         "resource_count": expected.resource_count,
         "schema": "loom-personal-dev-control-plane-render-v1",
@@ -705,6 +821,74 @@ def test_status_acceptance_emits_one_canonical_read_only_record(
 
     result = dispatch(
         _acceptance_status_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            kubeconfig.resolve(),
+        )
+    )
+
+    captured = capsys.readouterr()
+    expected_output = (
+        json.dumps(status.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    )
+    assert result == (0 if ready else 1)
+    assert captured.out == expected_output
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_status_operational_emits_one_canonical_read_only_record(
+    tmp_path: Path,
+    ready: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    plan_path, plan_digest, plan = _operational_plan(
+        tmp_path,
+        release_path,
+        release_digest,
+    )
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    status = PersonalDevOperationalStatus(
+        ready=ready,
+        blockers=() if ready else ("manager_binding_drift",),
+        input_sha256="a" * 64,
+        release_sha256="b" * 64,
+        operational_plan_sha256=plan.sha256,
+        manager_ceiling=0,
+        components=(PersonalDevShadowComponent("manager", 1, ready),),
+        application_ready=True,
+        capacity_publication_ready=ready,
+        worker_available=False,
+    )
+
+    class _Runner:
+        def __init__(self, path: Path) -> None:
+            assert path == kubeconfig
+
+    def _observe(
+        runner: object,
+        *,
+        expected: object,
+        plan: object,
+        namespace: str,
+    ) -> PersonalDevOperationalStatus:
+        assert isinstance(runner, _Runner)
+        assert expected.resource_count == 33
+        assert plan.sha256 == plan_digest
+        assert namespace == "loom-dev"
+        return status
+
+    monkeypatch.setattr(command, "_SubprocessKubectlRunner", _Runner)
+    monkeypatch.setattr(command, "observe_personal_dev_operational_status", _observe)
+
+    result = dispatch(
+        _operational_status_argv(
             release_path,
             release_digest,
             plan_path,

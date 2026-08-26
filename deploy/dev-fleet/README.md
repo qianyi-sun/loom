@@ -65,6 +65,19 @@ backup/restore evidence, and two-owner acceptance remain separate operational
 gates. Repository assets alone do not authorize their mutation or the live
 acceptance apply.
 
+The acceptance runbook always retires its two owner environments and returns
+the management plane to the reviewed inert shadow. Do not extend its expiry or
+leave its manifest active as a persistent deployment. After the complete
+acceptance result and shadow rollback are recorded, use the
+[durable zero-capacity launch runbook](../../docs/runbooks/personal-dev-durable-launch.md).
+Its independent operational plan drives `render-operational` and
+`status-operational`; it may leave lifecycle, builder, and one activation-agent
+replica enabled only while the exact operational binding remains healthy, the
+global executable ceiling is `0`, and `worker_available=false`. This is
+personal application deployment readiness, not physical task-capacity
+activation. #906/#822 remain the authority for any executable worker or
+nonzero capacity transition.
+
 `personal-dev-activation-agent.yaml.example` is the operator template for the
 independently keyed stable-route activation agent. Replace its image and Secret
 placeholders with reviewed immutable values before an authorized apply. The

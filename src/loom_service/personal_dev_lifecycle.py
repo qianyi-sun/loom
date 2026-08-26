@@ -41,7 +41,11 @@ from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlock,
     PersonalDevAcceptanceInterlockError,
     PersonalDevAcceptanceRuntimeBinding,
+    PersonalDevOperationalInterlock,
+    PersonalDevOperationalInterlockError,
+    PersonalDevOperationalRuntimeBinding,
     parse_personal_dev_acceptance_runtime_binding,
+    parse_personal_dev_operational_runtime_binding,
 )
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
@@ -60,6 +64,7 @@ class PersonalDevCapacityRuntime:
     projector: CapacityManagerPersonalDevProjector
     status_reader: PersonalDevCapacityStatusReader
     acceptance_interlock: PersonalDevAcceptanceInterlock | None
+    operational_interlock: PersonalDevOperationalInterlock | None
 
 
 def build_personal_dev_capacity_runtime(
@@ -67,10 +72,19 @@ def build_personal_dev_capacity_runtime(
 ) -> PersonalDevCapacityRuntime | None:
     """Build both trusted sides of personal capacity projection or fail startup."""
 
+    mode = settings.personal_dev_runtime_mode
+    if mode not in {"shadow", "acceptance", "operational"}:
+        raise RuntimeError("personal-dev runtime mode is invalid")
     if not settings.dev_instances_enabled:
+        if mode != "shadow":
+            raise RuntimeError("disabled personal-dev runtime must remain shadow")
         return None
+    if not settings.personal_dev_builder_enabled or mode == "shadow":
+        raise RuntimeError("enabled personal-dev runtime requires an enablement mode")
+
     acceptance_binding: PersonalDevAcceptanceRuntimeBinding | None = None
-    if settings.personal_dev_builder_enabled:
+    operational_binding: PersonalDevOperationalRuntimeBinding | None = None
+    if mode == "acceptance":
         try:
             acceptance_binding = parse_personal_dev_acceptance_runtime_binding(
                 settings.personal_dev_acceptance_binding_json,
@@ -78,6 +92,14 @@ def build_personal_dev_capacity_runtime(
             )
         except PersonalDevAcceptanceInterlockError as exc:
             raise RuntimeError("personal-dev acceptance binding is invalid") from exc
+    else:
+        try:
+            operational_binding = parse_personal_dev_operational_runtime_binding(
+                settings.personal_dev_operational_binding_json,
+                settings.personal_dev_operational_plan_sha256,
+            )
+        except PersonalDevOperationalInterlockError as exc:
+            raise RuntimeError("personal-dev operational binding is invalid") from exc
     if settings.dev_instance_database_admin_url is None:
         raise RuntimeError(
             "LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL is required when dev instances are enabled"
@@ -166,6 +188,14 @@ def build_personal_dev_capacity_runtime(
                 binding=acceptance_binding,
             )
             if acceptance_binding is not None
+            else None
+        ),
+        operational_interlock=(
+            PersonalDevOperationalInterlock.from_binding(
+                projector=projector,
+                binding=operational_binding,
+            )
+            if operational_binding is not None
             else None
         ),
     )
