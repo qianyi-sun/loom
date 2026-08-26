@@ -15,6 +15,8 @@ ANCHOR_LINE="PartitionName=all Nodes=ALL Default=YES MaxTime=INFINITE State=UP O
 PARTITION="loom-staging"
 PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-eai-oldlab-[3-5] Default=NO MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout OverSubscribe=NO"
 EXPECTED_NODES=$'trt-eai-oldlab-3\ntrt-eai-oldlab-4\ntrt-eai-oldlab-5'
+STABLE_READ_ATTEMPTS=4
+STABLE_READ_INTERVAL_SECONDS=10
 
 loom_oldlab_restore_backup_and_fail() {
   local failure="$1"
@@ -69,6 +71,19 @@ loom_oldlab_live_partition_is_exact() {
     scontrol show node "$node" -o \
       | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null \
       || return 1
+  done
+}
+
+loom_oldlab_require_stable_live_partition() {
+  local attempt
+  local partition_added="$1"
+  for ((attempt = 1; attempt <= STABLE_READ_ATTEMPTS; attempt++)); do
+    sleep "$STABLE_READ_INTERVAL_SECONDS"
+    if ! loom_oldlab_live_partition_is_exact; then
+      loom_oldlab_fail_readback \
+        "live OLDLAB staging partition did not remain exact through stable readback" \
+        "$partition_added"
+    fi
   done
 }
 
@@ -191,6 +206,7 @@ loom_oldlab_converge_partition() {
         "$partition_added"
     fi
   done
+  loom_oldlab_require_stable_live_partition "$partition_added"
   printf 'converged dedicated OLDLAB staging partition: trt-eai-oldlab-[3-5]\n'
 }
 

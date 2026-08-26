@@ -64,6 +64,16 @@ def _fake_scontrol(fake_bin: Path) -> None:
             esac
             ;;
           "show partition loom-staging -o")
+            read_count=0
+            if [ -f "$FAKE_PARTITION_READ_COUNT" ]; then
+              read -r read_count <"$FAKE_PARTITION_READ_COUNT"
+            fi
+            read_count=$((read_count + 1))
+            printf '%s\n' "$read_count" >"$FAKE_PARTITION_READ_COUNT"
+            if [ -n "${FAKE_PARTITION_UNAVAILABLE_AFTER_READ:-}" ] \
+              && [ "$read_count" -ge "$FAKE_PARTITION_UNAVAILABLE_AFTER_READ" ]; then
+              exit 1
+            fi
             if [ "${FAKE_PARTITION_UNAVAILABLE_UNTIL_RECONFIGURE:-}" = "1" ] \
               && [ ! -f "$FAKE_RECONFIGURE_COUNT" ]; then
               exit 1
@@ -106,6 +116,7 @@ def _run_converger(
     backup_mode: int = 0o600,
     partition_unavailable_until_reconfigure: bool = False,
     partition_state_before_reconfigure: str = "",
+    partition_unavailable_after_read: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     fake_bin = tmp_path / "bin"
     _fake_scontrol(fake_bin)
@@ -120,6 +131,7 @@ def _run_converger(
         backup.write_text(backup_text, encoding="utf-8")
         backup.chmod(backup_mode)
     reconfigure_count = tmp_path / "reconfigure-count"
+    partition_read_count = tmp_path / "partition-read-count"
     owner = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
     env = {
@@ -132,6 +144,12 @@ def _run_converger(
             "1" if partition_unavailable_until_reconfigure else ""
         ),
         "FAKE_PARTITION_STATE_BEFORE_RECONFIGURE": partition_state_before_reconfigure,
+        "FAKE_PARTITION_READ_COUNT": str(partition_read_count),
+        "FAKE_PARTITION_UNAVAILABLE_AFTER_READ": (
+            str(partition_unavailable_after_read)
+            if partition_unavailable_after_read is not None
+            else ""
+        ),
         "FAKE_HOSTNAMES": hostnames,
     }
     result = subprocess.run(
@@ -140,6 +158,7 @@ def _run_converger(
             "-c",
             r"""
             source "$1"
+            sleep() { :; }
             CONFIG="$2"
             STATE_ROOT="$3"
             BACKUP="$STATE_ROOT/slurm.conf.before-loom-staging-partition"
@@ -214,6 +233,24 @@ def test_canonical_durable_partition_reloads_drifted_live_state(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == canonical_config
+    assert not authority.exists()
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
+
+
+def test_canonical_reload_rejects_transient_one_sample_convergence(
+    tmp_path: Path,
+) -> None:
+    canonical_config = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, authority, reconfigure_count = _run_converger(
+        tmp_path,
+        config_text=canonical_config,
+        partition_unavailable_until_reconfigure=True,
+        partition_unavailable_after_read=3,
+    )
+
+    assert result.returncode == 1
+    assert "did not remain exact through stable readback" in result.stderr
     assert config.read_text(encoding="utf-8") == canonical_config
     assert not authority.exists()
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
