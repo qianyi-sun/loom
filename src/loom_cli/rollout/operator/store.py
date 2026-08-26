@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from ..preflight_artifact_retention import MAX_RETIREMENTS_PER_PLAN
+
 if TYPE_CHECKING:
     from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightRehearsal
 
@@ -100,6 +102,14 @@ def _attempt_number(value: object) -> int:
     return value
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and not any(character not in "0123456789abcdef" for character in value)
+    )
+
+
 def _directory_flags() -> int:
     return (
         os.O_RDONLY
@@ -120,6 +130,20 @@ def _fsync_directory(path: Path) -> None:
         raise RequestStoreError(f"could not fsync persistence directory {path}") from exc
     finally:
         os.close(fd)
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _validate_private_directory(path: Path, label: str) -> None:
@@ -164,6 +188,7 @@ def _read_private_bytes(
     object_name: str,
     *,
     lock_operation: int | None = None,
+    require_single_link: bool = False,
 ) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -181,6 +206,8 @@ def _read_private_bytes(
             raise RequestStoreError(f"{object_name} must be owned by the effective service UID")
         if stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE:
             raise RequestStoreError(f"{object_name} must have mode 0600")
+        if require_single_link and metadata.st_nlink != 1:
+            raise RequestStoreError(f"{object_name} must be single-link")
         if lock_operation is not None:
             fcntl.flock(fd, lock_operation)
             locked = True
@@ -195,8 +222,20 @@ def _read_private_bytes(
         os.close(fd)
 
 
-def _read_json(path: Path, object_name: str) -> dict[str, object]:
-    return _load_json_object(_read_private_bytes(path, object_name), object_name)
+def _read_json(
+    path: Path,
+    object_name: str,
+    *,
+    require_single_link: bool = False,
+) -> dict[str, object]:
+    return _load_json_object(
+        _read_private_bytes(
+            path,
+            object_name,
+            require_single_link=require_single_link,
+        ),
+        object_name,
+    )
 
 
 def _open_parent_directory(path: Path) -> int:
@@ -269,6 +308,99 @@ def _publish_immutable(path: Path, payload: Mapping[str, object]) -> Path:
         os.close(directory_fd)
 
 
+def _recover_exact_immutable_temp_link(
+    path: Path,
+    *,
+    expected_payload: bytes,
+    object_name: str,
+) -> None:
+    directory_fd = _open_parent_directory(path.parent)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory_fd)
+        before = os.fstat(descriptor)
+        if before.st_nlink == 1:
+            return
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != _PRIVATE_FILE_MODE
+            or before.st_nlink != 2
+            or before.st_size != len(expected_payload)
+        ):
+            raise RequestStoreError(f"{object_name} temp-link residue is unsafe")
+        chunks: list[bytes] = []
+        remaining = len(expected_payload) + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after_read = os.fstat(descriptor)
+        if _metadata_identity(before) != _metadata_identity(after_read):
+            raise RequestStoreError(f"{object_name} temp-link residue changed during read")
+        if b"".join(chunks) != expected_payload:
+            raise RequestStoreError(f"{object_name} temp-link residue identity drifted")
+        prefix = f".{path.name}."
+        suffix = ".tmp"
+        aliases: list[str] = []
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                if not entry.name.startswith(prefix) or not entry.name.endswith(suffix):
+                    continue
+                token = entry.name[len(prefix) : -len(suffix)]
+                if len(token) != 32 or any(
+                    character not in "0123456789abcdef" for character in token
+                ):
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+                if (metadata.st_dev, metadata.st_ino) == (before.st_dev, before.st_ino):
+                    aliases.append(entry.name)
+        if len(aliases) != 1:
+            raise RequestStoreError(
+                f"{object_name} must be single-link; temp-link residue is ambiguous"
+            )
+        alias_descriptor = os.open(aliases[0], flags, dir_fd=directory_fd)
+        try:
+            if _metadata_identity(os.fstat(alias_descriptor)) != _metadata_identity(before):
+                raise RequestStoreError(f"{object_name} temp-link residue changed during open")
+        finally:
+            os.close(alias_descriptor)
+        os.unlink(aliases[0], dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        after_unlink = os.fstat(descriptor)
+        stable_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        stable_after = (
+            after_unlink.st_dev,
+            after_unlink.st_ino,
+            after_unlink.st_mode,
+            after_unlink.st_uid,
+            after_unlink.st_gid,
+            after_unlink.st_size,
+            after_unlink.st_mtime_ns,
+        )
+        if stable_after != stable_before or after_unlink.st_nlink != 1:
+            raise RequestStoreError(f"{object_name} temp-link residue did not converge")
+    except RequestStoreError:
+        raise
+    except OSError as exc:
+        raise RequestStoreError(f"could not recover {object_name} temp-link residue") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
 def _replace_mutable(path: Path, payload: Mapping[str, object]) -> Path:
     directory_fd = _open_parent_directory(path.parent)
     temp_name = f".{path.name}.{uuid4().hex}.tmp"
@@ -312,8 +444,12 @@ class RequestStore:
         self.backup_rotation_path = self.root / "backup-rotation.json"
         self._backup_rotation_lock_path = self.root / ".backup-rotation.lock"
         self.backup_retention_claim_path = self.root / "backup-retention-claim.json"
+        self.preflight_artifact_retention_claim_path = (
+            self.root / "preflight-artifact-retention-claim.json"
+        )
         self.backup_leases_root = self.root / "backup-leases"
         self.backup_retirements_root = self.root / "backup-retirements"
+        self.preflight_artifact_retirements_root = self.root / "preflight-artifact-retirements"
 
     def _ensure_store(self) -> None:
         if not self.root.exists():
@@ -325,6 +461,131 @@ class RequestStore:
                 raise RequestStoreError("could not create request store root") from exc
         _validate_private_directory(self.root, "request store root")
         _ensure_private_directory(self.requests_root, "requests directory")
+
+    def request_ids(self) -> tuple[str, ...]:
+        """Return every typed request identity without skipping unknown entries."""
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect request store root") from exc
+        _validate_private_directory(self.root, "request store root")
+        try:
+            before = self.requests_root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect requests directory") from exc
+        _validate_private_directory(self.requests_root, "requests directory")
+        request_ids: list[str] = []
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(self.requests_root, _directory_flags())
+            opened = os.fstat(directory_fd)
+            if _metadata_identity(before) != _metadata_identity(opened):
+                raise RequestStoreError("requests directory changed during inventory")
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    try:
+                        request_id = _request_id(entry.name)
+                        metadata = entry.stat(follow_symlinks=False)
+                    except (OSError, RequestStoreError) as exc:
+                        raise RequestStoreError(
+                            "requests directory contains an unsafe entry"
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != os.geteuid()
+                        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+                    ):
+                        raise RequestStoreError("requests directory contains an unsafe entry")
+                    self._require_record_directory(request_id)
+                    try:
+                        self.read_preflight_request(request_id)
+                    except RequestStoreError as exc:
+                        if str(exc) != "preflight request does not exist":
+                            raise
+                    try:
+                        self.read_request(request_id)
+                    except RequestStoreError as exc:
+                        if str(exc) != "rollout request is not promoted":
+                            raise
+                    request_ids.append(request_id)
+        except RequestStoreError:
+            raise
+        except OSError as exc:
+            raise RequestStoreError("could not inspect requests directory") from exc
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        try:
+            after = self.requests_root.lstat()
+        except OSError as exc:
+            raise RequestStoreError("requests directory changed during inventory") from exc
+        if _metadata_identity(before) != _metadata_identity(after):
+            raise RequestStoreError("requests directory changed during inventory")
+        if len(set(request_ids)) != len(request_ids):
+            raise RequestStoreError("requests directory contains duplicate authority")
+        return tuple(sorted(request_ids))
+
+    def attempt_numbers(self, request_id: str) -> tuple[int, ...]:
+        """Return every complete consecutive immutable attempt for one request."""
+        request_directory = self._require_request_directory(request_id)
+        attempts_directory = request_directory / "attempts"
+        try:
+            before = attempts_directory.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect attempts directory") from exc
+        _validate_private_directory(attempts_directory, "attempts directory")
+        numbers: list[int] = []
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(attempts_directory, _directory_flags())
+            opened = os.fstat(directory_fd)
+            if _metadata_identity(before) != _metadata_identity(opened):
+                raise RequestStoreError("attempts directory changed during inventory")
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    if (
+                        not entry.name.isdecimal()
+                        or entry.name.startswith("0")
+                        or not entry.is_dir(follow_symlinks=False)
+                    ):
+                        raise RequestStoreError("attempts directory contains an unsafe entry")
+                    number = _attempt_number(int(entry.name))
+                    metadata = entry.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != os.geteuid()
+                        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+                    ):
+                        raise RequestStoreError("attempts directory contains an unsafe entry")
+                    numbers.append(number)
+        except RequestStoreError:
+            raise
+        except OSError as exc:
+            raise RequestStoreError("could not inspect attempts directory") from exc
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        ordered = tuple(sorted(numbers))
+        if ordered != tuple(range(1, len(ordered) + 1)):
+            raise RequestStoreError("attempt directories are not consecutive")
+        for number in ordered:
+            try:
+                self.read_attempt_envelope(request_id, number)
+            except RequestStoreError as exc:
+                raise RequestStoreError("attempt inventory envelope is unavailable") from exc
+        try:
+            after = attempts_directory.lstat()
+        except OSError as exc:
+            raise RequestStoreError("attempts directory changed during inventory") from exc
+        if _metadata_identity(before) != _metadata_identity(after):
+            raise RequestStoreError("attempts directory changed during inventory")
+        return ordered
 
     def publish_backup_lease(self, lease: BackupLease) -> Path:
         """Publish one complete restore-verified lease by its evidence digest."""
@@ -526,6 +787,248 @@ class RequestStore:
             except OSError as exc:
                 raise RequestStoreError("could not clear backup retention claim") from exc
             return True
+
+    def read_preflight_artifact_retention_claim(
+        self,
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """Return the exact bounded artifact-retirement authority, if present."""
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RequestStoreError("could not inspect request store root") from exc
+        _validate_private_directory(self.root, "request store root")
+        try:
+            payload = _read_json(
+                self.preflight_artifact_retention_claim_path,
+                "preflight artifact retention claim",
+                require_single_link=True,
+            )
+        except RequestStoreError as exc:
+            if str(exc) == "preflight artifact retention claim does not exist":
+                return None
+            raise
+        bundle_values = payload.get("bundle_digests")
+        plan_sha256 = payload.get("plan_sha256")
+        if (
+            set(payload) != {"bundle_digests", "plan_sha256", "schema_version"}
+            or payload.get("schema_version") != 1
+            or not _is_sha256(plan_sha256)
+            or not isinstance(bundle_values, list)
+            or len(bundle_values) > MAX_RETIREMENTS_PER_PLAN
+            or not all(_is_sha256(item) for item in bundle_values)
+        ):
+            raise RequestStoreError("preflight artifact retention claim schema is invalid")
+        bundle_digests = tuple(cast(list[str], bundle_values))
+        if tuple(sorted(set(bundle_digests))) != bundle_digests:
+            raise RequestStoreError("preflight artifact retention claim bundle digests are invalid")
+        return cast(str, plan_sha256), bundle_digests
+
+    def claim_preflight_artifact_retention(
+        self,
+        plan_sha256: str,
+        bundle_digests: tuple[str, ...],
+    ) -> Path:
+        """Claim one exact bounded artifact-retirement plan under the active lock."""
+        if not _is_sha256(plan_sha256):
+            raise RequestStoreError("preflight artifact retention plan digest is invalid")
+        if len(bundle_digests) > MAX_RETIREMENTS_PER_PLAN:
+            raise RequestStoreError("preflight artifact retention permits at most 32 bundles")
+        if not all(_is_sha256(item) for item in bundle_digests):
+            raise RequestStoreError("preflight artifact retention bundle digests are invalid")
+        canonical = tuple(sorted(bundle_digests))
+        if len(set(canonical)) != len(canonical):
+            raise RequestStoreError("preflight artifact retention bundle digests are invalid")
+        expected = (plan_sha256, canonical)
+        self._ensure_store()
+        with self._active_lock():
+            try:
+                self.active_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RequestStoreError("could not inspect active.json") from exc
+            else:
+                raise RequestStoreError("active rollout blocks preflight artifact retention claim")
+            existing = self.read_preflight_artifact_retention_claim()
+            if existing is not None:
+                if existing != expected:
+                    raise RequestStoreError(
+                        "another preflight artifact retention claim is already active"
+                    )
+                return self.preflight_artifact_retention_claim_path
+            return _replace_mutable(
+                self.preflight_artifact_retention_claim_path,
+                {
+                    "bundle_digests": list(canonical),
+                    "plan_sha256": plan_sha256,
+                    "schema_version": 1,
+                },
+            )
+
+    def clear_preflight_artifact_retention_claim(self, plan_sha256: str) -> bool:
+        """Clear only the exact completed artifact claim under the active lock."""
+        if not _is_sha256(plan_sha256):
+            raise RequestStoreError("preflight artifact retention plan digest is invalid")
+        with self._active_lock():
+            existing = self.read_preflight_artifact_retention_claim()
+            if existing is None:
+                return False
+            if existing[0] != plan_sha256:
+                raise RequestStoreError(
+                    "preflight artifact retention claim identity does not match"
+                )
+            try:
+                self.preflight_artifact_retention_claim_path.unlink()
+                _fsync_directory(self.root)
+            except OSError as exc:
+                raise RequestStoreError(
+                    "could not clear preflight artifact retention claim"
+                ) from exc
+            return True
+
+    def publish_preflight_artifact_retirement_receipt(
+        self,
+        bundle_digest: str,
+        *,
+        plan_sha256: str,
+        inventory_record_sha256: str,
+    ) -> Path:
+        """Publish one immutable receipt bound to the exact plan and record."""
+        self._validate_preflight_artifact_receipt_digests(
+            bundle_digest,
+            plan_sha256=plan_sha256,
+            inventory_record_sha256=inventory_record_sha256,
+        )
+        self._ensure_store()
+        _ensure_private_directory(
+            self.preflight_artifact_retirements_root,
+            "preflight artifact retirements directory",
+        )
+        path = self.preflight_artifact_retirements_root / f"{bundle_digest}.json"
+        payload = {
+            "bundle_digest": bundle_digest,
+            "inventory_record_sha256": inventory_record_sha256,
+            "plan_sha256": plan_sha256,
+            "schema_version": 1,
+        }
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RequestStoreError(
+                "could not inspect preflight artifact retirement receipt"
+            ) from exc
+        else:
+            _recover_exact_immutable_temp_link(
+                path,
+                expected_payload=_json_bytes(payload),
+                object_name="preflight artifact retirement receipt",
+            )
+            self.read_preflight_artifact_retirement_receipt(
+                bundle_digest,
+                plan_sha256=plan_sha256,
+                inventory_record_sha256=inventory_record_sha256,
+            )
+            return path
+        try:
+            return _publish_immutable(path, payload)
+        except RequestStoreError as exc:
+            if str(exc) != f"{bundle_digest}.json already exists":
+                raise
+            self.read_preflight_artifact_retirement_receipt(
+                bundle_digest,
+                plan_sha256=plan_sha256,
+                inventory_record_sha256=inventory_record_sha256,
+            )
+            return path
+
+    def read_preflight_artifact_retirement_receipt(
+        self,
+        bundle_digest: str,
+        *,
+        plan_sha256: str,
+        inventory_record_sha256: str,
+    ) -> bool:
+        """Require an existing receipt to match its expected exact authority."""
+        self._validate_preflight_artifact_receipt_digests(
+            bundle_digest,
+            plan_sha256=plan_sha256,
+            inventory_record_sha256=inventory_record_sha256,
+        )
+        try:
+            _validate_private_directory(self.root, "request store root")
+            _validate_private_directory(
+                self.preflight_artifact_retirements_root,
+                "preflight artifact retirements directory",
+            )
+        except RequestStoreError as exc:
+            if str(exc) in {
+                "request store root does not exist",
+                "preflight artifact retirements directory does not exist",
+            }:
+                return False
+            raise
+        path = self.preflight_artifact_retirements_root / f"{bundle_digest}.json"
+        expected = {
+            "bundle_digest": bundle_digest,
+            "inventory_record_sha256": inventory_record_sha256,
+            "plan_sha256": plan_sha256,
+            "schema_version": 1,
+        }
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise RequestStoreError(
+                "could not inspect preflight artifact retirement receipt"
+            ) from exc
+        _recover_exact_immutable_temp_link(
+            path,
+            expected_payload=_json_bytes(expected),
+            object_name="preflight artifact retirement receipt",
+        )
+        try:
+            payload = _read_json(
+                path,
+                "preflight artifact retirement receipt",
+                require_single_link=True,
+            )
+        except RequestStoreError as exc:
+            if str(exc) == "preflight artifact retirement receipt does not exist":
+                return False
+            raise
+        if (
+            set(payload) != set(expected)
+            or payload.get("schema_version") != 1
+            or not all(
+                _is_sha256(payload.get(field))
+                for field in (
+                    "bundle_digest",
+                    "inventory_record_sha256",
+                    "plan_sha256",
+                )
+            )
+        ):
+            raise RequestStoreError("preflight artifact retirement receipt schema is invalid")
+        if payload != expected:
+            raise RequestStoreError("preflight artifact retirement receipt identity drifted")
+        return True
+
+    @staticmethod
+    def _validate_preflight_artifact_receipt_digests(
+        bundle_digest: str,
+        *,
+        plan_sha256: str,
+        inventory_record_sha256: str,
+    ) -> None:
+        if not all(
+            _is_sha256(value) for value in (bundle_digest, plan_sha256, inventory_record_sha256)
+        ):
+            raise RequestStoreError("preflight artifact retirement receipt digest is invalid")
 
     def resolve_backup_retirement(
         self,
@@ -1272,6 +1775,10 @@ class RequestStore:
         with self._active_lock():
             if self.read_backup_retention_claim() is not None:
                 raise RequestStoreError("backup retention maintenance blocks active publication")
+            if self.read_preflight_artifact_retention_claim() is not None:
+                raise RequestStoreError(
+                    "preflight artifact retention maintenance blocks active publication"
+                )
             try:
                 self.active_path.lstat()
             except FileNotFoundError:

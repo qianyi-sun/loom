@@ -239,6 +239,14 @@ class LifecycleCoordinator:
                 "backup retention maintenance is still in progress",
                 {"status": "busy", "reason": "backup_retention_busy"},
             )
+        if self.store.read_preflight_artifact_retention_claim() is not None:
+            raise LifecycleBusyError(
+                "preflight artifact retention maintenance is still in progress",
+                {
+                    "status": "busy",
+                    "reason": "preflight_artifact_retention_busy",
+                },
+            )
 
     def assert_maintenance_active(self) -> None:
         """Require the root-owned admission freeze for protected maintenance."""

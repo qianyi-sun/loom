@@ -46,6 +46,10 @@ class CheckpointStore(Protocol):
 
     def read_backup_retention_claim(self) -> tuple[str, tuple[str, ...]] | None: ...
 
+    def read_preflight_artifact_retention_claim(
+        self,
+    ) -> tuple[str, tuple[str, ...]] | None: ...
+
     def replace_backup_rotation(
         self,
         state: BackupRotationState,
@@ -166,6 +170,10 @@ class DetachedCheckpointCoordinator:
     def _assert_no_retention_claim(self) -> None:
         if self.store.read_backup_retention_claim() is not None:
             raise CheckpointCoordinatorError("backup retention maintenance blocks checkpoint work")
+        if self.store.read_preflight_artifact_retention_claim() is not None:
+            raise CheckpointCoordinatorError(
+                "preflight artifact retention maintenance blocks checkpoint work"
+            )
 
     @staticmethod
     def _validate_binding(

@@ -53,6 +53,9 @@ from .installed_backup_retention import (
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
 from .installed_manifest_ownership import InstalledManifestOwnershipService
+from .installed_preflight_artifact_retention import (
+    InstalledPreflightArtifactRetentionService,
+)
 from .installed_preflight_commands import InstalledPreflightCommands
 from .lifecycle import LifecycleBusyError, LifecycleCoordinator, LifecycleError
 from .model import (
@@ -68,6 +71,12 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .preflight_artifact_references import (
+    InstalledMaintenanceReferenceInventory,
+    InstalledPreflightArtifactReferenceInventory,
+    InstalledResumeEligibility,
+    resume_binding_matches,
+)
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
     read_component_failure,
@@ -136,6 +145,14 @@ def _artifact_bundle_sha256(value: str) -> str:
     if _SHA256_RE.fullmatch(value) is None:
         raise argparse.ArgumentTypeError(
             "artifact bundle digest must be exactly 64 lowercase hex characters"
+        )
+    return value
+
+
+def _approved_plan_sha256(value: str) -> str:
+    if _SHA256_RE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "approved plan digest must be exactly 64 lowercase hex characters"
         )
     return value
 
@@ -210,6 +227,18 @@ def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParse
     retention_commands.add_parser("inventory")
     retention_apply = retention_commands.add_parser("apply")
     retention_apply.add_argument("--approved-plan-sha256", required=True)
+    artifact_retention = commands.add_parser("preflight-artifact-retention")
+    artifact_retention_commands = artifact_retention.add_subparsers(
+        dest="artifact_retention_action",
+        required=True,
+    )
+    artifact_retention_commands.add_parser("inventory")
+    artifact_retention_apply = artifact_retention_commands.add_parser("apply")
+    artifact_retention_apply.add_argument(
+        "--approved-plan-sha256",
+        required=True,
+        type=_approved_plan_sha256,
+    )
     recovery = commands.add_parser("backup-recovery")
     recovery_commands = recovery.add_subparsers(dest="recovery_action", required=True)
     recovery_commands.add_parser("inventory")
@@ -245,6 +274,7 @@ class BrokerDependencies:
     lifecycle_capacity: Any | None = None
     backup_retention: Any | None = None
     backup_recovery: Any | None = None
+    preflight_artifact_retention: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -595,6 +625,44 @@ def _backup_retention(
         )
         return 0
     result = dependencies.backup_retention.apply(plan)
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _preflight_artifact_retention(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if not _has_coordinator_authority(caller):
+        return _safe_error(
+            dependencies,
+            "preflight artifact retention maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.preflight_artifact_retention is None
+    ):
+        return _safe_error(
+            dependencies,
+            "preflight artifact retention maintenance is not configured",
+        )
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        if action == "inventory" and approved_plan_sha256 is None:
+            plan = dependencies.preflight_artifact_retention.inventory()
+            result: dict[str, object] = {
+                "plan": plan.to_dict(),
+                "plan_sha256": plan.plan_digest,
+            }
+        elif action == "apply" and approved_plan_sha256 is not None:
+            plan = dependencies.preflight_artifact_retention.load_claim(approved_plan_sha256)
+            dependencies.preflight_artifact_retention.claim(plan)
+            result = dependencies.preflight_artifact_retention.apply(plan)
+        else:
+            return 2
     _write_json(dependencies.stdout, result)
     return 0
 
@@ -994,56 +1062,6 @@ def _latest_attempt_event(events: list[RequestEvent]) -> RequestEvent | None:
     return current_attempt[-1]
 
 
-def _resume_binding_matches(
-    config: OperatorConfig,
-    request: RolloutRequest,
-    envelope: DriverEnvelope,
-) -> bool:
-    """Bind resume to the original request and every protected config input."""
-    return (
-        request.runner_config_sha256 == config.config_sha256
-        and envelope.runner_config_sha256 == config.config_sha256
-        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
-        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
-        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
-        and envelope.request_id == request.request_id
-        and envelope.rollout_id == request.rollout_id
-        and envelope.initiating_operator == request.caller.username
-        and envelope.initiating_uid == request.caller.uid
-        and envelope.remote_url == request.candidate.remote_url == config.remote_url
-        and envelope.target_ref == request.candidate.target_ref
-        and config.target_ref == "refs/heads/dev"
-        and envelope.resolved_sha == request.candidate.resolved_sha
-        and envelope.image_tag == request.candidate.image_tag
-        and envelope.fetched_at == request.candidate.fetched_at
-        and envelope.source_mode == request.candidate.source_mode == config.source_mode
-        and envelope.resolved_tree == request.candidate.resolved_tree
-        and envelope.approved_base_sha == request.candidate.approved_base_sha
-        and (
-            config.source_mode == "merged-dev"
-            or (
-                envelope.resolved_sha == config.source_commit_sha
-                and envelope.resolved_tree == config.source_tree_sha
-                and envelope.approved_base_sha == config.source_base_sha
-            )
-        )
-        and envelope.cluster_name == config.cluster_name
-        and envelope.namespace == config.namespace
-        and envelope.environment == config.environment
-        and envelope.cp_url == config.cp_url
-        and envelope.cluster_config_path == str(config.cluster_config_path)
-        and envelope.rollout_root == str(config.rollout_root)
-        and envelope.admin_token_source == config.admin_token_source
-        and envelope.worker_token_source == config.worker_token_source
-        and envelope.service_token_source == config.service_token_source
-        and envelope.expect_admin_token_fingerprint == config.expect_admin_token_fingerprint
-        and envelope.smoke_on_behalf_username == config.smoke_on_behalf_username
-        and envelope.smoke_on_behalf_team_id == config.smoke_on_behalf_team_id
-        and envelope.scope == config.scope
-        and envelope.gb10_prep_concurrency == config.gb10_prep_concurrency
-    )
-
-
 def _is_prelaunch_orphan(events: list[RequestEvent], attempt_number: int) -> bool:
     matching = [event for event in events if event.attempt_number == attempt_number]
     event_types = {event.event for event in matching}
@@ -1101,9 +1119,9 @@ def _resume(
             )
         except Exception:
             return _safe_error(dependencies, "first finalized attempt is unavailable")
-        if not _resume_binding_matches(dependencies.config, request, first):
+        if not resume_binding_matches(dependencies.config, request, first):
             return _safe_error(dependencies, "request config binding no longer matches")
-        if not _resume_binding_matches(dependencies.config, request, latest_envelope):
+        if not resume_binding_matches(dependencies.config, request, latest_envelope):
             return _safe_error(dependencies, "request config binding no longer matches")
         if (
             latest_envelope.backup_manifest_path != first.backup_manifest_path
@@ -2077,6 +2095,35 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         if config.source_mode == "sealed-cumulative"
         else None
     )
+    preflight_artifact_retention = None
+    if config.source_mode == "sealed-cumulative":
+        artifact_references = InstalledPreflightArtifactReferenceInventory(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            resume_eligible=InstalledResumeEligibility(
+                config=config,
+                service_uid=service_uid,
+                store=store,
+                attestation_store=deep_preflight.attestation_store,
+                read_mutation_epoch=deep_preflight.current_mutation_epoch,
+            ),
+            maintenance_references=InstalledMaintenanceReferenceInventory(
+                config=config,
+                service_uid=service_uid,
+            ),
+        )
+        preflight_artifact_retention = InstalledPreflightArtifactRetentionService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            artifact_store=PreflightArtifactStore(
+                config.state_root,
+                service_uid=service_uid,
+            ),
+            collect_references=lambda observed_at: artifact_references.collect(now=observed_at),
+            now=clock,
+        )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -2106,6 +2153,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         lifecycle_capacity=lifecycle_capacity,
         backup_retention=backup_retention,
         backup_recovery=backup_recovery,
+        preflight_artifact_retention=preflight_artifact_retention,
     )
 
 
@@ -2195,6 +2243,13 @@ def _main(
                 deps,
                 caller,
                 action=args.retention_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
+            )
+        if args.command == "preflight-artifact-retention":
+            return _preflight_artifact_retention(
+                deps,
+                caller,
+                action=args.artifact_retention_action,
                 approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         if args.command == "backup-recovery":
