@@ -229,6 +229,7 @@ class _NetworkInput(_StrictModel):
     ingress_class_name: str
     ingress_cluster_issuer: str
     ingress_controller_source_cidrs: list[str] = Field(default_factory=list, max_length=32)
+    acme_http01_solver_port: int = Field(ge=1, le=65535)
     kubernetes_api_cidr: str
     kubernetes_api_port: int = Field(ge=1, le=65535)
     dns_namespace: str
@@ -466,6 +467,8 @@ class _ProfileInput(_StrictModel):
             raise ValueError("personal-dev pools must be exactly OLDLAB and GB10")
         if self.network.capacity_manager_port != 8443:
             raise ValueError("capacity manager port differs from the protected service")
+        if self.network.acme_http01_solver_port != 8089:
+            raise ValueError("ACME HTTP-01 solver port differs from cert-manager")
         if self.network.dns_port != 53:
             raise ValueError("DNS port differs from the cluster service")
         return self
@@ -904,6 +907,7 @@ class PersonalDevControlPlaneNetwork:
     ingress_class_name: str
     ingress_cluster_issuer: str
     ingress_controller_source_cidrs: tuple[str, ...]
+    acme_http01_solver_port: int
     kubernetes_api_cidr: str
     kubernetes_api_port: int
     dns_namespace: str

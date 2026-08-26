@@ -41,6 +41,7 @@ public_origin = "https://loom-service.dev.yylx.world"
 ingress_class_name = "nginx"
 ingress_cluster_issuer = "letsencrypt-prod"
 ingress_controller_source_cidrs = ["192.168.50.14/32", "192.168.50.15/32", "192.168.50.16/32", "192.168.50.17/32", "192.168.50.103/32"]
+acme_http01_solver_port = 8089
 kubernetes_api_cidr = "10.43.0.1/32"
 kubernetes_api_port = 443
 dns_namespace = "kube-system"

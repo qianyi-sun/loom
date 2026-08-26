@@ -67,6 +67,8 @@ operational_plan_sha256="<reviewed-operational-plan-sha256>"
 acceptance_result="<absolute-owner-only-acceptance-result.json>"
 rollback_evidence="<absolute-owner-only-acceptance-shadow-rollback-evidence>"
 backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
+trusted_launcher_profile="<absolute-owner-only-source-derived-trusted-launcher-profile>"
+scanner_finding_policy="<absolute-owner-only-source-derived-scanner-finding-policy>"
 kubeconfig="<absolute-reviewed-self-contained-mode-0600-kubeconfig>"
 expected_kube_context="<reviewed-context>"
 
@@ -98,6 +100,8 @@ for path in \
   "$acceptance_result" \
   "$rollback_evidence" \
   "$backup_restore_evidence" \
+  "$trusted_launcher_profile" \
+  "$scanner_finding_policy" \
   "$kubeconfig"; do
   assert_owner_only_file "$path"
 done
@@ -110,6 +114,17 @@ test "$(sha256sum "$rollback_evidence" | awk '{print $1}')" = \
   "$(jq -r .approval.rollback_evidence_sha256 "$operational_plan")"
 test "$(sha256sum "$backup_restore_evidence" | awk '{print $1}')" = \
   "$(jq -r .storage.backup_restore_evidence_sha256 "$operational_plan")"
+test "$(sha256sum "$trusted_launcher_profile" | awk '{print $1}')" = \
+  "$(jq -r .builder.trusted_launcher_profile_sha256 "$operational_plan")"
+test "$(sha256sum "$scanner_finding_policy" | awk '{print $1}')" = \
+  "$(jq -r .builder.scanner_finding_policy_sha256 "$operational_plan")"
+
+operational_evidence_args=(
+  --source-root "$repo"
+  --trusted-launcher-profile-file "$trusted_launcher_profile"
+  --scanner-finding-policy-file "$scanner_finding_policy"
+  --backup-restore-evidence-file "$backup_restore_evidence"
+)
 
 cd "$repo"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
@@ -198,9 +213,24 @@ with open(sys.argv[1], "rb") as stream:
     print(urlsplit(tomllib.load(stream)["network"]["public_origin"]).hostname)
 ' "$profile")"
 test -n "$management_host"
+solver_port="$(python3 -c '
+import sys, tomllib
+with open(sys.argv[1], "rb") as stream:
+    print(tomllib.load(stream)["network"]["acme_http01_solver_port"])
+' "$profile")"
+test "$solver_port" = 8089
 
 getent ahosts "$management_host" > "$evidence_dir/management.dns.txt"
 test -s "$evidence_dir/management.dns.txt"
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-acme-http01-ingress -o json \
+  > "$evidence_dir/management.acme-http01-network-policy.json"
+jq -e --argjson port "$solver_port" '
+  .spec.podSelector.matchLabels == {"acme.cert-manager.io/http01-solver":"true"} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  .spec.ingress[0].ports == [{port:$port,protocol:"TCP"}]
+' "$evidence_dir/management.acme-http01-network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
@@ -239,6 +269,7 @@ if ! "$loom_cli" admin personal-dev-control-plane \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --operational-plan-file "$operational_plan" \
   --operational-plan-sha256 "$operational_plan_sha256" \
+  "${operational_evidence_args[@]}" \
   > "$operational_tmp" 2> "$operational_evidence_tmp"; then
   exit 1
 fi
@@ -314,6 +345,7 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --operational-plan-file "$operational_plan" \
   --operational-plan-sha256 "$operational_plan_sha256" \
+  "${operational_evidence_args[@]}" \
   > "$post_launch_status"
 chmod 0600 "$post_launch_status"
 jq -e --arg plan "$operational_plan_sha256" '
@@ -407,6 +439,7 @@ reviewed operational manifest. The final diff must be empty.
   --trusted-release-sha256 "$trusted_release_sha256" \
   --operational-plan-file "$operational_plan" \
   --operational-plan-sha256 "$operational_plan_sha256" \
+  "${operational_evidence_args[@]}" \
   > "$final_launch_status"
 chmod 0600 "$final_launch_status"
 jq -e '
