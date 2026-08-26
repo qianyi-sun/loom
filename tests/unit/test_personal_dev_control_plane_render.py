@@ -289,7 +289,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert repeated == rendered
     assert rendered.yaml_text.endswith("\n")
     assert rendered.resource_count == len(documents)
-    assert rendered.resource_count == 34
+    assert rendered.resource_count == 35
     expected_input = hashlib.sha256(
         b"loom-personal-dev-shadow-render-v1\0"
         + profile.canonical_bytes()
@@ -302,7 +302,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "ed631b0ead58257d393e347f4a918369605a036fbda5444b72cd5547c9b5002b"
+        "76a61d3a01a3d014d166b452107d7411031359a7516aa401468c992b934017d6"
     )
 
     identities = {_identity(document) for document in documents}
@@ -340,6 +340,11 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
             "NetworkPolicy",
             "loom-dev",
             "loom-personal-dev-capacity-manager-ingress",
+        ),
+        (
+            "NetworkPolicy",
+            "loom-dev",
+            "loom-personal-dev-acme-http01-ingress",
         ),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-migration-egress"),
@@ -461,7 +466,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             + plan.canonical_bytes()
         ).hexdigest()
     )
-    assert rendered.resource_count == shadow.resource_count == 34
+    assert rendered.resource_count == shadow.resource_count == 35
     assert rendered.runtime_class_name == plan.builder.runtime_class_name
     assert rendered.runtime_handler == plan.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == plan.builder.runtime_profile_sha256
@@ -696,7 +701,7 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         acceptance_documents,
     ) = _acceptance_render(tmp_path)
 
-    assert shadow_render.resource_count == acceptance_render.resource_count == 34
+    assert shadow_render.resource_count == acceptance_render.resource_count == 35
     for profile, release, plan, documents in (
         (shadow_profile, shadow_release, None, shadow_documents),
         (
@@ -1139,7 +1144,7 @@ def test_management_ingress_admits_exact_controller_hosts_and_known_pods(
         == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
     )
 
-    assert rendered.resource_count == 34
+    assert rendered.resource_count == 35
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1190,7 +1195,7 @@ def test_management_ingress_without_controller_hosts_preserves_selector_only_pol
     )
 
     assert profile.network.ingress_controller_source_cidrs == ()
-    assert rendered.resource_count == 34
+    assert rendered.resource_count == 35
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1234,7 +1239,7 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
         )
     )
 
-    assert rendered.resource_count == 34
+    assert rendered.resource_count == 35
     assert manager_ingress["spec"] == {
         "podSelector": {
             "matchLabels": {
@@ -1255,6 +1260,57 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
                 ],
                 "ports": [
                     {"protocol": "TCP", "port": profile.network.capacity_manager_port}
+                ],
+            }
+        ],
+    }
+
+
+def test_acme_http01_ingress_admits_only_exact_ingress_sources_and_port(
+    tmp_path: Path,
+) -> None:
+    profile, _release, rendered, documents = _render(tmp_path)
+    solver_ingress = next(
+        item
+        for item in documents
+        if _identity(item)
+        == (
+            "NetworkPolicy",
+            "loom-dev",
+            "loom-personal-dev-acme-http01-ingress",
+        )
+    )
+
+    assert rendered.resource_count == 35
+    assert solver_ingress["spec"] == {
+        "podSelector": {
+            "matchLabels": {"acme.cert-manager.io/http01-solver": "true"}
+        },
+        "policyTypes": ["Ingress"],
+        "ingress": [
+            {
+                "from": [
+                    {"ipBlock": {"cidr": "192.168.50.14/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.15/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.16/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.17/32"}},
+                    {"ipBlock": {"cidr": "192.168.50.103/32"}},
+                    {
+                        "namespaceSelector": {
+                            "matchLabels": {
+                                "kubernetes.io/metadata.name": "ingress-nginx"
+                            }
+                        },
+                        "podSelector": {
+                            "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
+                        },
+                    },
+                ],
+                "ports": [
+                    {
+                        "protocol": "TCP",
+                        "port": profile.network.acme_http01_solver_port,
+                    }
                 ],
             }
         ],

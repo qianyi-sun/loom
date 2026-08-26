@@ -3133,6 +3133,41 @@ def _network_policies(
             "egress": [dns, postgres],
         },
     )
+    acme_http01_ingress = policy(
+        "loom-personal-dev-acme-http01-ingress",
+        {
+            "podSelector": {
+                "matchLabels": {"acme.cert-manager.io/http01-solver": "true"}
+            },
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [
+                        *(
+                            {"ipBlock": {"cidr": cidr}}
+                            for cidr in profile.network.ingress_controller_source_cidrs
+                        ),
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "kubernetes.io/metadata.name": "ingress-nginx"
+                                }
+                            },
+                            "podSelector": {
+                                "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
+                            },
+                        },
+                    ],
+                    "ports": [
+                        {
+                            "protocol": "TCP",
+                            "port": profile.network.acme_http01_solver_port,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
     management_ingress = policy(
         "loom-personal-dev-management-ingress",
         {
@@ -3188,6 +3223,7 @@ def _network_policies(
         minio_ingress,
         management,
         capacity_manager_ingress,
+        acme_http01_ingress,
         management_ingress,
         migration,
         activation,

@@ -213,9 +213,24 @@ with open(sys.argv[1], "rb") as stream:
     print(urlsplit(tomllib.load(stream)["network"]["public_origin"]).hostname)
 ' "$profile")"
 test -n "$management_host"
+solver_port="$(python3 -c '
+import sys, tomllib
+with open(sys.argv[1], "rb") as stream:
+    print(tomllib.load(stream)["network"]["acme_http01_solver_port"])
+' "$profile")"
+test "$solver_port" = 8089
 
 getent ahosts "$management_host" > "$evidence_dir/management.dns.txt"
 test -s "$evidence_dir/management.dns.txt"
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-acme-http01-ingress -o json \
+  > "$evidence_dir/management.acme-http01-network-policy.json"
+jq -e --argjson port "$solver_port" '
+  .spec.podSelector.matchLabels == {"acme.cert-manager.io/http01-solver":"true"} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  .spec.ingress[0].ports == [{port:$port,protocol:"TCP"}]
+' "$evidence_dir/management.acme-http01-network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"

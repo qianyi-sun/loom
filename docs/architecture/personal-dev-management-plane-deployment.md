@@ -112,7 +112,9 @@ namespace unless Kubernetes requires cluster scope:
   inherit each other's storage access. A package-owned additive policy selects
   only the global capacity-manager Pod and admits TCP 8443 only from the
   personal-management Pod; it does not replace or widen the capacity package's
-  ingress policy; and
+  ingress policy. A separate additive policy selects only cert-manager's exact
+  HTTP-01 solver label and admits the exact ingress-controller sources on the
+  profile-pinned TCP 8089 solver port while retaining default-deny egress; and
 - internal Services plus one operator-configured management API Ingress. No
   shared Control Plane, Gateway, worker, family orchestrator, pipeline
   orchestrator, or web Deployment is rendered.

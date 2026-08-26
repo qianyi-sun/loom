@@ -832,7 +832,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 30, "ready": True},
+            {"name": "namespaced-resources", "observed": 31, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
@@ -1883,7 +1883,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 29, "ready": True},
+            {"name": "namespaced-resources", "observed": 30, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
         ],
@@ -2257,7 +2257,7 @@ def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -
     assert result.ready is True
     assert result.blockers == ()
     components = {component.name: component for component in result.components}
-    assert components["namespaced-resources"].observed == 31
+    assert components["namespaced-resources"].observed == 32
 
 
 @pytest.mark.parametrize(

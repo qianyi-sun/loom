@@ -60,6 +60,17 @@ def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> Non
     assert '"cidr": "0.0.0.0/0"' not in source
 
 
+def test_shadow_package_pins_the_exact_acme_http01_solver_boundary() -> None:
+    profile = _read("deploy/dev-fleet/personal-dev-control-plane.toml")
+    source = _read("src/loom/personal_dev_control_plane_render.py")
+
+    assert "acme_http01_solver_port = 8089" in profile
+    assert '"loom-personal-dev-acme-http01-ingress"' in source
+    assert '"acme.cert-manager.io/http01-solver": "true"' in source
+    assert "profile.network.ingress_controller_source_cidrs" in source
+    assert "profile.network.acme_http01_solver_port" in source
+
+
 def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -> None:
     personal = personal_dev_preparation_manifest_documents(
         derive_identity("alice"),
@@ -995,6 +1006,11 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
     assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
     assert runbook.count('"${operational_evidence_args[@]}"') == 3
+    assert 'test "$solver_port" = 8089' in runbook
+    assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
+    assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
+    assert '(.spec | has("egress") | not)' in runbook
+    assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
 
 

@@ -979,7 +979,7 @@ def test_status_emits_one_canonical_record_and_readiness_exit_code(
         namespace: str,
     ) -> PersonalDevShadowStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 34
+        assert expected.resource_count == 35
         assert namespace == "loom-dev"
         return status
 
@@ -1043,7 +1043,7 @@ def test_status_acceptance_emits_one_canonical_read_only_record(
         namespace: str,
     ) -> PersonalDevAcceptanceStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 34
+        assert expected.resource_count == 35
         assert plan.sha256 == plan_digest
         assert namespace == "loom-dev"
         return status
@@ -1111,7 +1111,7 @@ def test_status_operational_emits_one_canonical_read_only_record(
         namespace: str,
     ) -> PersonalDevOperationalStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 34
+        assert expected.resource_count == 35
         assert plan.sha256 == plan_digest
         assert namespace == "loom-dev"
         return status
