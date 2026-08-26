@@ -528,9 +528,11 @@ def _build_trajectory_index(result: TrialResult) -> dict[str, object]:
         "trajectory_uri": result.trajectory_uri,
         "trajectory_sha256": result.trajectory_sha256,
         "trajectory_size_bytes": result.trajectory_size_bytes,
+        "trajectory_version_id": result.trajectory_version_id,
         "atif_uri": result.atif_uri,
         "atif_sha256": result.atif_sha256,
         "atif_size_bytes": result.atif_size_bytes,
+        "atif_version_id": result.atif_version_id,
         "atif_schema_version": result.atif_schema_version,
         "artifacts": artifacts,
     }

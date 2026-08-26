@@ -23,6 +23,7 @@ class CollectedArtifact:
     key: str
     size: int
     content_hash: str
+    version_id: str | None
     share_status: ShareStatus
     blocked_reason: str | None = None
 
@@ -106,7 +107,7 @@ class ArtifactCollector:
                 )
                 body = local_target.read_bytes()
                 share_decision = contains_secret_like_content(body)
-                await self.store.put_object(
+                write_result = await self.store.put_object_with_metadata(
                     bucket=self.bucket, key=key, body=body,
                 )
                 artifacts.append(
@@ -115,6 +116,7 @@ class ArtifactCollector:
                         key=key,
                         size=len(body),
                         content_hash=f"sha256:{sha256(body).hexdigest()}",
+                        version_id=write_result.version_id,
                         share_status=share_decision.status,
                         blocked_reason=share_decision.reason,
                     ),

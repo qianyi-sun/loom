@@ -1,4 +1,5 @@
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,41 @@ async def test_collect_and_upload(
     assert [a.size for a in collection.artifacts] == [8, 8]
     assert ("artifacts", "t1/r1/main/out/a.json") in store.objects
     assert ("artifacts", "t1/r1/main/out/b.json") in store.objects
+
+
+async def test_collect_preserves_post_upload_object_version(
+    fake_with_artifacts: FakeDriver,
+    tmp_path: Path,
+) -> None:
+    class VersionedStore(FakeObjectStore):
+        async def put_object_with_metadata(
+            self,
+            *,
+            bucket: str,
+            key: str,
+            body: bytes,
+        ) -> object:
+            uri = await super().put_object(bucket=bucket, key=key, body=body)
+            return SimpleNamespace(uri=uri, version_id=f"version:{key}")
+
+    collector = ArtifactCollector(
+        store=VersionedStore(),
+        bucket="artifacts",
+        team_id="t1",
+        trial_id="r1",
+        step_name="main",
+        local_root=tmp_path / "art",
+    )
+
+    collection = await collector.collect(
+        env=fake_with_artifacts,
+        patterns=["out/*.json"],
+    )
+
+    assert [artifact.version_id for artifact in collection.artifacts] == [
+        "version:t1/r1/main/out/a.json",
+        "version:t1/r1/main/out/b.json",
+    ]
 
 
 async def test_collect_marks_secret_like_artifacts_blocked(

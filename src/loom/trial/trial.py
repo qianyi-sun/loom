@@ -445,6 +445,7 @@ class Trial:
                 result.trajectory_uri = self.ctx.trajectory_uri if writer.remote_committed else None
                 result.trajectory_sha256 = hashlib.sha256(trajectory_body).hexdigest()
                 result.trajectory_size_bytes = len(trajectory_body)
+                result.trajectory_version_id = writer.remote_version_id
                 finalized = await asyncio.wait_for(
                     asyncio.shield(
                         finalize_trajectory_with_metadata(
@@ -464,6 +465,7 @@ class Trial:
                 result.atif_uri = finalized.uri
                 result.atif_sha256 = finalized.sha256
                 result.atif_size_bytes = finalized.size_bytes
+                result.atif_version_id = finalized.version_id
                 result.atif_schema_version = "1.7"
             except (Exception, TimeoutError) as exc:
                 if result.state == TrialState.SUCCEEDED:
