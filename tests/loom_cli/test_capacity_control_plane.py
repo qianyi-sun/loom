@@ -872,6 +872,20 @@ def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts(
         {"ipBlock": {"cidr": "192.168.50.13/32"}},
     ]
     manager_peers = policies["capacity-manager-ingress"]["ingress"][0]["from"]
+    assert manager_peers[:-1] == [
+        {
+            "namespaceSelector": {},
+            "podSelector": {
+                "matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}
+            },
+        },
+        {"podSelector": {"matchLabels": {"app": "loom-service"}}},
+        {
+            "podSelector": {
+                "matchLabels": {"app": "loom-personal-dev-management"}
+            }
+        },
+    ]
     assert manager_peers[-1] == {
         "namespaceSelector": {
             "matchLabels": {"kubernetes.io/metadata.name": "loom-capacity-router"}
@@ -1468,6 +1482,11 @@ def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks()
             "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}},
         },
         {"podSelector": {"matchLabels": {"app": "loom-service"}}},
+        {
+            "podSelector": {
+                "matchLabels": {"app": "loom-personal-dev-management"}
+            }
+        },
     ]
     assert not any(
         "ipBlock" in peer
