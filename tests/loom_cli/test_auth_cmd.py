@@ -552,11 +552,14 @@ def test_whoami_prints_legacy_team_token_scopes_and_prefix(
         f"Bearer {raw_token}"
     )
     out = capsys.readouterr().out
-    assert "Server:    https://loom.test" in out
-    assert "Principal: legacy team token" in out
-    assert "Team:      Team Alpha (owner)" in out
-    assert "Scopes:    providers:manage, read:own, submit" in out
-    assert "Token:     loom_api_abcd1234" in out
+    assert out == (
+        "Server:    https://loom.test\n"
+        "Principal: legacy team token\n"
+        "Team:      Team Alpha (owner)\n"
+        "Scopes:    providers:manage, read:own, submit\n"
+        "Token:     loom_api_abcd1234\n"
+        "Expires:   2026-07-22T00:00:00Z\n"
+    )
     assert raw_token not in out
 
 

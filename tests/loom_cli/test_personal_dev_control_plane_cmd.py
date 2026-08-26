@@ -539,6 +539,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     plan_path, plan_sha256, result_path, result_sha256 = _acceptance_result_files(tmp_path)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
 
     rc = dispatch(
         _verify_acceptance_result_argv(
@@ -559,9 +560,9 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         "acceptance_result_sha256": result_sha256,
         "cross_owner_denial_count": 6,
         "owner_count": 2,
-        "release_sha256": record["release_sha256"],
+        "release_sha256": plan.release.trusted_release_sha256,
         "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
-        "shadow_manifest_sha256": record["shadow_manifest_sha256"],
+        "shadow_manifest_sha256": plan.release.shadow_manifest_sha256,
         "verified": True,
     }
 
@@ -609,6 +610,9 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
     with patch(
         "loom_cli.personal_dev_control_plane_cmd._SubprocessKubectlRunner",
         side_effect=AssertionError("verification must not construct a Kubernetes runner"),
+    ), patch(
+        "loom_cli.personal_dev_control_plane_cmd.subprocess.run",
+        side_effect=AssertionError("verification must not create a subprocess"),
     ):
         rc = dispatch(
             _verify_acceptance_result_argv(
