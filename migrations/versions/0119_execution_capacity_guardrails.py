@@ -110,10 +110,10 @@ def upgrade() -> None:
             AND provider_quota_vcpu_millis > 0
             AND provider_quota_memory_mib > 0
             AND provider_quota_storage_mib > 0
-            AND provider_used_nodes BETWEEN 0 AND provider_quota_nodes
-            AND provider_used_vcpu_millis BETWEEN 0 AND provider_quota_vcpu_millis
-            AND provider_used_memory_mib BETWEEN 0 AND provider_quota_memory_mib
-            AND provider_used_storage_mib BETWEEN 0 AND provider_quota_storage_mib
+            AND provider_used_nodes >= 0
+            AND provider_used_vcpu_millis >= 0
+            AND provider_used_memory_mib >= 0
+            AND provider_used_storage_mib >= 0
           ),
           CONSTRAINT execution_capacity_observations_cluster_check CHECK (
             active_nodes >= 0

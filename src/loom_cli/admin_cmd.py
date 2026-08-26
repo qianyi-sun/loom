@@ -433,6 +433,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
     endpoint = {
         "task-image-builder": "task-image-builder-tokens",
         "task-image-registry-gc": "task-image-registry-gc-tokens",
+        "execution-capacity-collector": "execution-capacity-collector-tokens",
     }.get(kind, "worker-tokens")
     url = f"{args.cp_url.rstrip('/')}/admin/{endpoint}"
     body: dict[str, int] = {}
@@ -477,6 +478,12 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "install it only in the registry-retention controller; "
                 "do not install it on builders or trial workers"
             )
+        elif kind == "execution-capacity-collector":
+            label = "execution capacity collector"
+            next_step = (
+                "install it only as the collector control-plane token; "
+                "do not install it on actuators or trial workers"
+            )
         else:
             label = "worker"
             next_step = (
@@ -501,6 +508,12 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "--format json | jq -r .token \\\n"
                 "    > /secure/staging-task-image-registry-gc.token\n"
             )
+        elif kind == "execution-capacity-collector":
+            install_hint = (
+                "  loom admin tokens worker mint --kind execution-capacity-collector "
+                "--format json | jq -r .token \\\n"
+                "    > /secure/staging-execution-capacity-collector.token\n"
+            )
         else:
             install_hint = (
                 "  loom admin tokens worker mint --format json | jq -r .token \\\n"
@@ -509,7 +522,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "        --dry-run=client -o yaml | kubectl apply -f -\n"
             )
         sys.stdout.write(
-            f"New {('task-image builder' if kind == 'task-image-builder' else 'task-image registry GC' if kind == 'task-image-registry-gc' else 'worker')} "
+            f"New {('task-image builder' if kind == 'task-image-builder' else 'task-image registry GC' if kind == 'task-image-registry-gc' else 'execution capacity collector' if kind == 'execution-capacity-collector' else 'worker')} "
             f"token minted.\n"
             f"  prefix: {data['token_hash_prefix']}\n"
             f"\nThe raw token was NOT printed (terminal scrollback risk).\n"
@@ -2277,11 +2290,16 @@ def dispatch(argv: list[str]) -> int:
     )
     p_mint.add_argument(
         "--kind",
-        choices=["trial", "task-image-builder", "task-image-registry-gc"],
+        choices=[
+            "trial",
+            "task-image-builder",
+            "task-image-registry-gc",
+            "execution-capacity-collector",
+        ],
         default="trial",
         help=(
-            "Mint an ordinary trial worker, least-privilege task-image builder, "
-            "or registry-GC token."
+            "Mint an ordinary trial worker or a least-privilege task-image builder, "
+            "registry-GC, or execution-capacity collector token."
         ),
     )
     p_mint.add_argument(

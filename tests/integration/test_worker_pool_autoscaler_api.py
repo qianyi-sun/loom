@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -432,6 +432,58 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         assert capacity_policy.status_code == 200, capacity_policy.text
         assert capacity_policy.json()["version"] == 1
 
+        collector_token = client.post(
+            "/admin/execution-capacity-collector-tokens",
+            headers=headers,
+            json={"expires_in_days": 30},
+        )
+        assert collector_token.status_code == 201, collector_token.text
+        collector_headers = {"Authorization": f"Bearer {collector_token.json()['token']}"}
+        collector_policy = client.get(
+            "/admin/execution-capacity-collector-policy/nebius-finance-api",
+            headers=collector_headers,
+            params={"pool_id": "nebius-finance-api-pool"},
+        )
+        assert collector_policy.status_code == 200, collector_policy.text
+        assert collector_policy.json() == {
+            "target_id": "nebius-finance-api",
+            "pool_id": "nebius-finance-api-pool",
+            "enabled": True,
+            "max_nodes": 20,
+            "node_cpu_millis": 64_000,
+            "node_memory_mib": 262_144,
+            "node_storage_mib": 1_048_576,
+            "version": 1,
+        }
+        assert (
+            client.get(
+                "/admin/execution-capacity/status",
+                headers=collector_headers,
+                params={"pool_id": "nebius-finance-api-pool"},
+            ).status_code
+            == 403
+        )
+        forbidden_policy_write = client.put(
+            "/admin/execution-capacity-policies/nebius-finance-api",
+            headers=collector_headers,
+            json={
+                "enabled": False,
+                "max_nodes": 20,
+                "max_vcpu_millis": 1_280_000,
+                "max_memory_mib": 5_242_880,
+                "max_storage_mib": 20_971_520,
+                "node_cpu_millis": 64_000,
+                "node_memory_mib": 262_144,
+                "node_storage_mib": 1_048_576,
+                "max_pending_jobs": 10,
+                "max_unschedulable_jobs": 1,
+                "max_image_pull_backoff_jobs": 1,
+                "max_create_per_minute": 10,
+                "observation_max_age_seconds": 120,
+            },
+        )
+        assert forbidden_policy_write.status_code == 403
+
         observation_payload = {
             "target_id": "nebius-finance-api",
             "source": "nebius-capacity-export",
@@ -466,21 +518,21 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         }
         capacity_observation = client.post(
             "/admin/execution-capacity-observations",
-            headers=headers,
+            headers=collector_headers,
             json=observation_payload,
         )
         assert capacity_observation.status_code == 200, capacity_observation.text
         assert capacity_observation.json()["created"] is True
         capacity_replay = client.post(
             "/admin/execution-capacity-observations",
-            headers=headers,
+            headers=collector_headers,
             json=observation_payload,
         )
         assert capacity_replay.status_code == 200, capacity_replay.text
         assert capacity_replay.json()["created"] is False
         capacity_conflict = client.post(
             "/admin/execution-capacity-observations",
-            headers=headers,
+            headers=collector_headers,
             json={**observation_payload, "pending_jobs": 2},
         )
         assert capacity_conflict.status_code == 400, capacity_conflict.text
@@ -499,6 +551,26 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         assert capacity_target["command_backlog"] == 0
         assert capacity_target["recent_authorizations"] == []
         assert capacity_target["blockers"] == []
+
+        over_quota = client.post(
+            "/admin/execution-capacity-observations",
+            headers=collector_headers,
+            json={
+                **observation_payload,
+                "source_version": "snapshot-over-quota",
+                "observed_at": (now + timedelta(seconds=1)).isoformat(),
+                "provider_used_nodes": 21,
+            },
+        )
+        assert over_quota.status_code == 200, over_quota.text
+        over_quota_status = client.get(
+            "/admin/execution-capacity/status?pool_id=nebius-finance-api-pool",
+            headers=headers,
+        )
+        assert over_quota_status.status_code == 200, over_quota_status.text
+        over_quota_target = over_quota_status.json()["targets"][0]
+        assert over_quota_target["observation"]["provider_quota_nodes_headroom"] == 0
+        assert "execution_capacity_provider_quota_nodes_exceeded" in over_quota_target["blockers"]
 
         node_cost = client.post(
             "/admin/execution-node-cost-records",

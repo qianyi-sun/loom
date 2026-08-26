@@ -167,15 +167,6 @@ async def create_execution_capacity_observation(
         _positive_int(value, name=name)
     for name, value in non_negative_values.items():
         _non_negative_int(value, name=name)
-    quota_pairs = (
-        (provider_used_nodes, provider_quota_nodes, "nodes"),
-        (provider_used_vcpu_millis, provider_quota_vcpu_millis, "vCPU"),
-        (provider_used_memory_mib, provider_quota_memory_mib, "memory"),
-        (provider_used_storage_mib, provider_quota_storage_mib, "storage"),
-    )
-    for used, limit, label in quota_pairs:
-        if used > limit:
-            raise ValueError(f"provider used {label} exceeds the reported quota")
     if provider_capacity_state not in {"available", "insufficient", "unknown"}:
         raise ValueError("provider_capacity_state is invalid")
     if autoscaler_state not in {"ready", "scaling", "stalled", "unknown"}:

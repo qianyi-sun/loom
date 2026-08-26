@@ -1,8 +1,9 @@
 # Nebius service execution contract
 
 Status: accepted hybrid target architecture for issue #1548. The
-provider-neutral durable control plane and namespace-scoped Kubernetes Job
-adapter are implemented but not traffic-enabled. Infrastructure,
+provider-neutral durable control plane, namespace-scoped Kubernetes Job
+adapter, and read-only capacity collector are implemented but not
+traffic-enabled. Infrastructure,
 sandbox-runtime acceptance, live canaries, routing-policy changes, maintenance
 drains, and any future pool retirement remain separately authorized work.
 
@@ -243,6 +244,45 @@ autoscaler state, command backlog, authorization counts, and distinct refusal
 reasons. These repository surfaces accept persisted observation evidence; they
 do not query or mutate Nebius themselves.
 
+The independently runnable `loom_execution_capacity_collector` is the only
+repository component that combines live provider and cluster readback into
+that API. Each pass first reads the enabled target policy, then captures the
+four exact region-scoped Nebius quota allowances, the bound Managed
+Kubernetes node group, all nodes selected for the target, and all non-terminal
+Pods consuming those nodes. It publishes nothing unless every source returns a
+resource version, the quota service/region/unit bindings match, node-group and
+target identities match, and the control-plane receipt repeats the exact
+source identity and observation time. Transport retries reuse the same
+immutable payload. Usage above quota remains valid evidence and yields zero
+headroom instead of making the observation disappear.
+
+Kubernetes requested-resource accounting follows scheduler semantics: normal
+containers are summed, restartable init sidecars accumulate, ordinary init
+containers contribute their peak, and Pod overhead is added. Ready,
+schedulable selected nodes contribute allocatable resources; all selected-node
+Pods contribute requests; an unscheduled Pending Pod for the exact Loom target
+also contributes demand. Pending, Unschedulable, and image-pull states retain
+bounded reason codes, never Pod messages, node names, provider credentials, or
+raw API responses. A target Pod found outside the configured node selector is
+identity drift and prevents publication.
+
+`deploy/k8s/nebius-capacity-collector.yaml` packages the one-shot collector as
+a one-minute `CronJob` with concurrency forbidden, a read-only `get/list`
+ClusterRole for Nodes and Pods, a non-root/read-only-root filesystem, and
+owner-only copied credential files. It is checked in with `suspend=true` and
+depends on a separately provisioned ConfigMap containing the exact target,
+pool, namespace, node selector, project, node-group, region, control-plane URL,
+and quota name/unit bindings plus two separately provisioned Secrets for the
+Nebius service-account credential file and a Loom bearer carrying only
+`execution:capacity:observe`. Operators mint that credential with
+`loom admin tokens worker mint --kind execution-capacity-collector`; it can
+read only the collector policy projection and publish capacity observations,
+and cannot mutate policy or use ordinary worker authority. Repository
+merge neither creates those credentials nor unsuspends the collector. The
+collector uses the official Nebius Python SDK only for quota `list` and node
+group `get`; it contains no Nebius create, update, delete, or operation-wait
+path.
+
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
@@ -256,7 +296,8 @@ topology for the `nebius-cpu` adapter:
 Development, staging, and production cannot share a target identity or health
 observation. Every target is probed independently; a target becomes ineligible
 when its observation is older than its declared stale threshold. Nebius target
-placement is environment-local and health-first. Production prefers `eu-north1` and may
+placement is environment-local and health-first. Production prefers
+`eu-north1` and may
 fail over to `eu-west1` only when the secondary target is independently healthy
 and the durable lease policy permits the transition. Queued work does not
 cross environments or leave EU residency to recover capacity.
@@ -364,6 +405,8 @@ an architecture assumption. References:
 - <https://docs.nebius.com/kubernetes/node-groups/manage>
 - <https://docs.nebius.com/kubernetes/node-groups/node-group-autoscaling>
 - <https://docs.nebius.com/compute/virtual-machines/types>
+- <https://docs.nebius.com/overview/quotas>
+- <https://github.com/nebius/pysdk>
 - <https://docs.nebius.com/vpc/security-groups>
 
 ## Kubernetes execution units

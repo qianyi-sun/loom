@@ -161,6 +161,39 @@ def test_mint_posts_to_cp_with_bearer(
     assert "--from-file=worker-token=/dev/stdin" in out  # safe-install hint
 
 
+def test_mint_execution_capacity_collector_token_uses_dedicated_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_post(url, **kwargs):  # type: ignore[no-untyped-def]
+        captured["url"] = url
+        return _StubResponse(
+            201,
+            json_data={"token": "loom_ecc_secret", "token_hash_prefix": "a1b2c3d4"},
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    rc = main(
+        [
+            "admin",
+            "tokens",
+            "worker",
+            "mint",
+            "--kind",
+            "execution-capacity-collector",
+        ]
+    )
+    assert rc == 0
+    assert captured["url"] == "http://localhost:8080/admin/execution-capacity-collector-tokens"
+    output = capsys.readouterr().out
+    assert "execution capacity collector" in output
+    assert "loom_ecc_secret" not in output
+    assert "staging-execution-capacity-collector.token" in output
+
+
 def test_mint_strips_trailing_slash_on_cp_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

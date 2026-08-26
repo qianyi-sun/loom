@@ -16,7 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import insert, select, text, update
 
 from loom.auth import AuthContext, verify_bearer_token
-from loom.db.schema import AdminAuditEvent, Token, WorkerPoolAutoscalerPolicy
+from loom.db.schema import (
+    AdminAuditEvent,
+    ExecutionCapacityPolicy,
+    ServiceExecutionTarget,
+    Token,
+    WorkerPoolAutoscalerPolicy,
+)
 from loom_control_plane.execution_admission import (
     fetch_execution_admission_status,
     upsert_execution_admission_policy,
@@ -360,6 +366,41 @@ async def _require_admin_scope(
     return ctx
 
 
+async def _require_any_scope(
+    request: Request,
+    authorization: str | None,
+    *scopes: str,
+) -> AuthContext:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(
+            session,
+            authorization,
+            admin_verifier=getattr(request.app.state, "admin_secret_verifier", None),
+        )
+    if ctx is None or not set(scopes).intersection(ctx.scopes):
+        raise HTTPException(status_code=403, detail=f"missing one of scopes {sorted(scopes)}")
+    return ctx
+
+
+async def _require_capacity_observer(
+    request: Request,
+    authorization: str | None,
+) -> AuthContext:
+    ctx = await _require_any_scope(
+        request,
+        authorization,
+        "admin:worker_pools",
+        "execution:capacity:observe",
+    )
+    if "admin:worker_pools" not in ctx.scopes and (
+        ctx.type != "worker"
+        or ctx.team_id is not None
+        or set(ctx.scopes) != {"execution:capacity:observe"}
+    ):
+        raise HTTPException(status_code=403, detail="invalid capacity observer identity")
+    return ctx
+
+
 @router.post("/worker-tokens", status_code=201)
 async def issue_worker_token(
     request: Request,
@@ -487,6 +528,33 @@ async def issue_task_image_builder_token(
         "token": raw,
         "token_hash_prefix": token_hash.hex()[:8],
     }
+
+
+@router.post("/execution-capacity-collector-tokens", status_code=201)
+async def issue_execution_capacity_collector_token(
+    request: Request,
+    payload: _TaskImageServiceTokenPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Mint a token that can only read its policy and publish observations."""
+    await _require_admin_scope(request, authorization, "admin:tokens")
+
+    raw = "loom_ecc_" + secrets.token_bytes(32).hex()
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
+    async with request.app.state.session_factory() as session:
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["execution:capacity:observe"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
+        await session.commit()
+    return {"token": raw, "token_hash_prefix": token_hash.hex()[:8]}
 
 
 @router.post("/task-image-registry-gc-tokens", status_code=201)
@@ -1202,7 +1270,7 @@ async def post_execution_capacity_observation(
     payload: _ExecutionCapacityObservationPayload,
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
-    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    auth = await _require_capacity_observer(request, authorization)
     try:
         async with request.app.state.session_factory() as session:
             row, created = await create_execution_capacity_observation(
@@ -1241,6 +1309,33 @@ async def post_execution_capacity_observation(
             }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/execution-capacity-collector-policy/{target_id}")
+async def get_execution_capacity_collector_policy(
+    target_id: str,
+    request: Request,
+    pool_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_capacity_observer(request, authorization)
+    async with request.app.state.session_factory() as session:
+        target = await session.get(ServiceExecutionTarget, target_id)
+        policy = await session.get(ExecutionCapacityPolicy, target_id)
+    if target is None or target.provider != "nebius" or target.logical_pool_id != pool_id:
+        raise HTTPException(status_code=404, detail="capacity policy target is unavailable")
+    if policy is None:
+        raise HTTPException(status_code=409, detail="capacity policy is unavailable")
+    return {
+        "target_id": target.id,
+        "pool_id": target.logical_pool_id,
+        "enabled": policy.enabled,
+        "max_nodes": policy.max_nodes,
+        "node_cpu_millis": policy.node_cpu_millis,
+        "node_memory_mib": policy.node_memory_mib,
+        "node_storage_mib": policy.node_storage_mib,
+        "version": policy.version,
+    }
 
 
 @router.get("/execution-capacity/status")
