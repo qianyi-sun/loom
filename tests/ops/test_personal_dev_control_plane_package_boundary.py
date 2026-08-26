@@ -829,7 +829,7 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
     assert "personal-dev-management-plane-deployment.md" in architecture
 
 
-def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
+def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
     normalized = " ".join(runbook.split())
 
@@ -863,32 +863,32 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert '"worker_available":false' in runbook
     assert '"manager_ceiling":0' in runbook
 
-    assert 'owner_a_xdg="<absolute-mode-0700-owner-a-xdg-config-root>"' in runbook
-    assert 'owner_b_xdg="<absolute-mode-0700-owner-b-xdg-config-root>"' in runbook
-    assert 'owner_a_name="<owner-a-personal-name>"' in runbook
-    assert 'owner_b_name="<owner-b-personal-name>"' in runbook
-    assert 'XDG_CONFIG_HOME="$owner_a_xdg"' in runbook
-    assert 'XDG_CONFIG_HOME="$owner_b_xdg"' in runbook
-    assert runbook.count("loom auth whoami") == 2
-    assert "owner_a_deploy_pid=$!" in runbook
-    assert "owner_b_deploy_pid=$!" in runbook
-    assert "wait \"$owner_a_deploy_pid\"" in runbook
-    assert "wait \"$owner_b_deploy_pid\"" in runbook
-    assert "owner_a_update_pid=$!" in runbook
-    assert "owner_b_update_pid=$!" in runbook
+    assert (
+        'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"'
+        in runbook
+    )
+    assert 'primary_name="<owner-primary-personal-name>"' in runbook
+    assert 'retained_name="<owner-retained-personal-name>"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_xdg"' in runbook
+    assert runbook.count("loom auth whoami") == 1
+    assert "primary_deploy_pid=$!" in runbook
+    assert "retained_deploy_pid=$!" in runbook
+    assert "wait \"$primary_deploy_pid\"" in runbook
+    assert "wait \"$retained_deploy_pid\"" in runbook
+    assert "primary_update_pid=$!" in runbook
+    assert "retained_update_pid=$!" in runbook
     assert runbook.count("--min-slots 0") >= 5
-    assert '--source-root "$owner_a_source_v1"' in normalized
-    assert '--source-root "$owner_b_source_v1"' in normalized
-    assert '--source-root "$owner_a_source_v2"' in normalized
-    assert '--source-root "$owner_b_source_v2"' in normalized
-    assert "expect_owner_rejection" in runbook
-    assert 'loom dev status "$owner_b_name"' in normalized
-    assert 'loom dev status "$owner_a_name"' in normalized
-    assert 'loom dev destroy "$owner_b_name" --no-wait' in normalized
-    assert 'loom dev destroy "$owner_a_name" --no-wait' in normalized
-    assert 'loom dev destroy "$owner_a_name" --format json' in normalized
-    assert 'loom dev destroy "$owner_b_name" --keep-data --format json' in normalized
-    assert 'loom service up --environment "dev-$owner_b_name"' in normalized
+    assert '--source-root "$primary_source_v1"' in normalized
+    assert '--source-root "$retained_source_v1"' in normalized
+    assert '--source-root "$primary_source_v2"' in normalized
+    assert '--source-root "$retained_source_v2"' in normalized
+    assert '.acceptance_owner.user_id' in runbook
+    assert '.acceptance_owner.team_id' in runbook
+    assert 'loom dev status "$retained_name"' in normalized
+    assert 'loom dev status "$primary_name"' in normalized
+    assert 'loom dev destroy "$primary_name" --format json' in normalized
+    assert 'loom dev destroy "$retained_name" --keep-data --format json' in normalized
+    assert 'loom service up --environment "dev-$retained_name"' in normalized
     assert 'jq -e --arg previous "$retained_subject"' in normalized
     assert ".subject_id != $previous" in runbook
 
@@ -928,7 +928,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "scanner_finding_policy_sha256" in runbook
     assert "approved secret channel" in lowered
     assert "exact key inventory" in lowered
-    assert "two distinct authenticated owner sessions" in lowered
+    assert "single authenticated acceptance-owner session" in lowered
     assert "arbitrary committed, modified, and untracked source" in lowered
     assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
     assert "issue #906" in lowered

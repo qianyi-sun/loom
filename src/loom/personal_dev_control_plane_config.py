@@ -826,19 +826,8 @@ class _AcceptancePlanInput(_StrictModel):
     manager: _AcceptanceManagerInput
     principals: _AcceptancePrincipalsInput
     quotas: _AcceptanceQuotasInput
-    acceptance_owners: list[_AcceptanceOwnerInput] = Field(min_length=2, max_length=2)
+    acceptance_owner: _AcceptanceOwnerInput
     window: _AcceptanceWindowInput
-
-    @model_validator(mode="after")
-    def _owners_are_distinct(self) -> _AcceptancePlanInput:
-        identities = {
-            identity
-            for owner in self.acceptance_owners
-            for identity in (owner.team_id, owner.user_id)
-        }
-        if len(identities) != 4:
-            raise ValueError("acceptance owners must be distinct")
-        return self
 
 
 class _OperationalApprovalInput(_StrictModel):
@@ -1137,15 +1126,15 @@ class PersonalDevAcceptancePlan:
     manager: PersonalDevAcceptanceManager
     principals: PersonalDevAcceptancePrincipals
     quotas: PersonalDevControlPlaneLimits
-    acceptance_owners: tuple[PersonalDevAcceptanceOwner, PersonalDevAcceptanceOwner]
+    acceptance_owner: PersonalDevAcceptanceOwner
     window: PersonalDevAcceptanceWindow
 
     def canonical_value(self) -> dict[str, Any]:
         return {
-            "acceptance_owners": [
-                {"team_id": str(owner.team_id), "user_id": str(owner.user_id)}
-                for owner in self.acceptance_owners
-            ],
+            "acceptance_owner": {
+                "team_id": str(self.acceptance_owner.team_id),
+                "user_id": str(self.acceptance_owner.user_id),
+            },
             "activation": _dataclass_value(self.activation),
             "builder": _dataclass_value(self.builder),
             "manager": {
@@ -1578,7 +1567,7 @@ def load_personal_dev_acceptance_plan(
         if not isinstance(value, dict) or _canonical_json(value) != payload:
             raise ValueError("acceptance plan JSON is not canonical")
         parsed = _AcceptancePlanInput.model_validate(value)
-        first_owner, second_owner = parsed.acceptance_owners
+        owner = parsed.acceptance_owner
         plan = PersonalDevAcceptancePlan(
             schema_version=parsed.schema_version,
             source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
@@ -1600,15 +1589,9 @@ def load_personal_dev_acceptance_plan(
             ),
             principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
             quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
-            acceptance_owners=(
-                PersonalDevAcceptanceOwner(
-                    team_id=UUID(first_owner.team_id),
-                    user_id=UUID(first_owner.user_id),
-                ),
-                PersonalDevAcceptanceOwner(
-                    team_id=UUID(second_owner.team_id),
-                    user_id=UUID(second_owner.user_id),
-                ),
+            acceptance_owner=PersonalDevAcceptanceOwner(
+                team_id=UUID(owner.team_id),
+                user_id=UUID(owner.user_id),
             ),
             window=PersonalDevAcceptanceWindow(
                 started_at=_parse_acceptance_timestamp(parsed.window.started_at),

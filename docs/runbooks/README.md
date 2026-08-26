@@ -31,7 +31,7 @@ capacity workflow.
   — measured gVisor installation, sequential OLDLAB agent rollout,
   RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
 - **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
-  — plan-bound enablement, two-owner candidate lifecycle acceptance, exact
+  — plan-bound enablement, single-owner two-environment lifecycle acceptance, exact
   zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
 - **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
   — separately gated zero-ceiling manager and two-pool preparation evidence.

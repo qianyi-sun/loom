@@ -1,7 +1,7 @@
 # Personal-development durable zero-capacity launch
 
 This runbook enables the personal application plane as a durable operational
-service after the complete two-owner zero-capacity acceptance has finished and
+service after the complete single-owner zero-capacity acceptance has finished and
 returned the shared management plane to its byte-reviewed inert shadow. It does
 not extend the acceptance window and does not leave an acceptance manifest
 running. The durable manifest is generated from a separate operational plan by
@@ -125,8 +125,9 @@ expiry. Choosing a distant acceptance expiry is not an operational plan.
 
 ## 2. Prove the accepted procedure ended in the exact shadow
 
-The acceptance result must be canonical and report two-owner create/update,
-cross-owner isolation, destroy, retained-data redeploy, and final cleanup. The
+The acceptance result must be canonical and report the exact acceptance owner,
+two-environment create/update and isolation, destroy, retained-data redeploy,
+and final cleanup. The
 acceptance runbook's last apply and status must prove the byte-reviewed shadow,
 not an expired or still-active acceptance manifest.
 
@@ -330,7 +331,7 @@ route behavior.
 
 Use one reviewed authenticated owner session and a small arbitrary source
 snapshot. This is a personal application launch smoke, not another substitute
-for the completed two-owner acceptance. Do not submit a TaskSet, Batch, Trial,
+for the completed single-owner acceptance. Do not submit a TaskSet, Batch, Trial,
 Slurm job, or model call.
 
 ```bash

@@ -748,6 +748,6 @@ chmod 0600 "$evidence_dir/final-evidence.sha256"
 ```
 
 Shadow readiness proves only the shared management foundation and the separate
-zero-ceiling capacity boundary. Acceptance enablement, two-owner application
+zero-ceiling capacity boundary. Acceptance enablement, single-owner application
 deployment, and physical worker execution require later, independently
 reviewed interlocks.

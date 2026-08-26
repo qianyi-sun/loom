@@ -798,7 +798,7 @@ PyYAML, pytest, Ruff, and mypy.
 
   State that the scanner cache is release-bound and prepared in shadow without
   personal or capacity authority. Do not imply DNS, candidate GHCR publishing,
-  gVisor rollout, or two-owner acceptance is complete.
+  gVisor rollout, or single-owner acceptance is complete.
 
 - [ ] **Step 5: Verify and commit documentation**
 
@@ -885,4 +885,4 @@ PyYAML, pytest, Ruff, and mypy.
   and management readiness, run canonical shadow status, and recheck five Ready
   nodes, no DiskPressure, healthy Longhorn volumes, no dynamic namespaces, no
   workers, and exact zero ceiling. Do not render or apply acceptance until the
-  separate gVisor, Secret, DNS, GHCR, backup/restore, and two-owner gates pass.
+  separate gVisor, Secret, DNS, GHCR, backup/restore, and single-owner gates pass.

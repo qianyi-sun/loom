@@ -61,11 +61,11 @@ management plane to an owner-only acceptance plan, exact global-manager
 execution identity, a monotonic configuration-epoch floor, ceiling zero,
 reviewed builder/scanner inputs, and an immutable rollback shadow. Live DNS,
 Secret provisioning, measured gVisor, candidate GHCR publication,
-backup/restore evidence, and two-owner acceptance remain separate operational
+backup/restore evidence, and single-owner acceptance remain separate operational
 gates. Repository assets alone do not authorize their mutation or the live
 acceptance apply.
 
-The acceptance runbook always retires its two owner environments and returns
+The acceptance runbook always retires its two owner-controlled environments and returns
 the management plane to the reviewed inert shadow. Do not extend its expiry or
 leave its manifest active as a persistent deployment. After the complete
 acceptance result and shadow rollback are recorded, use the

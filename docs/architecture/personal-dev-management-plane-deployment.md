@@ -62,9 +62,9 @@ The package is delivered in three repository increments:
    controller and builder enabled and the activation agent at one replica.
    Runtime startup and operator status both recheck the global manager and
    refuse any nonzero executable ceiling. This increment supports #1280's
-   two-owner application acceptance but still cannot allocate a worker.
+   single-owner application acceptance but still cannot allocate a worker.
 3. **Durable zero-capacity operational contract.** After the complete
-   acceptance runbook has retired both owner environments and restored the
+   acceptance runbook has retired both owner-controlled environments and restored the
    reviewed shadow, accept a separate canonical operational plan.
    `render-operational` enables the same personal application authorities
    without retaining the expiring acceptance binding. `status-operational`
@@ -226,7 +226,7 @@ binds:
 - global-manager authority incarnation, configuration epoch, execution state,
   execution epoch, and executable ceiling `0`;
 - exact lifecycle and reporter principal identifiers;
-- two distinct acceptance owner identifiers and finite quotas; and
+- one exact acceptance-owner identifier pair and finite quotas; and
 - change-window, rollback-manifest, and expiry timestamps.
 
 Operational rendering is a separate third mode. It requires an owner-only
@@ -234,7 +234,7 @@ canonical operational plan and its independently supplied SHA-256. The
 operational plan binds the same immutable source, release, storage,
 RuntimeClass, scanner, publisher, registry, activation, quota, principal, and
 global-manager zero-capacity boundaries needed for acceptance. It also binds
-the completed two-owner acceptance result and the exact byte-reviewed shadow
+the completed single-owner acceptance result and the exact byte-reviewed shadow
 rollback manifest. It does not contain acceptance owners or an acceptance
 window, and an operator must not simulate durability by choosing a distant
 acceptance expiry. Configuration-epoch advancement is permitted only as the
@@ -248,7 +248,7 @@ match. It is control evidence, not a credential.
 
 Repository implementation does not establish the live prerequisites by
 itself. DNS and TLS, provisioned Secret inventories, the measured gVisor
-RuntimeClass, candidate GHCR publication, backup/restore evidence, two-owner
+RuntimeClass, candidate GHCR publication, backup/restore evidence, single-owner
 acceptance, and a successful operational apply/status remain separate
 operational gates. None may be inferred from a successful render or from
 scanner-cache preparation, and the executable ceiling remains zero throughout
@@ -331,8 +331,8 @@ and worker availability. For this phase, application and non-executable
 capacity publication may become ready; `worker_available` must remain false.
 
 Acceptance is not a steady-state mode. Its finite window and owner-specific
-evidence exist to prove the behavior under test. After the two owners complete
-create, concurrent build, update, isolation, destroy, retained-data redeploy,
+evidence exist to prove the behavior under test. After the acceptance owner completes
+create, concurrent two-environment build, update, isolation, destroy, retained-data redeploy,
 and final destroy, the acceptance runbook reapplies the exact shadow it
 reviewed before forward mutation. Leaving the acceptance manifest active past
 that procedure is configuration drift even if its expiry has not yet arrived.
@@ -386,19 +386,20 @@ and do not apply shadow over unresolved dynamic authority.
 After the shadow rehearsal and acceptance interlock are merged, published, and
 deployed, #1280 closes only after this controlled test:
 
-1. Two distinct user/team owners authenticate to the management API.
-2. Each owner deploys a distinct arbitrary source snapshot with
+1. The exact acceptance owner authenticates to the management API.
+2. The owner deploys two distinctly named arbitrary source snapshots with
    `loom service up --environment dev-<name> --min-slots 0`.
 3. Both builds and lifecycle operations run concurrently without shared mutable
    candidate, attempt, registry, database, bucket, credential, or namespace
    authority.
-4. Each owner performs an independent source update and capacity-policy update.
-5. Cross-owner list/detail/mutation, Secret, database, bucket, and namespace
-   access is rejected.
+4. The owner performs independent source and capacity-policy updates for both
+   environments.
+5. Candidate, subject, Secret, database, bucket, route, worker-pool, and
+   namespace identities remain disjoint across the two environments.
 6. Application readiness and initial non-executable demand publication succeed,
    while worker availability remains false and the manager ceiling remains `0`.
-7. One owner destroys with data deletion and the other with `--keep-data`;
-   neither operation mutates `loom-dev` or the sibling namespace.
+7. The owner destroys one environment with data deletion and the other with
+   `--keep-data`; neither operation mutates `loom-dev` or the sibling namespace.
 8. The retained environment name is redeployed and proves authority rotation.
 
 Physical one-slot x86_64, arm64, and architecture-neutral task execution is not

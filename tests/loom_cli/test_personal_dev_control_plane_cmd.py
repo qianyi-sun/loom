@@ -104,16 +104,10 @@ def _acceptance_plan(
         ).encode("ascii")
     ).hexdigest()
     value = {
-        "acceptance_owners": [
-            {
-                "team_id": "00000000-0000-0000-0000-000000000201",
-                "user_id": "00000000-0000-0000-0000-000000000301",
-            },
-            {
-                "team_id": "00000000-0000-0000-0000-000000000202",
-                "user_id": "00000000-0000-0000-0000-000000000302",
-            },
-        ],
+        "acceptance_owner": {
+            "team_id": "00000000-0000-0000-0000-000000000201",
+            "user_id": "00000000-0000-0000-0000-000000000301",
+        },
         "activation": {
             "key_id": "personal-dev-agent-v1",
             "public_key_sha256": "c" * 64,
@@ -195,7 +189,7 @@ def _operational_plan(
         release_digest,
     )
     value = acceptance.canonical_value()
-    value.pop("acceptance_owners")
+    value.pop("acceptance_owner")
     value.pop("window")
     value["approval"] = {
         "acceptance_result_sha256": "4" * 64,
