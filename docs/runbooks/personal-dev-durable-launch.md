@@ -59,6 +59,7 @@ umask 077
 
 repo="<absolute-clean-detached-loom-checkout>"
 profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
+loom_cli="$repo/.venv/bin/loom"
 trusted_release="<absolute-owner-only-trusted-release.json>"
 trusted_release_sha256="<reviewed-trusted-release-sha256>"
 operational_plan="<absolute-owner-only-operational-plan.json>"
@@ -68,6 +69,8 @@ rollback_evidence="<absolute-owner-only-acceptance-shadow-rollback-evidence>"
 backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
 kubeconfig="<absolute-reviewed-self-contained-mode-0600-kubeconfig>"
 expected_kube_context="<reviewed-context>"
+
+test -x "$loom_cli"
 
 evidence_dir="<new-absolute-owner-only-durable-launch-evidence-directory>"
 install -d -m 0700 "$evidence_dir"
@@ -138,7 +141,7 @@ test "$(jq -r .release_sha256 "$acceptance_result")" = "$trusted_release_sha256"
 test "$(jq -r .shadow_manifest_sha256 "$acceptance_result")" = \
   "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
 
-/home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status \
+"$loom_cli" admin personal-dev-control-plane status \
   --namespace loom-dev \
   --kubeconfig "$kubeconfig" \
   --file "$profile" \
@@ -229,7 +232,7 @@ rollback digest in the operational plan.
 ```bash
 operational_tmp="$(mktemp "$evidence_dir/operational.XXXXXX.yaml")"
 operational_evidence_tmp="$(mktemp "$evidence_dir/operational.XXXXXX.json")"
-if ! /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane \
+if ! "$loom_cli" admin personal-dev-control-plane \
   render-operational \
   --file "$profile" \
   --trusted-release-file "$trusted_release" \
@@ -245,7 +248,7 @@ mv "$operational_evidence_tmp" "$operational_render_evidence"
 
 shadow_tmp="$(mktemp "$evidence_dir/shadow.XXXXXX.yaml")"
 shadow_evidence_tmp="$(mktemp "$evidence_dir/shadow.XXXXXX.json")"
-if ! /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane render \
+if ! "$loom_cli" admin personal-dev-control-plane render \
   --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
@@ -302,7 +305,7 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-activation-agent --timeout=300s
 
-/home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane \
+"$loom_cli" admin personal-dev-control-plane \
   status-operational \
   --namespace loom-dev \
   --kubeconfig "$kubeconfig" \
@@ -395,7 +398,7 @@ checks, Secret-key inventory, scanner init, and a server-side diff against the
 reviewed operational manifest. The final diff must be empty.
 
 ```bash
-/home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane \
+"$loom_cli" admin personal-dev-control-plane \
   status-operational \
   --namespace loom-dev \
   --kubeconfig "$kubeconfig" \
@@ -463,7 +466,7 @@ reviewed before operational apply:
 ```bash
 shadow_recheck="$(mktemp "$evidence_dir/shadow-recheck.XXXXXX.yaml")"
 shadow_recheck_evidence="$(mktemp "$evidence_dir/shadow-recheck.XXXXXX.json")"
-/home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane render \
+"$loom_cli" admin personal-dev-control-plane render \
   --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
@@ -496,7 +499,7 @@ test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   deployment/loom-personal-dev-activation-agent \
   -o jsonpath='{.spec.replicas}')" = 0
 
-/home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status \
+"$loom_cli" admin personal-dev-control-plane status \
   --namespace loom-dev \
   --kubeconfig "$kubeconfig" \
   --file "$profile" \

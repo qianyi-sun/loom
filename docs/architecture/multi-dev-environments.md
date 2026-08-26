@@ -26,10 +26,11 @@ acceptance remains a later gate after both the personal-management shadow and
 the separate global-capacity zero-ceiling shadow report ready.
 The controlled
 [zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
-then exercises two concurrent owners with distinct authenticated sessions,
-source snapshots, lifecycle operations, namespaces, storage identities, and
-capacity publications. Acceptance requires `worker_available=false` and an
-exact global executable-new-capacity ceiling of zero throughout. Its plan pins
+then exercises two concurrent isolated environments under one authenticated
+acceptance owner, with distinct source snapshots, lifecycle operations,
+namespaces, storage identities, and capacity publications. Acceptance requires
+`worker_available=false` and an exact global executable-new-capacity ceiling of
+zero throughout. Its plan pins
 the manager configuration epoch as a monotonic floor rather than a constant:
 every personal projection advances the global epoch, and other environments
 share the same authority, so advancement is valid while regression fails the

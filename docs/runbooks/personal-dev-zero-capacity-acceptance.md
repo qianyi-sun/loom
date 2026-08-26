@@ -59,8 +59,11 @@ exactly the aggregate release, its evidence, and its digest.
     trusted_release="$trusted_release_artifact/trusted-release.json"
     trusted_release_evidence="$trusted_release_artifact/trusted-release-evidence.json"
     acceptance_plan="<absolute-owner-only-acceptance-plan.json>"
-    profile="$(pwd -P)/deploy/dev-fleet/personal-dev-control-plane.toml"
-    scanner_cache_lock="$(pwd -P)/deploy/dev-fleet/personal-dev-scanner-cache-lock.json"
+    repo="$(pwd -P)"
+    profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
+    scanner_cache_lock="$repo/deploy/dev-fleet/personal-dev-scanner-cache-lock.json"
+    loom_cli="$repo/.venv/bin/loom"
+    python_cli="$repo/.venv/bin/python"
     kubeconfig="<absolute-reviewed-self-contained-mode-0600-kubeconfig>"
     expected_kube_context="<exact-reviewed-kubernetes-context>"
 
@@ -95,9 +98,11 @@ exactly the aggregate release, its evidence, and its digest.
 
     install -d -m 0700 "$evidence_dir"
     test -z "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print -quit)"
+    test -x "$loom_cli"
+    test -x "$python_cli"
     export PYTHONPATH=src:.
     loom() {
-      /home/hongjian/loom/.venv/bin/loom "$@"
+      "$loom_cli" "$@"
     }
 
 The XDG root is the single authenticated acceptance-owner session. Prepare its
@@ -108,7 +113,7 @@ The following helpers reject duplicate/noncanonical JSON and bind every
 owner-only input to stable bytes.
 
     canonical_json_sha256() {
-      /home/hongjian/loom/.venv/bin/python - "$1" <<'PY'
+      "$python_cli" - "$1" <<'PY'
     import hashlib
     import json
     import math
@@ -332,7 +337,7 @@ expected, while regression is a stop condition.
 
     capture_pre_acceptance_status() {
       local status_rc=0
-      /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$pre_acceptance_status" || status_rc=$?
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$pre_acceptance_status" || status_rc=$?
       test "$status_rc" -eq 1
       chmod 0600 "$pre_acceptance_status"
       assert_canonical_json_line "$pre_acceptance_status"
@@ -346,7 +351,7 @@ expected, while regression is a stop condition.
       assert_reviewed_kubeconfig
       assert_secret_key_inventory
       assert_storage_and_migration
-      /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$output"
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$output"
       chmod 0600 "$output"
       assert_canonical_json_line "$output"
       jq -e --arg plan "$acceptance_plan_sha256" '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "acceptance" and .ready == true and .blockers == [] and .acceptance_plan_sha256 == $plan and .application_ready == true and .capacity_publication_ready == true and .worker_available == false and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$output" >/dev/null
@@ -370,7 +375,7 @@ expected, while regression is a stop condition.
       assert_secret_key_inventory
       assert_storage_and_migration
       assert_no_dynamic_namespaces
-      /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$rollback_pre_status" || status_rc=$?
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$rollback_pre_status" || status_rc=$?
       test "$status_rc" -eq 0 || test "$status_rc" -eq 1
       chmod 0600 "$rollback_pre_status"
       assert_canonical_json_line "$rollback_pre_status"
@@ -394,7 +399,7 @@ that init's zero exit status and immutable image ID after each apply.
 
     acceptance_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.yaml")"
     acceptance_evidence_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.json")"
-    if ! /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane render-acceptance --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$acceptance_tmp" 2> "$acceptance_evidence_tmp"; then
+    if ! "$loom_cli" admin personal-dev-control-plane render-acceptance --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$acceptance_tmp" 2> "$acceptance_evidence_tmp"; then
       rm -f "$acceptance_tmp" "$acceptance_evidence_tmp"
       exit 1
     fi
@@ -404,7 +409,7 @@ that init's zero exit status and immutable image ID after each apply.
 
     shadow_tmp="$(mktemp "$evidence_dir/shadow.XXXXXX.yaml")"
     shadow_evidence_tmp="$(mktemp "$evidence_dir/shadow.XXXXXX.json")"
-    if ! /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane render --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$shadow_tmp" 2> "$shadow_evidence_tmp"; then
+    if ! "$loom_cli" admin personal-dev-control-plane render --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$shadow_tmp" 2> "$shadow_evidence_tmp"; then
       rm -f "$shadow_tmp" "$shadow_evidence_tmp"
       exit 1
     fi
@@ -601,7 +606,7 @@ separate reviewed plan.
 
     shadow_render_recheck="$(mktemp "$evidence_dir/shadow-recheck.XXXXXX.yaml")"
     shadow_evidence_recheck="$(mktemp "$evidence_dir/shadow-recheck.XXXXXX.json")"
-    if ! /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane render --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$shadow_render_recheck" 2> "$shadow_evidence_recheck"; then
+    if ! "$loom_cli" admin personal-dev-control-plane render --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$shadow_render_recheck" 2> "$shadow_evidence_recheck"; then
       rm -f "$shadow_render_recheck" "$shadow_evidence_recheck"
       exit 1
     fi
@@ -621,7 +626,7 @@ separate reviewed plan.
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
     capture_scanner_cache_init_status "$rollback_scanner_cache_init_status"
     test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get deployment/loom-personal-dev-activation-agent -o jsonpath='{.spec.replicas}')" = 0
-    /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status"
+    "$loom_cli" admin personal-dev-control-plane status --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status"
     chmod 0600 "$rollback_status"
     assert_canonical_json_line "$rollback_status"
     jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "shadow" and .ready == true and .blockers == [] and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$rollback_status" >/dev/null
