@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import insert, select, text, update
 
 from loom.auth import AuthContext, verify_bearer_token
@@ -20,6 +20,14 @@ from loom.db.schema import AdminAuditEvent, Token, WorkerPoolAutoscalerPolicy
 from loom_control_plane.execution_admission import (
     fetch_execution_admission_status,
     upsert_execution_admission_policy,
+)
+from loom_control_plane.execution_finance import (
+    create_execution_price_snapshot,
+    fetch_execution_finance_status,
+    record_execution_node_cost,
+    settle_execution_cost_reservation,
+    upsert_execution_budget_policy,
+    upsert_target_price_binding,
 )
 from loom_control_plane.gb10_worker_lifecycle import (
     GB10NodeReport,
@@ -161,6 +169,103 @@ class _ExecutionAdmissionPolicyPayload(BaseModel):
     max_concurrent: int = Field(gt=0)
     enabled: bool = False
     reason: str | None = Field(default=None, max_length=500)
+
+
+class _ExecutionPriceSnapshotPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    provider: str = Field(min_length=1, max_length=80)
+    region: str = Field(min_length=1, max_length=120)
+    sku: str = Field(min_length=1, max_length=120)
+    source: str = Field(min_length=1, max_length=120)
+    source_version: str = Field(min_length=1, max_length=160)
+    source_uri: str = Field(min_length=1, max_length=2048)
+    effective_at: datetime
+    observed_at: datetime
+    base_microusd_per_hour: int = Field(default=0, ge=0)
+    vcpu_microusd_per_hour: int = Field(default=0, ge=0)
+    memory_gib_microusd_per_hour: int = Field(default=0, ge=0)
+    ephemeral_storage_gib_microusd_per_hour: int = Field(default=0, ge=0)
+
+    @field_validator("effective_at", "observed_at", mode="before")
+    @classmethod
+    def _parse_datetime(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+
+class _ExecutionTargetPriceBindingPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    price_snapshot_id: UUID
+    enabled: bool = False
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("price_snapshot_id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, value: object) -> object:
+        return UUID(value) if isinstance(value, str) else value
+
+
+class _ExecutionBudgetPolicyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    daily_limit_microusd: int = Field(gt=0)
+    monthly_limit_microusd: int = Field(gt=0)
+    per_attempt_limit_microusd: int = Field(gt=0)
+    max_estimate_duration_seconds: int = Field(gt=0, le=604_800)
+    emergency_stop: bool = False
+    enabled: bool = False
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class _ExecutionNodeCostPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    target_id: str = Field(min_length=1, max_length=120)
+    price_snapshot_id: UUID
+    provider_record_id: str = Field(min_length=1, max_length=240)
+    node_name: str = Field(min_length=1, max_length=253)
+    interval_started_at: datetime
+    interval_stopped_at: datetime
+    node_cpu_millis: int = Field(gt=0)
+    node_memory_mib: int = Field(gt=0)
+    node_ephemeral_storage_mib: int = Field(gt=0)
+    provider_billed_microusd: int = Field(ge=0)
+    billing_source: str = Field(min_length=1, max_length=120)
+    billing_source_version: str = Field(min_length=1, max_length=160)
+    observed_at: datetime
+
+    @field_validator("price_snapshot_id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, value: object) -> object:
+        return UUID(value) if isinstance(value, str) else value
+
+    @field_validator(
+        "interval_started_at",
+        "interval_stopped_at",
+        "observed_at",
+        mode="before",
+    )
+    @classmethod
+    def _parse_datetime(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+
+class _ExecutionCostSettlementPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    billing_complete_through: datetime
+
+    @field_validator("billing_complete_through", mode="before")
+    @classmethod
+    def _parse_datetime(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
 
 
 class _TaskImageServiceTokenPayload(BaseModel):
@@ -705,6 +810,264 @@ async def get_execution_admission_status(
     await _require_admin_scope(request, authorization, "admin:worker_pools")
     async with request.app.state.session_factory() as session:
         return await fetch_execution_admission_status(session)
+
+
+@router.post("/execution-price-snapshots")
+async def post_execution_price_snapshot(
+    request: Request,
+    payload: _ExecutionPriceSnapshotPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row, created = await create_execution_price_snapshot(
+                session,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.price_snapshot.recorded",
+                    target_type="execution_price_snapshot",
+                    target_id=str(row.id),
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "created": created,
+                        "provider": row.provider,
+                        "region": row.region,
+                        "sku": row.sku,
+                        "source": row.source,
+                        "source_version": row.source_version,
+                        "rate_card_sha256": row.rate_card_sha256,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "created": created,
+                "provider": row.provider,
+                "region": row.region,
+                "sku": row.sku,
+                "source": row.source,
+                "source_version": row.source_version,
+                "effective_at": row.effective_at.isoformat(),
+                "observed_at": row.observed_at.isoformat(),
+                "rate_card_sha256": row.rate_card_sha256,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/execution-target-price-bindings/{target_id}")
+async def put_execution_target_price_binding(
+    target_id: str,
+    request: Request,
+    payload: _ExecutionTargetPriceBindingPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_target_price_binding(
+                session,
+                target_id=target_id,
+                price_snapshot_id=payload.price_snapshot_id,
+                enabled=payload.enabled,
+                reason=payload.reason,
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.target_price_binding.upserted",
+                    target_type="execution_target_price_binding",
+                    target_id=row.target_id,
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "price_snapshot_id": str(row.price_snapshot_id),
+                        "enabled": row.enabled,
+                        "reason": row.reason,
+                        "version": row.version,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "target_id": row.target_id,
+                "price_snapshot_id": str(row.price_snapshot_id),
+                "enabled": row.enabled,
+                "reason": row.reason,
+                "version": row.version,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/execution-budget-policies/{scope_kind}/{scope_key}")
+async def put_execution_budget_policy(
+    scope_kind: Literal["pool", "target"],
+    scope_key: str,
+    request: Request,
+    payload: _ExecutionBudgetPolicyPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_execution_budget_policy(
+                session,
+                scope_kind=scope_kind,
+                scope_key=scope_key,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.budget_policy.upserted",
+                    target_type="execution_budget_policy",
+                    target_id=f"{row.scope_kind}/{row.scope_key}",
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "daily_limit_microusd": row.daily_limit_microusd,
+                        "monthly_limit_microusd": row.monthly_limit_microusd,
+                        "per_attempt_limit_microusd": row.per_attempt_limit_microusd,
+                        "max_estimate_duration_seconds": (row.max_estimate_duration_seconds),
+                        "emergency_stop": row.emergency_stop,
+                        "enabled": row.enabled,
+                        "version": row.version,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "scope_kind": row.scope_kind,
+                "scope_key": row.scope_key,
+                "daily_limit_microusd": row.daily_limit_microusd,
+                "monthly_limit_microusd": row.monthly_limit_microusd,
+                "per_attempt_limit_microusd": row.per_attempt_limit_microusd,
+                "max_estimate_duration_seconds": row.max_estimate_duration_seconds,
+                "emergency_stop": row.emergency_stop,
+                "enabled": row.enabled,
+                "reason": row.reason,
+                "version": row.version,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/execution-node-cost-records")
+async def post_execution_node_cost_record(
+    request: Request,
+    payload: _ExecutionNodeCostPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row, created = await record_execution_node_cost(
+                session,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.node_cost.recorded",
+                    target_type="execution_node_cost_record",
+                    target_id=str(row.id),
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "created": created,
+                        "provider": row.provider,
+                        "provider_record_id": row.provider_record_id,
+                        "target_id": row.target_id,
+                        "provider_billed_microusd": row.provider_billed_microusd,
+                        "allocated_microusd": row.allocated_microusd,
+                        "idle_system_fragmentation_microusd": (
+                            row.idle_system_fragmentation_microusd
+                        ),
+                        "evidence_sha256": row.evidence_sha256,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "created": created,
+                "provider": row.provider,
+                "provider_record_id": row.provider_record_id,
+                "target_id": row.target_id,
+                "node_identity_sha256": row.node_identity_sha256,
+                "provider_billed_microusd": row.provider_billed_microusd,
+                "allocated_microusd": row.allocated_microusd,
+                "idle_system_fragmentation_microusd": (row.idle_system_fragmentation_microusd),
+                "evidence_sha256": row.evidence_sha256,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/execution-cost-reservations/{reservation_id}/settle")
+async def post_execution_cost_settlement(
+    reservation_id: UUID,
+    request: Request,
+    payload: _ExecutionCostSettlementPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await settle_execution_cost_reservation(
+                session,
+                reservation_id=reservation_id,
+                billing_complete_through=payload.billing_complete_through,
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.cost_reservation.settled",
+                    target_type="execution_cost_reservation",
+                    target_id=str(row.id),
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "lease_id": str(row.lease_id),
+                        "price_snapshot_id": str(row.price_snapshot_id),
+                        "estimated_cost_microusd": row.estimated_cost_microusd,
+                        "actual_allocated_microusd": row.actual_allocated_microusd,
+                        "billing_complete_through": (
+                            row.billing_complete_through.isoformat()
+                            if row.billing_complete_through
+                            else None
+                        ),
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "state": row.state,
+                "estimated_cost_microusd": row.estimated_cost_microusd,
+                "actual_allocated_microusd": row.actual_allocated_microusd,
+                "billing_complete_through": (
+                    row.billing_complete_through.isoformat()
+                    if row.billing_complete_through
+                    else None
+                ),
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/execution-finance/status")
+async def get_execution_finance_status(
+    request: Request,
+    pool_id: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        return await fetch_execution_finance_status(session, pool_id=pool_id)
 
 
 @router.get("/worker-pools/{pool_name}/prod-pressure")

@@ -1371,6 +1371,78 @@ def test_execution_admission_status_shows_scope_usage(
     assert "version=3" in out
 
 
+def test_execution_finance_status_shows_budget_reservation_and_bill_overhead(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, *, headers, params, timeout):  # type: ignore[no-untyped-def]
+        assert url == "http://cp:8080/admin/execution-finance/status"
+        assert headers["Authorization"] == "Bearer admin-secret"
+        assert params == {"pool_id": "nebius-cpu"}
+        return _StubResponse(
+            200,
+            json_data={
+                "price_snapshots": [],
+                "target_bindings": [],
+                "budget_policies": [
+                    {
+                        "scope_kind": "pool",
+                        "scope_key": "nebius-cpu",
+                        "enabled": True,
+                        "emergency_stop": False,
+                        "daily_limit_microusd": 10_000_000,
+                        "daily_reserved_microusd": 2_000_000,
+                        "daily_settled_microusd": 1_000_000,
+                        "monthly_limit_microusd": 100_000_000,
+                        "monthly_reserved_microusd": 2_000_000,
+                        "monthly_settled_microusd": 1_000_000,
+                        "counter_in_sync": True,
+                        "version": 2,
+                    }
+                ],
+                "cost_reservations": [
+                    {
+                        "id": "reservation-1",
+                        "pool_id": "nebius-cpu",
+                        "state": "awaiting_settlement",
+                        "estimated_cost_microusd": 2_000_000,
+                        "actual_allocated_microusd": None,
+                    }
+                ],
+                "node_cost_records": [
+                    {
+                        "provider_record_id": "invoice-line-1",
+                        "target_id": "nebius-eu",
+                        "provider_billed_microusd": 1_000_000,
+                        "allocated_microusd": 250_000,
+                        "idle_system_fragmentation_microusd": 750_000,
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "finance-status",
+            "--pool-id",
+            "nebius-cpu",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "budget pool/nebius-cpu" in out
+    assert "daily=3000000/10000000" in out
+    assert "monthly=3000000/100000000 sync=True version=2" in out
+    assert "reservation reservation-1" in out
+    assert "billed=1000000 allocated=250000 overhead=750000" in out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # loom admin environment-state apply/check
 # ──────────────────────────────────────────────────────────────────────

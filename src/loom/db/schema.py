@@ -7,7 +7,7 @@ that writes the row (which already validates against the Pydantic models).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,6 +17,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
@@ -4103,6 +4104,325 @@ class ServiceExecutionLease(Base):
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionPriceSnapshot(Base):
+    """Immutable provider price evidence used for execution estimates."""
+
+    __tablename__ = "execution_price_snapshots"
+    __table_args__ = (
+        CheckConstraint("currency = 'USD'", name="execution_price_snapshots_currency_check"),
+        CheckConstraint(
+            "base_microusd_per_hour >= 0 AND vcpu_microusd_per_hour >= 0 "
+            "AND memory_gib_microusd_per_hour >= 0 "
+            "AND ephemeral_storage_gib_microusd_per_hour >= 0 "
+            "AND base_microusd_per_hour + vcpu_microusd_per_hour "
+            "+ memory_gib_microusd_per_hour "
+            "+ ephemeral_storage_gib_microusd_per_hour > 0",
+            name="execution_price_snapshots_rates_check",
+        ),
+        CheckConstraint(
+            "rate_card_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="execution_price_snapshots_digest_check",
+        ),
+        UniqueConstraint(
+            "provider",
+            "region",
+            "sku",
+            "source",
+            "source_version",
+            name="execution_price_snapshots_source_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    sku: Mapped[str] = mapped_column(Text, nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    base_microusd_per_hour: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    vcpu_microusd_per_hour: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    memory_gib_microusd_per_hour: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    ephemeral_storage_gib_microusd_per_hour: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    rate_card_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    rate_card_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionTargetPriceBinding(Base):
+    """Versioned operator selection of one immutable target price snapshot."""
+
+    __tablename__ = "execution_target_price_bindings"
+
+    target_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("execution_targets.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    price_snapshot_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_price_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionBudgetPolicy(Base):
+    """Race-safe daily/monthly paid-execution guardrail for a pool or target."""
+
+    __tablename__ = "execution_budget_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "scope_kind IN ('pool','target')",
+            name="execution_budget_policies_scope_check",
+        ),
+        CheckConstraint(
+            "daily_limit_microusd > 0 "
+            "AND monthly_limit_microusd >= daily_limit_microusd "
+            "AND per_attempt_limit_microusd > 0 "
+            "AND per_attempt_limit_microusd <= daily_limit_microusd "
+            "AND max_estimate_duration_seconds BETWEEN 1 AND 604800",
+            name="execution_budget_policies_limits_check",
+        ),
+        UniqueConstraint(
+            "scope_kind",
+            "scope_key",
+            name="execution_budget_policies_scope_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    scope_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_key: Mapped[str] = mapped_column(Text, nullable=False)
+    daily_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    monthly_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    per_attempt_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_estimate_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    emergency_stop: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    current_day: Mapped[date | None] = mapped_column(Date)
+    current_month: Mapped[date | None] = mapped_column(Date)
+    daily_reserved_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    daily_settled_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    monthly_reserved_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    monthly_settled_microusd: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionCostReservation(Base):
+    """Worst-case paid-execution estimate retained until billing settlement."""
+
+    __tablename__ = "execution_cost_reservations"
+    __table_args__ = (
+        UniqueConstraint(
+            "trial_id",
+            "attempt",
+            "execution_role",
+            name="execution_cost_reservations_trial_attempt_role_uidx",
+        ),
+        Index("execution_cost_reservations_pool_state_idx", "pool_id", "state", "acquired_at"),
+        Index("execution_cost_reservations_team_time_idx", "team_id", "acquired_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="RESTRICT"), nullable=False
+    )
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("batches.id", ondelete="RESTRICT")
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_role: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    price_snapshot_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_price_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    estimate_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_cpu_millis: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_memory_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_ephemeral_storage_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    estimate_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'reserved'"))
+    acquired_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    terminal_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    settled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    billing_complete_through: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    actual_allocated_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    release_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class ExecutionCostReservationDebit(Base):
+    """The period-specific effect of one reservation on one budget policy."""
+
+    __tablename__ = "execution_cost_reservation_debits"
+
+    reservation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_cost_reservations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    policy_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_budget_policies.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    budget_day: Mapped[date] = mapped_column(Date, primary_key=True)
+    budget_month: Mapped[date] = mapped_column(Date, nullable=False)
+    reserved_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    actual_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionNodeCostRecord(Base):
+    """Immutable provider node-bill evidence with explicit unallocated overhead."""
+
+    __tablename__ = "execution_node_cost_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_record_id",
+            name="execution_node_cost_records_provider_uidx",
+        ),
+        Index(
+            "execution_node_cost_records_target_time_idx",
+            "target_id",
+            "interval_started_at",
+            "interval_stopped_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    price_snapshot_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_price_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_record_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_identity_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    interval_started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    interval_stopped_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    node_cpu_millis: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_memory_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_ephemeral_storage_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_billed_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocated_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idle_system_fragmentation_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
+    billing_source: Mapped[str] = mapped_column(Text, nullable=False)
+    billing_source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    allocation_method: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionNodeCostAllocation(Base):
+    """One provider-bill allocation to one execution cost reservation."""
+
+    __tablename__ = "execution_node_cost_allocations"
+    __table_args__ = (
+        Index(
+            "execution_node_cost_allocations_reservation_idx",
+            "cost_reservation_id",
+            "node_cost_record_id",
+        ),
+    )
+
+    node_cost_record_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_node_cost_records.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    cost_reservation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_cost_reservations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="RESTRICT"), nullable=False
+    )
+    overlap_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    dominant_resource_fraction_ppb: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocated_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 

@@ -161,6 +161,54 @@ counter and retain the released ledger row. The reservation is therefore both
 the concurrency seat and the audit evidence, not a cache derived from worker
 heartbeats.
 
+Paid Nebius execution adds a second, independent finance admission boundary.
+An immutable `execution_price_snapshots` row records provider, region, SKU,
+USD rates, source URI/version, effective and observation timestamps, the full
+canonical rate payload, and its digest. A target price binding is versioned and
+must be explicitly enabled. Nebius lease reservation fails closed before the
+create command when the binding is absent, mismatched, disabled, or not yet
+effective; other pools are not changed by this provider-specific requirement.
+
+The preflight estimate prices the complete requested Pod envelope for its full
+deadline: execution container, native sidecars, runtime materializer,
+workspace/runtime/output volumes, CPU, memory, and ephemeral storage. It is a
+conservative reservation, not a provider bill. Both an enabled pool policy and
+an enabled target policy must admit the estimate. Each policy independently
+enforces per-attempt, daily, monthly, and maximum-duration limits plus an
+emergency stop. Matching policy rows are locked before their current-period
+counters and debit ledger are updated, so concurrent control-plane replicas
+cannot overspend the same remaining budget. Policy mutation takes an exclusive
+transaction lock while reservations, terminal release, and billing ingestion
+take the shared form; routine paid reservations remain concurrent after that
+brief shared acquisition. Reservations that cross midnight are split into UTC
+daily debit rows, and status reads reconcile the current UTC day/month directly
+from the debit and provider-bill ledgers instead of trusting cached counters.
+
+Terminal leases that never started a Pod release the estimate immediately.
+Started leases retain it as `awaiting_settlement` until provider billing covers
+their complete runtime. `execution_node_cost_records` stores immutable
+provider-billed node intervals and only a hash of the node identity. Loom
+allocates each bill using `dominant_requested_resource_time_v1`: the dominant
+requested CPU/memory/storage share multiplied by actual overlap with the billed
+node interval. The provider bill remains the cost authority; Pod lifetime alone
+never creates cost. Any amount not attributed to attempts remains visible as
+`idle_system_fragmentation_microusd`. Settlement requires gap-free persisted
+bill intervals. Provider bill records must be split at UTC day boundaries so
+daily hard-spend attribution is unambiguous. Settlement replaces the attempt
+estimate with the allocation and retains both figures plus the exact price
+snapshot. Loom rejects an interval that overlaps a lease without a persisted Pod
+termination timestamp, preventing immutable evidence from being prematurely
+classified as overhead. Daily/monthly hard-spend counters use the full
+provider-billed node amount, including unattributed overhead.
+
+Operators manage and inspect this state through the authenticated
+`execution-price-snapshots`, `execution-target-price-bindings`,
+`execution-budget-policies`, `execution-node-cost-records`, cost-settlement,
+and `execution-finance/status` admin APIs. `loom admin worker-pools
+finance-status` exposes the same budgets, reservations, billed allocations,
+and overhead. Every mutation writes `admin_audit_events`; none of these
+repository surfaces calls Nebius or changes live routing.
+
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
@@ -184,7 +232,7 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113` through `0117` persist the complete provider-neutral
+Migrations `0113` through `0118` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;

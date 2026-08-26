@@ -1069,6 +1069,64 @@ def _execution_admission_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _execution_finance_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-finance/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution finance:\n")
+    for row in data.get("budget_policies", []):
+        daily_used = row["daily_reserved_microusd"] + row["daily_settled_microusd"]
+        monthly_used = row["monthly_reserved_microusd"] + row["monthly_settled_microusd"]
+        sys.stdout.write(
+            f"  budget {row['scope_kind']}/{row['scope_key']} "
+            f"enabled={row['enabled']} stop={row['emergency_stop']} "
+            f"daily={daily_used}/{row['daily_limit_microusd']} "
+            f"monthly={monthly_used}/{row['monthly_limit_microusd']} "
+            f"sync={row.get('counter_in_sync', False)} "
+            f"version={row['version']}\n"
+        )
+    for row in data.get("cost_reservations", []):
+        sys.stdout.write(
+            f"  reservation {row['id']} pool={row['pool_id']} state={row['state']} "
+            f"estimate={row['estimated_cost_microusd']} "
+            f"actual={row.get('actual_allocated_microusd')}\n"
+        )
+    for row in data.get("node_cost_records", []):
+        sys.stdout.write(
+            f"  node-cost {row['provider_record_id']} target={row['target_id']} "
+            f"billed={row['provider_billed_microusd']} "
+            f"allocated={row['allocated_microusd']} "
+            f"overhead={row['idle_system_fragmentation_microusd']}\n"
+        )
+    if not any(
+        data.get(key) for key in ("budget_policies", "cost_reservations", "node_cost_records")
+    ):
+        sys.stdout.write("  no execution finance records\n")
+    return 0
+
+
 def _format_autoscaler_blocked_details(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
@@ -2338,6 +2396,24 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_admission_status.set_defaults(handler=_execution_admission_status)
+
+    p_finance_status = worker_pools_sub.add_parser(
+        "finance-status",
+        help="Show paid-execution prices, budgets, reservations, and node-bill attribution.",
+    )
+    _add_common_args(p_finance_status)
+    p_finance_status.add_argument(
+        "--pool-id",
+        default=None,
+        help="Limit finance records to one logical pool.",
+    )
+    p_finance_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_finance_status.set_defaults(handler=_execution_finance_status)
 
     p_env_state = sub.add_parser(
         "environment-state",

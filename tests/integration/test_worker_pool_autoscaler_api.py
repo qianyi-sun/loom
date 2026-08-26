@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,15 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     AdminAuditEvent,
     ExecutionAdmissionPolicy,
+    ExecutionBudgetPolicy,
+    ExecutionCostReservation,
+    ExecutionCostReservationDebit,
+    ExecutionNodeCostAllocation,
+    ExecutionNodeCostRecord,
+    ExecutionPriceSnapshot,
+    ExecutionTargetPriceBinding,
+    ServiceExecutionClass,
+    ServiceExecutionTarget,
     Token,
     WorkerPoolAutoscalerPolicy,
 )
@@ -57,26 +67,50 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     with session_factory() as s:
-        s.execute(delete(WorkerPoolAutoscalerPolicy))
-        s.execute(delete(ExecutionAdmissionPolicy))
+        s.execute(delete(ExecutionNodeCostAllocation))
+        s.execute(delete(ExecutionNodeCostRecord))
+        s.execute(delete(ExecutionCostReservationDebit))
+        s.execute(delete(ExecutionCostReservation))
+        s.execute(delete(ExecutionTargetPriceBinding))
+        s.execute(delete(ExecutionBudgetPolicy))
+        s.execute(delete(ExecutionPriceSnapshot))
         s.execute(
-            delete(AdminAuditEvent).where(
-                AdminAuditEvent.action == "execution.admission_policy.upserted"
+            delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == "nebius-finance-api")
+        )
+        s.execute(
+            delete(ServiceExecutionClass).where(
+                ServiceExecutionClass.id == "nebius-finance-api-class"
             )
         )
+        s.execute(delete(WorkerPoolAutoscalerPolicy))
+        s.execute(delete(ExecutionAdmissionPolicy))
+        s.execute(delete(AdminAuditEvent).where(AdminAuditEvent.action.like("execution.%")))
         s.execute(delete(Token))
         s.commit()
     try:
         yield
     finally:
         with session_factory() as s:
-            s.execute(delete(WorkerPoolAutoscalerPolicy))
-            s.execute(delete(ExecutionAdmissionPolicy))
+            s.execute(delete(ExecutionNodeCostAllocation))
+            s.execute(delete(ExecutionNodeCostRecord))
+            s.execute(delete(ExecutionCostReservationDebit))
+            s.execute(delete(ExecutionCostReservation))
+            s.execute(delete(ExecutionTargetPriceBinding))
+            s.execute(delete(ExecutionBudgetPolicy))
+            s.execute(delete(ExecutionPriceSnapshot))
             s.execute(
-                delete(AdminAuditEvent).where(
-                    AdminAuditEvent.action == "execution.admission_policy.upserted"
+                delete(ServiceExecutionTarget).where(
+                    ServiceExecutionTarget.id == "nebius-finance-api"
                 )
             )
+            s.execute(
+                delete(ServiceExecutionClass).where(
+                    ServiceExecutionClass.id == "nebius-finance-api-class"
+                )
+            )
+            s.execute(delete(WorkerPoolAutoscalerPolicy))
+            s.execute(delete(ExecutionAdmissionPolicy))
+            s.execute(delete(AdminAuditEvent).where(AdminAuditEvent.action.like("execution.%")))
             s.execute(delete(Token))
             s.commit()
         engine.dispose()
@@ -252,4 +286,190 @@ def test_execution_admission_policy_round_trip_and_status(app, postgres_url: str
         assert len(events) == 2
         assert events[-1].target_id == "pool/nebius-cpu"
         assert events[-1].event_metadata["version"] == 2
+    engine.dispose()
+
+
+def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
+    app,
+    postgres_url: str,
+) -> None:
+    now = datetime.now(UTC)
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        session.add(
+            ServiceExecutionClass(
+                id="nebius-finance-api-class",
+                schema_version="loom.execution-class.v1",
+                spec_json={},
+                spec_sha256="sha256:" + "a" * 64,
+                enabled=True,
+            )
+        )
+        session.add(
+            ServiceExecutionTarget(
+                id="nebius-finance-api",
+                logical_pool_id="nebius-finance-api-pool",
+                execution_class_id="nebius-finance-api-class",
+                schema_version="loom.execution-target.v1",
+                spec_json={},
+                spec_sha256="sha256:" + "b" * 64,
+                environment="staging",
+                provider="nebius",
+                region="eu-north1",
+                failure_domain="eu-north1-a",
+                data_residency="eu",
+                desired_state="active",
+                observed_state="ready",
+                health_status="healthy",
+                health_observed_at=now,
+            )
+        )
+        session.commit()
+
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    price_payload = {
+        "provider": "nebius",
+        "region": "eu-north1",
+        "sku": "cpu-d3",
+        "source": "nebius-public-rate-card",
+        "source_version": "2026-08-26",
+        "source_uri": "https://example.test/nebius/rate-card",
+        "effective_at": "2026-08-26T00:00:00Z",
+        "observed_at": "2026-08-26T01:00:00Z",
+        "base_microusd_per_hour": 1_000_000,
+        "vcpu_microusd_per_hour": 100_000,
+        "memory_gib_microusd_per_hour": 10_000,
+        "ephemeral_storage_gib_microusd_per_hour": 1_000,
+    }
+    with TestClient(app) as client:
+        created = client.post(
+            "/admin/execution-price-snapshots",
+            headers=headers,
+            json=price_payload,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["created"] is True
+        price_id = created.json()["id"]
+
+        replay = client.post(
+            "/admin/execution-price-snapshots",
+            headers=headers,
+            json=price_payload,
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json() == {**created.json(), "created": False}
+
+        conflict = client.post(
+            "/admin/execution-price-snapshots",
+            headers=headers,
+            json={**price_payload, "base_microusd_per_hour": 2_000_000},
+        )
+        assert conflict.status_code == 400
+        assert "different contents" in conflict.json()["detail"]
+
+        binding = client.put(
+            "/admin/execution-target-price-bindings/nebius-finance-api",
+            headers=headers,
+            json={
+                "price_snapshot_id": price_id,
+                "enabled": True,
+                "reason": "accepted immutable price evidence",
+            },
+        )
+        assert binding.status_code == 200, binding.text
+        assert binding.json()["version"] == 1
+
+        budget_payload = {
+            "daily_limit_microusd": 10_000_000,
+            "monthly_limit_microusd": 100_000_000,
+            "per_attempt_limit_microusd": 5_000_000,
+            "max_estimate_duration_seconds": 7_200,
+            "emergency_stop": False,
+            "enabled": True,
+            "reason": "bounded paid execution",
+        }
+        for kind, key in (
+            ("pool", "nebius-finance-api-pool"),
+            ("target", "nebius-finance-api"),
+        ):
+            budget = client.put(
+                f"/admin/execution-budget-policies/{kind}/{key}",
+                headers=headers,
+                json=budget_payload,
+            )
+            assert budget.status_code == 200, budget.text
+            assert budget.json()["version"] == 1
+
+        node_cost = client.post(
+            "/admin/execution-node-cost-records",
+            headers=headers,
+            json={
+                "target_id": "nebius-finance-api",
+                "price_snapshot_id": price_id,
+                "provider_record_id": "invoice-line-1",
+                "node_name": "provider-node-private-name",
+                "interval_started_at": "2026-08-26T02:00:00Z",
+                "interval_stopped_at": "2026-08-26T03:00:00Z",
+                "node_cpu_millis": 64_000,
+                "node_memory_mib": 262_144,
+                "node_ephemeral_storage_mib": 1_048_576,
+                "provider_billed_microusd": 1_000_000,
+                "billing_source": "nebius-invoice-export",
+                "billing_source_version": "invoice-2026-08",
+                "observed_at": "2026-08-26T04:00:00Z",
+            },
+        )
+        assert node_cost.status_code == 200, node_cost.text
+        assert node_cost.json()["allocated_microusd"] == 0
+        assert node_cost.json()["idle_system_fragmentation_microusd"] == 1_000_000
+        assert "provider-node-private-name" not in str(node_cost.json())
+        assert node_cost.json()["node_identity_sha256"].startswith("sha256:")
+
+        cross_day = client.post(
+            "/admin/execution-node-cost-records",
+            headers=headers,
+            json={
+                "target_id": "nebius-finance-api",
+                "price_snapshot_id": price_id,
+                "provider_record_id": "invoice-line-cross-day",
+                "node_name": "provider-node-private-name",
+                "interval_started_at": "2026-08-26T23:30:00Z",
+                "interval_stopped_at": "2026-08-27T00:30:00Z",
+                "node_cpu_millis": 64_000,
+                "node_memory_mib": 262_144,
+                "node_ephemeral_storage_mib": 1_048_576,
+                "provider_billed_microusd": 1_000_000,
+                "billing_source": "nebius-invoice-export",
+                "billing_source_version": "invoice-2026-08",
+                "observed_at": "2026-08-27T01:00:00Z",
+            },
+        )
+        assert cross_day.status_code == 400, cross_day.text
+        assert "split at UTC day boundaries" in cross_day.json()["detail"]
+
+        status = client.get(
+            "/admin/execution-finance/status?pool_id=nebius-finance-api-pool",
+            headers=headers,
+        )
+        assert status.status_code == 200, status.text
+        body = status.json()
+        assert len(body["price_snapshots"]) == 1
+        assert len(body["target_bindings"]) == 1
+        assert len(body["budget_policies"]) == 2
+        assert all(policy["counter_in_sync"] is True for policy in body["budget_policies"])
+        assert body["node_cost_records"][0]["provider_billed_microusd"] == 1_000_000
+        assert body["node_cost_records"][0]["idle_system_fragmentation_microusd"] == 1_000_000
+
+    with sessionmaker(engine)() as session:
+        actions = set(
+            session.scalars(
+                select(AdminAuditEvent.action).where(AdminAuditEvent.action.like("execution.%"))
+            ).all()
+        )
+        assert {
+            "execution.price_snapshot.recorded",
+            "execution.target_price_binding.upserted",
+            "execution.budget_policy.upserted",
+            "execution.node_cost.recorded",
+        }.issubset(actions)
     engine.dispose()

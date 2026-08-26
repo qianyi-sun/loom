@@ -47,6 +47,10 @@ from loom_control_plane.execution_admission import (
     ExecutionAdmissionIdentity,
     reserve_execution_admission,
 )
+from loom_control_plane.execution_finance import (
+    ExecutionFinanceBlockedError,
+    reserve_execution_cost,
+)
 from loom_control_plane.metrics import (
     SERVICE_EXECUTION_CLEANUP_DEBT,
     SERVICE_EXECUTION_COMMAND_BACKLOG,
@@ -633,6 +637,23 @@ async def reserve_trial_execution(
         )
     except ExecutionAdmissionBlockedError as exc:
         raise ServiceExecutionConflict(exc.reason) from exc
+    # The lease row is still uncommitted and cannot become executable without
+    # the deferred outbox constraint. Persisting its identity first lets the
+    # paid-execution reservation retain a real FK to the exact generation.
+    session.add(lease)
+    await session.flush()
+    try:
+        cost_reservation = await reserve_execution_cost(
+            session,
+            lease=lease,
+            trial=trial,
+            target=target,
+            runtime_plan=runtime_contract,
+            deadline_at=deadline_at,
+            now=current_time,
+        )
+    except ExecutionFinanceBlockedError as exc:
+        raise ServiceExecutionConflict(exc.reason) from exc
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),
@@ -661,6 +682,16 @@ async def reserve_trial_execution(
         "command_identity_sha256": runtime_contract.command_identity_sha256,
         "container_roles": _runtime_container_roles(runtime_contract),
         "deadline_at": deadline_at.isoformat(),
+        "cost_reservation_id": (str(cost_reservation.id) if cost_reservation is not None else None),
+        "price_snapshot_id": (
+            str(cost_reservation.price_snapshot_id) if cost_reservation is not None else None
+        ),
+        "estimated_cost_microusd": (
+            cost_reservation.estimated_cost_microusd if cost_reservation is not None else None
+        ),
+        "cost_estimate_sha256": (
+            cost_reservation.estimate_sha256 if cost_reservation is not None else None
+        ),
     }
     command = ServiceExecutionCommand(
         id=uuid4(),
@@ -677,8 +708,6 @@ async def reserve_trial_execution(
     # Flush the lease identity before its FK-bound outbox row.  Both writes
     # remain in this transaction; the deferred database trigger then proves
     # that the desired state cannot commit without the matching command.
-    session.add(lease)
-    await session.flush()
     session.add(command)
     if execution_role == "attempt":
         trial.state = "claimed"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -20,6 +21,13 @@ from loom.db.schema import (
     Batch,
     ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
+    ExecutionBudgetPolicy,
+    ExecutionCostReservation,
+    ExecutionCostReservationDebit,
+    ExecutionNodeCostAllocation,
+    ExecutionNodeCostRecord,
+    ExecutionPriceSnapshot,
+    ExecutionTargetPriceBinding,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
@@ -52,6 +60,13 @@ from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
+from loom_control_plane.execution_finance import (
+    create_execution_price_snapshot,
+    record_execution_node_cost,
+    settle_execution_cost_reservation,
+    upsert_execution_budget_policy,
+    upsert_target_price_binding,
+)
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
@@ -107,6 +122,29 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 )
             )
             owned_trials = select(Trial.id).join(Team).where(Team.name.like("service-execution-%"))
+            owned_cost_reservations = select(ExecutionCostReservation.id).where(
+                ExecutionCostReservation.trial_id.in_(owned_trials)
+            )
+            await session.execute(
+                delete(ExecutionNodeCostAllocation).where(
+                    ExecutionNodeCostAllocation.cost_reservation_id.in_(owned_cost_reservations)
+                )
+            )
+            await session.execute(
+                delete(ExecutionNodeCostRecord).where(
+                    ExecutionNodeCostRecord.target_id.like("nebius-staging-%")
+                )
+            )
+            await session.execute(
+                delete(ExecutionCostReservationDebit).where(
+                    ExecutionCostReservationDebit.reservation_id.in_(owned_cost_reservations)
+                )
+            )
+            await session.execute(
+                delete(ExecutionCostReservation).where(
+                    ExecutionCostReservation.id.in_(owned_cost_reservations)
+                )
+            )
             await session.execute(
                 delete(ServiceExecutionLease).where(
                     ServiceExecutionLease.trial_id.in_(owned_trials)
@@ -120,8 +158,24 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
             )
             await session.execute(delete(Task).where(Task.id.like("service-execution/%")))
             await session.execute(
+                delete(ExecutionTargetPriceBinding).where(
+                    ExecutionTargetPriceBinding.target_id.like("nebius-staging-%")
+                )
+            )
+            await session.execute(
+                delete(ExecutionBudgetPolicy).where(
+                    (ExecutionBudgetPolicy.scope_key == "nebius-cpu")
+                    | (ExecutionBudgetPolicy.scope_key.like("nebius-staging-%"))
+                )
+            )
+            await session.execute(
                 delete(ServiceExecutionTarget).where(
                     ServiceExecutionTarget.id.like("nebius-staging-%")
+                )
+            )
+            await session.execute(
+                delete(ExecutionPriceSnapshot).where(
+                    ExecutionPriceSnapshot.source == "service-execution-test"
                 )
             )
             await session.execute(delete(Team).where(Team.name.like("service-execution-%")))
@@ -400,6 +454,46 @@ async def _seed_ready_trial(
         health_status="healthy",
         observed_at=now,
     )
+    price, _ = await create_execution_price_snapshot(
+        session,
+        provider="nebius",
+        region=target.region,
+        sku="test-node",
+        source="service-execution-test",
+        source_version=target.target_id,
+        source_uri="https://example.test/nebius-price",
+        effective_at=now - timedelta(days=1),
+        observed_at=now,
+        base_microusd_per_hour=3_600_000,
+        vcpu_microusd_per_hour=0,
+        memory_gib_microusd_per_hour=0,
+        ephemeral_storage_gib_microusd_per_hour=0,
+    )
+    await upsert_target_price_binding(
+        session,
+        target_id=target.target_id,
+        price_snapshot_id=price.id,
+        enabled=True,
+        reason="service execution test",
+        now=now,
+    )
+    for scope_kind, scope_key in (
+        ("pool", target.logical_pool_id),
+        ("target", target.target_id),
+    ):
+        await upsert_execution_budget_policy(
+            session,
+            scope_kind=scope_kind,  # type: ignore[arg-type]
+            scope_key=scope_key,
+            daily_limit_microusd=100_000_000,
+            monthly_limit_microusd=1_000_000_000,
+            per_attempt_limit_microusd=10_000_000,
+            max_estimate_duration_seconds=7_200,
+            emergency_stop=False,
+            enabled=True,
+            reason="service execution test",
+            now=now,
+        )
     return trial_id, target
 
 
@@ -470,6 +564,13 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                     )
                 )
             ).scalar_one()
+            cost_reservation = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == lease_id
+                    )
+                )
+            ).scalar_one()
             assert trial is not None
             assert (trial.state, trial.attempt_count) == ("claimed", 1)
             route = ExecutionRoutingDecisionV1.model_validate(trial.execution_route_json)
@@ -484,6 +585,15 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             assert len(commands) == 1
             assert (commands[0].command_type, commands[0].state) == ("create", "pending")
             assert commands[0].payload_json["selected_pool_id"] == "nebius-cpu"
+            assert commands[0].payload_json["cost_reservation_id"] == str(cost_reservation.id)
+            assert commands[0].payload_json["price_snapshot_id"] == str(
+                cost_reservation.price_snapshot_id
+            )
+            assert commands[0].payload_json["estimated_cost_microusd"] == 3_600_000
+            assert cost_reservation.estimated_cost_microusd == 3_600_000
+            assert cost_reservation.requested_cpu_millis == 1_050
+            assert cost_reservation.requested_memory_mib == 1_088
+            assert cost_reservation.requested_ephemeral_storage_mib == 4_180
             assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
             assert projection["selected_pool_id"] == "nebius-cpu"
@@ -523,6 +633,293 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 )
                 await session.commit()
             await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+async def test_nebius_budget_reservation_is_race_safe_across_service_leases(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            first_trial_id, target = await _seed_ready_trial(session, now=now)
+            first = await session.get(Trial, first_trial_id)
+            assert first is not None
+            second_trial_id = uuid4()
+            session.add(
+                Trial(
+                    id=second_trial_id,
+                    team_id=first.team_id,
+                    task_id=first.task_id,
+                    config={"agent": {"name": "test"}},
+                    requires_caps={"os": "linux", "cpu_arch": "x86_64"},
+                    state="queued",
+                    attempt_count=0,
+                )
+            )
+            for scope_kind, scope_key in (
+                ("pool", target.logical_pool_id),
+                ("target", target.target_id),
+            ):
+                await upsert_execution_budget_policy(
+                    session,
+                    scope_kind=scope_kind,  # type: ignore[arg-type]
+                    scope_key=scope_key,
+                    daily_limit_microusd=3_600_000,
+                    monthly_limit_microusd=3_600_000,
+                    per_attempt_limit_microusd=3_600_000,
+                    max_estimate_duration_seconds=3_600,
+                    emergency_stop=False,
+                    enabled=True,
+                    reason="one paid attempt",
+                    now=now,
+                )
+            await session.commit()
+
+        async def reserve(trial_id: UUID) -> ServiceExecutionLease | str:
+            async with sessions() as session:
+                try:
+                    lease = await _reserve(
+                        session,
+                        trial_id=trial_id,
+                        target=target,
+                        now=now,
+                    )
+                    await session.commit()
+                    return lease
+                except ServiceExecutionConflict as exc:
+                    await session.rollback()
+                    return str(exc)
+
+        results = await asyncio.gather(reserve(first_trial_id), reserve(second_trial_id))
+        leases = [result for result in results if isinstance(result, ServiceExecutionLease)]
+        blockers = [result for result in results if isinstance(result, str)]
+        assert len(leases) == 1
+        assert blockers == ["execution_budget_pool_daily_limit_exceeded"]
+
+        async with sessions() as session:
+            policies = (
+                (
+                    await session.execute(
+                        select(ExecutionBudgetPolicy).where(
+                            ExecutionBudgetPolicy.scope_key.in_(
+                                (target.logical_pool_id, target.target_id)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert {row.daily_reserved_microusd for row in policies} == {3_600_000}
+            assert await session.scalar(select(func.count(ExecutionCostReservation.id))) == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_nebius_paid_execution_fails_closed_without_price_or_during_emergency_stop(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            binding = await session.get(ExecutionTargetPriceBinding, target.target_id)
+            assert binding is not None
+            binding.enabled = False
+            await session.commit()
+
+        async with sessions() as session:
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="execution_cost_price_binding_unavailable",
+            ):
+                await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.rollback()
+
+        async with sessions() as session:
+            binding = await session.get(ExecutionTargetPriceBinding, target.target_id)
+            assert binding is not None
+            binding.enabled = True
+            pool_policy = (
+                await session.execute(
+                    select(ExecutionBudgetPolicy).where(
+                        ExecutionBudgetPolicy.scope_kind == "pool",
+                        ExecutionBudgetPolicy.scope_key == target.logical_pool_id,
+                    )
+                )
+            ).scalar_one()
+            pool_policy.emergency_stop = True
+            pool_policy.reason = "provider emergency stop test"
+            await session.commit()
+
+        async with sessions() as session:
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="execution_budget_pool_emergency_stop",
+            ):
+                await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.rollback()
+            assert await session.scalar(select(func.count(ExecutionCostReservation.id))) == 0
+    finally:
+        await engine.dispose()
+
+
+async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    pod_started = now + timedelta(seconds=10)
+    pod_stopped = now + timedelta(seconds=110)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+
+        async with sessions() as session:
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "running",
+                    "job_uid": "job-finance",
+                    "pod_uid": "pod-finance",
+                    "resource_version": "1",
+                    "node_name": "node-finance",
+                    "scheduled_at": (pod_started - timedelta(seconds=1)).isoformat(),
+                    "started_at": pod_started.isoformat(),
+                },
+                observed_at=pod_started,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            reservation = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
+            with pytest.raises(
+                ValueError,
+                match="without a persisted termination timestamp",
+            ):
+                await record_execution_node_cost(
+                    session,
+                    target_id=target.target_id,
+                    price_snapshot_id=reservation.price_snapshot_id,
+                    provider_record_id=f"premature-bill-{uuid4()}",
+                    node_name="node-finance",
+                    interval_started_at=pod_started,
+                    interval_stopped_at=pod_started + timedelta(seconds=50),
+                    node_cpu_millis=64_000,
+                    node_memory_mib=262_144,
+                    node_ephemeral_storage_mib=1_048_576,
+                    provider_billed_microusd=1_000_000,
+                    billing_source="nebius-invoice-export",
+                    billing_source_version="invoice-2026-08",
+                    observed_at=pod_started + timedelta(seconds=51),
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=2,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "failed",
+                    "job_uid": "job-finance",
+                    "pod_uid": "pod-finance",
+                    "resource_version": "2",
+                    "node_name": "node-finance",
+                    "scheduled_at": (pod_started - timedelta(seconds=1)).isoformat(),
+                    "started_at": pod_started.isoformat(),
+                    "terminated_at": pod_stopped.isoformat(),
+                    "message": "test terminal",
+                },
+                observed_at=pod_stopped,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            reservation = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
+            assert reservation.state == "awaiting_settlement"
+            node_cost, created = await record_execution_node_cost(
+                session,
+                target_id=target.target_id,
+                price_snapshot_id=reservation.price_snapshot_id,
+                provider_record_id=f"bill-{uuid4()}",
+                node_name="node-finance",
+                interval_started_at=pod_started,
+                interval_stopped_at=pod_stopped,
+                node_cpu_millis=reservation.requested_cpu_millis * 4,
+                node_memory_mib=reservation.requested_memory_mib * 4,
+                node_ephemeral_storage_mib=(reservation.requested_ephemeral_storage_mib * 4),
+                provider_billed_microusd=4_000_000,
+                billing_source="nebius-invoice-export",
+                billing_source_version="invoice-2026-08",
+                observed_at=pod_stopped + timedelta(seconds=1),
+            )
+            assert created is True
+            assert node_cost.allocated_microusd == 1_000_000
+            assert node_cost.idle_system_fragmentation_microusd == 3_000_000
+            settled = await settle_execution_cost_reservation(
+                session,
+                reservation_id=reservation.id,
+                billing_complete_through=pod_stopped,
+                now=pod_stopped + timedelta(seconds=2),
+            )
+            await session.commit()
+            assert settled.state == "settled"
+            assert settled.actual_allocated_microusd == 1_000_000
+
+        async with sessions() as session:
+            policies = (
+                (
+                    await session.execute(
+                        select(ExecutionBudgetPolicy).where(
+                            ExecutionBudgetPolicy.scope_key.in_(
+                                (target.logical_pool_id, target.target_id)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert {row.daily_reserved_microusd for row in policies} == {0}
+            assert {row.daily_settled_microusd for row in policies} == {4_000_000}
+            allocation = (
+                await session.execute(
+                    select(ExecutionNodeCostAllocation).where(
+                        ExecutionNodeCostAllocation.cost_reservation_id == reservation.id
+                    )
+                )
+            ).scalar_one()
+            assert allocation.dominant_resource_fraction_ppb == 250_000_000
+            assert allocation.overlap_seconds == 100
+            assert allocation.allocated_microusd == 1_000_000
     finally:
         await engine.dispose()
 
@@ -632,6 +1029,15 @@ async def test_service_execution_enforces_each_scope_and_releases_on_terminal_ev
                 )
             ).scalar_one()
             assert released.state == "released"
+            released_cost = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == first.id
+                    )
+                )
+            ).scalar_one()
+            assert released_cost.state == "released"
+            assert released_cost.release_reason == "lease_terminal_before_pod_start"
             second = await _reserve(
                 session,
                 trial_id=second_trial_id,
