@@ -888,6 +888,189 @@ def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
     assert service.calls == []
 
 
+class _PreflightArtifactRetention:
+    def __init__(self, lifecycle: FakeLifecycle) -> None:
+        self.lifecycle = lifecycle
+        self.calls: list[tuple[str, object]] = []
+        self.plan = SimpleNamespace(
+            plan_digest="e" * 64,
+            to_dict=lambda: {
+                "candidates": [{"bundle_digest": "a" * 64}],
+                "environment": "staging",
+                "schema_version": 1,
+            },
+        )
+
+    def inventory(self):  # type: ignore[no-untyped-def]
+        self.calls.append(("inventory", self.lifecycle.guard_depth))
+        return self.plan
+
+    def load_claim(self, digest: str):  # type: ignore[no-untyped-def]
+        self.calls.append(("load", self.lifecycle.guard_depth))
+        assert digest == "e" * 64
+        return self.plan
+
+    def claim(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("claim", self.lifecycle.guard_depth))
+        assert plan is self.plan
+
+    def apply(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("apply", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {
+            "approved_plan_sha256": "e" * 64,
+            "retirements": [{"bundle_digest": "a" * 64}],
+            "schema_version": 1,
+        }
+
+
+def test_preflight_artifact_retention_holds_launch_guard_through_local_apply(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _PreflightArtifactRetention(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        config=sealed_config,
+        preflight_artifact_retention=service,
+    )
+    deps.lifecycle.maintenance = True
+
+    assert (
+        broker_main(
+            ["preflight-artifact-retention", "inventory"],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    inventory_output = deps.stdout.getvalue()
+    assert service.calls == [("inventory", 1)]
+    assert inventory_output == (
+        '{"plan":{"candidates":[{"bundle_digest":"'
+        + "a" * 64
+        + '"}],"environment":"staging","schema_version":1},"plan_sha256":"'
+        + "e" * 64
+        + '"}\n'
+    )
+    assert "known-secret" not in inventory_output
+    deps.stdout.seek(0)
+    deps.stdout.truncate(0)
+
+    assert (
+        broker_main(
+            [
+                "preflight-artifact-retention",
+                "apply",
+                "--approved-plan-sha256",
+                "e" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    apply_output = deps.stdout.getvalue()
+    assert service.calls[-3:] == [("load", 1), ("claim", 1), ("apply", 1)]
+    assert json.loads(apply_output) == {
+        "approved_plan_sha256": "e" * 64,
+        "retirements": [{"bundle_digest": "a" * 64}],
+        "schema_version": 1,
+    }
+    assert (
+        apply_output
+        == json.dumps(
+            json.loads(apply_output),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    assert "known-secret" not in apply_output
+
+
+@pytest.mark.parametrize(
+    "rejection",
+    ("non-coordinator", "non-sealed", "unconfigured", "no-maintenance", "active"),
+)
+def test_preflight_artifact_retention_rejects_unsealed_or_busy_authority(
+    tmp_path: Path,
+    rejection: str,
+) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _PreflightArtifactRetention(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        config=sealed_config,
+        preflight_artifact_retention=service,
+    )
+    if rejection == "non-coordinator":
+        dependencies = replace(
+            dependencies,
+            authenticate=lambda: CallerIdentity("devansh", 2003),
+        )
+    elif rejection == "non-sealed":
+        dependencies = replace(dependencies, config=deps.config)
+    elif rejection == "unconfigured":
+        dependencies = replace(dependencies, preflight_artifact_retention=None)
+    elif rejection == "no-maintenance":
+        pass
+    elif rejection == "active":
+        deps.lifecycle.maintenance = True
+        deps.store.active = ActivePointer("req-active", 1, "unit-active", "pending")
+
+    assert (
+        broker_main(
+            ["preflight-artifact-retention", "inventory"],
+            dependencies=dependencies,
+        )
+        == 1
+    )
+    assert service.calls == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["preflight-artifact-retention", "apply"],
+        [
+            "preflight-artifact-retention",
+            "apply",
+            "--approved-plan-sha256",
+            "A" * 64,
+        ],
+        [
+            "preflight-artifact-retention",
+            "apply",
+            "--approved-plan-sha256",
+            "e" * 63,
+        ],
+    ),
+)
+def test_preflight_artifact_retention_rejects_malformed_approval(
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
+    deps = fakes(tmp_path)
+
+    assert broker_main(argv, dependencies=deps.dependencies) == 2
+    assert deps.order == []
+
+
 class _BackupRecovery(_BackupRetention):
     def apply(self, plan):  # type: ignore[no-untyped-def]
         self.calls.append(("apply", self.lifecycle.guard_depth))
