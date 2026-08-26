@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction
+from loom_cli.rollout.operator import store as store_module
 from loom_cli.rollout.operator.backup_job import (
     BackupJobEnvelope,
     BackupJobState,
@@ -744,6 +745,130 @@ def test_backup_retention_claim_rejects_existing_active_pointer(tmp_path: Path) 
 
     assert store.read_active() == pointer
     assert store.read_backup_retention_claim() is None
+
+
+def test_request_and_attempt_inventory_is_exact_sorted_and_typed(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    second_request_id = "stg-20260713-bcdef234"
+    store.create_request(make_request(request_id=second_request_id))
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    store.publish_attempt_envelope(
+        make_envelope(
+            attempt_number=2,
+            attempt_operator="qianyi",
+            attempt_uid=2003,
+            resume=True,
+        )
+    )
+
+    assert store.request_ids() == (REQUEST_ID, second_request_id)
+    assert store.attempt_numbers(REQUEST_ID) == (1, 2)
+    assert store.attempt_numbers(second_request_id) == ()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["unknown-file", "symlink"])
+def test_request_inventory_rejects_unknown_or_aliased_entry(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_request())
+    unsafe = tmp_path / "requests" / "unknown-entry"
+    if unsafe_kind == "unknown-file":
+        unsafe.write_text("unknown\n")
+    else:
+        unsafe.symlink_to(tmp_path / "outside")
+
+    with pytest.raises(RequestStoreError, match="unsafe entry"):
+        store.request_ids()
+
+
+def test_request_inventory_rejects_malformed_typed_identity(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    path = store.create_request(make_request())
+    path.write_text('{"schema_version":1}\n', encoding="utf-8")
+
+    with pytest.raises(RequestStoreError, match="missing keys"):
+        store.request_ids()
+
+
+def test_request_inventory_binds_scan_to_validated_directory_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RequestStore(tmp_path / "store")
+    second_request_id = "stg-20260713-bcdef234"
+    store.create_request(make_request())
+    store.create_request(make_request(request_id=second_request_id))
+    redirected = RequestStore(tmp_path / "redirected")
+    redirected.create_request(make_request())
+    original_scandir = store_module.os.scandir
+
+    def redirect_path_scan(path):  # type: ignore[no-untyped-def]
+        return original_scandir(redirected.requests_root if path == store.requests_root else path)
+
+    monkeypatch.setattr(store_module.os, "scandir", redirect_path_scan)
+
+    assert store.request_ids() == (REQUEST_ID, second_request_id)
+
+
+def test_attempt_inventory_binds_scan_to_validated_directory_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RequestStore(tmp_path / "store")
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    store.publish_attempt_envelope(
+        make_envelope(
+            attempt_number=2,
+            attempt_operator="qianyi",
+            attempt_uid=2003,
+            resume=True,
+        )
+    )
+    redirected = RequestStore(tmp_path / "redirected")
+    redirected.create_request(make_request())
+    redirected.publish_attempt_envelope(make_envelope())
+    attempts = store.requests_root / REQUEST_ID / "attempts"
+    redirected_attempts = redirected.requests_root / REQUEST_ID / "attempts"
+    original_scandir = store_module.os.scandir
+
+    def redirect_path_scan(path):  # type: ignore[no-untyped-def]
+        return original_scandir(redirected_attempts if path == attempts else path)
+
+    monkeypatch.setattr(store_module.os, "scandir", redirect_path_scan)
+
+    assert store.attempt_numbers(REQUEST_ID) == (1, 2)
+
+
+def test_attempt_inventory_rejects_gap_and_missing_envelope(tmp_path: Path) -> None:
+    gap_store = RequestStore(tmp_path / "gap")
+    gap_store.create_request(make_request())
+    gap_store.publish_attempt_envelope(make_envelope())
+    attempt_three = gap_store.requests_root / REQUEST_ID / "attempts" / "3"
+    attempt_three.mkdir(mode=0o700)
+    with pytest.raises(RequestStoreError, match="consecutive"):
+        gap_store.attempt_numbers(REQUEST_ID)
+
+    missing_store = RequestStore(tmp_path / "missing")
+    missing_store.create_request(make_request())
+    missing = missing_store.requests_root / REQUEST_ID / "attempts" / "1"
+    missing.mkdir(parents=True, mode=0o700)
+    missing.parent.chmod(0o700)
+    with pytest.raises(RequestStoreError, match="envelope"):
+        missing_store.attempt_numbers(REQUEST_ID)
+
+
+def test_attempt_inventory_rejects_unknown_entry(tmp_path: Path) -> None:
+    store = RequestStore(tmp_path)
+    store.create_request(make_request())
+    store.publish_attempt_envelope(make_envelope())
+    (store.requests_root / REQUEST_ID / "attempts" / "notes").write_text("unsafe\n")
+
+    with pytest.raises(RequestStoreError, match="unsafe entry"):
+        store.attempt_numbers(REQUEST_ID)
 
 
 def test_concurrent_active_reservation_has_exactly_one_winner(tmp_path: Path) -> None:

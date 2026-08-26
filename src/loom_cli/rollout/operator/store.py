@@ -122,6 +122,20 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _validate_private_directory(path: Path, label: str) -> None:
     try:
         metadata = path.lstat()
@@ -325,6 +339,131 @@ class RequestStore:
                 raise RequestStoreError("could not create request store root") from exc
         _validate_private_directory(self.root, "request store root")
         _ensure_private_directory(self.requests_root, "requests directory")
+
+    def request_ids(self) -> tuple[str, ...]:
+        """Return every typed request identity without skipping unknown entries."""
+        try:
+            self.root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect request store root") from exc
+        _validate_private_directory(self.root, "request store root")
+        try:
+            before = self.requests_root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect requests directory") from exc
+        _validate_private_directory(self.requests_root, "requests directory")
+        request_ids: list[str] = []
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(self.requests_root, _directory_flags())
+            opened = os.fstat(directory_fd)
+            if _metadata_identity(before) != _metadata_identity(opened):
+                raise RequestStoreError("requests directory changed during inventory")
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    try:
+                        request_id = _request_id(entry.name)
+                        metadata = entry.stat(follow_symlinks=False)
+                    except (OSError, RequestStoreError) as exc:
+                        raise RequestStoreError(
+                            "requests directory contains an unsafe entry"
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != os.geteuid()
+                        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+                    ):
+                        raise RequestStoreError("requests directory contains an unsafe entry")
+                    self._require_record_directory(request_id)
+                    try:
+                        self.read_preflight_request(request_id)
+                    except RequestStoreError as exc:
+                        if str(exc) != "preflight request does not exist":
+                            raise
+                    try:
+                        self.read_request(request_id)
+                    except RequestStoreError as exc:
+                        if str(exc) != "rollout request is not promoted":
+                            raise
+                    request_ids.append(request_id)
+        except RequestStoreError:
+            raise
+        except OSError as exc:
+            raise RequestStoreError("could not inspect requests directory") from exc
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        try:
+            after = self.requests_root.lstat()
+        except OSError as exc:
+            raise RequestStoreError("requests directory changed during inventory") from exc
+        if _metadata_identity(before) != _metadata_identity(after):
+            raise RequestStoreError("requests directory changed during inventory")
+        if len(set(request_ids)) != len(request_ids):
+            raise RequestStoreError("requests directory contains duplicate authority")
+        return tuple(sorted(request_ids))
+
+    def attempt_numbers(self, request_id: str) -> tuple[int, ...]:
+        """Return every complete consecutive immutable attempt for one request."""
+        request_directory = self._require_request_directory(request_id)
+        attempts_directory = request_directory / "attempts"
+        try:
+            before = attempts_directory.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise RequestStoreError("could not inspect attempts directory") from exc
+        _validate_private_directory(attempts_directory, "attempts directory")
+        numbers: list[int] = []
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(attempts_directory, _directory_flags())
+            opened = os.fstat(directory_fd)
+            if _metadata_identity(before) != _metadata_identity(opened):
+                raise RequestStoreError("attempts directory changed during inventory")
+            with os.scandir(directory_fd) as entries:
+                for entry in entries:
+                    if (
+                        not entry.name.isdecimal()
+                        or entry.name.startswith("0")
+                        or not entry.is_dir(follow_symlinks=False)
+                    ):
+                        raise RequestStoreError("attempts directory contains an unsafe entry")
+                    number = _attempt_number(int(entry.name))
+                    metadata = entry.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != os.geteuid()
+                        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+                    ):
+                        raise RequestStoreError("attempts directory contains an unsafe entry")
+                    numbers.append(number)
+        except RequestStoreError:
+            raise
+        except OSError as exc:
+            raise RequestStoreError("could not inspect attempts directory") from exc
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        ordered = tuple(sorted(numbers))
+        if ordered != tuple(range(1, len(ordered) + 1)):
+            raise RequestStoreError("attempt directories are not consecutive")
+        for number in ordered:
+            try:
+                self.read_attempt_envelope(request_id, number)
+            except RequestStoreError as exc:
+                raise RequestStoreError("attempt inventory envelope is unavailable") from exc
+        try:
+            after = attempts_directory.lstat()
+        except OSError as exc:
+            raise RequestStoreError("attempts directory changed during inventory") from exc
+        if _metadata_identity(before) != _metadata_identity(after):
+            raise RequestStoreError("attempts directory changed during inventory")
+        return ordered
 
     def publish_backup_lease(self, lease: BackupLease) -> Path:
         """Publish one complete restore-verified lease by its evidence digest."""

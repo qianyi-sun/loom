@@ -68,6 +68,7 @@ from .model import (
 )
 from .policy import PolicyError, caller_from_sudo, sanitized_child_environment
 from .preflight import PreflightReport, catalog_secret_values, collect_preflight
+from .preflight_artifact_references import resume_binding_matches
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
     read_component_failure,
@@ -994,56 +995,6 @@ def _latest_attempt_event(events: list[RequestEvent]) -> RequestEvent | None:
     return current_attempt[-1]
 
 
-def _resume_binding_matches(
-    config: OperatorConfig,
-    request: RolloutRequest,
-    envelope: DriverEnvelope,
-) -> bool:
-    """Bind resume to the original request and every protected config input."""
-    return (
-        request.runner_config_sha256 == config.config_sha256
-        and envelope.runner_config_sha256 == config.config_sha256
-        and request.preflight_attestation_sha256 == envelope.preflight_attestation_sha256
-        and request.preflight_registry_sha256 == envelope.preflight_registry_sha256
-        and request.preflight_coverage_sha256 == envelope.preflight_coverage_sha256
-        and envelope.request_id == request.request_id
-        and envelope.rollout_id == request.rollout_id
-        and envelope.initiating_operator == request.caller.username
-        and envelope.initiating_uid == request.caller.uid
-        and envelope.remote_url == request.candidate.remote_url == config.remote_url
-        and envelope.target_ref == request.candidate.target_ref
-        and config.target_ref == "refs/heads/dev"
-        and envelope.resolved_sha == request.candidate.resolved_sha
-        and envelope.image_tag == request.candidate.image_tag
-        and envelope.fetched_at == request.candidate.fetched_at
-        and envelope.source_mode == request.candidate.source_mode == config.source_mode
-        and envelope.resolved_tree == request.candidate.resolved_tree
-        and envelope.approved_base_sha == request.candidate.approved_base_sha
-        and (
-            config.source_mode == "merged-dev"
-            or (
-                envelope.resolved_sha == config.source_commit_sha
-                and envelope.resolved_tree == config.source_tree_sha
-                and envelope.approved_base_sha == config.source_base_sha
-            )
-        )
-        and envelope.cluster_name == config.cluster_name
-        and envelope.namespace == config.namespace
-        and envelope.environment == config.environment
-        and envelope.cp_url == config.cp_url
-        and envelope.cluster_config_path == str(config.cluster_config_path)
-        and envelope.rollout_root == str(config.rollout_root)
-        and envelope.admin_token_source == config.admin_token_source
-        and envelope.worker_token_source == config.worker_token_source
-        and envelope.service_token_source == config.service_token_source
-        and envelope.expect_admin_token_fingerprint == config.expect_admin_token_fingerprint
-        and envelope.smoke_on_behalf_username == config.smoke_on_behalf_username
-        and envelope.smoke_on_behalf_team_id == config.smoke_on_behalf_team_id
-        and envelope.scope == config.scope
-        and envelope.gb10_prep_concurrency == config.gb10_prep_concurrency
-    )
-
-
 def _is_prelaunch_orphan(events: list[RequestEvent], attempt_number: int) -> bool:
     matching = [event for event in events if event.attempt_number == attempt_number]
     event_types = {event.event for event in matching}
@@ -1101,9 +1052,9 @@ def _resume(
             )
         except Exception:
             return _safe_error(dependencies, "first finalized attempt is unavailable")
-        if not _resume_binding_matches(dependencies.config, request, first):
+        if not resume_binding_matches(dependencies.config, request, first):
             return _safe_error(dependencies, "request config binding no longer matches")
-        if not _resume_binding_matches(dependencies.config, request, latest_envelope):
+        if not resume_binding_matches(dependencies.config, request, latest_envelope):
             return _safe_error(dependencies, "request config binding no longer matches")
         if (
             latest_envelope.backup_manifest_path != first.backup_manifest_path
