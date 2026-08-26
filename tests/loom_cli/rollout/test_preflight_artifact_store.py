@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -214,6 +216,104 @@ def test_store_publishes_and_reuses_exact_private_artifacts(tmp_path: Path) -> N
     assert first.descriptor_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_store_lifecycle_lock_is_private_and_single_link(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+
+    _publish(store)
+
+    metadata = (store.state_root / "preflight-artifacts.lock").lstat()
+    assert stat.S_ISREG(metadata.st_mode)
+    assert metadata.st_uid == os.geteuid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert metadata.st_nlink == 1
+
+
+@pytest.mark.timeout(5)
+def test_store_read_waits_for_exclusive_lifecycle_lock(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    publication = _publish(store)
+    started = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def read() -> None:
+        started.set()
+        try:
+            store.read(publication.bundle_digest)
+        except BaseException as exc:  # pragma: no cover - assertion reports the exception
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=read)
+    with store.exclusive_lifecycle_lock():
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.1)
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert finished.is_set()
+
+
+@pytest.mark.timeout(5)
+def test_store_publication_waits_for_shared_lifecycle_lock(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    _publish(store)
+    started = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def publish() -> None:
+        started.set()
+        try:
+            _publish(store)
+        except BaseException as exc:  # pragma: no cover - assertion reports the exception
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=publish)
+    with store.shared_lifecycle_lock():
+        thread.start()
+        assert started.wait(1)
+        assert not finished.wait(0.1)
+    thread.join(1)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert finished.is_set()
+
+
+def test_store_rejects_shared_to_exclusive_lifecycle_lock_promotion(tmp_path: Path) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    _publish(store)
+
+    with store.shared_lifecycle_lock():
+        with pytest.raises(PreflightArtifactStoreError, match="cannot be promoted"):
+            with store.exclusive_lifecycle_lock():
+                raise AssertionError("unsafe lock promotion entered exclusive work")
+
+
+@pytest.mark.parametrize("alias", ["symlink", "hardlink"])
+def test_store_rejects_unsafe_lifecycle_lock_alias(tmp_path: Path, alias: str) -> None:
+    store = PreflightArtifactStore(tmp_path / "state")
+    publication = _publish(store)
+    lock_path = store.state_root / "preflight-artifacts.lock"
+    lock_path.unlink()
+    outside = tmp_path / "outside.lock"
+    outside.write_text("outside\n")
+    outside.chmod(0o600)
+    if alias == "symlink":
+        lock_path.symlink_to(outside)
+    else:
+        os.link(outside, lock_path)
+
+    with pytest.raises(PreflightArtifactStoreError, match="lifecycle lock is unsafe"):
+        store.read(publication.bundle_digest)
+
+
 def test_store_rejects_content_and_path_authority_drift(tmp_path: Path) -> None:
     store = PreflightArtifactStore(tmp_path / "state")
     publication = _publish(store)
@@ -365,9 +465,7 @@ def test_store_loads_current_publication_beside_historical_schema_four(
     raw_without_digest = {key: value for key, value in raw.items() if key != "bundle_digest"}
     historical_digest = (
         __import__("hashlib")
-        .sha256(
-            json.dumps(raw_without_digest, sort_keys=True, separators=(",", ":")).encode()
-        )
+        .sha256(json.dumps(raw_without_digest, sort_keys=True, separators=(",", ":")).encode())
         .hexdigest()
     )
     raw["bundle_digest"] = historical_digest
