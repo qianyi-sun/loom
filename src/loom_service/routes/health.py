@@ -11,7 +11,10 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 
-from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
+from loom.personal_dev_runtime import (
+    PersonalDevAcceptanceInterlockError,
+    PersonalDevOperationalInterlockError,
+)
 from loom_service.dependencies import SessionAndCtx
 from loom_service.readiness import probe_dependencies
 
@@ -47,6 +50,35 @@ async def personal_dev_acceptance_readiness(
         response.status_code = 503
         return {
             "blockers": ["acceptance-interlock-unavailable"],
+            "status": "not-ready",
+        }
+    return {"blockers": [], "status": "ready"}
+
+
+@router.get("/health/personal-dev-operational")
+async def personal_dev_operational_readiness(
+    request: Request,
+    response: Response,
+) -> dict[str, object]:
+    """Expose only a stable, secret-free durable enablement result."""
+
+    interlock = getattr(request.app.state, "personal_dev_operational_interlock", None)
+    assert_ready = getattr(interlock, "assert_ready", None)
+    if not callable(assert_ready):
+        response.status_code = 503
+        return {
+            "blockers": ["operational-interlock-unavailable"],
+            "status": "not-ready",
+        }
+    try:
+        await assert_ready(now=datetime.now(UTC))
+    except PersonalDevOperationalInterlockError as exc:
+        response.status_code = 503
+        return {"blockers": [exc.code], "status": "not-ready"}
+    except Exception:
+        response.status_code = 503
+        return {
+            "blockers": ["operational-interlock-unavailable"],
             "status": "not-ready",
         }
     return {"blockers": [], "status": "ready"}

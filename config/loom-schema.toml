@@ -170,6 +170,24 @@ python_type = "str"
 default     = ""
 description = "Independent SHA-256 binding for the reviewed personal-development acceptance plan."
 
+[service_config.personal_dev_runtime_mode]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "shadow"
+description = "Explicit personal-development runtime mode: shadow, acceptance, or operational."
+
+[service_config.personal_dev_operational_binding_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+description = "Canonical secret-free runtime binding for durable zero-capacity personal development."
+
+[service_config.personal_dev_operational_plan_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Independent SHA-256 binding for the accepted durable personal-development plan."
+
 [service_config.personal_dev_activation_public_key_sha256]
 used_by     = ["loom-service"]
 python_type = "str"

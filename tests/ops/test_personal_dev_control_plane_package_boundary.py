@@ -829,7 +829,7 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
     assert "personal-dev-management-plane-deployment.md" in architecture
 
 
-def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
+def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
     normalized = " ".join(runbook.split())
 
@@ -837,10 +837,16 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert "umask 077" in runbook
     assert "personal-dev-trusted-release-run-<run>-attempt-<attempt>" in runbook
     assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
+    assert 'repo="$(pwd -P)"' in runbook
+    assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
+    assert 'python_cli="$repo/.venv/bin/python"' in runbook
+    assert 'test -x "$loom_cli"' in runbook
+    assert 'test -x "$python_cli"' in runbook
     assert (
-        'scanner_cache_lock="$(pwd -P)/deploy/dev-fleet/'
+        'scanner_cache_lock="$repo/deploy/dev-fleet/'
         'personal-dev-scanner-cache-lock.json"'
     ) in runbook
+    assert "/home/hongjian/loom/.venv" not in runbook
     assert 'scanner_cache_lock_sha256="$(sha256sum "$scanner_cache_lock"' in runbook
     assert '$(jq -r .scanner.lock_sha256 "$trusted_release")' in runbook
     assert '.images.personal_dev_scanner_cache "$trusted_release"' in runbook
@@ -863,32 +869,32 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert '"worker_available":false' in runbook
     assert '"manager_ceiling":0' in runbook
 
-    assert 'owner_a_xdg="<absolute-mode-0700-owner-a-xdg-config-root>"' in runbook
-    assert 'owner_b_xdg="<absolute-mode-0700-owner-b-xdg-config-root>"' in runbook
-    assert 'owner_a_name="<owner-a-personal-name>"' in runbook
-    assert 'owner_b_name="<owner-b-personal-name>"' in runbook
-    assert 'XDG_CONFIG_HOME="$owner_a_xdg"' in runbook
-    assert 'XDG_CONFIG_HOME="$owner_b_xdg"' in runbook
-    assert runbook.count("loom auth whoami") == 2
-    assert "owner_a_deploy_pid=$!" in runbook
-    assert "owner_b_deploy_pid=$!" in runbook
-    assert "wait \"$owner_a_deploy_pid\"" in runbook
-    assert "wait \"$owner_b_deploy_pid\"" in runbook
-    assert "owner_a_update_pid=$!" in runbook
-    assert "owner_b_update_pid=$!" in runbook
+    assert (
+        'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"'
+        in runbook
+    )
+    assert 'primary_name="<owner-primary-personal-name>"' in runbook
+    assert 'retained_name="<owner-retained-personal-name>"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_xdg"' in runbook
+    assert runbook.count("loom auth whoami") == 1
+    assert "primary_deploy_pid=$!" in runbook
+    assert "retained_deploy_pid=$!" in runbook
+    assert "wait \"$primary_deploy_pid\"" in runbook
+    assert "wait \"$retained_deploy_pid\"" in runbook
+    assert "primary_update_pid=$!" in runbook
+    assert "retained_update_pid=$!" in runbook
     assert runbook.count("--min-slots 0") >= 5
-    assert '--source-root "$owner_a_source_v1"' in normalized
-    assert '--source-root "$owner_b_source_v1"' in normalized
-    assert '--source-root "$owner_a_source_v2"' in normalized
-    assert '--source-root "$owner_b_source_v2"' in normalized
-    assert "expect_owner_rejection" in runbook
-    assert 'loom dev status "$owner_b_name"' in normalized
-    assert 'loom dev status "$owner_a_name"' in normalized
-    assert 'loom dev destroy "$owner_b_name" --no-wait' in normalized
-    assert 'loom dev destroy "$owner_a_name" --no-wait' in normalized
-    assert 'loom dev destroy "$owner_a_name" --format json' in normalized
-    assert 'loom dev destroy "$owner_b_name" --keep-data --format json' in normalized
-    assert 'loom service up --environment "dev-$owner_b_name"' in normalized
+    assert '--source-root "$primary_source_v1"' in normalized
+    assert '--source-root "$retained_source_v1"' in normalized
+    assert '--source-root "$primary_source_v2"' in normalized
+    assert '--source-root "$retained_source_v2"' in normalized
+    assert '.acceptance_owner.user_id' in runbook
+    assert '.acceptance_owner.team_id' in runbook
+    assert 'loom dev status "$retained_name"' in normalized
+    assert 'loom dev status "$primary_name"' in normalized
+    assert 'loom dev destroy "$primary_name" --format json' in normalized
+    assert 'loom dev destroy "$retained_name" --keep-data --format json' in normalized
+    assert 'loom service up --environment "dev-$retained_name"' in normalized
     assert 'jq -e --arg previous "$retained_subject"' in normalized
     assert ".subject_id != $previous" in runbook
 
@@ -928,7 +934,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "scanner_finding_policy_sha256" in runbook
     assert "approved secret channel" in lowered
     assert "exact key inventory" in lowered
-    assert "two distinct authenticated owner sessions" in lowered
+    assert "single authenticated acceptance-owner session" in lowered
     assert "arbitrary committed, modified, and untracked source" in lowered
     assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
     assert "issue #906" in lowered
@@ -982,13 +988,24 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     runbook_index = _read("docs/runbooks/README.md")
     fleet = _read("deploy/dev-fleet/README.md")
     architecture = _read("docs/architecture/multi-dev-environments.md")
+    normalized_architecture = " ".join(architecture.casefold().split())
 
     for document in (runbook_index, fleet, architecture):
         assert "personal-dev-zero-capacity-acceptance.md" in document
     assert "render-acceptance" in fleet
     assert "status-acceptance" in fleet
-    assert "two concurrent owners" in architecture.casefold()
+    assert "two concurrent isolated environments" in normalized_architecture
+    assert "one authenticated acceptance owner" in normalized_architecture
     assert "worker_available=false" in architecture
+
+
+def test_durable_launch_uses_the_exact_checkout_cli() -> None:
+    runbook = _read("docs/runbooks/personal-dev-durable-launch.md")
+
+    assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
+    assert 'test -x "$loom_cli"' in runbook
+    assert runbook.count('"$loom_cli" admin personal-dev-control-plane') >= 7
+    assert "/home/hongjian/loom/.venv" not in runbook
 
 
 def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:

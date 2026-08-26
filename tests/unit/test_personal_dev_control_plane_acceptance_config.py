@@ -16,11 +16,14 @@ from pydantic import ValidationError
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlanError,
     PersonalDevControlPlaneProfile,
+    PersonalDevOperationalPlanError,
     PersonalDevTrustedRelease,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
+    load_personal_dev_operational_plan,
     load_personal_dev_trusted_release,
     validate_personal_dev_acceptance_plan,
+    validate_personal_dev_operational_plan,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -161,16 +164,10 @@ def _plan_value(
             "reporter_principal_id": "personal-dev-reporter",
         },
         "quotas": _quota_value(profile),
-        "acceptance_owners": [
-            {
-                "team_id": "00000000-0000-0000-0000-000000000201",
-                "user_id": "00000000-0000-0000-0000-000000000301",
-            },
-            {
-                "team_id": "00000000-0000-0000-0000-000000000202",
-                "user_id": "00000000-0000-0000-0000-000000000302",
-            },
-        ],
+        "acceptance_owner": {
+            "team_id": "00000000-0000-0000-0000-000000000201",
+            "user_id": "00000000-0000-0000-0000-000000000301",
+        },
         "window": {
             "started_at": "2026-08-17T20:00:00Z",
             "expires_at": "2026-08-17T23:00:00Z",
@@ -226,10 +223,9 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         release.scanner.java_database_metadata_sha256
     )
     assert plan.quotas.per_owner_aggregate_min_slots == 8
-    assert [str(owner.user_id) for owner in plan.acceptance_owners] == [
-        "00000000-0000-0000-0000-000000000301",
-        "00000000-0000-0000-0000-000000000302",
-    ]
+    assert str(plan.acceptance_owner.user_id) == (
+        "00000000-0000-0000-0000-000000000301"
+    )
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
     validate_personal_dev_acceptance_plan(
@@ -279,17 +275,10 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         },
         lambda value: {
             **value,
-            "acceptance_owners": [value["acceptance_owners"][0]] * 2,
-        },
-        lambda value: {
-            **value,
-            "acceptance_owners": [
-                {
-                    **value["acceptance_owners"][0],
-                    "team_id": "00000000-0000-0000-0000-000000000000",
-                },
-                value["acceptance_owners"][1],
-            ],
+            "acceptance_owner": {
+                **value["acceptance_owner"],
+                "team_id": "00000000-0000-0000-0000-000000000000",
+            },
         },
         lambda value: {
             **value,
@@ -522,6 +511,80 @@ def test_acceptance_validation_requires_the_inert_shadow_profile(
     with pytest.raises(PersonalDevAcceptancePlanError):
         validate_personal_dev_acceptance_plan(
             replace(profile, **profile_drift),  # type: ignore[arg-type]
+            release,
+            "a" * 64,
+            plan,
+            now=_NOW,
+        )
+
+
+def _operational_plan_value(value: dict[str, Any]) -> dict[str, Any]:
+    operational = copy.deepcopy(value)
+    operational.pop("acceptance_owner")
+    operational.pop("window")
+    operational["approval"] = {
+        "acceptance_result_sha256": "4" * 64,
+        "approved_at": "2026-08-17T20:30:00Z",
+        "rollback_evidence_sha256": "5" * 64,
+    }
+    return operational
+
+
+def test_operational_plan_loads_accepted_non_expiring_zero_capacity_contract(
+    tmp_path: Path,
+) -> None:
+    profile, release, acceptance = _inputs(tmp_path)
+    value = _operational_plan_value(acceptance)
+    path, digest = _write_plan(tmp_path, value)
+
+    plan = load_personal_dev_operational_plan(path, digest)
+
+    assert plan.approval.acceptance_result_sha256 == "4" * 64
+    assert plan.approval.rollback_evidence_sha256 == "5" * 64
+    assert plan.canonical_bytes() == path.read_bytes()
+    assert plan.sha256 == digest
+    assert "expires_at" not in plan.manager_runtime_json()
+    validate_personal_dev_operational_plan(
+        profile,
+        release,
+        "a" * 64,
+        plan,
+        now=_NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["approval"].update(acceptance_result_sha256="0" * 64),
+        lambda value: value["approval"].update(rollback_evidence_sha256="0" * 64),
+        lambda value: value.update(acceptance_owner={}),
+        lambda value: value.update(window={}),
+    ],
+)
+def test_operational_plan_rejects_unaccepted_or_acceptance_only_fields(
+    tmp_path: Path,
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
+    _profile, _release, acceptance = _inputs(tmp_path)
+    value = _operational_plan_value(acceptance)
+    mutate(value)
+    path, digest = _write_plan(tmp_path, value)
+
+    with pytest.raises((PersonalDevOperationalPlanError, ValidationError)):
+        load_personal_dev_operational_plan(path, digest)
+
+
+def test_operational_plan_rejects_future_approval(tmp_path: Path) -> None:
+    profile, release, acceptance = _inputs(tmp_path)
+    value = _operational_plan_value(acceptance)
+    value["approval"]["approved_at"] = "2026-08-17T21:00:01Z"
+    path, digest = _write_plan(tmp_path, value)
+    plan = load_personal_dev_operational_plan(path, digest)
+
+    with pytest.raises(PersonalDevOperationalPlanError):
+        validate_personal_dev_operational_plan(
+            profile,
             release,
             "a" * 64,
             plan,

@@ -21,10 +21,14 @@ from loom.personal_dev_builder_manifest import (
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
     PersonalDevControlPlaneProfile,
+    PersonalDevOperationalPlan,
     PersonalDevTrustedRelease,
     ResourceEnvelope,
     validate_personal_dev_acceptance_plan,
+    validate_personal_dev_operational_plan,
 )
+
+PersonalDevEnabledPlan = PersonalDevAcceptancePlan | PersonalDevOperationalPlan
 
 _MANAGED_BY = "loom-personal-dev-control-plane"
 _MANAGEMENT_PRINCIPAL = "system:serviceaccount:loom-dev:loom-personal-dev-management"
@@ -63,6 +67,7 @@ class _RenderContext:
     input_sha256: str
     release_sha256: str
     acceptance_plan_sha256: str | None = None
+    operational_plan_sha256: str | None = None
 
     def labels(self) -> dict[str, str]:
         value = {
@@ -73,6 +78,8 @@ class _RenderContext:
         }
         if self.acceptance_plan_sha256 is not None:
             value["loom.dev/acceptance-plan-sha256"] = self.acceptance_plan_sha256[:32]
+        if self.operational_plan_sha256 is not None:
+            value["loom.dev/operational-plan-sha256"] = self.operational_plan_sha256[:32]
         return value
 
     def annotations(self) -> dict[str, str]:
@@ -82,6 +89,8 @@ class _RenderContext:
         }
         if self.acceptance_plan_sha256 is not None:
             value["loom.dev/acceptance-plan-sha256"] = self.acceptance_plan_sha256
+        if self.operational_plan_sha256 is not None:
+            value["loom.dev/operational-plan-sha256"] = self.operational_plan_sha256
         return value
 
 
@@ -2277,7 +2286,7 @@ def _migration(
 def _management_env(
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
-    plan: PersonalDevAcceptancePlan | None = None,
+    plan: PersonalDevEnabledPlan | None = None,
 ) -> list[dict[str, Any]]:
     secret = profile.identities.management_secret
     capabilities = json.dumps(
@@ -2302,7 +2311,7 @@ def _management_env(
         separators=(",", ":"),
         ensure_ascii=True,
     )
-    acceptance_env: list[dict[str, Any]] = []
+    enablement_env: list[dict[str, Any]] = []
     scanner_identity = (
         f"trivy-bin-sha256:{release.scanner.binary_sha256}:"
         f"db-sha256:{release.scanner.database_sha256}:"
@@ -2325,20 +2334,36 @@ def _management_env(
         registry_prefix = plan.builder.registry_prefix
         publisher_identity = plan.builder.publisher_identity
         activation_key_id = plan.activation.key_id
-        acceptance_env = [
-            _literal_env(
-                "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON",
-                plan.manager_runtime_json(),
-            ),
-            _literal_env(
-                "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256",
-                plan.sha256,
-            ),
+        if isinstance(plan, PersonalDevAcceptancePlan):
+            enablement_env = [
+                _literal_env("LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE", "acceptance"),
+                _literal_env(
+                    "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON",
+                    plan.manager_runtime_json(),
+                ),
+                _literal_env(
+                    "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256",
+                    plan.sha256,
+                ),
+            ]
+        else:
+            enablement_env = [
+                _literal_env("LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE", "operational"),
+                _literal_env(
+                    "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON",
+                    plan.manager_runtime_json(),
+                ),
+                _literal_env(
+                    "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256",
+                    plan.sha256,
+                ),
+            ]
+        enablement_env.append(
             _literal_env(
                 "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256",
                 plan.activation.public_key_sha256,
-            ),
-        ]
+            )
+        )
     return [
         _literal_env("LOOM_ENV", "dev"),
         _literal_env("LOOM_NAMESPACE", "loom-dev"),
@@ -2361,7 +2386,7 @@ def _management_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED",
             "true" if plan is not None else "false",
         ),
-        *acceptance_env,
+        *enablement_env,
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT", ""),
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBECTL_PATH", "/usr/local/bin/kubectl"),
         _literal_env(
@@ -2624,7 +2649,7 @@ def _management_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
-    plan: PersonalDevAcceptancePlan | None = None,
+    plan: PersonalDevEnabledPlan | None = None,
 ) -> dict[str, Any]:
     labels = {"app": "loom-personal-dev-management"}
     projected_management = [{"key": filename, "path": filename} for filename in _MANAGEMENT_FILES]
@@ -2682,9 +2707,13 @@ def _management_deployment(
                             "readinessProbe": {
                                 "httpGet": {
                                     "path": (
-                                        "/api/v1/health/personal-dev-acceptance"
-                                        if plan is not None
-                                        else "/api/v1/health"
+                                        "/api/v1/health/personal-dev-operational"
+                                        if isinstance(plan, PersonalDevOperationalPlan)
+                                        else (
+                                            "/api/v1/health/personal-dev-acceptance"
+                                            if isinstance(plan, PersonalDevAcceptancePlan)
+                                            else "/api/v1/health"
+                                        )
                                     ),
                                     "port": "http",
                                 },
@@ -2812,7 +2841,7 @@ def _activation_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
-    plan: PersonalDevAcceptancePlan | None = None,
+    plan: PersonalDevEnabledPlan | None = None,
 ) -> dict[str, Any]:
     labels = {"app": "loom-personal-dev-activation-agent"}
     init = _credential_init(
@@ -3150,7 +3179,7 @@ def _render_documents(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
-    plan: PersonalDevAcceptancePlan | None = None,
+    plan: PersonalDevEnabledPlan | None = None,
 ) -> RenderedPersonalDevControlPlane:
     shared_role, shared_binding = _shared_role(context)
     runtime = plan.builder if plan is not None else profile.builder
@@ -3264,8 +3293,42 @@ def render_acceptance_personal_dev_control_plane(
     return _render_documents(context, profile, release, plan)
 
 
+def render_operational_personal_dev_control_plane(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    plan: PersonalDevOperationalPlan,
+    *,
+    now: datetime,
+) -> RenderedPersonalDevControlPlane:
+    """Render durable personal applications with executable capacity fixed at zero."""
+
+    if not isinstance(plan, PersonalDevOperationalPlan):
+        raise TypeError("personal-dev operational plan is invalid")
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    validate_personal_dev_operational_plan(
+        profile,
+        release,
+        hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
+        plan,
+        now=now,
+    )
+    input_sha256 = hashlib.sha256(
+        b"loom-personal-dev-operational-render-v1\0"
+        + profile.canonical_bytes()
+        + release.canonical_bytes()
+        + plan.canonical_bytes()
+    ).hexdigest()
+    context = _RenderContext(
+        input_sha256=input_sha256,
+        release_sha256=hashlib.sha256(release.canonical_bytes()).hexdigest(),
+        operational_plan_sha256=plan.sha256,
+    )
+    return _render_documents(context, profile, release, plan)
+
+
 __all__ = [
     "RenderedPersonalDevControlPlane",
     "render_acceptance_personal_dev_control_plane",
+    "render_operational_personal_dev_control_plane",
     "render_shadow_personal_dev_control_plane",
 ]

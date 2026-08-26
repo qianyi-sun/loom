@@ -22,15 +22,18 @@ import yaml  # type: ignore[import-untyped]
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
+    load_personal_dev_operational_plan,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
     render_acceptance_personal_dev_control_plane,
+    render_operational_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
 from loom.personal_dev_control_plane_status import (
     MAX_PERSONAL_DEV_STATUS_RESPONSE_BYTES,
     observe_personal_dev_acceptance_status,
+    observe_personal_dev_operational_status,
     observe_personal_dev_shadow_status,
 )
 
@@ -105,6 +108,54 @@ def _render_acceptance(args: argparse.Namespace) -> int:
                 "source_sha": release.source_sha,
                 "source_tree": release.source_tree,
                 "yaml_sha256": hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    except (OSError, TypeError, ValueError):
+        sys.stderr.write(_RENDER_ERROR)
+        return 2
+
+    try:
+        sys.stdout.write(rendered.yaml_text)
+    except BrokenPipeError:
+        return 0
+    sys.stderr.write(evidence + "\n")
+    return 0
+
+
+def _render_operational(args: argparse.Namespace) -> int:
+    try:
+        profile = load_personal_dev_control_plane_profile(args.file)
+        release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        plan = load_personal_dev_operational_plan(
+            args.operational_plan_file,
+            args.operational_plan_sha256,
+        )
+        rendered = render_operational_personal_dev_control_plane(
+            profile,
+            release,
+            plan,
+            now=datetime.now(UTC),
+        )
+        evidence = json.dumps(
+            {
+                "input_sha256": rendered.input_sha256,
+                "mode": "operational",
+                "operational_plan_sha256": plan.sha256,
+                "release_sha256": rendered.release_sha256,
+                "resource_count": rendered.resource_count,
+                "schema": "loom-personal-dev-control-plane-render-v1",
+                "source_sha": release.source_sha,
+                "source_tree": release.source_tree,
+                "yaml_sha256": hashlib.sha256(
+                    rendered.yaml_text.encode("utf-8")
+                ).hexdigest(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -497,6 +548,53 @@ def _status_acceptance(args: argparse.Namespace) -> int:
     return 0 if status_value.ready else 1
 
 
+def _status_operational(args: argparse.Namespace) -> int:
+    try:
+        if _safe_kubeconfig(args.kubeconfig) is None:
+            raise ValueError("kubeconfig is invalid")
+        profile = load_personal_dev_control_plane_profile(args.file)
+        release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        plan = load_personal_dev_operational_plan(
+            args.operational_plan_file,
+            args.operational_plan_sha256,
+        )
+        expected = render_operational_personal_dev_control_plane(
+            profile,
+            release,
+            plan,
+            now=datetime.now(UTC),
+        )
+        runner = _SubprocessKubectlRunner(args.kubeconfig)
+    except (OSError, TypeError, ValueError):
+        sys.stderr.write(_STATUS_ERROR)
+        return 2
+
+    status_value = observe_personal_dev_operational_status(
+        runner,
+        expected=expected,
+        plan=plan,
+        namespace=args.namespace,
+    )
+    output = (
+        json.dumps(
+            status_value.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    try:
+        sys.stdout.write(output)
+    except BrokenPipeError:
+        return 0 if status_value.ready else 1
+    return 0 if status_value.ready else 1
+
+
 def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
     """Register the render-only and read-only personal-dev operator surface."""
 
@@ -507,7 +605,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         help="Render or observe the zero-capacity personal-development management plane.",
         description=(
             "render-only and read-only personal-development management-plane shadow "
-            "or acceptance\n"
+            "acceptance, or operational mode\n"
             "these commands never mutate resources\n"
             "physical capacity unchanged"
         ),
@@ -574,6 +672,41 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         help="Exact SHA-256 of the canonical acceptance plan.",
     )
     render_acceptance.set_defaults(handler=_render_acceptance)
+
+    render_operational = operations.add_parser(
+        "render-operational",
+        allow_abbrev=False,
+        help="Render exact durable zero-capacity operational YAML and evidence.",
+    )
+    render_operational.add_argument(
+        "--file",
+        type=Path,
+        required=True,
+        help="Strict non-secret personal-dev management-plane TOML profile.",
+    )
+    render_operational.add_argument(
+        "--trusted-release-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical trusted-release JSON document.",
+    )
+    render_operational.add_argument(
+        "--trusted-release-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical trusted-release document.",
+    )
+    render_operational.add_argument(
+        "--operational-plan-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical durable operational plan.",
+    )
+    render_operational.add_argument(
+        "--operational-plan-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical operational plan.",
+    )
+    render_operational.set_defaults(handler=_render_operational)
 
     status_parser = operations.add_parser(
         "status",
@@ -657,6 +790,53 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         help="Exact SHA-256 of the canonical acceptance plan.",
     )
     status_acceptance.set_defaults(handler=_status_acceptance)
+
+    status_operational = operations.add_parser(
+        "status-operational",
+        allow_abbrev=False,
+        help="Observe one exact durable zero-capacity operational binding.",
+    )
+    status_operational.add_argument(
+        "--namespace",
+        choices=["loom-dev"],
+        default="loom-dev",
+        help="Fixed shared infrastructure namespace (default: loom-dev).",
+    )
+    status_operational.add_argument(
+        "--kubeconfig",
+        type=Path,
+        required=True,
+        help="Absolute non-symlink path to the reviewed kubeconfig.",
+    )
+    status_operational.add_argument(
+        "--file",
+        type=Path,
+        required=True,
+        help="Strict non-secret personal-dev management-plane TOML profile.",
+    )
+    status_operational.add_argument(
+        "--trusted-release-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical trusted-release JSON document.",
+    )
+    status_operational.add_argument(
+        "--trusted-release-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical trusted-release document.",
+    )
+    status_operational.add_argument(
+        "--operational-plan-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical durable operational plan.",
+    )
+    status_operational.add_argument(
+        "--operational-plan-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical operational plan.",
+    )
+    status_operational.set_defaults(handler=_status_operational)
 
 
 __all__ = ["add_personal_dev_control_plane_subparser"]

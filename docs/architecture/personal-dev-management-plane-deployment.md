@@ -6,7 +6,8 @@ The personal candidate, lifecycle, builder, activation, teardown, capacity
 projection, and render-only shared-management package are implemented, but an
 ordinary Loom deployment leaves the personal mutation paths disabled. The
 package includes deterministic preparation of one exact release-bound scanner
-cache; its live shadow deployment and acceptance remain controlled operations.
+cache. Shadow deployment, bounded acceptance, and durable operational launch
+remain distinct controlled operations.
 
 This design adds that package without reintroducing a shared development
 application. `loom-dev` contains trusted shared infrastructure only. Candidate
@@ -17,7 +18,7 @@ lifecycle.
 The package does not activate physical capacity. The global capacity manager
 remains the only allocation authority across OLDLAB and GB10, and its
 executable new-capacity ceiling must remain exactly zero throughout the live
-personal-application acceptance.
+personal-application acceptance and the initial durable operational mode.
 
 ## Current boundary
 
@@ -50,7 +51,7 @@ has a narrow input schema, emits only the shared management plane, and exposes
 read-only status. It has no apply operation and no physical-capacity activation
 operation.
 
-The package is delivered in two repository increments:
+The package is delivered in three repository increments:
 
 1. **Shadow foundation.** Render storage, migration, management service,
    restricted-builder authority, activation-agent authority, RBAC, and network
@@ -61,10 +62,21 @@ The package is delivered in two repository increments:
    controller and builder enabled and the activation agent at one replica.
    Runtime startup and operator status both recheck the global manager and
    refuse any nonzero executable ceiling. This increment supports #1280's
-   two-owner application acceptance but still cannot allocate a worker.
+   single-owner application acceptance but still cannot allocate a worker.
+3. **Durable zero-capacity operational contract.** After the complete
+   acceptance runbook has retired both owner-controlled environments and restored the
+   reviewed shadow, accept a separate canonical operational plan.
+   `render-operational` enables the same personal application authorities
+   without retaining the expiring acceptance binding. `status-operational`
+   continuously verifies the immutable release and plan, the global-manager
+   authority and execution boundary, executable ceiling `0`, valid dynamic
+   namespace ownership, and zero personal workers. A successful operational
+   launch may remain enabled; it still cannot execute a task.
 
 The global manager's later prepared-to-active and one-slot execution interlock
-remains a separate #906 package and review.
+remains a separate #906/#822 package and review. Operational personal
+application readiness is not evidence that x86_64, arm64, or
+architecture-neutral task capacity is installed, active, or accepted.
 
 ## Topology
 
@@ -160,9 +172,9 @@ exact class, handler, and runtime-profile digest and prepares the release-bound
 scanner cache, while builder preparation remains false. The protected trusted
 release binds the scanner binary, both databases and metadata files, cache
 identity, checked-in source lock, and immutable cache image. The later
-acceptance plan additionally binds the same RuntimeClass profile and finding
-policy. Shadow and acceptance status both fail until the observed handler,
-annotation, and complete scheduling selector match.
+acceptance and operational plans additionally bind the same RuntimeClass
+profile and finding policy. Shadow, acceptance, and operational status all fail
+until the observed handler, annotation, and complete scheduling selector match.
 
 ## Configuration and immutable release binding
 
@@ -214,19 +226,33 @@ binds:
 - global-manager authority incarnation, configuration epoch, execution state,
   execution epoch, and executable ceiling `0`;
 - exact lifecycle and reporter principal identifiers;
-- two distinct acceptance owner identifiers and finite quotas; and
+- one exact acceptance-owner identifier pair and finite quotas; and
 - change-window, rollback-manifest, and expiry timestamps.
+
+Operational rendering is a separate third mode. It requires an owner-only
+canonical operational plan and its independently supplied SHA-256. The
+operational plan binds the same immutable source, release, storage,
+RuntimeClass, scanner, publisher, registry, activation, quota, principal, and
+global-manager zero-capacity boundaries needed for acceptance. It also binds
+the completed single-owner acceptance result and the exact byte-reviewed shadow
+rollback manifest. It does not contain acceptance owners or an acceptance
+window, and an operator must not simulate durability by choosing a distant
+acceptance expiry. Configuration-epoch advancement is permitted only as the
+same monotonic progress accepted during the bounded test; authority
+incarnation, execution state and epoch, observer principal, and executable
+ceiling remain exact fail-closed bindings.
 
 The file must be a current-user-owned, non-symlink, single-link regular file
 with mode `0600`, canonical JSON bytes, no trailing newline, and an exact digest
 match. It is control evidence, not a credential.
 
 Repository implementation does not establish the live prerequisites by
-itself. DNS, provisioned Secret inventories, the measured gVisor RuntimeClass,
-candidate GHCR publication, backup/restore evidence, and two-owner acceptance
-remain separate operational gates. None may be inferred from a successful
-render or from scanner-cache preparation, and the executable ceiling remains
-zero throughout these gates.
+itself. DNS and TLS, provisioned Secret inventories, the measured gVisor
+RuntimeClass, candidate GHCR publication, backup/restore evidence, single-owner
+acceptance, and a successful operational apply/status remain separate
+operational gates. None may be inferred from a successful render or from
+scanner-cache preparation, and the executable ceiling remains zero throughout
+these gates.
 
 ## Credential boundaries
 
@@ -304,6 +330,37 @@ Acceptance status distinguishes application readiness, capacity publication,
 and worker availability. For this phase, application and non-executable
 capacity publication may become ready; `worker_available` must remain false.
 
+Acceptance is not a steady-state mode. Its finite window and owner-specific
+evidence exist to prove the behavior under test. After the acceptance owner completes
+create, concurrent two-environment build, update, isolation, destroy, retained-data redeploy,
+and final destroy, the acceptance runbook reapplies the exact shadow it
+reviewed before forward mutation. Leaving the acceptance manifest active past
+that procedure is configuration drift even if its expiry has not yet arrived.
+
+### Durable zero-capacity operational mode
+
+The operational manifest uses the same shared storage identities and immutable
+release, enables the personal controller and restricted builder, and scales the
+activation agent to one. It is generated only by `render-operational` from the
+canonical operational plan after the complete acceptance-and-shadow-rollback
+result exists. The service continuously verifies the plan's global-manager
+authority, monotonic configuration-epoch floor, exact execution state and
+epoch, and executable ceiling `0`; it does not rely on an acceptance expiry.
+
+`status-operational` succeeds only when the shared package matches the exact
+render, management and activation are ready with the intended authorities,
+all observed `loom-dev-*` and transient `loom-build-*` namespaces satisfy their
+managed identity contracts, the global manager still satisfies the operational
+binding, the ceiling is `0`, no personal worker exists, and
+`worker_available=false`. DNS, certificate, and authenticated stable-route
+checks remain live launch evidence outside the Kubernetes render.
+
+This mode supports persistent personal application development only. A healthy
+route, successful source build, ready personal namespace, or non-executable
+demand publication does not prove task scheduling, model execution, GPU
+capacity, or #906/#822 acceptance. A task-capacity transition requires its own
+protected plan, executors, canaries, status, and rollback.
+
 ### Rollback
 
 Rollback reapplies the byte-reviewed shadow manifest for the same release. It
@@ -316,35 +373,53 @@ state and does not delete its namespace, database, buckets, or evidence.
 No rollback step changes the global-manager ceiling or restarts a legacy fleet
 writer.
 
+Operational rollback uses the same ordering. Stop admitting new operations,
+retire every personal environment through its authenticated manager-first
+destroy operation, wait until all `loom-dev-*` and `loom-build-*` namespaces
+are gone, and only then reapply the byte-reviewed shadow manifest. Never delete
+a namespace or PVC directly. If an environment cannot be retired safely, keep
+the zero-capacity operational plane fail closed, retain its data and evidence,
+and do not apply shadow over unresolved dynamic authority.
+
 ## Live acceptance
 
 After the shadow rehearsal and acceptance interlock are merged, published, and
 deployed, #1280 closes only after this controlled test:
 
-1. Two distinct user/team owners authenticate to the management API.
-2. Each owner deploys a distinct arbitrary source snapshot with
+1. The exact acceptance owner authenticates to the management API.
+2. The owner deploys two distinctly named arbitrary source snapshots with
    `loom service up --environment dev-<name> --min-slots 0`.
 3. Both builds and lifecycle operations run concurrently without shared mutable
    candidate, attempt, registry, database, bucket, credential, or namespace
    authority.
-4. Each owner performs an independent source update and capacity-policy update.
-5. Cross-owner list/detail/mutation, Secret, database, bucket, and namespace
-   access is rejected.
+4. The owner performs independent source and capacity-policy updates for both
+   environments.
+5. Candidate, subject, Secret, database, bucket, route, worker-pool, and
+   namespace identities remain disjoint across the two environments.
 6. Application readiness and initial non-executable demand publication succeed,
    while worker availability remains false and the manager ceiling remains `0`.
-7. One owner destroys with data deletion and the other with `--keep-data`;
-   neither operation mutates `loom-dev` or the sibling namespace.
+7. The owner destroys one environment with data deletion and the other with
+   `--keep-data`; neither operation mutates `loom-dev` or the sibling namespace.
 8. The retained environment name is redeployed and proves authority rotation.
 
 Physical one-slot x86_64, arm64, and architecture-neutral task execution is not
 part of this acceptance. It follows the separately reviewed #906 activation
 interlock after both pool executors and no-dual-writer evidence are complete.
 
+After all eight steps, the acceptance runbook performs final manager-first
+cleanup and returns to the byte-reviewed shadow. Durable launch is a subsequent
+operation under the
+[personal-development durable launch runbook](../runbooks/personal-dev-durable-launch.md):
+render and review both operational and shadow manifests, apply operational,
+prove `status-operational`, DNS/TLS, and stable-route behavior, and retain the
+operational manifest only while ceiling `0` and `worker_available=false` remain
+true.
+
 ## Verification
 
 Repository verification includes:
 
-- strict TOML and acceptance-plan model tests;
+- strict TOML, acceptance-plan, and operational-plan model tests;
 - render snapshots and YAML schema/identity tests;
 - rejection of mutable/zero/mixed-release images, unsafe evidence files,
   incomplete Secret key sets, broad RBAC, shared application workloads,
@@ -353,8 +428,10 @@ Repository verification includes:
 - credential projection race, ownership, mode, link, size, and exact-key tests;
 - atomic scanner generation, protected ownership/mode, startup rehash, render,
   and status-drift tests;
-- shadow and acceptance status matrices with manager identity/ceiling drift;
-- startup tests proving disabled shadow behavior and fail-closed acceptance;
+- shadow, acceptance, and operational status matrices with manager
+  identity/ceiling drift;
+- startup tests proving disabled shadow behavior, fail-closed acceptance, and
+  durable zero-capacity operational behavior;
 - server-side diff tests against an isolated disposable cluster; and
 - the existing personal source, candidate, builder, reconciler, activation,
   capacity, teardown, migration, package-boundary, and secret-scan suites.

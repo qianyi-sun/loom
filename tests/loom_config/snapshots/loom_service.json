@@ -504,6 +504,16 @@
     "default": "16",
     "required": false
   },
+  "personal_dev_operational_binding_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
+  "personal_dev_operational_plan_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_per_owner_aggregate_max_slots": {
     "annotation": "<class 'int'>",
     "default": "16",
@@ -532,6 +542,11 @@
   "personal_dev_reconciler_poll_interval_sec": {
     "annotation": "<class 'float'>",
     "default": "2.0",
+    "required": false
+  },
+  "personal_dev_runtime_mode": {
+    "annotation": "<class 'str'>",
+    "default": "'shadow'",
     "required": false
   },
   "personal_dev_source_max_archive_bytes": {

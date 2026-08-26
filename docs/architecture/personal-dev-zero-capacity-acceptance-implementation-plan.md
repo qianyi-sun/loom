@@ -13,7 +13,7 @@ capacity ceiling remains exactly zero.
 **Architecture:** Keep the merged shadow profile immutable and inert. A
 protected image-release job assembles one canonical trusted release, and a
 separate owner-only acceptance plan binds that release, the reviewed shadow,
-builder dependencies, two owners, rollback evidence, and one exact global
+builder dependencies, one acceptance owner, rollback evidence, and one exact global
 manager checkpoint. Acceptance rendering reuses the shadow resources but
 enables only personal lifecycle/build/activation, while service startup,
 activation routes, Kubernetes readiness, and operator status independently
@@ -231,7 +231,7 @@ pytest, Ruff, mypy.
 
   Use one canonical fixture with exact nested objects `source`, `release`,
   `storage`, `activation`, `builder`, `manager`, `principals`, `quotas`,
-  `acceptance_owners`, and `window`. The manager object has this exact shape:
+  `acceptance_owner`, and `window`. The manager object has this exact shape:
 
   ```python
   {
@@ -243,7 +243,7 @@ pytest, Ruff, mypy.
   }
   ```
 
-  The two owners each contain distinct nonzero `team_id` and `user_id` UUIDs.
+  The acceptance owner contains one exact nonzero `team_id` and `user_id` UUID pair.
   Assert rejection of unsafe file metadata/races, noncanonical bytes,
   duplicate/extra/missing fields, nonzero ceiling, active execution, incoherent
   epoch/state, mutable image, release/profile/shadow mismatch, schema-head
@@ -577,7 +577,7 @@ pytest, Ruff, mypy.
 
 ---
 
-### Task 6: Exact two-owner acceptance and rollback runbook
+### Task 6: Exact single-owner acceptance and rollback runbook
 
 **Files:**
 
@@ -590,16 +590,16 @@ pytest, Ruff, mypy.
 **Interfaces:**
 
 - Documents evidence preparation, server-side diff/apply, status, concurrent
-  two-owner create/update/policy/destroy/redeploy, and byte-reviewed rollback.
+  single-owner two-environment create/update/policy/destroy/redeploy, and byte-reviewed rollback.
 - Contains no Secret values, kubeconfig payload, physical activation command,
   or destructive cleanup shortcut.
 
 - [x] **Step 1: Write failing runbook contract tests**
 
   Assert exact use of the trusted-release artifact, owner-only acceptance plan,
-  pre/post status, manager identity/ceiling checks, two distinct authenticated
-  owner sessions, concurrent `--min-slots 0` deploys and updates, cross-owner
-  rejection checks, both destroy modes, retained-name redeploy, and rollback to
+  pre/post status, manager identity/ceiling checks, one exact authenticated
+  owner session, concurrent `--min-slots 0` deploys and updates, exact
+  two-environment identity isolation, both destroy modes, retained-name redeploy, and rollback to
   the exact shadow manifest. Assert stop conditions for credential, expiry,
   RuntimeClass/scanner, Secret key, migration, manager, namespace, and worker
   drift.

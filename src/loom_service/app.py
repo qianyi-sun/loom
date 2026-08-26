@@ -265,13 +265,26 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 settings,
                 minio_client=minio_client,
             )
-            if personal_dev_capacity_runtime.acceptance_interlock is not None:
-                await personal_dev_capacity_runtime.acceptance_interlock.assert_ready(
+            acceptance_interlock = getattr(
+                personal_dev_capacity_runtime,
+                "acceptance_interlock",
+                None,
+            )
+            if acceptance_interlock is not None:
+                await acceptance_interlock.assert_ready(
                     now=datetime.now(UTC)
                 )
-                app.state.personal_dev_acceptance_interlock = (
-                    personal_dev_capacity_runtime.acceptance_interlock
+                app.state.personal_dev_acceptance_interlock = acceptance_interlock
+            operational_interlock = getattr(
+                personal_dev_capacity_runtime,
+                "operational_interlock",
+                None,
+            )
+            if operational_interlock is not None:
+                await operational_interlock.assert_ready(
+                    now=datetime.now(UTC)
                 )
+                app.state.personal_dev_operational_interlock = operational_interlock
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url),
             timeout=10.0,
@@ -481,8 +494,16 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
     app.state.personal_dev_builder_available = False
+    app.state.personal_dev_runtime_mode = settings.personal_dev_runtime_mode
     app.state.personal_dev_acceptance_required = (
-        settings.dev_instances_enabled and settings.personal_dev_builder_enabled
+        settings.dev_instances_enabled
+        and settings.personal_dev_builder_enabled
+        and settings.personal_dev_runtime_mode == "acceptance"
+    )
+    app.state.personal_dev_enablement_required = (
+        settings.dev_instances_enabled
+        and settings.personal_dev_builder_enabled
+        and settings.personal_dev_runtime_mode in {"acceptance", "operational"}
     )
     stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
         repo_root=Path(__file__).resolve().parents[2]

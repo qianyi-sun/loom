@@ -16,18 +16,23 @@ import yaml
 
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
+    PersonalDevOperationalPlan,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
+    load_personal_dev_operational_plan,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
     RenderedPersonalDevControlPlane,
     render_acceptance_personal_dev_control_plane,
+    render_operational_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
 from loom.personal_dev_control_plane_status import (
     PersonalDevAcceptanceStatus,
+    PersonalDevOperationalStatus,
     observe_personal_dev_acceptance_status,
+    observe_personal_dev_operational_status,
     observe_personal_dev_shadow_status,
 )
 
@@ -462,16 +467,10 @@ def _acceptance_inputs(
         ).encode("ascii")
     ).hexdigest()
     value = {
-        "acceptance_owners": [
-            {
-                "team_id": "00000000-0000-0000-0000-000000000201",
-                "user_id": "00000000-0000-0000-0000-000000000301",
-            },
-            {
-                "team_id": "00000000-0000-0000-0000-000000000202",
-                "user_id": "00000000-0000-0000-0000-000000000302",
-            },
-        ],
+        "acceptance_owner": {
+            "team_id": "00000000-0000-0000-0000-000000000201",
+            "user_id": "00000000-0000-0000-0000-000000000301",
+        },
         "activation": {
             "key_id": "personal-dev-agent-v1",
             "public_key_sha256": "c" * 64,
@@ -543,10 +542,48 @@ def _acceptance_inputs(
     )
 
 
-def _acceptance_healthy_fixture(
+def _operational_inputs(
     tmp_path: Path,
-) -> tuple[RenderedPersonalDevControlPlane, PersonalDevAcceptancePlan, _FakeRunner]:
-    expected, plan = _acceptance_inputs(tmp_path)
+) -> tuple[RenderedPersonalDevControlPlane, PersonalDevOperationalPlan]:
+    _expected, acceptance = _acceptance_inputs(tmp_path)
+    value = acceptance.canonical_value()
+    value.pop("acceptance_owner")
+    value.pop("window")
+    value["approval"] = {
+        "acceptance_result_sha256": "4" * 64,
+        "approved_at": "2026-08-17T20:00:00Z",
+        "rollback_evidence_sha256": "5" * 64,
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    plan_path = tmp_path / "operational-plan.json"
+    plan_path.write_bytes(payload)
+    plan_path.chmod(0o600)
+    plan = load_personal_dev_operational_plan(
+        plan_path,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    release_path = tmp_path / "acceptance-trusted-release.json"
+    release_payload = release_path.read_bytes()
+    release = load_personal_dev_trusted_release(
+        release_path,
+        hashlib.sha256(release_payload).hexdigest(),
+    )
+    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    return (
+        render_operational_personal_dev_control_plane(
+            profile,
+            release,
+            plan,
+            now=_NOW,
+        ),
+        plan,
+    )
+
+
+def _enabled_healthy_runner(
+    expected: RenderedPersonalDevControlPlane,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+) -> _FakeRunner:
     documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
     namespace = next(item for item in documents if item["kind"] == "Namespace")
     cluster = [item for item in documents if "namespace" not in item["metadata"]]
@@ -651,7 +688,21 @@ def _acceptance_healthy_fixture(
             "items": deployments,
         },
     }
-    return expected, plan, _FakeRunner(responses)
+    return _FakeRunner(responses)
+
+
+def _acceptance_healthy_fixture(
+    tmp_path: Path,
+) -> tuple[RenderedPersonalDevControlPlane, PersonalDevAcceptancePlan, _FakeRunner]:
+    expected, plan = _acceptance_inputs(tmp_path)
+    return expected, plan, _enabled_healthy_runner(expected, plan)
+
+
+def _operational_healthy_fixture(
+    tmp_path: Path,
+) -> tuple[RenderedPersonalDevControlPlane, PersonalDevOperationalPlan, _FakeRunner]:
+    expected, plan = _operational_inputs(tmp_path)
+    return expected, plan, _enabled_healthy_runner(expected, plan)
 
 
 def _items(runner: _FakeRunner, command: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -752,6 +803,19 @@ def _observe_acceptance(
     )
 
 
+def _observe_operational(
+    expected: RenderedPersonalDevControlPlane,
+    plan: PersonalDevOperationalPlan,
+    runner: _FakeRunner,
+) -> PersonalDevOperationalStatus:
+    return observe_personal_dev_operational_status(
+        runner,
+        expected=expected,
+        plan=plan,
+        namespace="loom-dev",
+    )
+
+
 def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
     tmp_path: Path,
 ) -> None:
@@ -795,6 +859,31 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
     for command, _timeout in runner.calls:
         assert "secret" not in " ".join(command).casefold()
         assert command[0] in {"config", "get", "--request-timeout=10s"}
+
+
+def test_healthy_operational_is_durable_and_zero_capacity(tmp_path: Path) -> None:
+    expected, plan, runner = _operational_healthy_fixture(tmp_path)
+
+    result = _observe_operational(expected, plan, runner)
+
+    assert isinstance(result, PersonalDevOperationalStatus)
+    assert result.ready is True
+    assert result.blockers == ()
+    assert result.application_ready is True
+    assert result.capacity_publication_ready is True
+    assert result.manager_ceiling == 0
+    assert result.worker_available is False
+    assert result.to_dict()["mode"] == "operational"
+    assert result.to_dict()["operational_plan_sha256"] == plan.sha256
+    assert [call for call, _timeout in runner.calls] == [
+        _CONTEXT,
+        _NAMESPACES,
+        _RUNTIME_CLASS,
+        _NAMESPACED,
+        _CLUSTER,
+        _ACCEPTANCE_MANAGER,
+        _DEPLOYMENTS,
+    ]
 
 
 def test_status_accepts_api_server_canonical_empty_literal_environment(

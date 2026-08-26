@@ -121,12 +121,15 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]},{\"capability_id\":\"gb10-arm-none\",\"pool_id\":\"gb10\",\"operating_system\":\"linux\",\"cpu_architecture\":\"arm64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
     personal_dev_capacity_private_key_file: Path = Path("/var/run/loom-personal-dev-capacity/private-key.pem")
     personal_dev_global_live_instance_limit: int = 16
+    personal_dev_operational_binding_json: str = "{}"
+    personal_dev_operational_plan_sha256: str = ""
     personal_dev_per_owner_aggregate_max_slots: int = 16
     personal_dev_per_owner_aggregate_min_slots: int = 8
     personal_dev_per_owner_live_instance_limit: int = 2
     personal_dev_protocol_versions_json: str = "{}"
     personal_dev_reconciler_lease_sec: int = 1800
     personal_dev_reconciler_poll_interval_sec: float = 2.0
+    personal_dev_runtime_mode: str = "shadow"
     personal_dev_source_max_archive_bytes: int = 402653184
     personal_dev_trusted_launcher_profile_sha256: str = ""
     pipeline_stage1_smoke_key_id: str = "pipeline-stage1-operator-v1"

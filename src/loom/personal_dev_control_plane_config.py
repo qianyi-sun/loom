@@ -826,19 +826,37 @@ class _AcceptancePlanInput(_StrictModel):
     manager: _AcceptanceManagerInput
     principals: _AcceptancePrincipalsInput
     quotas: _AcceptanceQuotasInput
-    acceptance_owners: list[_AcceptanceOwnerInput] = Field(min_length=2, max_length=2)
+    acceptance_owner: _AcceptanceOwnerInput
     window: _AcceptanceWindowInput
 
-    @model_validator(mode="after")
-    def _owners_are_distinct(self) -> _AcceptancePlanInput:
-        identities = {
-            identity
-            for owner in self.acceptance_owners
-            for identity in (owner.team_id, owner.user_id)
-        }
-        if len(identities) != 4:
-            raise ValueError("acceptance owners must be distinct")
-        return self
+
+class _OperationalApprovalInput(_StrictModel):
+    acceptance_result_sha256: str
+    approved_at: str
+    rollback_evidence_sha256: str
+
+    @field_validator("acceptance_result_sha256", "rollback_evidence_sha256")
+    @classmethod
+    def _evidence_digest_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "operational evidence digest")
+
+    @field_validator("approved_at")
+    @classmethod
+    def _approval_timestamp_is_canonical(cls, value: str) -> str:
+        return _canonical_timestamp(value)
+
+
+class _OperationalPlanInput(_StrictModel):
+    schema_version: Literal[1]
+    source: _AcceptanceSourceInput
+    release: _AcceptanceReleaseInput
+    storage: _AcceptanceStorageInput
+    activation: _AcceptanceActivationInput
+    builder: _AcceptanceBuilderInput
+    manager: _AcceptanceManagerInput
+    principals: _AcceptancePrincipalsInput
+    quotas: _AcceptanceQuotasInput
+    approval: _OperationalApprovalInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -1108,15 +1126,15 @@ class PersonalDevAcceptancePlan:
     manager: PersonalDevAcceptanceManager
     principals: PersonalDevAcceptancePrincipals
     quotas: PersonalDevControlPlaneLimits
-    acceptance_owners: tuple[PersonalDevAcceptanceOwner, PersonalDevAcceptanceOwner]
+    acceptance_owner: PersonalDevAcceptanceOwner
     window: PersonalDevAcceptanceWindow
 
     def canonical_value(self) -> dict[str, Any]:
         return {
-            "acceptance_owners": [
-                {"team_id": str(owner.team_id), "user_id": str(owner.user_id)}
-                for owner in self.acceptance_owners
-            ],
+            "acceptance_owner": {
+                "team_id": str(self.acceptance_owner.team_id),
+                "user_id": str(self.acceptance_owner.user_id),
+            },
             "activation": _dataclass_value(self.activation),
             "builder": _dataclass_value(self.builder),
             "manager": {
@@ -1171,12 +1189,93 @@ class PersonalDevAcceptancePlan:
         ).decode("ascii")
 
 
+@dataclass(frozen=True, slots=True)
+class PersonalDevOperationalApproval:
+    acceptance_result_sha256: str
+    approved_at: datetime
+    rollback_evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevOperationalPlan:
+    """One durable, zero-capacity personal-development enablement contract."""
+
+    schema_version: int
+    source: PersonalDevAcceptanceSource
+    release: PersonalDevAcceptanceRelease
+    storage: PersonalDevAcceptanceStorage
+    activation: PersonalDevAcceptanceActivation
+    builder: PersonalDevAcceptanceBuilder
+    manager: PersonalDevAcceptanceManager
+    principals: PersonalDevAcceptancePrincipals
+    quotas: PersonalDevControlPlaneLimits
+    approval: PersonalDevOperationalApproval
+
+    def canonical_value(self) -> dict[str, Any]:
+        return {
+            "activation": _dataclass_value(self.activation),
+            "approval": {
+                "acceptance_result_sha256": self.approval.acceptance_result_sha256,
+                "approved_at": _format_timestamp(self.approval.approved_at),
+                "rollback_evidence_sha256": self.approval.rollback_evidence_sha256,
+            },
+            "builder": _dataclass_value(self.builder),
+            "manager": {
+                **_dataclass_value(self.manager),
+                "authority_incarnation": str(self.manager.authority_incarnation),
+            },
+            "principals": _dataclass_value(self.principals),
+            "quotas": _dataclass_value(self.quotas),
+            "release": {
+                "images": _dataclass_value(self.release.images),
+                "release_evidence_sha256": self.release.release_evidence_sha256,
+                "shadow_manifest_sha256": self.release.shadow_manifest_sha256,
+                "trusted_release_sha256": self.release.trusted_release_sha256,
+            },
+            "schema_version": self.schema_version,
+            "source": _dataclass_value(self.source),
+            "storage": _dataclass_value(self.storage),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json(self.canonical_value())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    def manager_runtime_json(self) -> str:
+        """Return the canonical, non-expiring zero-capacity runtime binding."""
+
+        return _canonical_json(
+            {
+                "acceptance_result_sha256": self.approval.acceptance_result_sha256,
+                "manager": {
+                    "authority_incarnation": str(self.manager.authority_incarnation),
+                    "configuration_epoch": self.manager.configuration_epoch,
+                    "executable_new_capacity_ceiling": (
+                        self.manager.executable_new_capacity_ceiling
+                    ),
+                    "execution_epoch": self.manager.execution_epoch,
+                    "execution_state": self.manager.execution_state,
+                    "observer_principal_id": self.principals.lifecycle_principal_id,
+                },
+                "operational_plan_sha256": self.sha256,
+                "schema_version": 1,
+            }
+        ).decode("ascii")
+
+
 class PersonalDevTrustedReleaseError(ValueError):
     """The trusted release file is unsafe, unstable, or invalid."""
 
 
 class PersonalDevAcceptancePlanError(ValueError):
     """The personal-development acceptance plan is unsafe or inconsistent."""
+
+
+class PersonalDevOperationalPlanError(ValueError):
+    """The durable personal-development operational plan is unsafe."""
 
 
 def _canonical_json(value: object) -> bytes:
@@ -1468,7 +1567,7 @@ def load_personal_dev_acceptance_plan(
         if not isinstance(value, dict) or _canonical_json(value) != payload:
             raise ValueError("acceptance plan JSON is not canonical")
         parsed = _AcceptancePlanInput.model_validate(value)
-        first_owner, second_owner = parsed.acceptance_owners
+        owner = parsed.acceptance_owner
         plan = PersonalDevAcceptancePlan(
             schema_version=parsed.schema_version,
             source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
@@ -1490,15 +1589,9 @@ def load_personal_dev_acceptance_plan(
             ),
             principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
             quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
-            acceptance_owners=(
-                PersonalDevAcceptanceOwner(
-                    team_id=UUID(first_owner.team_id),
-                    user_id=UUID(first_owner.user_id),
-                ),
-                PersonalDevAcceptanceOwner(
-                    team_id=UUID(second_owner.team_id),
-                    user_id=UUID(second_owner.user_id),
-                ),
+            acceptance_owner=PersonalDevAcceptanceOwner(
+                team_id=UUID(owner.team_id),
+                user_id=UUID(owner.user_id),
             ),
             window=PersonalDevAcceptanceWindow(
                 started_at=_parse_acceptance_timestamp(parsed.window.started_at),
@@ -1513,6 +1606,138 @@ def load_personal_dev_acceptance_plan(
     return plan
 
 
+def _invalid_operational_plan() -> PersonalDevOperationalPlanError:
+    return PersonalDevOperationalPlanError("personal-dev operational plan is invalid")
+
+
+def load_personal_dev_operational_plan(
+    path: Path,
+    expected_sha256: str,
+) -> PersonalDevOperationalPlan:
+    """Load one digest-pinned, owner-only durable operational contract."""
+
+    if (
+        not isinstance(expected_sha256, str)
+        or _DIGEST.fullmatch(expected_sha256) is None
+        or expected_sha256 == "0" * 64
+    ):
+        raise _invalid_operational_plan()
+    try:
+        payload = _read_trusted_release(path)
+    except PersonalDevTrustedReleaseError:
+        raise _invalid_operational_plan() from None
+    if not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), expected_sha256):
+        raise _invalid_operational_plan()
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=_duplicate_rejecting_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(value, dict) or _canonical_json(value) != payload:
+            raise ValueError("operational plan JSON is not canonical")
+        parsed = _OperationalPlanInput.model_validate(value)
+        plan = PersonalDevOperationalPlan(
+            schema_version=parsed.schema_version,
+            source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
+            release=PersonalDevAcceptanceRelease(
+                trusted_release_sha256=parsed.release.trusted_release_sha256,
+                release_evidence_sha256=parsed.release.release_evidence_sha256,
+                shadow_manifest_sha256=parsed.release.shadow_manifest_sha256,
+                images=PersonalDevTrustedImages(**parsed.release.images.model_dump()),
+            ),
+            storage=PersonalDevAcceptanceStorage(**parsed.storage.model_dump()),
+            activation=PersonalDevAcceptanceActivation(**parsed.activation.model_dump()),
+            builder=PersonalDevAcceptanceBuilder(**parsed.builder.model_dump()),
+            manager=PersonalDevAcceptanceManager(
+                authority_incarnation=UUID(parsed.manager.authority_incarnation),
+                configuration_epoch=parsed.manager.configuration_epoch,
+                execution_state=parsed.manager.execution_state,
+                execution_epoch=parsed.manager.execution_epoch,
+                executable_new_capacity_ceiling=(parsed.manager.executable_new_capacity_ceiling),
+            ),
+            principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
+            quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
+            approval=PersonalDevOperationalApproval(
+                acceptance_result_sha256=parsed.approval.acceptance_result_sha256,
+                approved_at=_parse_acceptance_timestamp(parsed.approval.approved_at),
+                rollback_evidence_sha256=parsed.approval.rollback_evidence_sha256,
+            ),
+        )
+    except (RecursionError, UnicodeError, ValueError):
+        raise _invalid_operational_plan() from None
+    if plan.canonical_bytes() != payload:
+        raise _invalid_operational_plan()
+    return plan
+
+
+def _validate_personal_dev_enabled_plan(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    shadow_yaml_sha256: str,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+) -> None:
+    if not isinstance(profile, PersonalDevControlPlaneProfile) or not isinstance(
+        release, PersonalDevTrustedRelease
+    ):
+        raise ValueError
+    if not isinstance(plan, (PersonalDevAcceptancePlan, PersonalDevOperationalPlan)):
+        raise ValueError
+    if (
+        profile.namespace != NAMESPACE
+        or profile.personal_namespace_prefix != PERSONAL_NAMESPACE_PREFIX
+        or type(profile.min_slots_default) is not int
+        or profile.min_slots_default != 0
+        or type(profile.max_slots_limit) is not int
+        or not 0 <= profile.max_slots_limit <= 8
+        or type(profile.executable_new_capacity_ceiling) is not int
+        or profile.executable_new_capacity_ceiling != 0
+        or profile.dev_instances_enabled is not False
+        or profile.personal_dev_builder_enabled is not False
+        or type(profile.activation_agent_replicas) is not int
+        or profile.activation_agent_replicas != 0
+        or len(profile.pools) != len(REQUIRED_POOLS)
+        or {item.pool_id: item.architecture for item in profile.pools} != REQUIRED_POOLS
+    ):
+        raise ValueError
+    shadow_yaml_sha256 = _nonzero_digest(shadow_yaml_sha256, "shadow manifest digest")
+    if (
+        plan.source.commit != release.source_sha
+        or plan.source.tree != release.source_tree
+        or plan.release.trusted_release_sha256
+        != hashlib.sha256(release.canonical_bytes()).hexdigest()
+        or plan.release.release_evidence_sha256 != release.release_evidence_sha256
+        or plan.release.shadow_manifest_sha256 != shadow_yaml_sha256
+        or plan.release.images != release.images
+    ):
+        raise ValueError
+    heads = service_schema_heads()
+    if len(heads) != 1 or plan.storage.schema_head not in heads:
+        raise ValueError
+    if (
+        plan.builder.runtime_class_name != profile.builder.runtime_class_name
+        or plan.builder.runtime_handler != profile.builder.runtime_handler
+        or plan.builder.runtime_profile_sha256 != profile.builder.runtime_profile_sha256
+        or plan.builder.publisher_identity != profile.builder.publisher_identity
+        or plan.builder.registry_prefix != profile.builder.registry_prefix
+        or plan.builder.protocol_map_sha256
+        != hashlib.sha256(_canonical_json(dict(profile.protocol_versions))).hexdigest()
+        or plan.builder.scanner_binary_sha256 != release.scanner.binary_sha256
+        or plan.builder.scanner_cache_identity_sha256 != release.scanner.cache_identity_sha256
+        or plan.builder.scanner_database_sha256 != release.scanner.database_sha256
+        or plan.builder.scanner_database_metadata_sha256
+        != release.scanner.database_metadata_sha256
+        or plan.builder.scanner_java_database_sha256 != release.scanner.java_database_sha256
+        or plan.builder.scanner_java_database_metadata_sha256
+        != release.scanner.java_database_metadata_sha256
+    ):
+        raise ValueError
+    if plan.quotas != profile.limits:
+        raise ValueError
+    if plan.manager.executable_new_capacity_ceiling != profile.executable_new_capacity_ceiling:
+        raise ValueError
+
+
 def validate_personal_dev_acceptance_plan(
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
@@ -1524,68 +1749,9 @@ def validate_personal_dev_acceptance_plan(
     """Fail closed unless one plan exactly binds the release and inert profile."""
 
     try:
-        if not isinstance(profile, PersonalDevControlPlaneProfile) or not isinstance(
-            release, PersonalDevTrustedRelease
-        ):
-            raise ValueError
         if not isinstance(plan, PersonalDevAcceptancePlan):
             raise ValueError
-        if (
-            profile.namespace != NAMESPACE
-            or profile.personal_namespace_prefix != PERSONAL_NAMESPACE_PREFIX
-            or type(profile.min_slots_default) is not int
-            or profile.min_slots_default != 0
-            or type(profile.max_slots_limit) is not int
-            or not 0 <= profile.max_slots_limit <= 8
-            or type(profile.executable_new_capacity_ceiling) is not int
-            or profile.executable_new_capacity_ceiling != 0
-            or profile.dev_instances_enabled is not False
-            or profile.personal_dev_builder_enabled is not False
-            or type(profile.activation_agent_replicas) is not int
-            or profile.activation_agent_replicas != 0
-            or len(profile.pools) != len(REQUIRED_POOLS)
-            or {item.pool_id: item.architecture for item in profile.pools} != REQUIRED_POOLS
-        ):
-            raise ValueError
-        shadow_yaml_sha256 = _nonzero_digest(shadow_yaml_sha256, "shadow manifest digest")
-        if (
-            plan.source.commit != release.source_sha
-            or plan.source.tree != release.source_tree
-            or plan.release.trusted_release_sha256
-            != hashlib.sha256(release.canonical_bytes()).hexdigest()
-            or plan.release.release_evidence_sha256 != release.release_evidence_sha256
-            or plan.release.shadow_manifest_sha256 != shadow_yaml_sha256
-            or plan.release.images != release.images
-        ):
-            raise ValueError
-        heads = service_schema_heads()
-        if len(heads) != 1 or plan.storage.schema_head not in heads:
-            raise ValueError
-        if (
-            plan.builder.runtime_class_name != profile.builder.runtime_class_name
-            or plan.builder.runtime_handler != profile.builder.runtime_handler
-            or plan.builder.runtime_profile_sha256
-            != profile.builder.runtime_profile_sha256
-            or plan.builder.publisher_identity != profile.builder.publisher_identity
-            or plan.builder.registry_prefix != profile.builder.registry_prefix
-            or plan.builder.protocol_map_sha256
-            != hashlib.sha256(_canonical_json(dict(profile.protocol_versions))).hexdigest()
-            or plan.builder.scanner_binary_sha256 != release.scanner.binary_sha256
-            or plan.builder.scanner_cache_identity_sha256
-            != release.scanner.cache_identity_sha256
-            or plan.builder.scanner_database_sha256 != release.scanner.database_sha256
-            or plan.builder.scanner_database_metadata_sha256
-            != release.scanner.database_metadata_sha256
-            or plan.builder.scanner_java_database_sha256
-            != release.scanner.java_database_sha256
-            or plan.builder.scanner_java_database_metadata_sha256
-            != release.scanner.java_database_metadata_sha256
-        ):
-            raise ValueError
-        if plan.quotas != profile.limits:
-            raise ValueError
-        if plan.manager.executable_new_capacity_ceiling != profile.executable_new_capacity_ceiling:
-            raise ValueError
+        _validate_personal_dev_enabled_plan(profile, release, shadow_yaml_sha256, plan)
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ValueError
         observed_at = now.astimezone(UTC)
@@ -1598,6 +1764,30 @@ def validate_personal_dev_acceptance_plan(
             raise ValueError
     except (OSError, RuntimeError, ValueError):
         raise _invalid_acceptance_plan() from None
+
+
+def validate_personal_dev_operational_plan(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    shadow_yaml_sha256: str,
+    plan: PersonalDevOperationalPlan,
+    *,
+    now: datetime,
+) -> None:
+    """Fail closed unless one durable plan binds accepted, zero-capacity state."""
+
+    try:
+        if not isinstance(plan, PersonalDevOperationalPlan):
+            raise ValueError
+        _validate_personal_dev_enabled_plan(profile, release, shadow_yaml_sha256, plan)
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError
+        if plan.approval.approved_at > now.astimezone(UTC):
+            raise ValueError
+        _nonzero_digest(plan.approval.acceptance_result_sha256, "acceptance result digest")
+        _nonzero_digest(plan.approval.rollback_evidence_sha256, "rollback evidence digest")
+    except (OSError, RuntimeError, ValueError):
+        raise _invalid_operational_plan() from None
 
 
 __all__ = [
@@ -1624,6 +1814,9 @@ __all__ = [
     "PersonalDevControlPlaneProfile",
     "PersonalDevControlPlaneResources",
     "PersonalDevControlPlaneStorage",
+    "PersonalDevOperationalApproval",
+    "PersonalDevOperationalPlan",
+    "PersonalDevOperationalPlanError",
     "PersonalDevTrustedImages",
     "PersonalDevTrustedRelease",
     "PersonalDevTrustedReleaseError",
@@ -1632,6 +1825,8 @@ __all__ = [
     "ResourceEnvelope",
     "load_personal_dev_acceptance_plan",
     "load_personal_dev_control_plane_profile",
+    "load_personal_dev_operational_plan",
     "load_personal_dev_trusted_release",
     "validate_personal_dev_acceptance_plan",
+    "validate_personal_dev_operational_plan",
 ]
