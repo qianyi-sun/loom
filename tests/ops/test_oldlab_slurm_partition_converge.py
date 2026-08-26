@@ -64,6 +64,15 @@ def _fake_scontrol(fake_bin: Path) -> None:
             esac
             ;;
           "show partition loom-staging -o")
+            if [ "${FAKE_PARTITION_UNAVAILABLE_UNTIL_RECONFIGURE:-}" = "1" ] \
+              && [ ! -f "$FAKE_RECONFIGURE_COUNT" ]; then
+              exit 1
+            fi
+            if [ -n "${FAKE_PARTITION_STATE_BEFORE_RECONFIGURE:-}" ] \
+              && [ ! -f "$FAKE_RECONFIGURE_COUNT" ]; then
+              printf '%s\n' "$FAKE_PARTITION_STATE_BEFORE_RECONFIGURE"
+              exit 0
+            fi
             printf '%s\n' "$FAKE_PARTITION_STATE"
             ;;
           "show hostnames "*)
@@ -95,6 +104,8 @@ def _run_converger(
     config_text: str = INITIAL_CONFIG,
     backup_text: str | None = None,
     backup_mode: int = 0o600,
+    partition_unavailable_until_reconfigure: bool = False,
+    partition_state_before_reconfigure: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     fake_bin = tmp_path / "bin"
     _fake_scontrol(fake_bin)
@@ -117,6 +128,10 @@ def _run_converger(
         "FAKE_RECONFIGURE_COUNT": str(reconfigure_count),
         "FAKE_RECONFIGURE_FAIL_AT": reconfigure_fail_at,
         "FAKE_PARTITION_STATE": partition_state,
+        "FAKE_PARTITION_UNAVAILABLE_UNTIL_RECONFIGURE": (
+            "1" if partition_unavailable_until_reconfigure else ""
+        ),
+        "FAKE_PARTITION_STATE_BEFORE_RECONFIGURE": partition_state_before_reconfigure,
         "FAKE_HOSTNAMES": hostnames,
     }
     result = subprocess.run(
@@ -172,6 +187,51 @@ def test_second_convergence_is_idempotent(tmp_path: Path) -> None:
     assert config.read_text(encoding="utf-8") == f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
     backup = authority / "slurm.conf.before-loom-staging-partition"
     assert backup.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
+
+
+def test_canonical_durable_partition_reloads_missing_live_state(tmp_path: Path) -> None:
+    canonical_config = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, authority, reconfigure_count = _run_converger(
+        tmp_path,
+        config_text=canonical_config,
+        partition_unavailable_until_reconfigure=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == canonical_config
+    assert not authority.exists()
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
+
+
+def test_canonical_durable_partition_reloads_drifted_live_state(tmp_path: Path) -> None:
+    canonical_config = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    stale_live_partition = LIVE_PARTITION.replace("PriorityTier=100", "PriorityTier=1")
+    result, config, authority, reconfigure_count = _run_converger(
+        tmp_path,
+        config_text=canonical_config,
+        partition_state_before_reconfigure=stale_live_partition,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == canonical_config
+    assert not authority.exists()
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
+
+
+def test_canonical_durable_partition_reload_failure_is_explicit(tmp_path: Path) -> None:
+    canonical_config = f"{INITIAL_CONFIG}{PARTITION_LINE}\n"
+    result, config, authority, reconfigure_count = _run_converger(
+        tmp_path,
+        config_text=canonical_config,
+        partition_unavailable_until_reconfigure=True,
+        reconfigure_fail_at="1",
+    )
+
+    assert result.returncode == 1
+    assert "rejected the canonical durable OLDLAB staging partition reload" in result.stderr
+    assert config.read_text(encoding="utf-8") == canonical_config
+    assert not authority.exists()
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
