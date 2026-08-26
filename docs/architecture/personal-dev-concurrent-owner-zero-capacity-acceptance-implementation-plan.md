@@ -292,12 +292,18 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
 
 - Modify: `src/loom_cli/auth_cmd.py`
 - Modify: `src/loom_cli/personal_dev_control_plane_cmd.py`
+- Modify: `src/loom_cli/service_cmd.py`
 - Modify: `tests/loom_cli/test_auth_cmd.py`
 - Modify: `tests/loom_cli/test_personal_dev_control_plane_cmd.py`
+- Modify: `tests/loom_cli/test_service_cmd.py`
 
 **Interfaces:**
 
 - Adds `loom auth whoami --format text|json`, default `text`.
+- Adds personal-only `loom service up --environment dev-<name> --quiet`.
+  Quiet mode suppresses actor-side progress and the success summary, never
+  suppresses stderr, never changes HTTP/lifecycle behavior, and is rejected
+  before action for local, staging, or production targets.
 - JSON emits exactly:
 
   ```json
@@ -335,12 +341,18 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   any Kubernetes runner or subprocess. Assert the command parser has no apply,
   activate, kubeconfig, database, Secret, Slurm, or capacity mutation option.
 
+  Add service-command tests proving existing personal stdout is unchanged when
+  `--quiet` is absent, quiet success and denied server responses write no
+  stdout, denied errors remain on stderr, and quiet is rejected before any
+  local/protected deployment action for non-personal targets.
+
 - [ ] **Step 3: Run both CLI test files and record RED**
 
   ```bash
   PYTHONPATH=src:packages/loom-benchmarks:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/loom_cli/test_auth_cmd.py \
-    tests/loom_cli/test_personal_dev_control_plane_cmd.py
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/loom_cli/test_service_cmd.py
   ```
 
 - [ ] **Step 4: Implement the minimal read-only handlers**
@@ -368,6 +380,11 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   digest, calls `load_personal_dev_acceptance_result`, and writes only its small
   verification projection. It performs no runner construction or network call.
 
+  Gate the existing `_up_personal` progress prints and final
+  `_print_personal_summary` call on `not args.quiet`. Reject `args.quiet` in the
+  non-personal dispatch path before Compose, candidate resolution, or protected
+  deployment begins. Do not catch or suppress the existing stderr error path.
+
 - [ ] **Step 5: Verify CLI tests, Ruff, and mypy**
 
   Run Step 3, then:
@@ -375,18 +392,23 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   ```bash
   PYTHONPATH=src:packages/loom-benchmarks:. /home/hongjian/loom/.venv/bin/python -m ruff check \
     src/loom_cli/auth_cmd.py src/loom_cli/personal_dev_control_plane_cmd.py \
+    src/loom_cli/service_cmd.py \
     tests/loom_cli/test_auth_cmd.py \
-    tests/loom_cli/test_personal_dev_control_plane_cmd.py
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/loom_cli/test_service_cmd.py
   PYTHONPATH=src:packages/loom-benchmarks:. /home/hongjian/loom/.venv/bin/python -m mypy \
-    src/loom_cli/auth_cmd.py src/loom_cli/personal_dev_control_plane_cmd.py
+    src/loom_cli/auth_cmd.py src/loom_cli/personal_dev_control_plane_cmd.py \
+    src/loom_cli/service_cmd.py
   ```
 
 - [ ] **Step 6: Commit the CLI verification boundary**
 
   ```bash
   git add src/loom_cli/auth_cmd.py src/loom_cli/personal_dev_control_plane_cmd.py \
+    src/loom_cli/service_cmd.py \
     tests/loom_cli/test_auth_cmd.py \
-    tests/loom_cli/test_personal_dev_control_plane_cmd.py
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/loom_cli/test_service_cmd.py
   git commit -m "feat(dev): verify two-owner acceptance results"
   ```
 
@@ -466,9 +488,9 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   assert_live_acceptance "$interlock_status"
   ```
 
-  The update command uses the actor's own updated `candidate_sha`,
-  `--candidate`, `--expected-operation-epoch 0`, and `--min-slots 0`; it does
-  not seal or upload another source. Construct the six canonical denial entries
+  The update command uses the actor's own updated `candidate_sha`, `--candidate`,
+  `--expected-operation-epoch 0`, `--min-slots 0`, and `--quiet`; it does not
+  seal or upload another source. Construct the six canonical denial entries
   from file SHA-256 values only, never stderr contents.
 
 - [ ] **Step 4: Correct retained-name fencing and assemble v2 evidence after rollback**
@@ -545,6 +567,7 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
     tests/loom_cli/test_auth_cmd.py \
     tests/loom_cli/test_personal_dev_control_plane_cmd.py \
     tests/loom_cli/test_personal_dev_deploy.py \
+    tests/loom_cli/test_service_cmd.py \
     tests/loom_cli/test_dev_cmd.py \
     tests/unit/test_dev_instance_routes.py \
     tests/ops/test_personal_dev_control_plane_package_boundary.py \

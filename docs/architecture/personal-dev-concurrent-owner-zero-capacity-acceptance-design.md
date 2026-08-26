@@ -92,7 +92,10 @@ attempt, the target owner records canonical JSON status. Those byte streams
 must be identical. The actor therefore learns no target document, and the
 target's candidate, policy, generation, operation epoch, subject, and identity
 cannot have changed. The update probe reuses an existing actor-owned candidate,
-so it does not create an unrelated build merely to test authorization.
+so it does not create an unrelated build merely to test authorization. The
+personal `loom service up` command supplies `--quiet` for this probe; quiet mode
+suppresses its actor-side progress and success summary but never suppresses
+errors, changes HTTP behavior, or applies to local/staging/production targets.
 
 Owner 0 then destroys normally. Owner 1 destroys with retained data, redeploys
 the same name, and destroys it finally. Redeploy must preserve `subject_id`
