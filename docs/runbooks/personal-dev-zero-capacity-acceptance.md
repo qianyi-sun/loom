@@ -3,8 +3,8 @@
 This runbook is the controlled issue #1280 acceptance and rollback procedure
 for the personal-development management plane. It enables lifecycle, restricted
 source building, and stable-route activation in the shared infrastructure
-namespace loom-dev, then exercises two concurrent environments owned by the
-single acceptance owner in loom-dev-<name> namespaces. Physical capacity remains unchanged: the exact global manager stays
+namespace loom-dev, then exercises two concurrent environments owned by two
+distinct acceptance owners in loom-dev-<name> namespaces. Physical capacity remains unchanged: the exact global manager stays
 at executable-new-capacity ceiling zero, no personal worker exists, and no task
 is submitted.
 
@@ -74,11 +74,13 @@ exactly the aggregate release, its evidence, and its digest.
     pre_acceptance_status="$evidence_dir/pre-acceptance.status.json"
     post_acceptance_status="$evidence_dir/post-acceptance.status.json"
     scanner_cache_init_status="$evidence_dir/scanner-cache-init.status.json"
-    initial_acceptance_status="$evidence_dir/initial-owner.status.json"
-    updated_acceptance_status="$evidence_dir/updated-owner.status.json"
-    post_isolation_acceptance_status="$evidence_dir/post-isolation.status.json"
-    post_destroy_acceptance_status="$evidence_dir/post-destroy.status.json"
-    final_acceptance_status="$evidence_dir/final-acceptance.status.json"
+    pre_deploy_acceptance_status="$evidence_dir/pre-deploy.status.json"
+    initial_acceptance_status="$evidence_dir/after-initial.status.json"
+    updated_acceptance_status="$evidence_dir/after-updates.status.json"
+    post_denials_acceptance_status="$evidence_dir/after-denials.status.json"
+    post_destroy_acceptance_status="$evidence_dir/after-destroy.status.json"
+    post_redeploy_acceptance_status="$evidence_dir/after-redeploy.status.json"
+    pre_rollback_acceptance_status="$evidence_dir/pre-rollback.status.json"
     rollback_pre_status="$evidence_dir/rollback-pre.status.json"
     rollback_scanner_cache_init_status="$evidence_dir/rollback-scanner-cache-init.status.json"
     rollback_status="$evidence_dir/rollback-shadow.status.json"
@@ -88,13 +90,17 @@ exactly the aggregate release, its evidence, and its digest.
     trusted_launcher_profile="$evidence_dir/trusted-launcher-profile.json"
     scanner_finding_policy="$evidence_dir/scanner-finding-policy.json"
 
-    owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"
-    primary_name="<owner-primary-personal-name>"
-    retained_name="<owner-retained-personal-name>"
-    primary_source_v1="<absolute-owner-primary-source-v1>"
-    primary_source_v2="<absolute-owner-primary-source-v2>"
-    retained_source_v1="<absolute-owner-retained-source-v1>"
-    retained_source_v2="<absolute-owner-retained-source-v2>"
+    owner_0_xdg="<absolute-mode-0700-owner-0-xdg-config-root>"
+    owner_1_xdg="<absolute-mode-0700-owner-1-xdg-config-root>"
+    owner_0_name="<owner-0-personal-name>"
+    owner_1_name="<owner-1-personal-name>"
+    owner_0_source_v1="<absolute-owner-0-source-v1>"
+    owner_0_source_v2="<absolute-owner-0-source-v2>"
+    owner_1_source_v1="<absolute-owner-1-source-v1>"
+    owner_1_source_v2="<absolute-owner-1-source-v2>"
+    acceptance_result="$evidence_dir/acceptance-result-v2.json"
+    acceptance_verification="$evidence_dir/acceptance-result-verification.json"
+    denials_jsonl="$evidence_dir/cross-owner-denials.jsonl"
 
     install -d -m 0700 "$evidence_dir"
     test -z "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print -quit)"
@@ -482,156 +488,260 @@ or unrelated namespace is a stop condition.
     capture_scanner_cache_init_status "$scanner_cache_init_status"
     assert_live_acceptance "$post_acceptance_status"
 
-## 5. Verify the acceptance-owner session
+## 5. Verify two pinned authenticated owner sessions
 
-The XDG root must be absolute, current-user-owned, mode 0700, and contain a
-mode-0600 single-link Loom configuration. The identity record is non-secret,
-owner-only evidence; review it against `acceptance_owner` before starting a
-build. Keep all arbitrary source roots separate from the clean control-plane
-checkout used to render and observe the release.
+Both XDG roots and both configuration files must be absolute, owner-only,
+non-symlink paths with distinct real paths and distinct device/inode
+identities. Capture canonical secret-free identity JSON and compare owner 0 and
+owner 1 with the correspondingly ordered v2 plan entries. The single-owner v1
+record remains historical compatibility; it is not authority for this proof.
+Keep all four arbitrary source roots separate from the clean control-plane
+checkout and from each other.
 
-    test "$primary_name" != "$retained_name"
-    test -d "$owner_xdg" && test ! -L "$owner_xdg"
-    test "$(realpath -e "$owner_xdg")" = "$owner_xdg"
-    test "$(stat -c %u "$owner_xdg")" = "$(id -u)"
-    test "$(stat -c %a "$owner_xdg")" = 700
-    test -f "$owner_xdg/loom/config.toml" && test ! -L "$owner_xdg/loom/config.toml"
-    test "$(stat -c %u "$owner_xdg/loom/config.toml")" = "$(id -u)"
-    test "$(stat -c %a "$owner_xdg/loom/config.toml")" = 600
-    test "$(stat -c %h "$owner_xdg/loom/config.toml")" = 1
+    test "$(jq -r .schema_version "$acceptance_plan")" = 2
+    test "$(jq '.acceptance_owners | length' "$acceptance_plan")" = 2
+    test "$owner_0_name" != "$owner_1_name"
+    test "$(realpath -e "$owner_0_xdg")" != "$(realpath -e "$owner_1_xdg")"
 
-    XDG_CONFIG_HOME="$owner_xdg" loom auth whoami > "$evidence_dir/owner.whoami.txt"
-    chmod 0600 "$evidence_dir/owner.whoami.txt"
-    owner_config="$owner_xdg/loom/config.toml"
-    owner_config_sha256="$(sha256sum "$owner_config" | awk '{print $1}')"
-    owner_config_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_config")"
+    for owner_root in "$owner_0_xdg" "$owner_1_xdg"; do
+      test -d "$owner_root" && test ! -L "$owner_root"
+      test "$(realpath -e "$owner_root")" = "$owner_root"
+      test "$(stat -c %u "$owner_root")" = "$(id -u)"
+      test "$(stat -c %a "$owner_root")" = 700
+      test -f "$owner_root/loom/config.toml" && test ! -L "$owner_root/loom/config.toml"
+      test "$(realpath -e "$owner_root/loom/config.toml")" = "$owner_root/loom/config.toml"
+      test "$(stat -c %u "$owner_root/loom/config.toml")" = "$(id -u)"
+      test "$(stat -c %a "$owner_root/loom/config.toml")" = 600
+      test "$(stat -c %h "$owner_root/loom/config.toml")" = 1
+    done
 
-    assert_owner_session() {
-      test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_config")" = "$owner_config_identity"
-      test "$(sha256sum "$owner_config" | awk '{print $1}')" = "$owner_config_sha256"
+    owner_0_config="$owner_0_xdg/loom/config.toml"
+    owner_1_config="$owner_1_xdg/loom/config.toml"
+    owner_0_xdg_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_0_xdg")"
+    owner_1_xdg_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_1_xdg")"
+    owner_0_xdg_device_inode="$(stat -c '%d:%i' "$owner_0_xdg")"
+    owner_1_xdg_device_inode="$(stat -c '%d:%i' "$owner_1_xdg")"
+    test "$owner_0_xdg_device_inode" != "$owner_1_xdg_device_inode"
+    test "$(realpath -e "$owner_0_config")" != "$(realpath -e "$owner_1_config")"
+    owner_0_config_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_0_config")"
+    owner_1_config_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_1_config")"
+    owner_0_config_device_inode="$(stat -c '%d:%i' "$owner_0_config")"
+    owner_1_config_device_inode="$(stat -c '%d:%i' "$owner_1_config")"
+    test "$owner_0_config_identity" != "$owner_1_config_identity"
+    test "$owner_0_config_device_inode" != "$owner_1_config_device_inode"
+    owner_0_config_sha256="$(sha256sum "$owner_0_config" | awk '{print $1}')"
+    owner_1_config_sha256="$(sha256sum "$owner_1_config" | awk '{print $1}')"
+
+    owner_0_whoami="$evidence_dir/owner-0.whoami.json"
+    owner_1_whoami="$evidence_dir/owner-1.whoami.json"
+    XDG_CONFIG_HOME="$owner_0_xdg" loom auth whoami --format json > "$owner_0_whoami"
+    XDG_CONFIG_HOME="$owner_1_xdg" loom auth whoami --format json > "$owner_1_whoami"
+    chmod 0600 "$owner_0_whoami" "$owner_1_whoami"
+    assert_canonical_json_line "$owner_0_whoami"
+    assert_canonical_json_line "$owner_1_whoami"
+    jq -e --arg user "$(jq -r '.acceptance_owners[0].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[0].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_0_whoami" >/dev/null
+    jq -e --arg user "$(jq -r '.acceptance_owners[1].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[1].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_1_whoami" >/dev/null
+
+    assert_owner_sessions() {
+      local owner_0_check owner_1_check
+      test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_0_xdg")" = "$owner_0_xdg_identity"
+      test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_1_xdg")" = "$owner_1_xdg_identity"
+      test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_0_config")" = "$owner_0_config_identity"
+      test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$owner_1_config")" = "$owner_1_config_identity"
+      test "$(sha256sum "$owner_0_config" | awk '{print $1}')" = "$owner_0_config_sha256"
+      test "$(sha256sum "$owner_1_config" | awk '{print $1}')" = "$owner_1_config_sha256"
+      owner_0_check="$(mktemp "$evidence_dir/owner-0-check.XXXXXX.json")"
+      owner_1_check="$(mktemp "$evidence_dir/owner-1-check.XXXXXX.json")"
+      XDG_CONFIG_HOME="$owner_0_xdg" loom auth whoami --format json > "$owner_0_check"
+      XDG_CONFIG_HOME="$owner_1_xdg" loom auth whoami --format json > "$owner_1_check"
+      cmp -s "$owner_0_check" "$owner_0_whoami"
+      cmp -s "$owner_1_check" "$owner_1_whoami"
+      rm -f "$owner_0_check" "$owner_1_check"
     }
 
-    for source_root in "$primary_source_v1" "$primary_source_v2" "$retained_source_v1" "$retained_source_v2"; do
+    source_real_paths="$(for source_root in "$owner_0_source_v1" "$owner_0_source_v2" "$owner_1_source_v1" "$owner_1_source_v2"; do
       test -d "$source_root" && test ! -L "$source_root"
       test "$(realpath -e "$source_root")" = "$source_root"
-    done
+      realpath -e "$source_root"
+    done)"
+    test "$(printf '%s\n' "$source_real_paths" | wc -l)" = 4
+    test "$(printf '%s\n' "$source_real_paths" | LC_ALL=C sort -u | wc -l)" = 4
 
-## 6. Concurrent initial deploys and updates
+## 6. Run concurrent initial deploys and updates
 
-Start both candidate-aware commands from the same authenticated owner before
-waiting so two independently named lifecycle and build authorities are
-exercised concurrently. Minimum demand is explicitly zero; different finite
-maxima exercise independent policy updates without requesting executable
-capacity.
+Start both owner-specific candidate-aware commands before either wait. Minimum
+demand is explicitly zero. Initial maxima are 2 and 2; owner 0 then updates to
+3 while owner 1 updates to 4, using independent arbitrary source roots.
 
-    assert_owner_session
-    assert_live_acceptance "$evidence_dir/pre-owner-deploy.status.json"
-    ( XDG_CONFIG_HOME="$owner_xdg" loom service up --environment "dev-$primary_name" --source-root "$primary_source_v1" --min-slots 0 --max-slots 2 ) > "$evidence_dir/primary.deploy-v1.txt" 2>&1 &
-    primary_deploy_pid=$!
-    ( XDG_CONFIG_HOME="$owner_xdg" loom service up --environment "dev-$retained_name" --source-root "$retained_source_v1" --min-slots 0 --max-slots 2 ) > "$evidence_dir/retained.deploy-v1.txt" 2>&1 &
-    retained_deploy_pid=$!
+    owner_0_initial="$evidence_dir/owner-0.initial.json"
+    owner_1_initial="$evidence_dir/owner-1.initial.json"
+    owner_0_updated="$evidence_dir/owner-0.updated.json"
+    owner_1_updated="$evidence_dir/owner-1.updated.json"
 
-    primary_deploy_status=0
-    retained_deploy_status=0
-    wait "$primary_deploy_pid" || primary_deploy_status=$?
-    wait "$retained_deploy_pid" || retained_deploy_status=$?
-    test "$primary_deploy_status" -eq 0
-    test "$retained_deploy_status" -eq 0
-    chmod 0600 "$evidence_dir/primary.deploy-v1.txt" "$evidence_dir/retained.deploy-v1.txt"
+    assert_owner_sessions
+    assert_live_acceptance "$pre_deploy_acceptance_status"
+    ( XDG_CONFIG_HOME="$owner_0_xdg" loom service up --environment "dev-$owner_0_name" --source-root "$owner_0_source_v1" --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-0.deploy-v1.txt" 2>&1 &
+    owner_0_deploy_pid=$!
+    ( XDG_CONFIG_HOME="$owner_1_xdg" loom service up --environment "dev-$owner_1_name" --source-root "$owner_1_source_v1" --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-1.deploy-v1.txt" 2>&1 &
+    owner_1_deploy_pid=$!
 
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$primary_name" --format json > "$evidence_dir/primary.v1.json"
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$retained_name" --format json > "$evidence_dir/retained.v1.json"
-    chmod 0600 "$evidence_dir/primary.v1.json" "$evidence_dir/retained.v1.json"
-    for status_path in "$evidence_dir/primary.v1.json" "$evidence_dir/retained.v1.json"; do
-      jq -e --arg user "$(jq -r .acceptance_owner.user_id "$acceptance_plan")" --arg team "$(jq -r .acceptance_owner.team_id "$acceptance_plan")" '.status == "ready" and .application_status == "ready" and .capacity_prepared == true and .worker_available == false and .min_slots == 0 and .owner_user_id == $user and .owner_team_id == $team' "$status_path" >/dev/null
-    done
+    owner_0_deploy_status=0
+    owner_1_deploy_status=0
+    wait "$owner_0_deploy_pid" || owner_0_deploy_status=$?
+    wait "$owner_1_deploy_pid" || owner_1_deploy_status=$?
+    test "$owner_0_deploy_status" -eq 0
+    test "$owner_1_deploy_status" -eq 0
+    chmod 0600 "$evidence_dir/owner-0.deploy-v1.txt" "$evidence_dir/owner-1.deploy-v1.txt"
+
+    XDG_CONFIG_HOME="$owner_0_xdg" loom dev status "$owner_0_name" --format json > "$owner_0_initial"
+    XDG_CONFIG_HOME="$owner_1_xdg" loom dev status "$owner_1_name" --format json > "$owner_1_initial"
+    chmod 0600 "$owner_0_initial" "$owner_1_initial"
+    jq -e --arg user "$(jq -r '.acceptance_owners[0].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[0].team_id' "$acceptance_plan")" '.status == "ready" and .application_status == "ready" and .capacity_prepared == true and .worker_available == false and .min_slots == 0 and .max_slots == 2 and .owner_user_id == $user and .owner_team_id == $team' "$owner_0_initial" >/dev/null
+    jq -e --arg user "$(jq -r '.acceptance_owners[1].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[1].team_id' "$acceptance_plan")" '.status == "ready" and .application_status == "ready" and .capacity_prepared == true and .worker_available == false and .min_slots == 0 and .max_slots == 2 and .owner_user_id == $user and .owner_team_id == $team' "$owner_1_initial" >/dev/null
     assert_live_acceptance "$initial_acceptance_status"
 
-    assert_owner_session
-    ( XDG_CONFIG_HOME="$owner_xdg" loom service up --environment "dev-$primary_name" --source-root "$primary_source_v2" --min-slots 0 --max-slots 3 ) > "$evidence_dir/primary.deploy-v2.txt" 2>&1 &
-    primary_update_pid=$!
-    ( XDG_CONFIG_HOME="$owner_xdg" loom service up --environment "dev-$retained_name" --source-root "$retained_source_v2" --min-slots 0 --max-slots 4 ) > "$evidence_dir/retained.deploy-v2.txt" 2>&1 &
-    retained_update_pid=$!
+    assert_owner_sessions
+    ( XDG_CONFIG_HOME="$owner_0_xdg" loom service up --environment "dev-$owner_0_name" --source-root "$owner_0_source_v2" --min-slots 0 --max-slots 3 ) > "$evidence_dir/owner-0.deploy-v2.txt" 2>&1 &
+    owner_0_update_pid=$!
+    ( XDG_CONFIG_HOME="$owner_1_xdg" loom service up --environment "dev-$owner_1_name" --source-root "$owner_1_source_v2" --min-slots 0 --max-slots 4 ) > "$evidence_dir/owner-1.deploy-v2.txt" 2>&1 &
+    owner_1_update_pid=$!
 
-    primary_update_status=0
-    retained_update_status=0
-    wait "$primary_update_pid" || primary_update_status=$?
-    wait "$retained_update_pid" || retained_update_status=$?
-    test "$primary_update_status" -eq 0
-    test "$retained_update_status" -eq 0
-    chmod 0600 "$evidence_dir/primary.deploy-v2.txt" "$evidence_dir/retained.deploy-v2.txt"
+    owner_0_update_status=0
+    owner_1_update_status=0
+    wait "$owner_0_update_pid" || owner_0_update_status=$?
+    wait "$owner_1_update_pid" || owner_1_update_status=$?
+    test "$owner_0_update_status" -eq 0
+    test "$owner_1_update_status" -eq 0
+    chmod 0600 "$evidence_dir/owner-0.deploy-v2.txt" "$evidence_dir/owner-1.deploy-v2.txt"
 
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$primary_name" --format json > "$evidence_dir/primary.v2.json"
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$retained_name" --format json > "$evidence_dir/retained.v2.json"
-    chmod 0600 "$evidence_dir/primary.v2.json" "$evidence_dir/retained.v2.json"
-    jq -e '.status == "ready" and .worker_available == false and .min_slots == 0 and .max_slots == 3' "$evidence_dir/primary.v2.json" >/dev/null
-    jq -e '.status == "ready" and .worker_available == false and .min_slots == 0 and .max_slots == 4' "$evidence_dir/retained.v2.json" >/dev/null
-    test "$(jq -r .candidate_sha "$evidence_dir/primary.v1.json")" != "$(jq -r .candidate_sha "$evidence_dir/primary.v2.json")"
-    test "$(jq -r .candidate_sha "$evidence_dir/retained.v1.json")" != "$(jq -r .candidate_sha "$evidence_dir/retained.v2.json")"
-    test "$(jq -r .candidate_sha "$evidence_dir/primary.v2.json")" != "$(jq -r .candidate_sha "$evidence_dir/retained.v2.json")"
-    test "$(jq -r .deployment_generation "$evidence_dir/primary.v2.json")" -gt "$(jq -r .deployment_generation "$evidence_dir/primary.v1.json")"
-    test "$(jq -r .deployment_generation "$evidence_dir/retained.v2.json")" -gt "$(jq -r .deployment_generation "$evidence_dir/retained.v1.json")"
+    XDG_CONFIG_HOME="$owner_0_xdg" loom dev status "$owner_0_name" --format json > "$owner_0_updated"
+    XDG_CONFIG_HOME="$owner_1_xdg" loom dev status "$owner_1_name" --format json > "$owner_1_updated"
+    chmod 0600 "$owner_0_updated" "$owner_1_updated"
+    jq -e '.status == "ready" and .worker_available == false and .min_slots == 0 and .max_slots == 3' "$owner_0_updated" >/dev/null
+    jq -e '.status == "ready" and .worker_available == false and .min_slots == 0 and .max_slots == 4' "$owner_1_updated" >/dev/null
+    test "$(jq -r .candidate_sha "$owner_0_initial")" != "$(jq -r .candidate_sha "$owner_0_updated")"
+    test "$(jq -r .candidate_sha "$owner_1_initial")" != "$(jq -r .candidate_sha "$owner_1_updated")"
+    test "$(jq -r .candidate_sha "$owner_0_updated")" != "$(jq -r .candidate_sha "$owner_1_updated")"
+    owner_0_candidate="$(jq -r .candidate_sha "$owner_0_updated")"
+    owner_1_candidate="$(jq -r .candidate_sha "$owner_1_updated")"
     assert_live_acceptance "$updated_acceptance_status"
 
-## 7. Prove same-owner environment isolation
+## 7. Prove bidirectional cross-owner isolation
 
-The two environments are intentionally controlled by the same accepted owner,
-but their candidate, subject, namespace, database, bucket, route, and worker
-identities must remain disjoint. Any equality is an isolation failure.
+The updated environments must have disjoint subject, namespace, database,
+bucket, route, host, and worker-pool identities. Then run read, update, and
+destroy denial probes in exact owner-0-to-owner-1 then owner-1-to-owner-0 order.
+Each target owner captures canonical status before and after the probe. Exact
+exit status 1, empty stdout, nonempty stderr, byte-equal target status, and a
+fresh live acceptance interlock are mandatory after every attempt.
 
-    for field in subject_id identity.namespace identity.database identity.task_bucket identity.trajectories_bucket identity.artifacts_bucket identity.route_host identity.worker_pool; do
-      test "$(jq -r ".$field" "$evidence_dir/primary.v2.json")" != "$(jq -r ".$field" "$evidence_dir/retained.v2.json")"
+    for field in subject_id subject_incarnation identity.environment identity.namespace identity.database identity.task_bucket identity.trajectories_bucket identity.artifacts_bucket identity.route_host identity.worker_control_plane_host identity.worker_gateway_host identity.route_path identity.worker_pool; do
+      test "$(jq -r ".$field" "$owner_0_updated")" != "$(jq -r ".$field" "$owner_1_updated")"
     done
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$primary_name" --format json > "$evidence_dir/primary.after-isolation.json"
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$retained_name" --format json > "$evidence_dir/retained.after-isolation.json"
-    jq -e '.status == "ready" and .worker_available == false' "$evidence_dir/primary.after-isolation.json" >/dev/null
-    jq -e '.status == "ready" and .worker_available == false' "$evidence_dir/retained.after-isolation.json" >/dev/null
-    assert_live_acceptance "$post_isolation_acceptance_status"
+    : > "$denials_jsonl"
+    chmod 0600 "$denials_jsonl"
 
-## 8. Destroy, retain, and prove subject rotation
+    probe_cross_owner_denial() {
+      local actor_xdg="$1"
+      local actor_candidate="$2"
+      local target_xdg="$3"
+      local target_name="$4"
+      local actor_index="$5"
+      local target_index="$6"
+      local operation="$7"
+      local prefix="$evidence_dir/denial-$actor_index-$target_index-$operation"
+      local before="$prefix.before.json"
+      local after="$prefix.after.json"
+      local stdout="$prefix.stdout"
+      local stderr="$prefix.stderr"
+      local interlock_status="$prefix.interlock.json"
+      local rc=0
 
-Capture the retained environment's subject before teardown. The primary
-environment uses default data removal; the retained environment uses
-`--keep-data`. Both commands wait for manager-first authority retirement and
-durable cleanup checkpoints.
+      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$before"
+      case "$operation" in
+        read)
+          XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json > "$stdout" 2> "$stderr" || rc=$?
+          ;;
+        update)
+          XDG_CONFIG_HOME="$actor_xdg" loom service up --environment "dev-$target_name" --candidate "$actor_candidate" --expected-operation-epoch 0 --min-slots 0 --quiet > "$stdout" 2> "$stderr" || rc=$?
+          ;;
+        destroy)
+          XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json > "$stdout" 2> "$stderr" || rc=$?
+          ;;
+        *)
+          return 2
+          ;;
+      esac
+      test "$rc" -eq 1
+      test ! -s "$stdout"
+      test -s "$stderr"
+      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$after"
+      chmod 0600 "$before" "$after" "$stdout" "$stderr"
+      assert_canonical_json_line "$before"
+      assert_canonical_json_line "$after"
+      cmp -s "$before" "$after"
+      assert_live_acceptance "$interlock_status"
 
-    assert_owner_session
-    retained_subject="$(jq -r .subject_id "$evidence_dir/retained.after-isolation.json")"
-    XDG_CONFIG_HOME="$owner_xdg" loom dev destroy "$primary_name" --format json > "$evidence_dir/primary.destroy.json"
-    XDG_CONFIG_HOME="$owner_xdg" loom dev destroy "$retained_name" --keep-data --format json > "$evidence_dir/retained.destroy-keep-data.json"
-    chmod 0600 "$evidence_dir/primary.destroy.json" "$evidence_dir/retained.destroy-keep-data.json"
-    jq -e '.status == "deleted" and .keep_data == false' "$evidence_dir/primary.destroy.json" >/dev/null
-    jq -e '.status == "deleted" and .keep_data == true' "$evidence_dir/retained.destroy-keep-data.json" >/dev/null
+      jq -cS -n \
+        --arg actor_team_id "$(jq -r ".acceptance_owners[$actor_index].team_id" "$acceptance_plan")" \
+        --arg actor_user_id "$(jq -r ".acceptance_owners[$actor_index].user_id" "$acceptance_plan")" \
+        --arg operation "$operation" \
+        --arg stderr_sha256 "$(sha256sum "$stderr" | awk '{print $1}')" \
+        --arg stdout_sha256 "$(sha256sum "$stdout" | awk '{print $1}')" \
+        --arg target_after_sha256 "$(sha256sum "$after" | awk '{print $1}')" \
+        --arg target_before_sha256 "$(sha256sum "$before" | awk '{print $1}')" \
+        --arg target_environment "$target_name" \
+        --arg target_team_id "$(jq -r ".acceptance_owners[$target_index].team_id" "$acceptance_plan")" \
+        --arg target_user_id "$(jq -r ".acceptance_owners[$target_index].user_id" "$acceptance_plan")" \
+        '{actor_team_id:$actor_team_id,actor_user_id:$actor_user_id,exit_code:1,operation:$operation,stderr_sha256:$stderr_sha256,stdout_sha256:$stdout_sha256,target_after_sha256:$target_after_sha256,target_before_sha256:$target_before_sha256,target_environment:$target_environment,target_team_id:$target_team_id,target_user_id:$target_user_id}' \
+        >> "$denials_jsonl"
+    }
+
+    assert_owner_sessions
+    probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 read
+    probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 update
+    probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 destroy
+    probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 read
+    probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 update
+    probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 destroy
+    test "$(wc -l < "$denials_jsonl")" = 6
+    assert_live_acceptance "$post_denials_acceptance_status"
+
+## 8. Destroy normally, retain, redeploy, and finish cleanup
+
+Owner 0 uses default data removal. Owner 1 uses `--keep-data`, then redeploys
+the retained name. The retained subject ID must remain stable while its
+incarnation rotates. Finally destroy owner 1 normally and prove all dynamic
+namespaces are absent before rollback.
+
+    owner_0_destroyed="$evidence_dir/owner-0.destroyed.json"
+    owner_1_destroyed="$evidence_dir/owner-1.destroyed.json"
+    owner_1_redeployed="$evidence_dir/owner-1.redeployed.json"
+    owner_1_final_destroyed="$evidence_dir/owner-1.final-destroyed.json"
+    retained_subject_id="$(jq -r .subject_id "$owner_1_updated")"
+    retained_incarnation="$(jq -r .subject_incarnation "$owner_1_updated")"
+
+    assert_owner_sessions
+    XDG_CONFIG_HOME="$owner_0_xdg" loom dev destroy "$owner_0_name" --format json > "$owner_0_destroyed"
+    XDG_CONFIG_HOME="$owner_1_xdg" loom dev destroy "$owner_1_name" --keep-data --format json > "$owner_1_destroyed"
+    chmod 0600 "$owner_0_destroyed" "$owner_1_destroyed"
+    jq -e '.status == "deleted" and .keep_data == false' "$owner_0_destroyed" >/dev/null
+    jq -e '.status == "deleted" and .keep_data == true' "$owner_1_destroyed" >/dev/null
     assert_live_acceptance "$post_destroy_acceptance_status"
 
-Redeploying the retained name must create a new authority, not revive the
-retired subject or reporter credentials.
+    assert_owner_sessions
+    XDG_CONFIG_HOME="$owner_1_xdg" loom service up --environment "dev-$owner_1_name" --source-root "$owner_1_source_v2" --min-slots 0 --max-slots 2 > "$evidence_dir/owner-1.redeploy.txt" 2>&1
+    XDG_CONFIG_HOME="$owner_1_xdg" loom dev status "$owner_1_name" --format json > "$owner_1_redeployed"
+    chmod 0600 "$evidence_dir/owner-1.redeploy.txt" "$owner_1_redeployed"
+    jq -e --arg subject "$retained_subject_id" --arg incarnation "$retained_incarnation" '.status == "ready" and .subject_id == $subject and .subject_incarnation != $incarnation and .deployment_generation == 1 and .worker_available == false and .min_slots == 0 and .max_slots == 2' "$owner_1_redeployed" >/dev/null
+    assert_live_acceptance "$post_redeploy_acceptance_status"
 
-    assert_owner_session
-    XDG_CONFIG_HOME="$owner_xdg" loom service up --environment "dev-$retained_name" --source-root "$retained_source_v2" --min-slots 0 --max-slots 4 > "$evidence_dir/retained.redeploy.txt" 2>&1
-    XDG_CONFIG_HOME="$owner_xdg" loom dev status "$retained_name" --format json > "$evidence_dir/retained.redeployed.json"
-    chmod 0600 "$evidence_dir/retained.redeploy.txt" "$evidence_dir/retained.redeployed.json"
-    jq -e --arg previous "$retained_subject" '.status == "ready" and .subject_id != $previous and .worker_available == false and .min_slots == 0' "$evidence_dir/retained.redeployed.json" >/dev/null
-    assert_live_acceptance "$final_acceptance_status"
-
-Create one canonical, owner-only result before final retirement. It contains
-only non-secret state and hashes; keep the detailed owner logs mode 0600.
-
-    jq -cS -n --arg release "$trusted_release_sha256" --arg plan "$acceptance_plan_sha256" --arg acceptance "$acceptance_render_sha256" --arg shadow "$shadow_render_sha256" --slurpfile primary "$evidence_dir/primary.v2.json" --slurpfile retained "$evidence_dir/retained.v2.json" --slurpfile primary_destroy "$evidence_dir/primary.destroy.json" --slurpfile retained_destroy "$evidence_dir/retained.destroy-keep-data.json" --slurpfile retained_redeploy "$evidence_dir/retained.redeployed.json" '{acceptance_manifest_sha256:$acceptance,acceptance_plan_sha256:$plan,acceptance_owner:{team_id:$primary[0].owner_team_id,user_id:$primary[0].owner_user_id},primary:$primary[0],primary_destroy:$primary_destroy[0],release_sha256:$release,retained:$retained[0],retained_destroy:$retained_destroy[0],retained_redeploy:$retained_redeploy[0],schema:"loom-personal-dev-zero-capacity-acceptance-result-v1",shadow_manifest_sha256:$shadow}' > "$evidence_dir/acceptance-result.json"
-    chmod 0600 "$evidence_dir/acceptance-result.json"
-    assert_canonical_json_line "$evidence_dir/acceptance-result.json"
-    sha256sum "$evidence_dir/acceptance-result.json" > "$evidence_dir/acceptance-result.sha256"
-    chmod 0600 "$evidence_dir/acceptance-result.sha256"
-
-Retire the redeployed retained environment through the same normal path. Do not
-proceed to shared-plane rollback until both personal namespaces and all build
-sandboxes are gone.
-
-    assert_owner_session
-    XDG_CONFIG_HOME="$owner_xdg" loom dev destroy "$retained_name" --format json > "$evidence_dir/retained.final-destroy.json"
-    chmod 0600 "$evidence_dir/retained.final-destroy.json"
-    jq -e '.status == "deleted"' "$evidence_dir/retained.final-destroy.json" >/dev/null
+    assert_owner_sessions
+    XDG_CONFIG_HOME="$owner_1_xdg" loom dev destroy "$owner_1_name" --format json > "$owner_1_final_destroyed"
+    chmod 0600 "$owner_1_final_destroyed"
+    jq -e '.status == "deleted" and .keep_data == false' "$owner_1_final_destroyed" >/dev/null
     assert_no_dynamic_namespaces
+    assert_live_acceptance "$pre_rollback_acceptance_status"
 
 ## 9. Reapply the byte-reviewed inert shadow
 
@@ -667,6 +777,82 @@ separate reviewed plan.
     chmod 0600 "$rollback_status"
     assert_canonical_json_line "$rollback_status"
     jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "shadow" and .ready == true and .blockers == [] and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$rollback_status" >/dev/null
+    assert_no_dynamic_namespaces
+
+## 10. Assemble and verify canonical v2 evidence while inert
+
+Only after normal final cleanup, byte-exact shadow reapply, and successful
+shadow status may the canonical result exist. Project every lifecycle snapshot
+to the strict non-secret field set, bind all six file-digest-only denial
+records and eight status digests, and verify the final digest through the
+read-only strict v2 loader. A verification failure leaves the system inert and
+blocks durable launch.
+
+    project_acceptance_snapshot() {
+      local source="$1"
+      local selected="$2"
+      jq -cS '{application_status,candidate_sha,capacity_prepared,capacity_status,deployment_generation,identity:{environment:.identity.environment,namespace:.identity.namespace,database:.identity.database,task_bucket:.identity.task_bucket,trajectories_bucket:.identity.trajectories_bucket,artifacts_bucket:.identity.artifacts_bucket,route_host:.identity.route_host,worker_control_plane_host:.identity.worker_control_plane_host,worker_gateway_host:.identity.worker_gateway_host,route_path:.identity.route_path,worker_pool:.identity.worker_pool},keep_data,max_slots,min_slots,name,operation_epoch,owner_team_id,owner_user_id,status,subject_id,subject_incarnation,worker_available}' "$source" > "$selected"
+      chmod 0600 "$selected"
+      assert_canonical_json_line "$selected"
+    }
+
+    owner_0_initial_selected="$evidence_dir/owner-0.initial.selected.json"
+    owner_0_updated_selected="$evidence_dir/owner-0.updated.selected.json"
+    owner_0_destroyed_selected="$evidence_dir/owner-0.destroyed.selected.json"
+    owner_1_initial_selected="$evidence_dir/owner-1.initial.selected.json"
+    owner_1_updated_selected="$evidence_dir/owner-1.updated.selected.json"
+    owner_1_destroyed_selected="$evidence_dir/owner-1.destroyed.selected.json"
+    owner_1_redeployed_selected="$evidence_dir/owner-1.redeployed.selected.json"
+    owner_1_final_destroyed_selected="$evidence_dir/owner-1.final-destroyed.selected.json"
+    project_acceptance_snapshot "$owner_0_initial" "$owner_0_initial_selected"
+    project_acceptance_snapshot "$owner_0_updated" "$owner_0_updated_selected"
+    project_acceptance_snapshot "$owner_0_destroyed" "$owner_0_destroyed_selected"
+    project_acceptance_snapshot "$owner_1_initial" "$owner_1_initial_selected"
+    project_acceptance_snapshot "$owner_1_updated" "$owner_1_updated_selected"
+    project_acceptance_snapshot "$owner_1_destroyed" "$owner_1_destroyed_selected"
+    project_acceptance_snapshot "$owner_1_redeployed" "$owner_1_redeployed_selected"
+    project_acceptance_snapshot "$owner_1_final_destroyed" "$owner_1_final_destroyed_selected"
+
+    jq -cS -j -n \
+      --arg acceptance_manifest_sha256 "$acceptance_render_sha256" \
+      --arg acceptance_plan_sha256 "$acceptance_plan_sha256" \
+      --arg after_denials "$(sha256sum "$post_denials_acceptance_status" | awk '{print $1}')" \
+      --arg after_destroy "$(sha256sum "$post_destroy_acceptance_status" | awk '{print $1}')" \
+      --arg after_initial "$(sha256sum "$initial_acceptance_status" | awk '{print $1}')" \
+      --arg after_redeploy "$(sha256sum "$post_redeploy_acceptance_status" | awk '{print $1}')" \
+      --arg after_updates "$(sha256sum "$updated_acceptance_status" | awk '{print $1}')" \
+      --arg pre_deploy "$(sha256sum "$pre_deploy_acceptance_status" | awk '{print $1}')" \
+      --arg pre_rollback "$(sha256sum "$pre_rollback_acceptance_status" | awk '{print $1}')" \
+      --arg release_sha256 "$trusted_release_sha256" \
+      --arg rollback_shadow "$(sha256sum "$rollback_status" | awk '{print $1}')" \
+      --arg shadow_manifest_sha256 "$shadow_render_sha256" \
+      --slurpfile cross_owner_denials "$denials_jsonl" \
+      --slurpfile owner_0_destroyed "$owner_0_destroyed_selected" \
+      --slurpfile owner_0_initial "$owner_0_initial_selected" \
+      --slurpfile owner_0_updated "$owner_0_updated_selected" \
+      --slurpfile owner_1_destroyed "$owner_1_destroyed_selected" \
+      --slurpfile owner_1_final_destroyed "$owner_1_final_destroyed_selected" \
+      --slurpfile owner_1_initial "$owner_1_initial_selected" \
+      --slurpfile owner_1_redeployed "$owner_1_redeployed_selected" \
+      --slurpfile owner_1_updated "$owner_1_updated_selected" \
+      '{acceptance_manifest_sha256:$acceptance_manifest_sha256,acceptance_plan_sha256:$acceptance_plan_sha256,cross_owner_denials:$cross_owner_denials,owners:[{destroyed:$owner_0_destroyed[0],final_destroyed:null,initial:$owner_0_initial[0],redeployed:null,updated:$owner_0_updated[0]},{destroyed:$owner_1_destroyed[0],final_destroyed:$owner_1_final_destroyed[0],initial:$owner_1_initial[0],redeployed:$owner_1_redeployed[0],updated:$owner_1_updated[0]}],release_sha256:$release_sha256,schema:"loom-personal-dev-zero-capacity-acceptance-result-v2",shadow_manifest_sha256:$shadow_manifest_sha256,status_sha256s:{after_denials:$after_denials,after_destroy:$after_destroy,after_initial:$after_initial,after_redeploy:$after_redeploy,after_updates:$after_updates,pre_deploy:$pre_deploy,pre_rollback:$pre_rollback,rollback_shadow:$rollback_shadow}}' \
+      > "$acceptance_result"
+    chmod 0600 "$acceptance_result"
+    acceptance_result_sha256="$(canonical_json_sha256 "$acceptance_result")"
+    test "$acceptance_result_sha256" = "$(sha256sum "$acceptance_result" | awk '{print $1}')"
+    printf '%s\n' "$acceptance_result_sha256" > "$evidence_dir/acceptance-result-v2.sha256"
+    chmod 0600 "$evidence_dir/acceptance-result-v2.sha256"
+
+    "$loom_cli" admin personal-dev-control-plane verify-acceptance-result \
+      --acceptance-plan-file "$acceptance_plan" \
+      --acceptance-plan-sha256 "$acceptance_plan_sha256" \
+      --acceptance-result-file "$acceptance_result" \
+      --acceptance-result-sha256 "$acceptance_result_sha256" \
+      --acceptance-manifest-sha256 "$acceptance_render_sha256" \
+      > "$acceptance_verification"
+    chmod 0600 "$acceptance_verification"
+    assert_canonical_json_line "$acceptance_verification"
+    jq -e --arg result "$acceptance_result_sha256" '.schema == "loom-personal-dev-zero-capacity-acceptance-verification-v1" and .verified == true and .owner_count == 2 and .cross_owner_denial_count == 6 and .acceptance_result_sha256 == $result' "$acceptance_verification" >/dev/null
 
 Retain the trusted-release artifact, acceptance plan, backup/restore record,
 both reviewed manifests, scanner-init completion records, diffs, applies,

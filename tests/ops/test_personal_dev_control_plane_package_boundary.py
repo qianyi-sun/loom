@@ -893,7 +893,7 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
     assert "personal-dev-management-plane-deployment.md" in architecture
 
 
-def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> None:
+def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
     normalized = " ".join(runbook.split())
 
@@ -932,31 +932,99 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
     assert '"worker_available":false' in runbook
     assert '"manager_ceiling":0' in runbook
 
-    assert 'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"' in runbook
-    assert 'primary_name="<owner-primary-personal-name>"' in runbook
-    assert 'retained_name="<owner-retained-personal-name>"' in runbook
-    assert 'XDG_CONFIG_HOME="$owner_xdg"' in runbook
-    assert runbook.count("loom auth whoami") == 1
-    assert "primary_deploy_pid=$!" in runbook
-    assert "retained_deploy_pid=$!" in runbook
-    assert 'wait "$primary_deploy_pid"' in runbook
-    assert 'wait "$retained_deploy_pid"' in runbook
-    assert "primary_update_pid=$!" in runbook
-    assert "retained_update_pid=$!" in runbook
+    assert 'owner_0_xdg="<absolute-mode-0700-owner-0-xdg-config-root>"' in runbook
+    assert 'owner_1_xdg="<absolute-mode-0700-owner-1-xdg-config-root>"' in runbook
+    assert 'owner_0_name="<owner-0-personal-name>"' in runbook
+    assert 'owner_1_name="<owner-1-personal-name>"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_0_xdg" loom auth whoami --format json' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_1_xdg" loom auth whoami --format json' in runbook
+    assert runbook.count("loom auth whoami --format json") == 4
+    assert ".acceptance_owners[0].user_id" in runbook
+    assert ".acceptance_owners[0].team_id" in runbook
+    assert ".acceptance_owners[1].user_id" in runbook
+    assert ".acceptance_owners[1].team_id" in runbook
+    assert 'test "$(realpath -e "$owner_0_xdg")" != "$(realpath -e "$owner_1_xdg")"' in runbook
+    assert 'test "$owner_0_config_identity" != "$owner_1_config_identity"' in runbook
+    assert "assert_owner_sessions()" in runbook
+
+    for owner in (0, 1):
+        assert f"owner_{owner}_deploy_pid=$!" in runbook
+        assert f'wait "$owner_{owner}_deploy_pid"' in runbook
+        assert f"owner_{owner}_update_pid=$!" in runbook
+        assert f'wait "$owner_{owner}_update_pid"' in runbook
+        for version in (1, 2):
+            assert (
+                f'owner_{owner}_source_v{version}="<absolute-owner-{owner}-source-v{version}>"'
+                in runbook
+            )
+            assert f'--source-root "$owner_{owner}_source_v{version}"' in normalized
+    assert runbook.index("owner_1_deploy_pid=$!") < runbook.index('wait "$owner_0_deploy_pid"')
+    assert runbook.index("owner_1_update_pid=$!") < runbook.index('wait "$owner_0_update_pid"')
     assert runbook.count("--min-slots 0") >= 5
-    assert '--source-root "$primary_source_v1"' in normalized
-    assert '--source-root "$retained_source_v1"' in normalized
-    assert '--source-root "$primary_source_v2"' in normalized
-    assert '--source-root "$retained_source_v2"' in normalized
-    assert ".acceptance_owner.user_id" in runbook
-    assert ".acceptance_owner.team_id" in runbook
-    assert 'loom dev status "$retained_name"' in normalized
-    assert 'loom dev status "$primary_name"' in normalized
-    assert 'loom dev destroy "$primary_name" --format json' in normalized
-    assert 'loom dev destroy "$retained_name" --keep-data --format json' in normalized
-    assert 'loom service up --environment "dev-$retained_name"' in normalized
-    assert 'jq -e --arg previous "$retained_subject"' in normalized
-    assert ".subject_id != $previous" in runbook
+    assert '--max-slots 2' in runbook
+    assert '--max-slots 3' in runbook
+    assert '--max-slots 4' in runbook
+
+    assert "probe_cross_owner_denial()" in runbook
+    assert 'local actor_xdg="$1"' in runbook
+    assert 'local actor_candidate="$2"' in runbook
+    assert 'local target_xdg="$3"' in runbook
+    assert 'local target_name="$4"' in runbook
+    assert 'local actor_index="$5"' in runbook
+    assert 'local target_index="$6"' in runbook
+    assert 'local operation="$7"' in runbook
+    assert 'XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json' in normalized
+    assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json' in normalized
+    assert '--candidate "$actor_candidate"' in normalized
+    assert '--expected-operation-epoch 0' in normalized
+    assert '--min-slots 0' in normalized
+    assert '--quiet' in normalized
+    assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json' in normalized
+    assert 'test "$rc" -eq 1' in runbook
+    assert 'test ! -s "$stdout"' in runbook
+    assert 'cmp -s "$before" "$after"' in runbook
+    assert 'assert_live_acceptance "$interlock_status"' in runbook
+    assert '--arg stdout_sha256 "$(sha256sum "$stdout" | awk \'{print $1}\')"' in runbook
+    assert '--arg stderr_sha256 "$(sha256sum "$stderr" | awk \'{print $1}\')"' in runbook
+    assert "stderr contents" not in runbook.casefold()
+    denial_calls = re.findall(
+        r'^    probe_cross_owner_denial "\$owner_([01])_xdg" '
+        r'"\$owner_\1_candidate" "\$owner_([01])_xdg" '
+        r'"\$owner_\2_name" ([01]) ([01]) (read|update|destroy)$',
+        runbook,
+        flags=re.MULTILINE,
+    )
+    assert denial_calls == [
+        ("0", "1", "0", "1", "read"),
+        ("0", "1", "0", "1", "update"),
+        ("0", "1", "0", "1", "destroy"),
+        ("1", "0", "1", "0", "read"),
+        ("1", "0", "1", "0", "update"),
+        ("1", "0", "1", "0", "destroy"),
+    ]
+
+    assert 'loom dev destroy "$owner_0_name" --format json' in normalized
+    assert 'loom dev destroy "$owner_1_name" --keep-data --format json' in normalized
+    assert 'retained_subject_id="$(jq -r .subject_id "$owner_1_updated")"' in runbook
+    assert 'retained_incarnation="$(jq -r .subject_incarnation "$owner_1_updated")"' in runbook
+    assert '.subject_id == $subject' in runbook
+    assert '.subject_incarnation != $incarnation' in runbook
+    assert 'loom dev destroy "$owner_1_name" --format json' in normalized
+    assert "assert_no_dynamic_namespaces" in runbook
+    assert "loom-personal-dev-zero-capacity-acceptance-result-v2" in runbook
+    assert "jq -cS" in runbook
+    assert 'verify-acceptance-result' in normalized
+    assert '--acceptance-result-file "$acceptance_result"' in normalized
+    assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in normalized
+
+    for forbidden in (
+        "owner_xdg",
+        "primary_name",
+        "retained_name",
+        ".subject_id != $previous",
+    ):
+        assert forbidden not in runbook
+    assert re.search(r"\.acceptance_owner(?:[^s]|$)", runbook) is None
 
     assert 'shadow_render="$evidence_dir/reviewed-rollback-shadow.yaml"' in runbook
     assert ".release.shadow_manifest_sha256" in runbook
@@ -992,7 +1060,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "scanner_finding_policy_sha256" in runbook
     assert "approved secret channel" in lowered
     assert "exact key inventory" in lowered
-    assert "single authenticated acceptance-owner session" in lowered
+    assert "two pinned authenticated owner sessions" in lowered
     assert "arbitrary committed, modified, and untracked source" in lowered
     assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
     assert "issue #906" in lowered
@@ -1053,7 +1121,8 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     assert "render-acceptance" in fleet
     assert "status-acceptance" in fleet
     assert "two concurrent isolated environments" in normalized_architecture
-    assert "one authenticated acceptance owner" in normalized_architecture
+    assert "two pinned authenticated acceptance owners" in normalized_architecture
+    assert "verified schema-v2 result" in normalized_architecture
     assert "worker_available=false" in architecture
 
 
@@ -1076,6 +1145,18 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert '(.spec.ingress[0] | has("from") | not)' in runbook
     assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
+    assert "schema-v1 single-owner record remains historical compatibility" in runbook
+    assert "final multi-person launch requires a verified schema-v2 result" in runbook
+    assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
+    assert 'acceptance_result="<absolute-owner-only-acceptance-result-v2.json>"' in runbook
+    verify = runbook.index("verify-acceptance-result")
+    render = runbook.index(" render-operational ")
+    assert verify < render
+    assert '--acceptance-plan-file "$acceptance_plan"' in runbook
+    assert '--acceptance-plan-sha256 "$acceptance_plan_sha256"' in runbook
+    assert '--acceptance-result-file "$acceptance_result"' in runbook
+    assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in runbook
+    assert '--acceptance-manifest-sha256 "$acceptance_manifest_sha256"' in runbook
 
 
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:

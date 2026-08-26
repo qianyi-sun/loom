@@ -26,9 +26,11 @@ acceptance remains a later gate after both the personal-management shadow and
 the separate global-capacity zero-ceiling shadow report ready.
 The controlled
 [zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
-then exercises two concurrent isolated environments under one authenticated
-acceptance owner, with distinct source snapshots, lifecycle operations,
-namespaces, storage identities, and capacity publications. Acceptance requires
+then exercises two concurrent isolated environments under two pinned
+authenticated acceptance owners, with distinct source snapshots, lifecycle
+operations, namespaces, storage identities, and capacity publications. Each
+owner proves that read, update, and destroy attempts against the other owner's
+environment fail without changing the target. Acceptance requires
 `worker_available=false` and an exact global executable-new-capacity ceiling of
 zero throughout. Its plan also binds the completed
 [owner-only isolated backup/restore evidence](../runbooks/personal-dev-backup-restore-evidence.md)
@@ -41,7 +43,10 @@ acceptance interlock.
 Acceptance is deliberately temporary. Its runbook destroys the acceptance
 environments and reapplies the byte-reviewed shadow before the bounded window
 closes; an acceptance manifest must not be left running as the development
-service. After that complete acceptance-and-rollback result exists, the
+service. Schema v1 remains historical single-owner compatibility. Final
+multi-person launch requires the canonical two-owner plan and a verified
+schema-v2 result assembled only after complete cleanup and byte-exact inert
+rollback. After that result exists, the
 [durable zero-capacity launch](../runbooks/personal-dev-durable-launch.md) uses
 a separate canonical operational plan. `render-operational` enables the
 personal controller and restricted builder and runs one activation-agent
