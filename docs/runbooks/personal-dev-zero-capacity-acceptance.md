@@ -541,6 +541,9 @@ checkout and from each other.
     assert_canonical_json_line "$owner_1_whoami"
     jq -e --arg user "$(jq -r '.acceptance_owners[0].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[0].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_0_whoami" >/dev/null
     jq -e --arg user "$(jq -r '.acceptance_owners[1].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[1].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_1_whoami" >/dev/null
+    owner_0_principal="$(jq -cS '{user_id,team_id}' "$owner_0_whoami")"
+    owner_1_principal="$(jq -cS '{user_id,team_id}' "$owner_1_whoami")"
+    test "$owner_0_principal" != "$owner_1_principal"
 
     assert_owner_sessions() {
       local owner_0_check owner_1_check
@@ -559,13 +562,16 @@ checkout and from each other.
       rm -f "$owner_0_check" "$owner_1_check"
     }
 
-    source_real_paths="$(for source_root in "$owner_0_source_v1" "$owner_0_source_v2" "$owner_1_source_v1" "$owner_1_source_v2"; do
-      test -d "$source_root" && test ! -L "$source_root"
-      test "$(realpath -e "$source_root")" = "$source_root"
-      realpath -e "$source_root"
-    done)"
-    test "$(printf '%s\n' "$source_real_paths" | wc -l)" = 4
-    test "$(printf '%s\n' "$source_real_paths" | LC_ALL=C sort -u | wc -l)" = 4
+    declare -A source_real_paths=()
+    for source_root in "$owner_0_source_v1" "$owner_0_source_v2" "$owner_1_source_v1" "$owner_1_source_v2"; do
+      test -d "$source_root"
+      test ! -L "$source_root"
+      source_real_path="$(realpath -e "$source_root")"
+      test "$source_real_path" = "$source_root"
+      test "$source_real_path" != "$repo"
+      source_real_paths["$source_real_path"]=1
+    done
+    test "${#source_real_paths[@]}" -eq 4
 
 ## 6. Run concurrent initial deploys and updates
 

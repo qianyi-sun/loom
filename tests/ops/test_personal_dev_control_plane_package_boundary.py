@@ -945,7 +945,35 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert ".acceptance_owners[1].team_id" in runbook
     assert 'test "$(realpath -e "$owner_0_xdg")" != "$(realpath -e "$owner_1_xdg")"' in runbook
     assert 'test "$owner_0_config_identity" != "$owner_1_config_identity"' in runbook
+    assert (
+        'owner_0_principal="$(jq -cS \'{user_id,team_id}\' "$owner_0_whoami")"'
+        in runbook
+    )
+    assert (
+        'owner_1_principal="$(jq -cS \'{user_id,team_id}\' "$owner_1_whoami")"'
+        in runbook
+    )
+    principal_inequality = 'test "$owner_0_principal" != "$owner_1_principal"'
+    assert principal_inequality in runbook
+    assert runbook.index(principal_inequality) < runbook.index(
+        '( XDG_CONFIG_HOME="$owner_0_xdg" loom service up'
+    )
     assert "assert_owner_sessions()" in runbook
+
+    source_root_validation = """
+    declare -A source_real_paths=()
+    for source_root in "$owner_0_source_v1" "$owner_0_source_v2" "$owner_1_source_v1" "$owner_1_source_v2"; do
+      test -d "$source_root"
+      test ! -L "$source_root"
+      source_real_path="$(realpath -e "$source_root")"
+      test "$source_real_path" = "$source_root"
+      test "$source_real_path" != "$repo"
+      source_real_paths["$source_real_path"]=1
+    done
+    test "${#source_real_paths[@]}" -eq 4
+    """.strip()
+    assert source_root_validation in runbook
+    assert 'source_real_paths="$(for source_root in' not in runbook
 
     for owner in (0, 1):
         assert f"owner_{owner}_deploy_pid=$!" in runbook
