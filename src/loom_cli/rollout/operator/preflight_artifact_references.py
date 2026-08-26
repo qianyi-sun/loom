@@ -83,10 +83,73 @@ _MANIFEST_FAILURE_STAGES = (
     "live-state-verification",
     "final-no-force-dry-run",
 )
+_LEGACY_MANIFEST_EVENT_SEQUENCE = (
+    "inventory-approved",
+    "epoch-claimed",
+    "ownership-adopted",
+    "network-policies-converged",
+    "live-state-verified",
+    "completed",
+)
+_LEGACY_MANIFEST_FAILURE_STAGES = (
+    "epoch-claim",
+    "ownership-adoption",
+    "network-policy-convergence",
+    "live-state-verification",
+    "final-no-force-dry-run",
+)
 
 
 class PreflightArtifactReferenceInventoryError(RuntimeError):
     """Raised when installed evidence cannot safely classify artifact references."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ManifestEventProfile:
+    sequence: tuple[str, ...]
+    failure_stages: tuple[str, ...]
+    live_attempts: bool
+    failure_code: bool
+
+
+# Schema v1 was append-only while its producer gained stage codes, live-read
+# retries, and managed-field cleanup. Accept only those four emitted profiles.
+_MANIFEST_EVENT_PROFILES = {
+    1: (
+        _ManifestEventProfile(
+            sequence=_LEGACY_MANIFEST_EVENT_SEQUENCE,
+            failure_stages=_LEGACY_MANIFEST_FAILURE_STAGES,
+            live_attempts=False,
+            failure_code=False,
+        ),
+        _ManifestEventProfile(
+            sequence=_LEGACY_MANIFEST_EVENT_SEQUENCE,
+            failure_stages=_LEGACY_MANIFEST_FAILURE_STAGES,
+            live_attempts=False,
+            failure_code=True,
+        ),
+        _ManifestEventProfile(
+            sequence=_LEGACY_MANIFEST_EVENT_SEQUENCE,
+            failure_stages=_LEGACY_MANIFEST_FAILURE_STAGES,
+            live_attempts=True,
+            failure_code=True,
+        ),
+        _ManifestEventProfile(
+            sequence=_MANIFEST_EVENT_SEQUENCE,
+            failure_stages=_MANIFEST_FAILURE_STAGES,
+            live_attempts=True,
+            failure_code=True,
+        ),
+    ),
+    2: (
+        _ManifestEventProfile(
+            sequence=_MANIFEST_EVENT_SEQUENCE,
+            failure_stages=_MANIFEST_FAILURE_STAGES,
+            live_attempts=True,
+            failure_code=True,
+        ),
+    ),
+}
 
 
 class _ReferenceStore(Protocol):
@@ -358,6 +421,13 @@ class InstalledMaintenanceReferenceInventory:
                 raise PreflightArtifactReferenceInventoryError(
                     "preflight artifact manifest ownership journal changed during inventory"
                 )
+            if bundle_digest is None:
+                if not terminal:
+                    raise PreflightArtifactReferenceInventoryError(
+                        "preflight artifact legacy manifest ownership journal is "
+                        "nonterminal and lacks an artifact digest"
+                    )
+                continue
             if not terminal:
                 reasons.setdefault(bundle_digest, set()).add("manifest-ownership-claim")
         after = _private_directory_metadata(root, service_uid=self.service_uid)
@@ -370,10 +440,10 @@ class InstalledMaintenanceReferenceInventory:
     def _validate_manifest_inventory(
         request_id: str,
         inventory: Mapping[str, object],
-    ) -> str:
+    ) -> str | None:
+        schema_version = inventory.get("schema_version")
         expected = {
             "action",
-            "artifact_bundle_sha256",
             "candidate_sha",
             "candidate_tree",
             "dry_run_sha256",
@@ -385,15 +455,18 @@ class InstalledMaintenanceReferenceInventory:
             "resources",
             "schema_version",
         }
+        if schema_version == 2:
+            expected.add("artifact_bundle_sha256")
         resources = inventory.get("resources")
         digest = inventory.get("artifact_bundle_sha256")
         mutation_epoch = inventory.get("mutation_epoch")
         if (
             set(inventory) != expected
-            or inventory.get("schema_version") != 2
+            or type(schema_version) is not int
+            or schema_version not in _MANIFEST_EVENT_PROFILES
             or inventory.get("action") != "inventory"
             or inventory.get("request_id") != request_id
-            or not _sha256(digest)
+            or (schema_version == 2 and not _sha256(digest))
             or not all(
                 _sha256(inventory.get(field))
                 for field in (
@@ -459,14 +532,16 @@ class InstalledMaintenanceReferenceInventory:
                     "preflight artifact manifest ownership inventory is invalid"
                 )
             identities.add(str(identity))
+        digest_document = {
+            "dry_run_sha256": inventory["dry_run_sha256"],
+            "plan_sha256": inventory["plan_sha256"],
+            "version": f"v{schema_version}",
+        }
+        if schema_version == 2:
+            digest_document["artifact_bundle_sha256"] = digest
         expected_digest = hashlib.sha256(
             json.dumps(
-                {
-                    "artifact_bundle_sha256": digest,
-                    "dry_run_sha256": inventory["dry_run_sha256"],
-                    "plan_sha256": inventory["plan_sha256"],
-                    "version": "v2",
-                },
+                digest_document,
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
@@ -475,7 +550,7 @@ class InstalledMaintenanceReferenceInventory:
             raise PreflightArtifactReferenceInventoryError(
                 "preflight artifact manifest ownership inventory drifted"
             )
-        return str(digest)
+        return str(digest) if schema_version == 2 else None
 
     @staticmethod
     def _validate_manifest_events(
@@ -524,6 +599,48 @@ class InstalledMaintenanceReferenceInventory:
                 )
             names.append(name)
             observed.append(occurred)
+        if observed != sorted(observed):
+            raise PreflightArtifactReferenceInventoryError(
+                "preflight artifact manifest ownership events are invalid"
+            )
+        schema_version = inventory.get("schema_version")
+        if type(schema_version) is not int:
+            raise PreflightArtifactReferenceInventoryError(
+                "preflight artifact manifest ownership events are invalid"
+            )
+        profiles = _MANIFEST_EVENT_PROFILES.get(schema_version, ())
+        if not any(
+            InstalledMaintenanceReferenceInventory._manifest_events_match_profile(
+                events,
+                names=names,
+                inventory=inventory,
+                claimed_epoch=claimed_epoch,
+                profile=profile,
+            )
+            for profile in profiles
+        ):
+            raise PreflightArtifactReferenceInventoryError(
+                "preflight artifact manifest ownership events are inconsistent"
+            )
+        return names[-1] in {"completed", "failed"}
+
+    @staticmethod
+    def _manifest_events_match_profile(
+        events: list[dict[str, object]],
+        *,
+        names: list[str],
+        inventory: Mapping[str, object],
+        claimed_epoch: int,
+        profile: _ManifestEventProfile,
+    ) -> bool:
+        resources = inventory["resources"]
+        if not isinstance(resources, list):  # guarded by inventory validation
+            return False
+        for event in events:
+            evidence = event["evidence"]
+            name = event["event"]
+            if not isinstance(evidence, Mapping):  # guarded by common event validation
+                return False
             if name == "inventory-approved":
                 valid = (
                     set(evidence) == {"inventory_sha256", "plan_sha256", "starting_epoch"}
@@ -541,9 +658,11 @@ class InstalledMaintenanceReferenceInventory:
                     evidence.get("adoption_sha256")
                 )
             elif name == "managed-fields-cleaned":
+                cleanup_count = evidence.get("cleanup_count")
                 valid = (
                     set(evidence) == {"cleanup_count", "cleanup_sha256"}
-                    and evidence.get("cleanup_count") == len(resources)
+                    and type(cleanup_count) is int
+                    and 0 <= cleanup_count <= len(resources)
                     and _sha256(evidence.get("cleanup_sha256"))
                 )
             elif name == "network-policies-converged":
@@ -551,12 +670,17 @@ class InstalledMaintenanceReferenceInventory:
                     evidence.get("network_sha256")
                 )
             elif name == "live-state-verified":
-                valid = (
-                    set(evidence) == {"attempts", "post_apply_sha256"}
-                    and type(evidence.get("attempts")) is int
-                    and 1 <= int(evidence["attempts"]) <= 3
-                    and _sha256(evidence.get("post_apply_sha256"))
-                )
+                if profile.live_attempts:
+                    valid = (
+                        set(evidence) == {"attempts", "post_apply_sha256"}
+                        and type(evidence.get("attempts")) is int
+                        and 1 <= int(evidence["attempts"]) <= 3
+                        and _sha256(evidence.get("post_apply_sha256"))
+                    )
+                else:
+                    valid = set(evidence) == {"post_apply_sha256"} and _sha256(
+                        evidence.get("post_apply_sha256")
+                    )
             elif name == "completed":
                 valid = (
                     set(evidence) == {"final_dry_run_sha256", "observed_epoch"}
@@ -564,45 +688,42 @@ class InstalledMaintenanceReferenceInventory:
                     and evidence.get("observed_epoch") == claimed_epoch
                 )
             elif name == "failed":
+                expected = (
+                    {"failure_class", "failure_code"} if profile.failure_code else {"failure_class"}
+                )
                 valid = (
-                    set(evidence) == {"failure_class", "failure_code"}
+                    set(evidence) == expected
                     and isinstance(evidence.get("failure_class"), str)
-                    and isinstance(evidence.get("failure_code"), str)
                     and bool(evidence["failure_class"])
-                    and bool(evidence["failure_code"])
+                    and (
+                        isinstance(evidence.get("failure_code"), str)
+                        and bool(evidence["failure_code"])
+                        if profile.failure_code
+                        else True
+                    )
                 )
             else:
                 valid = False
             if not valid:
-                raise PreflightArtifactReferenceInventoryError(
-                    "preflight artifact manifest ownership events are invalid"
-                )
-        if observed != sorted(observed):
-            raise PreflightArtifactReferenceInventoryError(
-                "preflight artifact manifest ownership events are invalid"
-            )
-        terminal = names[-1] in {"completed", "failed"}
+                return False
         successful = names if names[-1] != "failed" else names[:-1]
         if (
-            tuple(successful) != _MANIFEST_EVENT_SEQUENCE[: len(successful)]
+            tuple(successful) != profile.sequence[: len(successful)]
             or ("completed" in names and names[-1] != "completed")
             or ("failed" in names and names[-1] != "failed")
         ):
-            raise PreflightArtifactReferenceInventoryError(
-                "preflight artifact manifest ownership events are inconsistent"
-            )
+            return False
         if names[-1] == "failed":
             failure_evidence = events[-1]["evidence"]
-            if (
-                not isinstance(failure_evidence, Mapping)
-                or not 1 <= len(successful) <= len(_MANIFEST_FAILURE_STAGES)
-                or failure_evidence.get("failure_code")
-                != (f"manifest_ownership.{_MANIFEST_FAILURE_STAGES[len(successful) - 1]}.failed")
+            if not isinstance(failure_evidence, Mapping) or not 1 <= len(successful) <= len(
+                profile.failure_stages
             ):
-                raise PreflightArtifactReferenceInventoryError(
-                    "preflight artifact manifest ownership events are inconsistent"
-                )
-        return terminal
+                return False
+            if profile.failure_code and failure_evidence.get("failure_code") != (
+                f"manifest_ownership.{profile.failure_stages[len(successful) - 1]}.failed"
+            ):
+                return False
+        return True
 
     def _lifecycle_capacity(self, reasons: dict[str, set[str]]) -> None:
         root = self.config.state_root / "lifecycle-capacity-jobs"
