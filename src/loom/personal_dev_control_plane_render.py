@@ -3095,6 +3095,36 @@ def _network_policies(
             "egress": [dns, postgres, minio, manager, api],
         },
     )
+    capacity_manager_ingress = policy(
+        "loom-personal-dev-capacity-manager-ingress",
+        {
+            "podSelector": {
+                "matchLabels": {
+                    profile.network.capacity_manager_pod_label_key: (
+                        profile.network.capacity_manager_pod_label_value
+                    )
+                }
+            },
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {"app": "loom-personal-dev-management"}
+                            }
+                        }
+                    ],
+                    "ports": [
+                        {
+                            "protocol": "TCP",
+                            "port": profile.network.capacity_manager_port,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
     migration = policy(
         "loom-personal-dev-migration-egress",
         {
@@ -3157,6 +3187,7 @@ def _network_policies(
         postgres_ingress,
         minio_ingress,
         management,
+        capacity_manager_ingress,
         management_ingress,
         migration,
         activation,

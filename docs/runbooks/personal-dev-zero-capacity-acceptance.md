@@ -459,8 +459,8 @@ that init's zero exit status and immutable image ID after each apply.
     acceptance_render_evidence_sha256="$(sha256sum "$acceptance_render_evidence" | awk '{print $1}')"
     shadow_render_evidence_sha256="$(sha256sum "$shadow_render_evidence" | awk '{print $1}')"
     test "$shadow_render_sha256" = "$(jq -r .release.shadow_manifest_sha256 "$acceptance_plan")"
-    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 33' "$acceptance_render_evidence" >/dev/null
-    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 33' "$shadow_render_evidence" >/dev/null
+    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 34' "$acceptance_render_evidence" >/dev/null
+    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 34' "$shadow_render_evidence" >/dev/null
 
 ## 4. Diff and apply acceptance
 

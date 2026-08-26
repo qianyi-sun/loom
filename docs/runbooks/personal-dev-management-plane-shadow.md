@@ -393,7 +393,7 @@ jq -e \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
   '.schema == "loom-personal-dev-control-plane-render-v1" and
    .mode == "shadow" and
-   .resource_count == 33 and
+   .resource_count == 34 and
    .release_sha256 == $release and
    .yaml_sha256 == $yaml and
    (.input_sha256 | test("^[0-9a-f]{64}$")) and
@@ -570,7 +570,7 @@ chmod 0600 "$status_evidence.sha256"
 The successful canonical shape is:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":28,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1"}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":29,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1"}
 ```
 
 The namespaced observed count may include bounded retained successful migration

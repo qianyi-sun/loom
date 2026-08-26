@@ -109,7 +109,10 @@ namespace unless Kubernetes requires cluster scope:
 - NetworkPolicies that allow only the required DNS, PostgreSQL, MinIO, registry,
   global-manager, ingress, and personal-namespace control paths, with separate
   PostgreSQL and MinIO ingress policies so migration and builder callers cannot
-  inherit each other's storage access; and
+  inherit each other's storage access. A package-owned additive policy selects
+  only the global capacity-manager Pod and admits TCP 8443 only from the
+  personal-management Pod; it does not replace or widen the capacity package's
+  ingress policy; and
 - internal Services plus one operator-configured management API Ingress. No
   shared Control Plane, Gateway, worker, family orchestrator, pipeline
   orchestrator, or web Deployment is rendered.
