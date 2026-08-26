@@ -16,6 +16,10 @@ SHARED_LINE = (
     "PartitionName=gb10 Nodes=trt-gb10-[1-9,11-16] Default=YES "
     "MaxTime=1-00:00:00 State=UP PriorityTier=100"
 )
+CURRENT_FOREIGN_SHARED_LINE = (
+    "PartitionName=gb10 Nodes=trt-gb10-[1-9,11-24] Default=YES "
+    "MaxTime=1-00:00:00 State=UP PriorityTier=100"
+)
 DEDICATED_LINE = (
     "PartitionName=loom-staging Nodes=trt-gb10-[1-15] Default=NO "
     "MaxTime=1-00:00:00 State=UP PriorityTier=100 "
@@ -37,9 +41,7 @@ OTHER_PARTITIONS = "\n".join(
     )
 )
 INITIAL_CONFIG = f"ClusterName=trt-gb10\n{SHARED_LINE}\n{OTHER_PARTITIONS}\n"
-EXPECTED_CONFIG = (
-    f"ClusterName=trt-gb10\n{SHARED_LINE}\n{DEDICATED_LINE}\n{OTHER_PARTITIONS}\n"
-)
+EXPECTED_CONFIG = f"ClusterName=trt-gb10\n{SHARED_LINE}\n{DEDICATED_LINE}\n{OTHER_PARTITIONS}\n"
 LIVE_PARTITION = (
     "PartitionName=loom-staging AllowAccounts=loom-staging AllowQos=loom-staging "
     "Default=NO MaxTime=1-00:00:00 Nodes=trt-gb10-[1-15] "
@@ -185,6 +187,24 @@ def test_convergence_adds_dedicated_partition_without_rewriting_shared_partition
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
+def test_convergence_preserves_current_foreign_shared_partition_expansion(
+    tmp_path: Path,
+) -> None:
+    initial = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    expected = EXPECTED_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
+        tmp_path,
+        config_text=initial,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == expected
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == initial
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
+
+
 def test_second_convergence_is_idempotent(tmp_path: Path) -> None:
     result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
         tmp_path,
@@ -224,17 +244,19 @@ def test_unsafe_backup_mode_fails_before_partition_mutation(tmp_path: Path) -> N
     assert not reconfigure_count.exists()
 
 
-def test_drifted_shared_partition_anchor_fails_without_mutation(tmp_path: Path) -> None:
-    drifted = INITIAL_CONFIG.replace("PriorityTier=100", "PriorityTier=99", 1)
-    result, config, _authority, reconfigure_count, _scontrol_log = _run_converger(
+def test_convergence_preserves_foreign_shared_partition_options(tmp_path: Path) -> None:
+    foreign = INITIAL_CONFIG.replace("PriorityTier=100", "PriorityTier=99", 1)
+    expected = EXPECTED_CONFIG.replace("PriorityTier=100", "PriorityTier=99", 1)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
         tmp_path,
-        config_text=drifted,
+        config_text=foreign,
     )
 
-    assert result.returncode == 1
-    assert "shared GB10 partition anchor is not exact" in result.stderr
-    assert config.read_text(encoding="utf-8") == drifted
-    assert not reconfigure_count.exists()
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == expected
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == foreign
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
 def test_duplicate_shared_partition_authority_fails_without_mutation(tmp_path: Path) -> None:
@@ -249,7 +271,7 @@ def test_duplicate_shared_partition_authority_fails_without_mutation(tmp_path: P
     )
 
     assert result.returncode == 1
-    assert "shared GB10 partition anchor is not exact" in result.stderr
+    assert "shared GB10 partition authority is not singular" in result.stderr
     assert config.read_text(encoding="utf-8") == duplicate
     assert not reconfigure_count.exists()
 

@@ -11,7 +11,6 @@ CONFIG_OWNER="root"
 CONFIG_GROUP="root"
 STATE_OWNER="root"
 STATE_GROUP="root"
-SHARED_ANCHOR_LINE="PartitionName=gb10 Nodes=trt-gb10-[1-9,11-16] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
 PARTITION="loom-staging"
 PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-gb10-[1-15] Default=NO MaxTime=1-00:00:00 State=UP PriorityTier=100 AllowAccounts=loom-staging AllowQos=loom-staging OverSubscribe=NO"
 EXPECTED_NODES="$(printf 'trt-gb10-%s\n' {1..15})"
@@ -75,12 +74,12 @@ loom_gb10_live_partition_is_exact() {
 }
 
 loom_gb10_converge_partition() {
-  local anchor_count
   local expected
   local field
   local live_nodes
   local named_count
   local partition_count
+  local shared_line_number
   local shared_named_count
   local nodes_expression
   local partition_added=0
@@ -99,14 +98,16 @@ loom_gb10_converge_partition() {
     exit 1
   fi
 
-  anchor_count="$(grep -Fxc "$SHARED_ANCHOR_LINE" "$CONFIG" || true)"
   shared_named_count="$(grep -Ec '^PartitionName=gb10([[:space:]]|$)' "$CONFIG" || true)"
   partition_count="$(grep -Fxc "$PARTITION_LINE" "$CONFIG" || true)"
   named_count="$(grep -Ec "^PartitionName=$PARTITION([[:space:]]|$)" "$CONFIG" || true)"
-  if [ "$anchor_count" != "1" ] || [ "$shared_named_count" != "1" ]; then
-    echo "error: shared GB10 partition anchor is not exact" >&2
+  if [ "$shared_named_count" != "1" ]; then
+    echo "error: shared GB10 partition authority is not singular" >&2
     exit 1
   fi
+  shared_line_number="$(
+    grep -En '^PartitionName=gb10([[:space:]]|$)' "$CONFIG" | cut -d: -f1
+  )"
   if [ "$partition_count" = "0" ] && [ "$named_count" = "0" ]; then
     install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0755 "$STATE_ROOT"
     if [ -e "$BACKUP" ]; then
@@ -122,8 +123,14 @@ loom_gb10_converge_partition() {
     fi
     temporary="$(mktemp "$(dirname "$CONFIG")/.slurm.conf.XXXXXX")"
     trap 'if [ -n "${temporary:-}" ] && [ -e "$temporary" ]; then unlink "$temporary"; fi' EXIT
-    awk -v anchor="$SHARED_ANCHOR_LINE" -v partition="$PARTITION_LINE" \
-      '{ print; if ($0 == anchor) print partition }' "$CONFIG" >"$temporary"
+    awk -v anchor_line="$shared_line_number" -v partition="$PARTITION_LINE" \
+      '{ print; if (NR == anchor_line) print partition }' "$CONFIG" >"$temporary"
+    if [ "$(grep -Fxc "$PARTITION_LINE" "$temporary" || true)" != "1" ] \
+      || ! awk -v partition="$PARTITION_LINE" \
+        '$0 != partition { print }' "$temporary" | cmp -s - "$BACKUP"; then
+      echo "error: candidate GB10 partition config did not preserve foreign state" >&2
+      exit 1
+    fi
     chown "$CONFIG_OWNER:$CONFIG_GROUP" "$temporary"
     chmod 0644 "$temporary"
     mv "$temporary" "$CONFIG"
