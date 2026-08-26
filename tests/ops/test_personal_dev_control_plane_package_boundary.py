@@ -67,7 +67,6 @@ def test_shadow_package_pins_the_exact_acme_http01_solver_boundary() -> None:
     assert "acme_http01_solver_port = 8089" in profile
     assert '"loom-personal-dev-acme-http01-ingress"' in source
     assert '"acme.cert-manager.io/http01-solver": "true"' in source
-    assert "profile.network.ingress_controller_source_cidrs" in source
     assert "profile.network.acme_http01_solver_port" in source
 
 
@@ -1074,6 +1073,7 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
     assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
     assert '(.spec | has("egress") | not)' in runbook
+    assert '(.spec.ingress[0] | has("from") | not)' in runbook
     assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
 

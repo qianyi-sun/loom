@@ -229,6 +229,7 @@ jq -e --argjson port "$solver_port" '
   .spec.podSelector.matchLabels == {"acme.cert-manager.io/http01-solver":"true"} and
   .spec.policyTypes == ["Ingress"] and
   (.spec | has("egress") | not) and
+  (.spec.ingress[0] | has("from") | not) and
   .spec.ingress[0].ports == [{port:$port,protocol:"TCP"}]
 ' "$evidence_dir/management.acme-http01-network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \

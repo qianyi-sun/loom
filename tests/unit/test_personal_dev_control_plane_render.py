@@ -302,7 +302,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "76a61d3a01a3d014d166b452107d7411031359a7516aa401468c992b934017d6"
+        "5912bd5f2b024a8179085584852da5d09ebc9551ea4cddd9a18309999513b8a0"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1266,7 +1266,7 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
     }
 
 
-def test_acme_http01_ingress_admits_only_exact_ingress_sources_and_port(
+def test_acme_http01_ingress_admits_public_challenge_only_on_exact_port(
     tmp_path: Path,
 ) -> None:
     profile, _release, rendered, documents = _render(tmp_path)
@@ -1289,23 +1289,6 @@ def test_acme_http01_ingress_admits_only_exact_ingress_sources_and_port(
         "policyTypes": ["Ingress"],
         "ingress": [
             {
-                "from": [
-                    {"ipBlock": {"cidr": "192.168.50.14/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.15/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.16/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.17/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.103/32"}},
-                    {
-                        "namespaceSelector": {
-                            "matchLabels": {
-                                "kubernetes.io/metadata.name": "ingress-nginx"
-                            }
-                        },
-                        "podSelector": {
-                            "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
-                        },
-                    },
-                ],
                 "ports": [
                     {
                         "protocol": "TCP",
