@@ -44,6 +44,20 @@ from .model import (
 
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
+_LEGACY_ROLLOUT_REQUEST_KEYS = frozenset(
+    {
+        "caller",
+        "candidate",
+        "command",
+        "request_id",
+        "requested_at",
+        "rollout_id",
+        "runner_config_sha256",
+        "schema_version",
+        "status",
+    }
+)
+_LEGACY_BINDING_SENTINEL = "0" * 64
 
 
 class RequestStoreError(RuntimeError):
@@ -501,15 +515,23 @@ class RequestStore:
                     ):
                         raise RequestStoreError("requests directory contains an unsafe entry")
                     self._require_record_directory(request_id)
+                    preflight_present = True
                     try:
                         self.read_preflight_request(request_id)
                     except RequestStoreError as exc:
                         if str(exc) != "preflight request does not exist":
                             raise
+                        preflight_present = False
                     try:
                         self.read_request(request_id)
                     except RequestStoreError as exc:
-                        if str(exc) != "rollout request is not promoted":
+                        if str(exc) == "rollout request is not promoted":
+                            pass
+                        elif not preflight_present and self._validate_preflightless_legacy_request(
+                            request_id
+                        ):
+                            pass
+                        else:
                             raise
                     request_ids.append(request_id)
         except RequestStoreError:
@@ -1430,6 +1452,43 @@ class RequestStore:
         if request.request_id != request_id:
             raise RequestStoreError("request.json request_id does not match its directory")
         return request
+
+    def _validate_preflightless_legacy_request(self, request_id: str) -> bool:
+        """Validate the exact typed schema predating preflight, or report no match."""
+        request_directory = self._require_request_directory(request_id)
+        try:
+            before = request_directory.lstat()
+        except OSError as exc:
+            raise RequestStoreError("request directory changed during legacy validation") from exc
+        payload = _read_json(request_directory / "request.json", "request.json")
+        if set(payload) != _LEGACY_ROLLOUT_REQUEST_KEYS:
+            return False
+        compatible = {
+            **payload,
+            "preflight_attestation_sha256": _LEGACY_BINDING_SENTINEL,
+            "preflight_registry_sha256": _LEGACY_BINDING_SENTINEL,
+            "preflight_coverage_sha256": _LEGACY_BINDING_SENTINEL,
+        }
+        try:
+            request = RolloutRequest.from_dict(compatible)
+        except ValueError as exc:
+            raise RequestStoreError(str(exc)) from exc
+        if request.request_id != request_id:
+            raise RequestStoreError("request.json request_id does not match its directory")
+        try:
+            self.read_preflight_request(request_id)
+        except RequestStoreError as exc:
+            if str(exc) != "preflight request does not exist":
+                raise
+        else:
+            return False
+        try:
+            after = request_directory.lstat()
+        except OSError as exc:
+            raise RequestStoreError("request directory changed during legacy validation") from exc
+        if _metadata_identity(before) != _metadata_identity(after):
+            raise RequestStoreError("request directory changed during legacy validation")
+        return True
 
     def publish_backup_job(self, envelope: BackupJobEnvelope) -> Path:
         """Publish one immutable detached-backup job under its request."""
