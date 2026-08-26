@@ -238,6 +238,10 @@ spec:
           value: /var/run/loom-personal-dev-capacity/private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
           value: '16'
+        - name: LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON
+          value: '{}'
+        - name: LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MAX_SLOTS
           value: '16'
         - name: LOOM_SVC_PERSONAL_DEV_PER_OWNER_AGGREGATE_MIN_SLOTS
@@ -250,6 +254,8 @@ spec:
           value: '1800'
         - name: LOOM_SVC_PERSONAL_DEV_RECONCILER_POLL_INTERVAL_SEC
           value: '2.0'
+        - name: LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE
+          value: shadow
         - name: LOOM_SVC_PERSONAL_DEV_SOURCE_MAX_ARCHIVE_BYTES
           value: '402653184'
         - name: LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256

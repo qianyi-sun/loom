@@ -15,7 +15,10 @@ from uuid import UUID
 import yaml  # type: ignore[import-untyped]
 
 from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
-from loom.personal_dev_control_plane_config import PersonalDevAcceptancePlan
+from loom.personal_dev_control_plane_config import (
+    PersonalDevAcceptancePlan,
+    PersonalDevOperationalPlan,
+)
 from loom.personal_dev_control_plane_render import RenderedPersonalDevControlPlane
 from loom_capacity_manager.health_probe import capacity_health_probe_argv
 
@@ -186,6 +189,36 @@ class PersonalDevAcceptanceStatus:
             "input_sha256": self.input_sha256,
             "manager_ceiling": self.manager_ceiling,
             "mode": "acceptance",
+            "ready": self.ready,
+            "release_sha256": self.release_sha256,
+            "schema": "loom-personal-dev-control-plane-status-v1",
+            "worker_available": self.worker_available,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevOperationalStatus:
+    ready: bool
+    blockers: tuple[str, ...]
+    input_sha256: str | None
+    release_sha256: str | None
+    operational_plan_sha256: str
+    manager_ceiling: int | None
+    components: tuple[PersonalDevShadowComponent, ...]
+    application_ready: bool
+    capacity_publication_ready: bool
+    worker_available: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "application_ready": self.application_ready,
+            "blockers": list(self.blockers),
+            "capacity_publication_ready": self.capacity_publication_ready,
+            "components": [component.to_dict() for component in self.components],
+            "input_sha256": self.input_sha256,
+            "manager_ceiling": self.manager_ceiling,
+            "mode": "operational",
+            "operational_plan_sha256": self.operational_plan_sha256,
             "ready": self.ready,
             "release_sha256": self.release_sha256,
             "schema": "loom-personal-dev-control-plane-status-v1",
@@ -668,6 +701,40 @@ def _acceptance_plan_digest_absent(item: Mapping[str, Any]) -> bool:
     )
 
 
+def _operational_plan_digest_matches(
+    item: Mapping[str, Any],
+    *,
+    operational_plan_sha256: str,
+) -> bool:
+    metadata = _metadata(item)
+    if metadata is None:
+        return False
+    labels = metadata.get("labels")
+    annotations = metadata.get("annotations")
+    return (
+        isinstance(labels, Mapping)
+        and isinstance(annotations, Mapping)
+        and annotations.get("loom.dev/operational-plan-sha256")
+        == operational_plan_sha256
+        and labels.get("loom.dev/operational-plan-sha256")
+        == operational_plan_sha256[:32]
+    )
+
+
+def _operational_plan_digest_absent(item: Mapping[str, Any]) -> bool:
+    metadata = _metadata(item)
+    if metadata is None:
+        return False
+    labels = metadata.get("labels")
+    annotations = metadata.get("annotations")
+    return (
+        isinstance(labels, Mapping)
+        and isinstance(annotations, Mapping)
+        and "loom.dev/operational-plan-sha256" not in labels
+        and "loom.dev/operational-plan-sha256" not in annotations
+    )
+
+
 def _containers(item: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     spec = item.get("spec")
     if not isinstance(spec, Mapping):
@@ -802,6 +869,59 @@ def _acceptance_management_binding_valid(
     return all(environment.get(name) == value for name, value in expected.items())
 
 
+def _operational_management_binding_valid(
+    deployment: Mapping[str, Any],
+    plan: PersonalDevOperationalPlan,
+) -> bool:
+    environment = _literal_environment(deployment)
+    if environment is None:
+        return False
+    scanner_identity = (
+        f"trivy-bin-sha256:{plan.builder.scanner_binary_sha256}:"
+        f"db-sha256:{plan.builder.scanner_database_sha256}:"
+        f"java-db-sha256:{plan.builder.scanner_java_database_sha256}"
+    )
+    expected = {
+        "LOOM_SVC_DEV_INSTANCES_ENABLED": "true",
+        "LOOM_SVC_K8S_WORKER_ENABLED": "false",
+        "LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE": "operational",
+        "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON": plan.manager_runtime_json(),
+        "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256": plan.sha256,
+        "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256": (
+            plan.activation.public_key_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED": "true",
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY": (
+            plan.builder.publisher_identity
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_PREFIX": plan.builder.registry_prefix,
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME": (
+            plan.builder.runtime_class_name
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR": (
+            "/var/lib/loom-personal-dev-scanner/generations/"
+            + plan.builder.scanner_cache_identity_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256": (
+            plan.builder.scanner_cache_identity_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256": (
+            plan.builder.scanner_database_metadata_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY": scanner_identity,
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256": (
+            plan.builder.scanner_java_database_metadata_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256": (
+            plan.builder.scanner_finding_policy_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256": (
+            plan.builder.trusted_launcher_profile_sha256
+        ),
+    }
+    return all(environment.get(name) == value for name, value in expected.items())
+
+
 def _acceptance_management_probe_valid(deployment: Mapping[str, Any]) -> bool:
     management = next(
         (
@@ -818,6 +938,26 @@ def _acceptance_management_probe_valid(deployment: Mapping[str, Any]) -> bool:
     return (
         isinstance(http_get, Mapping)
         and http_get.get("path") == "/api/v1/health/personal-dev-acceptance"
+        and http_get.get("port") == "http"
+    )
+
+
+def _operational_management_probe_valid(deployment: Mapping[str, Any]) -> bool:
+    management = next(
+        (
+            container
+            for container in _containers(deployment)
+            if container.get("name") == "management"
+        ),
+        None,
+    )
+    if management is None:
+        return False
+    readiness = management.get("readinessProbe")
+    http_get = readiness.get("httpGet") if isinstance(readiness, Mapping) else None
+    return (
+        isinstance(http_get, Mapping)
+        and http_get.get("path") == "/api/v1/health/personal-dev-operational"
         and http_get.get("port") == "http"
     )
 
@@ -1092,7 +1232,7 @@ def _dynamic_namespace_valid(
 
 def _acceptance_manager_status(
     result: subprocess.CompletedProcess[str] | None,
-    plan: PersonalDevAcceptancePlan,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
 ) -> tuple[int | None, bool, set[str]]:
     if result is None or result.returncode != 0:
         return None, False, {"manager_probe_unavailable"}
@@ -1219,28 +1359,40 @@ def _observe_personal_dev_status(
     runner: KubectlRunner,
     *,
     expected: RenderedPersonalDevControlPlane,
-    plan: PersonalDevAcceptancePlan | None,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan | None,
     namespace: str = _NAMESPACE,
-) -> PersonalDevShadowStatus | PersonalDevAcceptanceStatus:
+) -> (
+    PersonalDevShadowStatus
+    | PersonalDevAcceptanceStatus
+    | PersonalDevOperationalStatus
+):
     """Compare bounded live state with one locally trusted mode render."""
 
     if namespace != _NAMESPACE:
         raise ValueError("personal-dev control-plane namespace must be loom-dev")
     if not isinstance(expected, RenderedPersonalDevControlPlane):
         raise TypeError("personal-dev expected render is invalid")
-    if plan is not None and not isinstance(plan, PersonalDevAcceptancePlan):
-        raise TypeError("personal-dev acceptance plan is invalid")
-    acceptance = plan is not None
+    if plan is not None and not isinstance(
+        plan,
+        (PersonalDevAcceptancePlan, PersonalDevOperationalPlan),
+    ):
+        raise TypeError("personal-dev enabled plan is invalid")
+    acceptance_plan = plan if isinstance(plan, PersonalDevAcceptancePlan) else None
+    operational_plan = plan if isinstance(plan, PersonalDevOperationalPlan) else None
+    enabled_plan = acceptance_plan or operational_plan
+    enabled = enabled_plan is not None
     expected_namespaced, expected_cluster, expected_namespace = _expected_documents(expected)
     deadline = time.monotonic() + _TOTAL_TIMEOUT_SECONDS
-    runtime_binding = plan.builder if plan is not None else expected
+    runtime_binding = enabled_plan.builder if enabled_plan is not None else expected
     runtime_class_command = (
         "get",
         f"runtimeclass.node.k8s.io/{runtime_binding.runtime_class_name}",
         "--output=json",
     )
     mode_commands = (
-        (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND) if acceptance else (_MANAGER_COMMAND,)
+        (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND)
+        if enabled
+        else (_MANAGER_COMMAND,)
     )
     results = {
         command: _run(runner, command, deadline)
@@ -1254,7 +1406,11 @@ def _observe_personal_dev_status(
         )
     }
     blockers: set[str] = set()
-    window_blocker = _acceptance_window_blocker(plan) if plan is not None else None
+    window_blocker = (
+        _acceptance_window_blocker(acceptance_plan)
+        if acceptance_plan is not None
+        else None
+    )
     if window_blocker is not None:
         blockers.add(window_blocker)
 
@@ -1295,7 +1451,7 @@ def _observe_personal_dev_status(
         )
         if not shared_namespace_ok:
             blockers.add("namespace_missing")
-        if plan is None:
+        if not enabled:
             if personal_names:
                 blockers.add("unexpected_personal_namespace")
             if builder_names:
@@ -1334,11 +1490,11 @@ def _observe_personal_dev_status(
         except (json.JSONDecodeError, ValueError):
             runtime_ok = False
     if not runtime_ok:
-        blockers.add("runtime_class_binding_invalid" if acceptance else "runtime_class_missing")
+        blockers.add("runtime_class_binding_invalid" if enabled else "runtime_class_missing")
 
     namespaced_ok = False
     namespaced_observed = 0
-    activation_ready = not acceptance
+    activation_ready = not enabled
     live_namespaced: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     expected_namespaced_index = _index_unique(expected_namespaced)
     try:
@@ -1539,21 +1695,56 @@ def _observe_personal_dev_status(
         )
         if not digest_ok:
             blockers.add("resource_digest_drift")
-        generated_pvc_acceptance_digest_ok = all(
-            _acceptance_plan_digest_absent(item)
-            for item in namespaced_items
-            if _identity(item) in generated_pvcs
-        )
-        acceptance_resource_digest_ok = plan is None or all(
-            _acceptance_plan_digest_matches(
-                item,
-                acceptance_plan_sha256=plan.sha256,
+        if acceptance_plan is not None:
+            generated_pvc_plan_digest_ok = all(
+                _acceptance_plan_digest_absent(item)
+                for item in namespaced_items
+                if _identity(item) in generated_pvcs
             )
-            for item in namespaced_items
-            if _identity(item) not in historical_identities | generated_pvcs
-        )
-        if not generated_pvc_acceptance_digest_ok or not acceptance_resource_digest_ok:
-            blockers.add("acceptance_plan_digest_drift")
+            resource_plan_digest_ok = all(
+                _acceptance_plan_digest_matches(
+                    item,
+                    acceptance_plan_sha256=acceptance_plan.sha256,
+                )
+                for item in namespaced_items
+                if _identity(item) not in historical_identities | generated_pvcs
+            )
+            plan_digest_blocker = "acceptance_plan_digest_drift"
+        elif operational_plan is not None:
+            generated_pvc_plan_digest_ok = all(
+                _operational_plan_digest_absent(item)
+                for item in namespaced_items
+                if _identity(item) in generated_pvcs
+            )
+            resource_plan_digest_ok = all(
+                _operational_plan_digest_matches(
+                    item,
+                    operational_plan_sha256=operational_plan.sha256,
+                )
+                for item in namespaced_items
+                if _identity(item) not in historical_identities | generated_pvcs
+            )
+            plan_digest_blocker = "operational_plan_digest_drift"
+        else:
+            generated_pvc_acceptance_digest_ok = all(
+                _acceptance_plan_digest_absent(item)
+                for item in namespaced_items
+                if _identity(item) in generated_pvcs
+            )
+            generated_pvc_operational_digest_ok = all(
+                _operational_plan_digest_absent(item)
+                for item in namespaced_items
+                if _identity(item) in generated_pvcs
+            )
+            if not generated_pvc_acceptance_digest_ok:
+                blockers.add("acceptance_plan_digest_drift")
+            if not generated_pvc_operational_digest_ok:
+                blockers.add("operational_plan_digest_drift")
+            generated_pvc_plan_digest_ok = True
+            resource_plan_digest_ok = True
+            plan_digest_blocker = "plan_digest_drift"
+        if not generated_pvc_plan_digest_ok or not resource_plan_digest_ok:
+            blockers.add(plan_digest_blocker)
 
         workload_image_ok = all(
             identity not in live_expected or _images_match(item, live_expected[identity])
@@ -1573,17 +1764,26 @@ def _observe_personal_dev_status(
         management_ok = management is not None and _management_ready(management)
         if not management_ok:
             blockers.add("management_not_ready")
-        if plan is None:
+        if not enabled:
             if management is None or not _shadow_flags_valid(management):
                 blockers.add("management_shadow_flags_invalid")
-        else:
+        elif acceptance_plan is not None:
             if management is None or not _acceptance_management_binding_valid(
                 management,
-                plan,
+                acceptance_plan,
             ):
                 blockers.add("management_acceptance_binding_invalid")
             if management is None or not _acceptance_management_probe_valid(management):
                 blockers.add("management_acceptance_probe_invalid")
+        else:
+            assert operational_plan is not None
+            if management is None or not _operational_management_binding_valid(
+                management,
+                operational_plan,
+            ):
+                blockers.add("management_operational_binding_invalid")
+            if management is None or not _operational_management_probe_valid(management):
+                blockers.add("management_operational_probe_invalid")
 
         activation = next(
             (
@@ -1596,7 +1796,7 @@ def _observe_personal_dev_status(
             None,
         )
         activation_spec = activation.get("spec") if activation else None
-        if plan is None:
+        if not enabled:
             if (
                 not isinstance(activation_spec, Mapping)
                 or _integer(activation_spec.get("replicas")) != 0
@@ -1647,12 +1847,15 @@ def _observe_personal_dev_status(
             blockers.add("init_container_failed")
         namespaced_blockers = {
             "acceptance_plan_digest_drift",
+            "operational_plan_digest_drift",
             "activation_not_ready",
             "activation_replicas_invalid",
             "activation_replicas_nonzero",
             "init_container_failed",
             "management_acceptance_binding_invalid",
             "management_acceptance_probe_invalid",
+            "management_operational_binding_invalid",
+            "management_operational_probe_invalid",
             "management_not_ready",
             "management_shadow_flags_invalid",
             "migration_failed",
@@ -1697,29 +1900,39 @@ def _observe_personal_dev_status(
         ):
             blockers.add("resource_digest_drift")
             cluster_ok = False
-        if plan is not None and not all(
+        if acceptance_plan is not None and not all(
             _acceptance_plan_digest_matches(
                 item,
-                acceptance_plan_sha256=plan.sha256,
+                acceptance_plan_sha256=acceptance_plan.sha256,
             )
             for item in cluster_items
         ):
             blockers.add("acceptance_plan_digest_drift")
+            cluster_ok = False
+        if operational_plan is not None and not all(
+            _operational_plan_digest_matches(
+                item,
+                operational_plan_sha256=operational_plan.sha256,
+            )
+            for item in cluster_items
+        ):
+            blockers.add("operational_plan_digest_drift")
             cluster_ok = False
     except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
         blockers.add("resource_inventory_invalid")
 
     personal_workers = 0
     worker_inventory_ok = True
-    if plan is None:
+    if not enabled:
         manager_ceiling, manager_blocker = _manager_status(results[_MANAGER_COMMAND])
         if manager_blocker:
             blockers.add(manager_blocker)
         manager_ok = manager_blocker is None
     else:
+        assert enabled_plan is not None
         manager_ceiling, manager_ok, manager_blockers = _acceptance_manager_status(
             results[_ACCEPTANCE_MANAGER_COMMAND],
-            plan,
+            enabled_plan,
         )
         blockers.update(manager_blockers)
         try:
@@ -1745,7 +1958,7 @@ def _observe_personal_dev_status(
         PersonalDevShadowComponent("namespaces", namespace_observed, namespace_ok),
         PersonalDevShadowComponent("runtime-class", runtime_observed, runtime_ok),
     ]
-    if plan is not None:
+    if enabled:
         component_values.append(
             PersonalDevShadowComponent(
                 "personal-workers",
@@ -1755,16 +1968,33 @@ def _observe_personal_dev_status(
         )
     components = tuple(sorted(component_values, key=lambda component: component.name))
     stable_blockers = tuple(sorted(blockers))
-    if plan is not None:
+    if enabled:
         shared_ready = namespace_ok and runtime_ok and namespaced_ok and cluster_ok
         application_ready = shared_ready and activation_ready
         capacity_publication_ready = manager_ok and manager_ceiling == 0
-        return PersonalDevAcceptanceStatus(
-            ready=(application_ready and capacity_publication_ready and not stable_blockers),
+        ready = application_ready and capacity_publication_ready and not stable_blockers
+        input_sha256 = expected.input_sha256 if digest_observed else None
+        release_sha256 = expected.release_sha256 if digest_observed else None
+        if acceptance_plan is not None:
+            return PersonalDevAcceptanceStatus(
+                ready=ready,
+                blockers=stable_blockers,
+                input_sha256=input_sha256,
+                release_sha256=release_sha256,
+                acceptance_plan_sha256=acceptance_plan.sha256,
+                manager_ceiling=manager_ceiling,
+                components=components,
+                application_ready=application_ready,
+                capacity_publication_ready=capacity_publication_ready,
+                worker_available=False,
+            )
+        assert operational_plan is not None
+        return PersonalDevOperationalStatus(
+            ready=ready,
             blockers=stable_blockers,
-            input_sha256=expected.input_sha256 if digest_observed else None,
-            release_sha256=expected.release_sha256 if digest_observed else None,
-            acceptance_plan_sha256=plan.sha256,
+            input_sha256=input_sha256,
+            release_sha256=release_sha256,
+            operational_plan_sha256=operational_plan.sha256,
             manager_ceiling=manager_ceiling,
             components=components,
             application_ready=application_ready,
@@ -1820,12 +2050,35 @@ def observe_personal_dev_acceptance_status(
     return result
 
 
+def observe_personal_dev_operational_status(
+    runner: KubectlRunner,
+    *,
+    expected: RenderedPersonalDevControlPlane,
+    plan: PersonalDevOperationalPlan,
+    namespace: str = _NAMESPACE,
+) -> PersonalDevOperationalStatus:
+    """Observe one read-only durable zero-capacity personal binding."""
+
+    if not isinstance(plan, PersonalDevOperationalPlan):
+        raise TypeError("personal-dev operational plan is invalid")
+    result = _observe_personal_dev_status(
+        runner,
+        expected=expected,
+        plan=plan,
+        namespace=namespace,
+    )
+    assert isinstance(result, PersonalDevOperationalStatus)
+    return result
+
+
 __all__ = [
     "MAX_PERSONAL_DEV_STATUS_RESPONSE_BYTES",
     "KubectlRunner",
     "PersonalDevAcceptanceStatus",
+    "PersonalDevOperationalStatus",
     "PersonalDevShadowComponent",
     "PersonalDevShadowStatus",
     "observe_personal_dev_acceptance_status",
+    "observe_personal_dev_operational_status",
     "observe_personal_dev_shadow_status",
 ]

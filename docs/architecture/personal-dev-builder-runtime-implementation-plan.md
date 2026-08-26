@@ -30,7 +30,7 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
 - Builder preparation and personal lifecycle flags remain false; activation
   replicas remain `0`.
 - No personal/build namespace, personal worker, task submission, physical-pool
-  mutation, or two-owner acceptance is permitted during this shadow phase.
+mutation, or single-owner acceptance is permitted during this shadow phase.
 - Install only gVisor `release-20260810.0`, tag commit
   `5ceb9a5fd5750d6c73dd166441f28306039300d0`, from the exact SHA-512-bound
   archive in the spec.
@@ -674,4 +674,4 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
 
   Publish only sanitized evidence hashes and final guardrail state to #1280.
   Preserve all owner-only evidence. Do not proceed to acceptance enablement,
-  two-owner applications, task submission, or physical capacity in this plan.
+  single-owner applications, task submission, or physical capacity in this plan.

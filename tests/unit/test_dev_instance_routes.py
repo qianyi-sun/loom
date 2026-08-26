@@ -27,7 +27,10 @@ from loom.personal_dev_environment import (
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
-from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
+from loom.personal_dev_runtime import (
+    PersonalDevAcceptanceInterlockError,
+    PersonalDevOperationalInterlockError,
+)
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
     PersonalDevActivationAcknowledgementPayload,
@@ -753,6 +756,38 @@ async def test_activation_intent_read_rejects_before_database_when_interlock_dri
     assert calls == 1
     assert exc.value.status_code == 503
     assert exc.value.detail == "personal-dev acceptance capacity-manager-binding-drift"
+
+
+async def test_operational_activation_intent_rechecks_manager_before_database() -> None:
+    calls = 0
+
+    class _Interlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            nonlocal calls
+            calls += 1
+            assert now.tzinfo == UTC
+            raise PersonalDevOperationalInterlockError("capacity-manager-binding-drift")
+
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_runtime_mode = "operational"
+    request.app.state.personal_dev_enablement_required = True
+    request.app.state.personal_dev_operational_interlock = _Interlock()
+    payload = PersonalDevActivationIntentRequestPayload(
+        agent_key_id="personal-dev-agent-v1",
+        request_nonce=UUID("00000000-0000-0000-0000-000000000099"),
+        requested_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await next_personal_dev_activation_intent(
+            payload,
+            request,
+            signature="0" * 128,
+        )
+
+    assert calls == 1
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev operational capacity-manager-binding-drift"
 
 
 async def test_ordinary_activation_intent_route_requires_signature_without_acceptance_interlock(
