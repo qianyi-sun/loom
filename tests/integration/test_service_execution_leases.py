@@ -17,6 +17,9 @@ from loom.auth import AuthContext, verify_step_jwt
 from loom.db.schema import (
     AdminAuditEvent,
     Artifact,
+    Batch,
+    ExecutionAdmissionPolicy,
+    ExecutionAdmissionReservation,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
@@ -110,6 +113,11 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 )
             )
             await session.execute(delete(Trial).where(Trial.id.in_(owned_trials)))
+            await session.execute(
+                delete(Batch).where(
+                    Batch.team_id.in_(select(Team.id).where(Team.name.like("service-execution-%")))
+                )
+            )
             await session.execute(delete(Task).where(Task.id.like("service-execution/%")))
             await session.execute(
                 delete(ServiceExecutionTarget).where(
@@ -458,7 +466,7 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
             history = (
                 await session.execute(
                     select(ServiceExecutionLeaseHistory).where(
-                    ServiceExecutionLeaseHistory.lease_id == lease_id
+                        ServiceExecutionLeaseHistory.lease_id == lease_id
                     )
                 )
             ).scalar_one()
@@ -516,6 +524,127 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 await session.commit()
             await session.rollback()
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "scope_kind",
+    ["global", "environment", "region", "team", "batch", "execution_class", "pool"],
+)
+async def test_service_execution_enforces_each_scope_and_releases_on_terminal_event(
+    postgres_url: str,
+    scope_kind: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    policy_id = uuid4()
+    batch_id = uuid4()
+    try:
+        async with sessions() as session:
+            first_trial_id, target = await _seed_ready_trial(session, now=now)
+            first_trial = await session.get(Trial, first_trial_id)
+            assert first_trial is not None
+            second_trial_id = uuid4()
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=first_trial.team_id,
+                    name=f"service admission {scope_kind}",
+                    task_filter={},
+                    trial_config={},
+                    state="submitted",
+                    created_by_token_prefix="test",
+                    expected_trial_count=2,
+                )
+            )
+            first_trial.batch_id = batch_id
+            session.add(
+                Trial(
+                    id=second_trial_id,
+                    team_id=first_trial.team_id,
+                    task_id=first_trial.task_id,
+                    config={"agent": {"name": "test"}},
+                    requires_caps={"os": "linux", "cpu_arch": "x86_64"},
+                    state="queued",
+                    attempt_count=0,
+                    batch_id=batch_id,
+                )
+            )
+            scope_keys = {
+                "global": "*",
+                "environment": target.environment,
+                "region": target.region,
+                "team": str(first_trial.team_id),
+                "batch": str(batch_id),
+                "execution_class": NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                "pool": target.logical_pool_id,
+            }
+            session.add(
+                ExecutionAdmissionPolicy(
+                    id=policy_id,
+                    scope_kind=scope_kind,
+                    scope_key=scope_keys[scope_kind],
+                    max_concurrent=1,
+                    enabled=True,
+                    reason="service pool ceiling test",
+                )
+            )
+            first = await _reserve(
+                session,
+                trial_id=first_trial_id,
+                target=target,
+                now=now,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match=f"execution_admission_{scope_kind}_ceiling_reached",
+            ):
+                await _reserve(
+                    session,
+                    trial_id=second_trial_id,
+                    target=target,
+                    now=now + timedelta(seconds=1),
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            await record_execution_event(
+                session,
+                lease_id=first.id,
+                generation=1,
+                ordinal=1,
+                event_kind="failed",
+                payload={"failure_reason": "test_terminal"},
+                observed_at=now + timedelta(seconds=2),
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            released = (
+                await session.execute(
+                    select(ExecutionAdmissionReservation).where(
+                        ExecutionAdmissionReservation.owner_id == first.id
+                    )
+                )
+            ).scalar_one()
+            assert released.state == "released"
+            second = await _reserve(
+                session,
+                trial_id=second_trial_id,
+                target=target,
+                now=now + timedelta(seconds=3),
+            )
+            assert second.id != first.id
+            await session.commit()
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(ExecutionAdmissionPolicy).where(ExecutionAdmissionPolicy.id == policy_id)
+            )
         await engine.dispose()
 
 
@@ -1647,9 +1776,7 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
         assert await restarted.run_commands_once(now=now + timedelta(minutes=5, seconds=2)) == 1
         assert kubernetes.delete_count == 1
         assert kubernetes.jobs == {}
-        assert await restarted.reconcile_full_once(
-            now=now + timedelta(minutes=5, seconds=3)
-        ) == 1
+        assert await restarted.reconcile_full_once(now=now + timedelta(minutes=5, seconds=3)) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)

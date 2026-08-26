@@ -109,9 +109,7 @@ def choose_neutral_pool_selection(
         and state.error_message is None
     )
     free = tuple(
-        state
-        for state in eligible
-        if state.capacity_is_fresh and state.unassigned_free_slots > 0
+        state for state in eligible if state.capacity_is_fresh and state.unassigned_free_slots > 0
     )
     if free:
         selected = min(
@@ -156,12 +154,19 @@ def choose_neutral_pool(states: tuple[PoolDemandState, ...]) -> str | None:
     return selection.pool_name if selection is not None else None
 
 
-def _pool_state(
+def pool_demand_state_from_policy(
     row: WorkerPoolAutoscalerPolicy,
     *,
     now: datetime,
     capacity_freshness_seconds: int,
+    assigned_queued_slots: int = 0,
 ) -> PoolDemandState:
+    """Normalize one persisted policy observation without upgrading stale capacity.
+
+    ``last_actual_slots`` is backed by fresh worker heartbeats at observation
+    time.  It is executable evidence only while the observation itself is
+    fresh; configured scale headroom remains a separate planning fact.
+    """
     observed_at = row.last_decision_at
     capacity_is_fresh = (
         observed_at is not None
@@ -170,9 +175,7 @@ def _pool_state(
     actuator_config = row.actuator_config or {}
     raw_weight = actuator_config.get("routing_weight", 0)
     operator_weight = (
-        raw_weight
-        if isinstance(raw_weight, int) and not isinstance(raw_weight, bool)
-        else 0
+        raw_weight if isinstance(raw_weight, int) and not isinstance(raw_weight, bool) else 0
     )
     operator_weight = max(-1_000, min(1_000, operator_weight))
     raw_cost = actuator_config.get("routing_cost_microusd_per_slot_hour")
@@ -190,7 +193,7 @@ def _pool_state(
         active_slots=max(0, int(row.last_actual_slots or 0)),
         occupied_slots=max(0, int(row.last_occupied_slots or 0)),
         pending_slots=max(0, int(row.last_pending_slots or 0)),
-        assigned_queued_slots=0,
+        assigned_queued_slots=max(0, int(assigned_queued_slots)),
         blocked_reason=row.last_blocked_reason,
         error_message=row.last_error,
         environment=row.environment,
@@ -213,7 +216,7 @@ def _pool_state(
     )
 
 
-def _candidate(state: PoolDemandState) -> ExecutionRouteCandidateV1:
+def route_candidate_from_pool_state(state: PoolDemandState) -> ExecutionRouteCandidateV1:
     blockers = []
     if not state.enabled:
         blockers.append("disabled")
@@ -248,9 +251,7 @@ def _candidate(state: PoolDemandState) -> ExecutionRouteCandidateV1:
         data_residency=state.data_residency,
         operator_weight=state.operator_weight,
         budget_eligible=state.budget_eligible,
-        estimated_cost_microusd_per_slot_hour=(
-            state.estimated_cost_microusd_per_slot_hour
-        ),
+        estimated_cost_microusd_per_slot_hour=(state.estimated_cost_microusd_per_slot_hour),
         enabled=state.enabled,
         healthy=healthy,
         draining=state.draining,
@@ -261,9 +262,7 @@ def _candidate(state: PoolDemandState) -> ExecutionRouteCandidateV1:
         assigned_queued_slots=state.assigned_queued_slots,
         available_slots=available_slots,
         capacity_evidence_kind=evidence_kind,
-        capacity_observed_at=(
-            state.capacity_observed_at if state.capacity_is_fresh else None
-        ),
+        capacity_observed_at=(state.capacity_observed_at if state.capacity_is_fresh else None),
         blockers=tuple(sorted(set(blockers))),
     )
 
@@ -278,7 +277,7 @@ def _routing_decision(
 ) -> ExecutionRoutingDecisionV1:
     candidates = tuple(
         sorted(
-            (_candidate(state) for state in states),
+            (route_candidate_from_pool_state(state) for state in states),
             key=lambda item: (item.logical_pool_id, item.target_id or ""),
         )
     )
@@ -322,7 +321,7 @@ async def assign_neutral_queued_trials(
         .all()
     )
     states = {
-        row.pool_name: _pool_state(
+        row.pool_name: pool_demand_state_from_policy(
             row,
             now=now,
             capacity_freshness_seconds=capacity_freshness_seconds,

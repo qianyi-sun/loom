@@ -1207,6 +1207,12 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
                         "last_blocked_reason": None,
                         "last_blocked_details": None,
                         "last_error": None,
+                        "routing_capacity": {
+                            "executable_free_slots": 0,
+                            "configured_scale_headroom_slots": 17,
+                            "capacity_evidence_kind": "configured_scale_headroom",
+                            "capacity_is_fresh": False,
+                        },
                     },
                 ],
             },
@@ -1232,6 +1238,8 @@ def test_worker_pool_autoscaler_status_gets_cp_decisions(
     out = capsys.readouterr().out
     assert "production/oldlab" in out
     assert "desired=12 actual=6 pending=6 draining=0" in out
+    assert "executable_free=0 scale_headroom=17" in out
+    assert "capacity=configured_scale_headroom fresh=False" in out
     assert "decision=scale_up" in out
 
 
@@ -1316,6 +1324,51 @@ def test_worker_pool_autoscaler_status_json_format_emits_raw_json(
     )
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_execution_admission_status_shows_scope_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, *, headers, timeout):  # type: ignore[no-untyped-def]
+        assert url == "http://cp:8080/admin/execution-admission/status"
+        assert headers["Authorization"] == "Bearer admin-secret"
+        return _StubResponse(
+            200,
+            json_data={
+                "policies": [
+                    {
+                        "scope_kind": "pool",
+                        "scope_key": "nebius-cpu",
+                        "enabled": True,
+                        "active_count": 7,
+                        "ledger_active_count": 7,
+                        "counter_in_sync": True,
+                        "max_concurrent": 12,
+                        "available": 5,
+                        "version": 3,
+                        "reason": "bounded Nebius canary",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "admission-status",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "pool/nebius-cpu" in out
+    assert "active=7 ledger=7 sync=True max=12 available=5" in out
+    assert "version=3" in out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1846,10 +1899,7 @@ def test_environment_state_check_passes_worker_token_without_leaking_secret(
         assert expected_worker_token == active_token
         return [
             StateDrift(
-                path=(
-                    "external_slurm_runner_prerequisites"
-                    "[staging/gb10].worker_token_fingerprint"
-                ),
+                path=("external_slurm_runner_prerequisites[staging/gb10].worker_token_fingerprint"),
                 desired="sha256:active123456 len=33",
                 live="sha256:stale1234567 len=28",
             ),

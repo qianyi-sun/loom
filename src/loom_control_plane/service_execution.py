@@ -42,6 +42,11 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
+from loom_control_plane.execution_admission import (
+    ExecutionAdmissionBlockedError,
+    ExecutionAdmissionIdentity,
+    reserve_execution_admission,
+)
 from loom_control_plane.metrics import (
     SERVICE_EXECUTION_CLEANUP_DEBT,
     SERVICE_EXECUTION_COMMAND_BACKLOG,
@@ -343,10 +348,7 @@ def _bind_kubernetes_execution_route(
     """Bind or validate the trial's sole physical execution route."""
 
     if trial.execution_route_json is None:
-        if (
-            trial.execution_route_pool_name is not None
-            or trial.execution_route_sha256 is not None
-        ):
+        if trial.execution_route_pool_name is not None or trial.execution_route_sha256 is not None:
             raise ServiceExecutionConflict("trial execution route is incomplete")
         decision = ExecutionRoutingDecisionV1(
             generation=trial.execution_route_generation + 1,
@@ -368,8 +370,7 @@ def _bind_kubernetes_execution_route(
                     data_residency=target.data_residency,
                     enabled=target.desired_state == "active",
                     healthy=(
-                        target.observed_state == "ready"
-                        and target.health_status == "healthy"
+                        target.observed_state == "ready" and target.health_status == "healthy"
                     ),
                     draining=False,
                     configured_slots=0,
@@ -612,6 +613,26 @@ async def reserve_trial_execution(
         execution_unit_key=execution_unit_key,
         deadline_at=deadline_at,
     )
+    try:
+        await reserve_execution_admission(
+            session,
+            ExecutionAdmissionIdentity(
+                trial_id=trial.id,
+                attempt=attempt,
+                execution_role=execution_role,
+                team_id=trial.team_id,
+                batch_id=trial.batch_id,
+                environment=target.environment,
+                region=target.region,
+                execution_class_id=execution_class_id,
+                pool_id=routing_decision.selected_pool_id,
+                owner_kind="service_execution_lease",
+                owner_id=lease_id,
+            ),
+            now=current_time,
+        )
+    except ExecutionAdmissionBlockedError as exc:
+        raise ServiceExecutionConflict(exc.reason) from exc
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),

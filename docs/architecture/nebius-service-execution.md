@@ -127,6 +127,40 @@ authority, proves cleanup/seat release, returns the Trial to queued state, and
 creates a new routing generation for the next attempt. It never creates two
 authorities for one attempt generation.
 
+## Capacity observation and concurrency admission
+
+`loom.pool-capacity.v1` is the normalized operator projection for every legacy
+autoscaler pool. It reports the configured ceiling and scale headroom
+separately from observed active, occupied, pending, and route-assigned queued
+slots. An observation older than the requested freshness window retains its
+diagnostic values but reports `executable_free_slots=0`,
+`capacity_is_fresh=false`, and is excluded from executable aggregation. This
+prevents quota, configured slots, or stale worker counts from becoming a claim
+of runnable capacity. `loom admin worker-pools autoscaler status` exposes the
+same contract as `GET /admin/worker-pool-autoscalers/status`.
+
+Concurrency admission is a separate persisted boundary. Operators can enable
+independent positive ceilings for `global`, `environment`, `region`, `team`,
+`batch`, `execution_class`, and `pool` scopes through
+`PUT /admin/execution-admission-policies/{scope_kind}/{scope_key}`. Every
+mutation is versioned and recorded in `admin_audit_events`; disabling a policy
+preserves its history. `GET /admin/execution-admission/status` and
+`loom admin worker-pools admission-status` report the durable counter, the
+reservation-ledger count, and whether they agree.
+
+Both legacy worker claim endpoints and Kubernetes Job lease reservation call
+the same database admission function before changing Trial authority. The
+function locks every matching policy row in canonical scope order, increments
+all matching counters with reservation creation in the same transaction, and
+fails closed when any scope is full. Disjoint scopes remain concurrent. A
+reservation freezes team, batch, environment, region, execution class, pool,
+attempt, role, and owner identity. Legacy reservations
+release when a Trial leaves `claimed`/`running`; service reservations release
+only on a terminal lease observation. Database triggers decrement every scope
+counter and retain the released ledger row. The reservation is therefore both
+the concurrency seat and the audit evidence, not a cache derived from worker
+heartbeats.
+
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
@@ -150,7 +184,7 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113` through `0116` persist the complete provider-neutral
+Migrations `0113` through `0117` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;

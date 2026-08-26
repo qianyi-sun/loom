@@ -15,8 +15,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, select, text, update
 
-from loom.auth import verify_bearer_token
-from loom.db.schema import Token, WorkerPoolAutoscalerPolicy
+from loom.auth import AuthContext, verify_bearer_token
+from loom.db.schema import AdminAuditEvent, Token, WorkerPoolAutoscalerPolicy
+from loom_control_plane.execution_admission import (
+    fetch_execution_admission_status,
+    upsert_execution_admission_policy,
+)
 from loom_control_plane.gb10_worker_lifecycle import (
     GB10NodeReport,
     UnsafeDesiredEnvError,
@@ -151,6 +155,14 @@ class _AutoscalerPolicyPayload(BaseModel):
     actuator_config: dict[str, Any] = Field(default_factory=dict)
 
 
+class _ExecutionAdmissionPolicyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    max_concurrent: int = Field(gt=0)
+    enabled: bool = False
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class _TaskImageServiceTokenPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -161,7 +173,7 @@ async def _require_admin_scope(
     request: Request,
     authorization: str | None,
     scope: str,
-) -> None:
+) -> AuthContext:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(
             session,
@@ -174,6 +186,7 @@ async def _require_admin_scope(
         )
     if ctx is None or scope not in ctx.scopes:
         raise HTTPException(status_code=403, detail=f"missing scope {scope}")
+    return ctx
 
 
 @router.post("/worker-tokens", status_code=201)
@@ -621,6 +634,7 @@ async def get_worker_pool_autoscaler_status(
     request: Request,
     environment: str | None = Query(default=None),
     pool_name: str | None = Query(default=None),
+    capacity_freshness_seconds: int = Query(default=120, gt=0, le=3600),
     authorization: str | None = Header(default=None),
 ) -> dict[str, list[dict[str, object]]]:
     await _require_admin_scope(request, authorization, "admin:worker_pools")
@@ -629,7 +643,68 @@ async def get_worker_pool_autoscaler_status(
             session,
             environment=environment,
             pool_name=pool_name,
+            capacity_freshness_seconds=capacity_freshness_seconds,
         )
+
+
+@router.put("/execution-admission-policies/{scope_kind}/{scope_key}")
+async def put_execution_admission_policy(
+    scope_kind: Literal[
+        "global", "environment", "region", "team", "batch", "execution_class", "pool"
+    ],
+    scope_key: str,
+    request: Request,
+    payload: _ExecutionAdmissionPolicyPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_execution_admission_policy(
+                session,
+                scope_kind=scope_kind,
+                scope_key=scope_key,
+                max_concurrent=payload.max_concurrent,
+                enabled=payload.enabled,
+                reason=payload.reason,
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.admission_policy.upserted",
+                    target_type="execution_admission_policy",
+                    target_id=f"{row.scope_kind}/{row.scope_key}",
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "max_concurrent": row.max_concurrent,
+                        "enabled": row.enabled,
+                        "reason": row.reason,
+                        "version": row.version,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "scope_kind": row.scope_kind,
+                "scope_key": row.scope_key,
+                "max_concurrent": row.max_concurrent,
+                "enabled": row.enabled,
+                "reason": row.reason,
+                "version": row.version,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/execution-admission/status")
+async def get_execution_admission_status(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, list[dict[str, object]]]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        return await fetch_execution_admission_status(session)
 
 
 @router.get("/worker-pools/{pool_name}/prod-pressure")

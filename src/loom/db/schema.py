@@ -3288,6 +3288,126 @@ class PipelineScopedPolicyActivation(Base):
     )
 
 
+class ExecutionAdmissionPolicy(Base):
+    """One independently enforceable concurrency ceiling (#1552)."""
+
+    __tablename__ = "execution_admission_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "scope_kind IN ('global','environment','region','team','batch',"
+            "'execution_class','pool')",
+            name="execution_admission_policies_scope_kind_check",
+        ),
+        CheckConstraint(
+            "length(trim(scope_key)) BETWEEN 1 AND 120",
+            name="execution_admission_policies_scope_key_check",
+        ),
+        CheckConstraint(
+            "max_concurrent > 0",
+            name="execution_admission_policies_max_concurrent_check",
+        ),
+        CheckConstraint(
+            "active_count >= 0",
+            name="execution_admission_policies_active_count_check",
+        ),
+        CheckConstraint(
+            "(scope_kind = 'global' AND scope_key = '*') OR scope_kind <> 'global'",
+            name="execution_admission_policies_global_key_check",
+        ),
+        UniqueConstraint(
+            "scope_kind",
+            "scope_key",
+            name="execution_admission_policies_scope_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    scope_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_key: Mapped[str] = mapped_column(Text, nullable=False)
+    max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False)
+    active_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    counter_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionAdmissionReservation(Base):
+    """Durable slot held by a legacy claim or service execution lease."""
+
+    __tablename__ = "execution_admission_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt > 0",
+            name="execution_admission_reservations_attempt_check",
+        ),
+        CheckConstraint(
+            "execution_role IN ('attempt','verifier')",
+            name="execution_admission_reservations_role_check",
+        ),
+        CheckConstraint(
+            "owner_kind IN ('legacy_worker_claim','service_execution_lease')",
+            name="execution_admission_reservations_owner_kind_check",
+        ),
+        CheckConstraint(
+            "state IN ('active','released')",
+            name="execution_admission_reservations_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'active' AND released_at IS NULL AND release_reason IS NULL) OR "
+            "(state = 'released' AND released_at IS NOT NULL "
+            "AND length(trim(release_reason)) > 0)",
+            name="execution_admission_reservations_release_group_check",
+        ),
+        UniqueConstraint(
+            "trial_id",
+            "attempt",
+            "execution_role",
+            name="execution_admission_reservations_trial_attempt_role_uidx",
+        ),
+        Index(
+            "execution_admission_reservations_active_scope_idx",
+            "state",
+            "pool_id",
+            "environment",
+            "team_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_role: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("batches.id", ondelete="RESTRICT")
+    )
+    environment: Mapped[str | None] = mapped_column(Text)
+    region: Mapped[str | None] = mapped_column(Text)
+    execution_class_id: Mapped[str | None] = mapped_column(Text)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    acquired_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    release_reason: Mapped[str | None] = mapped_column(Text)
+
+
 class Batch(Base):
     """One row per submitted batch (Plan 19 + Plan 28 rename).
 
@@ -3558,8 +3678,7 @@ class Trial(Base):
             name="trials_execution_route_group_check",
         ),
         CheckConstraint(
-            "autoscaler_pool_name IS NULL OR "
-            "execution_route_pool_name = autoscaler_pool_name",
+            "autoscaler_pool_name IS NULL OR execution_route_pool_name = autoscaler_pool_name",
             name="trials_autoscaler_route_pool_check",
         ),
         Index(
@@ -3858,8 +3977,7 @@ class ServiceExecutionLease(Base):
             name="execution_leases_pod_time_order_check",
         ),
         CheckConstraint(
-            "output_commit_state IN "
-            "('not_started','uploading','committed','unavailable')",
+            "output_commit_state IN ('not_started','uploading','committed','unavailable')",
             name="execution_leases_output_state_check",
         ),
         CheckConstraint(

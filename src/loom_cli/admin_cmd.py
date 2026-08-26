@@ -998,6 +998,8 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
     for row in policies:
         error = row.get("last_error") or "-"
         blocked = row.get("last_blocked_reason") or "-"
+        routing_capacity = row.get("routing_capacity")
+        capacity = routing_capacity if isinstance(routing_capacity, dict) else {}
         details = _format_autoscaler_blocked_details(
             row.get("last_blocked_details"),
         )
@@ -1013,9 +1015,56 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
             f"draining={row.get('last_draining_slots') or 0} "
             f"occupied={row.get('last_occupied_slots') or 0} "
             f"queued={row.get('last_queued_slots') or 0} "
+            f"executable_free={capacity.get('executable_free_slots', 0)} "
+            f"scale_headroom={capacity.get('configured_scale_headroom_slots', 0)} "
+            f"capacity={capacity.get('capacity_evidence_kind', 'unavailable')} "
+            f"fresh={capacity.get('capacity_is_fresh', False)} "
             f"decision={row.get('last_decision') or '-'} "
             f"reason={row.get('last_decision_reason') or '-'} "
             f"blocked={blocked}{details_text} error={error}\n",
+        )
+    return 0
+
+
+def _execution_admission_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-admission/status"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    policies = data.get("policies", [])
+    sys.stdout.write("Execution admission ceilings:\n")
+    if not policies:
+        sys.stdout.write("  no admission policies recorded\n")
+        return 0
+    for row in policies:
+        available = row.get("available")
+        sys.stdout.write(
+            f"  {row['scope_kind']}/{row['scope_key']} "
+            f"enabled={row['enabled']} active={row['active_count']} "
+            f"ledger={row.get('ledger_active_count', row['active_count'])} "
+            f"sync={row.get('counter_in_sync', False)} "
+            f"max={row['max_concurrent']} "
+            f"available={available if available is not None else '-'} "
+            f"version={row['version']} reason={row.get('reason') or '-'}\n"
         )
     return 0
 
@@ -2276,6 +2325,19 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
+
+    p_admission_status = worker_pools_sub.add_parser(
+        "admission-status",
+        help="Show persisted hybrid execution admission ceilings and active reservations.",
+    )
+    _add_common_args(p_admission_status)
+    p_admission_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_admission_status.set_defaults(handler=_execution_admission_status)
 
     p_env_state = sub.add_parser(
         "environment-state",

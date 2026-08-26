@@ -37,11 +37,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # The family predicate uses ``task_sequence[current_index + 1]`` because
 # Postgres arrays are 1-indexed while ``current_index`` counts from 0.
 _CLAIM_SQL = text("""
-WITH next AS (
-  SELECT t.id, t.family_key, t.batch_id
+WITH worker_scope AS (
+  SELECT w.id, w.pool_name, policy.environment,
+         policy.actuator_config->>'routing_region' AS region
+    FROM workers w
+    LEFT JOIN LATERAL (
+      SELECT p.environment, p.actuator_config
+        FROM worker_pool_autoscaler_policies p
+       WHERE p.pool_name = w.pool_name
+       ORDER BY p.enabled DESC, p.updated_at DESC, p.id
+       LIMIT 1
+    ) policy ON true
+   WHERE w.id = (:worker_id)::uuid
+), next AS (
+  SELECT t.id, t.family_key, t.batch_id, t.team_id,
+         t.attempt_count + 1 AS admission_attempt,
+         worker_scope.pool_name AS admission_pool_id,
+         worker_scope.environment AS admission_environment,
+         worker_scope.region AS admission_region,
+         t.execution_route_json->>'selected_execution_class_id'
+           AS admission_execution_class_id
     FROM trials t
     JOIN tasks task_definition ON task_definition.id = t.task_id
     JOIN team_quotas q ON q.team_id = t.team_id
+    CROSS JOIN worker_scope
    WHERE t.state = 'queued'
      AND t.attempt_count < q.max_attempts_ceiling
      AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= NOW())
@@ -50,6 +69,14 @@ WITH next AS (
        COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
        OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
      )
+     AND loom_execution_admission_available(
+           t.team_id,
+           t.batch_id,
+           worker_scope.environment,
+           worker_scope.region,
+           t.execution_route_json->>'selected_execution_class_id',
+           worker_scope.pool_name
+         )
      AND (
        EXISTS (
          SELECT 1
@@ -164,6 +191,15 @@ WITH next AS (
        t.submitted_at ASC
    LIMIT 1
    FOR UPDATE OF t SKIP LOCKED
+), admitted AS (
+  SELECT next.*
+    FROM next
+   WHERE loom_execution_admission_reserve(
+           next.id, next.admission_attempt, 'attempt', next.team_id,
+           next.batch_id, next.admission_environment, next.admission_region,
+           next.admission_execution_class_id, next.admission_pool_id,
+           'legacy_worker_claim', (:worker_id)::uuid, NOW()
+         ) IS NOT NULL
 ),
 -- Same-transaction family gate: flip the picked family to 'running' so a
 -- concurrent claim on a sibling task blocks on the predicate above.
@@ -171,7 +207,7 @@ family_lock AS (
   UPDATE batch_family_state bfs
      SET state = 'running',
          updated_at = NOW()
-    FROM next n
+    FROM admitted n
    WHERE n.family_key IS NOT NULL
      AND bfs.batch_id = n.batch_id
      AND bfs.family_key = n.family_key
@@ -186,8 +222,8 @@ UPDATE trials t
        failure_reason = NULL,
        failure_message = NULL,
        attempt_count = attempt_count + 1
-  FROM next
- WHERE t.id = next.id
+  FROM admitted
+ WHERE t.id = admitted.id
  RETURNING t.id, t.team_id, t.task_id, t.config, t.requires_caps,
            t.attempt_count, t.provider_connection_id,
            t.family_key, t.batch_id,
@@ -324,9 +360,29 @@ WITH candidates AS (
           WHERE bfs.batch_id = t.batch_id
             AND bfs.family_key = t.family_key
             AND bfs.state = 'pending'
-            AND bfs.task_sequence[bfs.current_index + 1] = t.task_id
+           AND bfs.task_sequence[bfs.current_index + 1] = t.task_id
        )
      )
+     AND loom_execution_admission_available(
+           t.team_id,
+           t.batch_id,
+           (
+             SELECT policy.environment
+               FROM worker_pool_autoscaler_policies policy
+              WHERE policy.pool_name = w.pool_name
+              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
+              LIMIT 1
+           ),
+           (
+             SELECT policy.actuator_config->>'routing_region'
+               FROM worker_pool_autoscaler_policies policy
+              WHERE policy.pool_name = w.pool_name
+              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
+              LIMIT 1
+           ),
+           t.execution_route_json->>'selected_execution_class_id',
+           w.pool_name
+         )
      AND (
        (
          NULLIF(t.requires_caps->>'worker_pool', '') IS NOT NULL
@@ -752,10 +808,46 @@ WITH candidates AS (
             work_kind ASC,
             id ASC
    LIMIT 1
+), admitted AS (
+  SELECT picked.*
+    FROM picked
+   WHERE picked.work_kind <> 'trial'
+  UNION ALL
+  SELECT picked.*
+    FROM picked
+    JOIN trials admission_trial ON admission_trial.id = picked.id
+    JOIN workers admission_worker ON admission_worker.id = (:worker_id)::uuid
+   WHERE picked.work_kind = 'trial'
+     AND loom_execution_admission_reserve(
+           admission_trial.id,
+           admission_trial.attempt_count + 1,
+           'attempt',
+           admission_trial.team_id,
+           admission_trial.batch_id,
+           (
+             SELECT policy.environment
+               FROM worker_pool_autoscaler_policies policy
+              WHERE policy.pool_name = admission_worker.pool_name
+              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
+              LIMIT 1
+           ),
+           (
+             SELECT policy.actuator_config->>'routing_region'
+               FROM worker_pool_autoscaler_policies policy
+              WHERE policy.pool_name = admission_worker.pool_name
+              ORDER BY policy.enabled DESC, policy.updated_at DESC, policy.id
+              LIMIT 1
+           ),
+           admission_trial.execution_route_json->>'selected_execution_class_id',
+           admission_worker.pool_name,
+           'legacy_worker_claim',
+           (:worker_id)::uuid,
+           NOW()
+         ) IS NOT NULL
 ), family_lock AS (
   UPDATE batch_family_state bfs
      SET state = 'running', updated_at = NOW()
-    FROM picked p
+    FROM admitted p
    WHERE p.work_kind = 'trial'
      AND p.family_key IS NOT NULL
      AND bfs.batch_id = p.batch_id
@@ -767,7 +859,7 @@ WITH candidates AS (
      SET state = 'claimed', worker_id = (:worker_id)::uuid, claimed_at = NOW(),
          pre_start_heartbeat_at = NULL, failure_reason = NULL, failure_message = NULL,
          attempt_count = attempt_count + 1
-    FROM picked p
+    FROM admitted p
    WHERE p.work_kind = 'trial' AND t.id = p.id AND t.state = 'queued'
      AND (
        p.family_key IS NULL
@@ -789,7 +881,7 @@ WITH candidates AS (
          lease_token_digest = :lease_token_digest,
          lease_expires_at = NOW() + INTERVAL '60 seconds', claimed_at = NOW(),
          version = a.version + 1
-    FROM picked p, pipeline_stage_runs s, pipeline_runs r
+    FROM admitted p, pipeline_stage_runs s, pipeline_runs r
    WHERE p.work_kind = 'execution_attempt' AND a.id = p.id AND a.state = 'queued'
      AND s.id = a.stage_run_id AND s.state = 'queued'
      AND r.id = s.pipeline_run_id AND r.state IN ('submitted','running')

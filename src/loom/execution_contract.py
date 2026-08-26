@@ -76,6 +76,55 @@ class ExecutionRoutingReason(StrEnum):
     ADMIN_TARGET_BINDING = "admin_target_binding"
 
 
+class PoolCapacityV1(_StrictContract):
+    """Normalized capacity evidence without upgrading configuration to capacity."""
+
+    schema_version: Literal["loom.pool-capacity.v1"] = "loom.pool-capacity.v1"
+    logical_pool_id: str = Field(min_length=1, max_length=80)
+    adapter_kind: ExecutionAdapterKind
+    environment: str | None
+    region: str | None
+    data_residency: str | None
+    configured_ceiling_slots: int = Field(ge=0)
+    configured_scale_headroom_slots: int = Field(ge=0)
+    observed_active_slots: int = Field(ge=0)
+    observed_occupied_slots: int = Field(ge=0)
+    observed_pending_slots: int = Field(ge=0)
+    assigned_queued_slots: int = Field(ge=0)
+    executable_free_slots: int = Field(ge=0)
+    capacity_evidence_kind: CapacityEvidenceKind
+    capacity_observed_at: datetime | None
+    capacity_fresh_until: datetime | None
+    capacity_is_fresh: bool
+    capacity_freshness_seconds: int = Field(gt=0)
+    aggregate_executable_eligible: bool
+    enabled: bool
+    healthy: bool
+    draining: bool
+    budget_eligible: bool
+    estimated_cost_microusd_per_slot_hour: int | None = Field(default=None, ge=0)
+    operator_weight: int = Field(ge=-1_000, le=1_000)
+    blockers: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _capacity_evidence_is_consistent(self) -> PoolCapacityV1:
+        if self.configured_scale_headroom_slots > self.configured_ceiling_slots:
+            raise ValueError("configured scale headroom exceeds the configured ceiling")
+        is_executable = (
+            self.capacity_is_fresh
+            and self.capacity_evidence_kind == CapacityEvidenceKind.FRESH_EXECUTABLE
+        )
+        if self.aggregate_executable_eligible != is_executable:
+            raise ValueError("aggregate executable eligibility does not match fresh evidence")
+        if not self.capacity_is_fresh and self.executable_free_slots != 0:
+            raise ValueError("stale capacity cannot expose executable free slots")
+        if self.executable_free_slots > 0 and not is_executable:
+            raise ValueError("executable free slots require fresh executable evidence")
+        if (self.capacity_observed_at is None) != (self.capacity_fresh_until is None):
+            raise ValueError("capacity observation and freshness deadline must be grouped")
+        return self
+
+
 class ExecutionClassV1(_StrictContract):
     """Versioned, provider-neutral capabilities for one execution class."""
 
@@ -363,10 +412,14 @@ class ExecutionRoutingDecisionV1(_StrictContract):
             or candidate.available_slots <= 0
         ):
             raise ValueError("selected candidate is not eligible for the recorded reason")
-        if self.reason in {
-            ExecutionRoutingReason.FRESH_EXECUTABLE_CAPACITY,
-            ExecutionRoutingReason.CONFIGURED_SCALE_HEADROOM,
-        } and candidate.capacity_evidence_kind.value != self.reason.value:
+        if (
+            self.reason
+            in {
+                ExecutionRoutingReason.FRESH_EXECUTABLE_CAPACITY,
+                ExecutionRoutingReason.CONFIGURED_SCALE_HEADROOM,
+            }
+            and candidate.capacity_evidence_kind.value != self.reason.value
+        ):
             raise ValueError("selected candidate evidence does not match the routing reason")
         if self.reason == ExecutionRoutingReason.OPERATOR_PIN and (
             candidate.capacity_evidence_kind

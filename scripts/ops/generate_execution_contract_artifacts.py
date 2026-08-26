@@ -21,6 +21,7 @@ from loom.execution_contract import (  # noqa: E402
     ExecutionRoutingDecisionV1,
     ExecutionTargetV1,
     ExecutionTopologyV1,
+    PoolCapacityV1,
     WorkloadRequirementsV1,
 )
 
@@ -42,6 +43,7 @@ SCHEMA_OUTPUTS = {
         ExecutionRoutingDecisionV1
     ),
     ROOT / "docs" / "evidence" / "loom.execution-topology.v1.schema.json": (ExecutionTopologyV1),
+    ROOT / "docs" / "evidence" / "loom.pool-capacity.v1.schema.json": PoolCapacityV1,
     ROOT / "docs" / "evidence" / "loom.workload-requirements.v1.schema.json": (
         WorkloadRequirementsV1
     ),
@@ -193,9 +195,7 @@ def build_report() -> dict[str, Any]:
                     "reason": pool["reason"],
                     "required_actions": pool["required_actions"],
                 }
-            pool_dispositions.append(
-                {"logical_pool_id": pool["logical_pool_id"], **disposition}
-            )
+            pool_dispositions.append({"logical_pool_id": pool["logical_pool_id"], **disposition})
         routed_workloads.append({**row, "pool_dispositions": pool_dispositions})
     pool_summary = {}
     for pool_id in sorted(row["logical_pool_id"] for row in pool_policies):
@@ -208,9 +208,7 @@ def build_report() -> dict[str, Any]:
         pool_summary[pool_id] = {
             "total": len(decisions),
             **{
-                disposition: sum(
-                    decision["disposition"] == disposition for decision in decisions
-                )
+                disposition: sum(decision["disposition"] == disposition for decision in decisions)
                 for disposition in sorted(_DISPOSITIONS)
             },
         }

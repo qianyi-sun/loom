@@ -118,6 +118,8 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "execution_commands",
         "execution_events",
         "execution_lease_history",
+        "execution_admission_policies",
+        "execution_admission_reservations",
         "tokens",
         "rate_cards",
         "llm_calls",

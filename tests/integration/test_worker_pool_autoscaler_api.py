@@ -5,10 +5,15 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Token, WorkerPoolAutoscalerPolicy
+from loom.db.schema import (
+    AdminAuditEvent,
+    ExecutionAdmissionPolicy,
+    Token,
+    WorkerPoolAutoscalerPolicy,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -17,10 +22,7 @@ RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 
 def _write_admin_secret(path: Path) -> None:
     path.write_text(
-        "[admin]\n"
-        f"token = \"{RAW_ADMIN_TOKEN}\"\n"
-        "created_at = \"2026-06-27T00:00:00Z\"\n"
-        "version = 1\n",
+        f'[admin]\ntoken = "{RAW_ADMIN_TOKEN}"\ncreated_at = "2026-06-27T00:00:00Z"\nversion = 1\n',
         encoding="utf-8",
     )
     path.chmod(0o600)
@@ -56,6 +58,12 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
     session_factory = sessionmaker(engine)
     with session_factory() as s:
         s.execute(delete(WorkerPoolAutoscalerPolicy))
+        s.execute(delete(ExecutionAdmissionPolicy))
+        s.execute(
+            delete(AdminAuditEvent).where(
+                AdminAuditEvent.action == "execution.admission_policy.upserted"
+            )
+        )
         s.execute(delete(Token))
         s.commit()
     try:
@@ -63,6 +71,12 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
     finally:
         with session_factory() as s:
             s.execute(delete(WorkerPoolAutoscalerPolicy))
+            s.execute(delete(ExecutionAdmissionPolicy))
+            s.execute(
+                delete(AdminAuditEvent).where(
+                    AdminAuditEvent.action == "execution.admission_policy.upserted"
+                )
+            )
             s.execute(delete(Token))
             s.commit()
         engine.dispose()
@@ -123,6 +137,13 @@ def test_policy_put_get_and_status_round_trip(app) -> None:
         assert status.status_code == 200, status.text
         status_body = status.json()
         assert status_body["policies"][0]["pool_name"] == "oldlab"
+        capacity = status_body["policies"][0]["routing_capacity"]
+        assert capacity["schema_version"] == "loom.pool-capacity.v1"
+        assert capacity["capacity_is_fresh"] is False
+        assert capacity["executable_free_slots"] == 0
+        assert capacity["configured_ceiling_slots"] == 30
+        assert capacity["configured_scale_headroom_slots"] == 30
+        assert capacity["aggregate_executable_eligible"] is False
 
 
 def test_policy_rejects_max_slots_below_min_slots(app) -> None:
@@ -139,6 +160,24 @@ def test_policy_rejects_max_slots_below_min_slots(app) -> None:
 
     assert response.status_code == 400, response.text
     assert "max_slots" in response.json()["detail"]
+
+
+def test_policy_rejects_invalid_routing_controls(app) -> None:
+    payload = _policy_payload()
+    payload["actuator_config"] = {
+        **payload["actuator_config"],
+        "routing_budget_eligible": "yes",
+    }
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/admin/worker-pool-autoscaler-policies/production/oldlab",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json=payload,
+        )
+
+    assert response.status_code == 400, response.text
+    assert "routing_budget_eligible" in response.json()["detail"]
 
 
 def test_policy_delete_requires_drained_shape_and_is_idempotent(app) -> None:
@@ -164,3 +203,53 @@ def test_policy_delete_requires_drained_shape_and_is_idempotent(app) -> None:
             headers=headers,
         )
         assert missing.status_code == 404, missing.text
+
+
+def test_execution_admission_policy_round_trip_and_status(app, postgres_url: str) -> None:
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+    with TestClient(app) as client:
+        created = client.put(
+            "/admin/execution-admission-policies/pool/nebius-cpu",
+            headers=headers,
+            json={
+                "max_concurrent": 40,
+                "enabled": True,
+                "reason": "bounded Nebius canary",
+            },
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["version"] == 1
+
+        status = client.get(
+            "/admin/execution-admission/status",
+            headers=headers,
+        )
+        assert status.status_code == 200, status.text
+        policy = status.json()["policies"][0]
+        assert policy["scope_kind"] == "pool"
+        assert policy["scope_key"] == "nebius-cpu"
+        assert policy["active_count"] == 0
+        assert policy["ledger_active_count"] == 0
+        assert policy["counter_in_sync"] is True
+        assert policy["available"] == 40
+
+        updated = client.put(
+            "/admin/execution-admission-policies/pool/nebius-cpu",
+            headers=headers,
+            json={"max_concurrent": 12, "enabled": False},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["version"] == 2
+        assert updated.json()["enabled"] is False
+
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        events = session.scalars(
+            select(AdminAuditEvent).where(
+                AdminAuditEvent.action == "execution.admission_policy.upserted"
+            )
+        ).all()
+        assert len(events) == 2
+        assert events[-1].target_id == "pool/nebius-cpu"
+        assert events[-1].event_metadata["version"] == 2
+    engine.dispose()

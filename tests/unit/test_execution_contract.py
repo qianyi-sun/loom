@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
+    CapacityEvidenceKind,
     ExecutionClassV1,
     ExecutionRouteCandidateV1,
     ExecutionRoutingDecisionV1,
@@ -15,6 +16,7 @@ from loom.execution_contract import (
     ExecutionTopologyV1,
     ImageMaterialization,
     NetworkAccess,
+    PoolCapacityV1,
     VerifierTopology,
     WorkloadRequirementsV1,
     evaluate_execution_admission,
@@ -81,6 +83,44 @@ def test_provider_binding_lives_on_regional_execution_target() -> None:
     )
     assert target.provider == "nebius"
     assert target.logical_pool_id == "nebius-cpu"
+
+
+def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> None:
+    observed_at = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
+    capacity = PoolCapacityV1(
+        logical_pool_id="oldlab",
+        adapter_kind="legacy_worker_claim",
+        environment="production",
+        region=None,
+        data_residency=None,
+        configured_ceiling_slots=30,
+        configured_scale_headroom_slots=20,
+        observed_active_slots=12,
+        observed_occupied_slots=4,
+        observed_pending_slots=3,
+        assigned_queued_slots=3,
+        executable_free_slots=0,
+        capacity_evidence_kind=CapacityEvidenceKind.CONFIGURED_SCALE_HEADROOM,
+        capacity_observed_at=observed_at,
+        capacity_fresh_until=observed_at,
+        capacity_is_fresh=False,
+        capacity_freshness_seconds=120,
+        aggregate_executable_eligible=False,
+        enabled=True,
+        healthy=True,
+        draining=False,
+        budget_eligible=True,
+        estimated_cost_microusd_per_slot_hour=None,
+        operator_weight=0,
+        blockers=(),
+    )
+    assert capacity.observed_active_slots == 12
+    assert capacity.executable_free_slots == 0
+
+    with pytest.raises(ValidationError, match="stale capacity"):
+        PoolCapacityV1.model_validate(
+            {**capacity.model_dump(mode="json"), "executable_free_slots": 8}
+        )
 
 
 def test_topology_requires_environment_isolation_and_two_production_regions() -> None:
