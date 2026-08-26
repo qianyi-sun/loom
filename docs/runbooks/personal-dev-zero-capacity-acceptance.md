@@ -85,8 +85,8 @@ exactly the aggregate release, its evidence, and its digest.
 
     backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
     runtime_profile="<absolute-reviewed-runtime-profile>"
-    trusted_launcher_profile="<absolute-reviewed-trusted-launcher-profile>"
-    scanner_finding_policy="<absolute-reviewed-scanner-finding-policy>"
+    trusted_launcher_profile="$evidence_dir/trusted-launcher-profile.json"
+    scanner_finding_policy="$evidence_dir/scanner-finding-policy.json"
 
     owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"
     primary_name="<owner-primary-personal-name>"
@@ -104,6 +104,43 @@ exactly the aggregate release, its evidence, and its digest.
     loom() {
       "$loom_cli" "$@"
     }
+
+    launcher_tmp="$(mktemp "$evidence_dir/trusted-launcher.XXXXXX.json")"
+    launcher_render_evidence="$evidence_dir/trusted-launcher-profile.render.json"
+    "$loom_cli" admin personal-dev-control-plane render-trusted-launcher-profile \
+      --file "$profile" \
+      --trusted-release-file "$trusted_release" \
+      --trusted-release-sha256 "$(tr -d '\n' < "$trusted_release_artifact/trusted-release.sha256")" \
+      --source-root "$repo" \
+      > "$launcher_tmp" 2> "$launcher_render_evidence"
+    chmod 0600 "$launcher_tmp" "$launcher_render_evidence"
+    mv "$launcher_tmp" "$trusted_launcher_profile"
+
+    scanner_tmp="$(mktemp "$evidence_dir/scanner-policy.XXXXXX.json")"
+    scanner_render_evidence="$evidence_dir/scanner-finding-policy.render.json"
+    "$loom_cli" admin personal-dev-control-plane render-scanner-finding-policy \
+      --file "$profile" \
+      --trusted-release-file "$trusted_release" \
+      --trusted-release-sha256 "$(tr -d '\n' < "$trusted_release_artifact/trusted-release.sha256")" \
+      --source-root "$repo" \
+      > "$scanner_tmp" 2> "$scanner_render_evidence"
+    chmod 0600 "$scanner_tmp" "$scanner_render_evidence"
+    mv "$scanner_tmp" "$scanner_finding_policy"
+
+    acceptance_evidence_args=(
+      --source-root "$repo"
+      --trusted-launcher-profile-file "$trusted_launcher_profile"
+      --scanner-finding-policy-file "$scanner_finding_policy"
+      --backup-restore-evidence-file "$backup_restore_evidence"
+    )
+
+The two policy files above are generated from the exact checkout, profile, and
+trusted release; they are not manually authored. Review their canonical render
+records, bind their SHA-256 values into the acceptance plan, and generate the
+backup/restore record with
+[`personal-dev-backup-restore-evidence.md`](personal-dev-backup-restore-evidence.md)
+before continuing. The renderer and status observer rederive both policies and
+semantically validate the completed restore record on every invocation.
 
 The XDG root is the single authenticated acceptance-owner session. Prepare its
 credential through the approved authentication channel before continuing. Do
@@ -337,7 +374,7 @@ expected, while regression is a stop condition.
 
     capture_pre_acceptance_status() {
       local status_rc=0
-      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$pre_acceptance_status" || status_rc=$?
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" "${acceptance_evidence_args[@]}" > "$pre_acceptance_status" || status_rc=$?
       test "$status_rc" -eq 1
       chmod 0600 "$pre_acceptance_status"
       assert_canonical_json_line "$pre_acceptance_status"
@@ -351,7 +388,7 @@ expected, while regression is a stop condition.
       assert_reviewed_kubeconfig
       assert_secret_key_inventory
       assert_storage_and_migration
-      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$output"
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" "${acceptance_evidence_args[@]}" > "$output"
       chmod 0600 "$output"
       assert_canonical_json_line "$output"
       jq -e --arg plan "$acceptance_plan_sha256" '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "acceptance" and .ready == true and .blockers == [] and .acceptance_plan_sha256 == $plan and .application_ready == true and .capacity_publication_ready == true and .worker_available == false and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$output" >/dev/null
@@ -375,7 +412,7 @@ expected, while regression is a stop condition.
       assert_secret_key_inventory
       assert_storage_and_migration
       assert_no_dynamic_namespaces
-      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$rollback_pre_status" || status_rc=$?
+      "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" "${acceptance_evidence_args[@]}" > "$rollback_pre_status" || status_rc=$?
       test "$status_rc" -eq 0 || test "$status_rc" -eq 1
       chmod 0600 "$rollback_pre_status"
       assert_canonical_json_line "$rollback_pre_status"
@@ -399,7 +436,7 @@ that init's zero exit status and immutable image ID after each apply.
 
     acceptance_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.yaml")"
     acceptance_evidence_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.json")"
-    if ! "$loom_cli" admin personal-dev-control-plane render-acceptance --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" > "$acceptance_tmp" 2> "$acceptance_evidence_tmp"; then
+    if ! "$loom_cli" admin personal-dev-control-plane render-acceptance --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" "${acceptance_evidence_args[@]}" > "$acceptance_tmp" 2> "$acceptance_evidence_tmp"; then
       rm -f "$acceptance_tmp" "$acceptance_evidence_tmp"
       exit 1
     fi
@@ -422,8 +459,8 @@ that init's zero exit status and immutable image ID after each apply.
     acceptance_render_evidence_sha256="$(sha256sum "$acceptance_render_evidence" | awk '{print $1}')"
     shadow_render_evidence_sha256="$(sha256sum "$shadow_render_evidence" | awk '{print $1}')"
     test "$shadow_render_sha256" = "$(jq -r .release.shadow_manifest_sha256 "$acceptance_plan")"
-    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 33' "$acceptance_render_evidence" >/dev/null
-    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 33' "$shadow_render_evidence" >/dev/null
+    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 35' "$acceptance_render_evidence" >/dev/null
+    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 35' "$shadow_render_evidence" >/dev/null
 
 ## 4. Diff and apply acceptance
 
