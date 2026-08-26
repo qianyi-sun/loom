@@ -313,7 +313,10 @@ def test_acceptance_plan_v1_preserves_historically_valid_lower_global_limits(
                 "user_id": "00000000-0000-0000-0000-000000000008",
             }
         ),
-        lambda value: value["quotas"].update(global_live_instances=1),
+        lambda value: value["quotas"].update(
+            global_live_instances=1,
+            per_owner_live_instances=1,
+        ),
         lambda value: value["quotas"].update(builder_global_concurrency=1),
         lambda value: value["quotas"].update(per_owner_live_instances=0),
         lambda value: value["quotas"].update(builder_per_owner_concurrency=0),
