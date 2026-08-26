@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib
 import io
@@ -10,6 +11,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -37,6 +39,7 @@ from loom.personal_dev_control_plane_status import (
 )
 from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
+from tests.unit.test_personal_dev_acceptance_evidence import _result_plan, _result_value
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
@@ -494,6 +497,161 @@ def _operational_status_argv(
         "--backup-restore-evidence-file",
         str(plan.parent / "backup-restore-evidence.json"),
     ]
+
+
+def _verify_acceptance_result_argv(
+    plan_path: Path,
+    plan_sha256: str,
+    result_path: Path,
+    result_sha256: str,
+    manifest_sha256: str,
+) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "verify-acceptance-result",
+        "--acceptance-plan-file",
+        str(plan_path),
+        "--acceptance-plan-sha256",
+        plan_sha256,
+        "--acceptance-result-file",
+        str(result_path),
+        "--acceptance-result-sha256",
+        result_sha256,
+        "--acceptance-manifest-sha256",
+        manifest_sha256,
+    ]
+
+
+def _acceptance_result_files(tmp_path: Path) -> tuple[Path, str, Path, str]:
+    plan, _v1_plan = _result_plan(tmp_path)
+    plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
+    payload = json.dumps(_result_value(plan), sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    result_path = tmp_path / "acceptance-result.json"
+    result_path.write_bytes(payload)
+    result_path.chmod(0o600)
+    return plan_path, plan.sha256, result_path, hashlib.sha256(payload).hexdigest()
+
+
+def test_verify_acceptance_result_emits_canonical_secret_free_projection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan_path, plan_sha256, result_path, result_sha256 = _acceptance_result_files(tmp_path)
+
+    rc = dispatch(
+        _verify_acceptance_result_argv(
+            plan_path, plan_sha256, result_path, result_sha256, "a" * 64,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+    record = json.loads(captured.out)
+    assert captured.out == json.dumps(
+        record, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ) + "\n"
+    assert record == {
+        "acceptance_manifest_sha256": "a" * 64,
+        "acceptance_plan_sha256": plan_sha256,
+        "acceptance_result_sha256": result_sha256,
+        "cross_owner_denial_count": 6,
+        "owner_count": 2,
+        "release_sha256": record["release_sha256"],
+        "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
+        "shadow_manifest_sha256": record["shadow_manifest_sha256"],
+        "verified": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    ["unsafe-plan", "unsafe-result", "v1-plan", "wrong-plan-sha", "wrong-result-sha",
+     "wrong-manifest", "invalid-result"],
+)
+def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runner(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    invalid_input: str,
+) -> None:
+    plan_path, plan_sha256, result_path, result_sha256 = _acceptance_result_files(tmp_path)
+    manifest_sha256 = "a" * 64
+    if invalid_input == "unsafe-plan":
+        plan_path.chmod(0o644)
+    elif invalid_input == "unsafe-result":
+        result_path.chmod(0o644)
+    elif invalid_input == "v1-plan":
+        plan, v1_plan = _result_plan(tmp_path / "v1")
+        del plan
+        payload = json.dumps(
+            v1_plan.canonical_value(), sort_keys=True, separators=(",", ":"),
+        ).encode("ascii")
+        plan_path = tmp_path / "v1-plan.json"
+        plan_path.write_bytes(payload)
+        plan_path.chmod(0o600)
+        plan_sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_input == "wrong-plan-sha":
+        plan_sha256 = "b" * 64
+    elif invalid_input == "wrong-result-sha":
+        result_sha256 = "b" * 64
+    elif invalid_input == "wrong-manifest":
+        manifest_sha256 = "b" * 64
+    else:
+        value = json.loads(result_path.read_text(encoding="ascii"))
+        value["owners"][0]["initial"]["worker_available"] = True
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+        result_path.write_bytes(payload)
+        result_path.chmod(0o600)
+        result_sha256 = hashlib.sha256(payload).hexdigest()
+
+    with patch(
+        "loom_cli.personal_dev_control_plane_cmd._SubprocessKubectlRunner",
+        side_effect=AssertionError("verification must not construct a Kubernetes runner"),
+    ):
+        rc = dispatch(
+            _verify_acceptance_result_argv(
+                plan_path, plan_sha256, result_path, result_sha256, manifest_sha256,
+            )
+        )
+
+    assert rc == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_verify_acceptance_result_parser_has_no_mutation_options() -> None:
+    from loom_cli import personal_dev_control_plane_cmd
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(required=True)
+    personal_dev_control_plane_cmd.add_personal_dev_control_plane_subparser(subparsers)
+    verify = next(
+        action for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ).choices["personal-dev-control-plane"]
+    operations = next(
+        action for action in verify._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    option_names = {
+        option for action in operations.choices["verify-acceptance-result"]._actions
+        for option in action.option_strings
+    }
+    forbidden = {"--apply", "--activate", "--kubeconfig", "--database", "--secret", "--slurm",
+                 "--capacity"}
+    assert option_names.isdisjoint(forbidden)
+
+
+def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None:
+    with pytest.raises(SystemExit) as exc:
+        dispatch([
+            "personal-dev-control-plane",
+            "verify-acceptance-result",
+            "--acceptance-plan-file",
+            "plan.json",
+        ])
+
+    assert exc.value.code == 2
 
 
 def test_render_emits_exact_yaml_and_canonical_evidence(

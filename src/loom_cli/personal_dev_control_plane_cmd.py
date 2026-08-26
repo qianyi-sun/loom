@@ -23,6 +23,7 @@ from loom.personal_dev_acceptance_evidence import (
     build_personal_dev_backup_restore_evidence,
     build_personal_dev_scanner_finding_policy,
     build_personal_dev_trusted_launcher_profile,
+    load_personal_dev_acceptance_result,
     load_personal_dev_backup_restore_evidence,
     validate_personal_dev_policy_evidence,
 )
@@ -51,6 +52,7 @@ from loom.personal_dev_control_plane_status import (
 _RENDER_ERROR = "error: personal-dev control-plane render inputs are invalid\n"
 _STATUS_ERROR = "error: personal-dev control-plane status inputs are invalid\n"
 _EVIDENCE_ERROR = "error: personal-dev acceptance evidence inputs are invalid\n"
+_VERIFICATION_ERROR = "error: personal-dev acceptance result inputs are invalid\n"
 _KUBECTL_READ_BYTES = 64 * 1024
 _MAX_KUBECONFIG_BYTES = 1024 * 1024
 _KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
@@ -656,6 +658,47 @@ def _safe_kubeconfig(path: Path) -> _KubeconfigIdentity | None:
     return None if loaded is None else loaded[0]
 
 
+def _verify_acceptance_result(args: argparse.Namespace) -> int:
+    """Validate local two-owner evidence without constructing a runner or client."""
+    try:
+        plan = load_personal_dev_acceptance_plan(
+            args.acceptance_plan_file,
+            args.acceptance_plan_sha256,
+        )
+        result = load_personal_dev_acceptance_result(
+            args.acceptance_result_file,
+            args.acceptance_result_sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256=args.acceptance_manifest_sha256,
+        )
+    except (OSError, TypeError, ValueError):
+        sys.stderr.write(_VERIFICATION_ERROR)
+        return 2
+
+    record = {
+        "acceptance_manifest_sha256": result.acceptance_manifest_sha256,
+        "acceptance_plan_sha256": plan.sha256,
+        "acceptance_result_sha256": args.acceptance_result_sha256,
+        "cross_owner_denial_count": len(result.cross_owner_denials),
+        "owner_count": len(result.owners),
+        "release_sha256": result.release_sha256,
+        "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
+        "shadow_manifest_sha256": result.shadow_manifest_sha256,
+        "verified": True,
+    }
+    sys.stdout.write(
+        json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    return 0
+
+
 def _status(args: argparse.Namespace) -> int:
     try:
         if _safe_kubeconfig(args.kubeconfig) is None:
@@ -1008,6 +1051,40 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
     )
     _add_bound_evidence_arguments(render_operational)
     render_operational.set_defaults(handler=_render_operational)
+
+    verify_acceptance_result = operations.add_parser(
+        "verify-acceptance-result",
+        allow_abbrev=False,
+        help="Verify one canonical two-owner acceptance result without mutation.",
+    )
+    verify_acceptance_result.add_argument(
+        "--acceptance-plan-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical two-owner acceptance plan.",
+    )
+    verify_acceptance_result.add_argument(
+        "--acceptance-plan-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical acceptance plan.",
+    )
+    verify_acceptance_result.add_argument(
+        "--acceptance-result-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical two-owner acceptance result.",
+    )
+    verify_acceptance_result.add_argument(
+        "--acceptance-result-sha256",
+        required=True,
+        help="Exact SHA-256 of the canonical acceptance result.",
+    )
+    verify_acceptance_result.add_argument(
+        "--acceptance-manifest-sha256",
+        required=True,
+        help="Exact SHA-256 of the acceptance manifest bound by the result.",
+    )
+    verify_acceptance_result.set_defaults(handler=_verify_acceptance_result)
 
     status_parser = operations.add_parser(
         "status",

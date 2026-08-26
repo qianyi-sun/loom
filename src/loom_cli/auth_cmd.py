@@ -21,6 +21,8 @@ loom_cli.secret_source for the rationale.
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from collections.abc import Sequence
 from typing import cast
@@ -342,6 +344,24 @@ def _format_scopes(scopes: object) -> str:
     return ", ".join(rendered) if rendered else "(none)"
 
 
+_SCOPE = re.compile(r"[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*)*")
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _validated_scope_list(scopes: object) -> list[str]:
+    """Return only the bounded, non-secret scope strings from a whoami response."""
+    if not isinstance(scopes, Sequence) or isinstance(scopes, str):
+        return []
+    return [
+        scope
+        for scope in scopes
+        if isinstance(scope, str) and _SCOPE.fullmatch(scope) is not None
+    ]
+
+
 def _principal_label(data: dict[str, object]) -> str:
     auth_kind = str(data.get("auth_kind") or "unknown")
     principal_type = str(data.get("principal_type") or "unknown")
@@ -402,6 +422,23 @@ def _whoami(args: argparse.Namespace) -> int:
     except httpx.RequestError as e:
         sys.stderr.write(f"error: could not reach {cfg.server_url}: {e}\n")
         return 2
+
+    if args.format == "json":
+        record = {
+            "auth_kind": _optional_string(data.get("auth_kind")),
+            "credential_type": _optional_string(data.get("credential_type")),
+            "expires_at": _optional_string(data.get("expires_at")),
+            "principal_type": _optional_string(data.get("principal_type")),
+            "role": _optional_string(data.get("role")),
+            "scopes": sorted(set(_validated_scope_list(data.get("scopes")))),
+            "server": cfg.server_url,
+            "team_id": _optional_string(data.get("team_id")),
+            "token_prefix": _optional_string(data.get("token_prefix")),
+            "user_id": _optional_string(data.get("user_id")),
+        }
+        json.dump(record, sys.stdout, separators=(",", ":"), sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
 
     print(f"Server:    {cfg.server_url}")
     print(f"Principal: {_principal_label(data)}")
@@ -553,6 +590,12 @@ def dispatch(argv: list[str]) -> int:
     p_whoami = sub.add_parser(
         "whoami",
         help="Ask the server which principal, team, scopes, and token prefix are active.",
+    )
+    p_whoami.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format (default: text).",
     )
     p_whoami.set_defaults(handler=_whoami)
 

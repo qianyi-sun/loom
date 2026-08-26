@@ -657,30 +657,34 @@ def _up_personal(args: argparse.Namespace) -> int:
                 else deploy.expected_operation_epoch(name)
             )
             if args.candidate is not None:
-                print(f"→ resolving owned ready candidate {args.candidate}")
+                if not args.quiet:
+                    print(f"→ resolving owned ready candidate {args.candidate}")
                 candidate = deploy.resolve_ready_candidate(args.candidate)
             else:
                 contexts = tuple(args.source_context or (".",))
                 with tempfile.TemporaryDirectory(prefix="loom-personal-dev-source-") as directory:
                     archive = Path(directory) / "source.tar"
-                    print(
-                        f"→ sealing source from {source_root} "
-                        f"for {args.environment}"
-                    )
+                    if not args.quiet:
+                        print(
+                            f"→ sealing source from {source_root} "
+                            f"for {args.environment}"
+                        )
                     snapshot = create_personal_dev_source_snapshot(
                         source_root,
                         archive,
                         contexts=contexts,
                     )
-                    print(
-                        "→ uploading immutable personal-dev source "
-                        f"{snapshot.source_digest}"
-                    )
+                    if not args.quiet:
+                        print(
+                            "→ uploading immutable personal-dev source "
+                            f"{snapshot.source_digest}"
+                        )
                     candidate = deploy.upload_snapshot(archive, snapshot)
-            print(
-                f"→ applying {args.environment} at expected operation epoch "
-                f"{expected_epoch}"
-            )
+            if not args.quiet:
+                print(
+                    f"→ applying {args.environment} at expected operation epoch "
+                    f"{expected_epoch}"
+                )
             environment, operation = deploy.apply(
                 name=name,
                 candidate=candidate,
@@ -699,7 +703,8 @@ def _up_personal(args: argparse.Namespace) -> int:
                     timeout=timeout,
                     poll_interval=poll_interval,
                 )
-            _print_personal_summary(environment)
+            if not args.quiet:
+                _print_personal_summary(environment)
             return 0
     except NotLoggedInError as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -773,6 +778,9 @@ def _populate_local_defaults(args: argparse.Namespace) -> None:
 
 
 def _up(args: argparse.Namespace) -> int:
+    if args.quiet and not args.environment.startswith("dev-"):
+        sys.stderr.write("error: --quiet is only valid for personal dev-<name> deployments\n")
+        return 2
     if args.environment == "local":
         if args.candidate is not None:
             sys.stderr.write("error: --candidate is not valid for --environment local\n")
@@ -1047,6 +1055,11 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         ),
     )
     personal_options = p_up.add_argument_group("personal-development options")
+    personal_options.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress personal deployment progress and success output.",
+    )
     personal_options.add_argument(
         "--source-root",
         type=Path,
