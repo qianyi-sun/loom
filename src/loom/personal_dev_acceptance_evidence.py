@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -33,6 +34,7 @@ _LAUNCHER_SOURCE_FILES = (
     "src/loom_capacity_executor/trusted_launcher.py",
 )
 _SCANNER_SOURCE_FILE = "src/loom/personal_dev_builder_tools.py"
+_MINIO_BUCKETS = ("artifacts", "trajectories")
 _SCANNER_ARGV = (
     "image",
     "--input",
@@ -128,8 +130,8 @@ class _PostgresRestore(_StrictModel):
 class _MinioRestore(_StrictModel):
     backup_manifest_sha256: str
     image: str
-    source_object_count: int = Field(ge=0)
-    restored_object_count: int = Field(ge=0)
+    source_object_count: Literal[0]
+    restored_object_count: Literal[0]
     restored_manifest_sha256: str
 
     @field_validator("backup_manifest_sha256", "restored_manifest_sha256")
@@ -175,6 +177,7 @@ class _ManagerBoundary(_StrictModel):
 class _CleanupBoundary(_StrictModel):
     isolated_postgres_absent: Literal[True]
     isolated_minio_absent: Literal[True]
+    isolated_network_absent: Literal[True]
 
 
 class PersonalDevBackupRestoreEvidence(_StrictModel):
@@ -381,27 +384,180 @@ def _sha256_owner_only_file(path: Path) -> str:
             os.close(descriptor)
 
 
-def _source_file_sha256(source_root: Path, relative: str) -> str:
-    if not source_root.is_absolute():
-        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-    path = source_root / relative
+def _read_source_file(path: Path) -> bytes:
+    descriptor: int | None = None
     try:
-        before = path.lstat()
+        before_path = path.lstat()
         if (
-            path.is_symlink()
-            or not stat.S_ISREG(before.st_mode)
-            or before.st_uid != os.geteuid()
-            or before.st_nlink != 1
-            or not 0 < before.st_size <= _MAX_SOURCE_BYTES
+            not stat.S_ISREG(before_path.st_mode)
+            or stat.S_ISLNK(before_path.st_mode)
+            or before_path.st_uid != os.geteuid()
+            or before_path.st_nlink != 1
+            or not 0 < before_path.st_size <= _MAX_SOURCE_BYTES
         ):
             raise ValueError
-        payload = path.read_bytes()
-        after = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if _identity(opened) != _identity(before_path):
+            raise ValueError
+        payload = bytearray()
+        while len(payload) <= _MAX_SOURCE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _MAX_SOURCE_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if (
+            len(payload) != opened.st_size
+            or _identity(os.fstat(descriptor)) != _identity(opened)
+            or _identity(path.lstat()) != _identity(before_path)
+        ):
+            raise ValueError
+        return bytes(payload)
     except (OSError, ValueError):
         raise PersonalDevAcceptanceEvidenceError(
             "personal-dev acceptance evidence is invalid"
         ) from None
-    if len(payload) != before.st_size or _identity(before) != _identity(after):
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _git_output(
+    source_root: Path,
+    *arguments: str,
+    maximum_bytes: int,
+) -> bytes:
+    environment = {
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/git",
+                "--no-replace-objects",
+                "-C",
+                str(source_root),
+                *arguments,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            env=environment,
+        )
+        if result.returncode != 0 or len(result.stdout) > maximum_bytes:
+            raise ValueError
+        return result.stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+
+
+def _validate_source_root(
+    source_root: Path,
+    release: PersonalDevTrustedRelease,
+    relative_files: tuple[str, ...],
+) -> Path:
+    try:
+        if not source_root.is_absolute():
+            raise ValueError
+        root = source_root.resolve(strict=True)
+        if root != source_root or not root.is_dir():
+            raise ValueError
+        top_level = Path(
+            os.fsdecode(
+                _git_output(
+                    root,
+                    "rev-parse",
+                    "--show-toplevel",
+                    maximum_bytes=4096,
+                )
+            ).strip()
+        ).resolve(strict=True)
+        head = _git_output(
+            root,
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            maximum_bytes=128,
+        ).decode("ascii").strip()
+        tree = _git_output(
+            root,
+            "rev-parse",
+            "--verify",
+            "HEAD^{tree}",
+            maximum_bytes=128,
+        ).decode("ascii").strip()
+        status = _git_output(
+            root,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            *relative_files,
+            maximum_bytes=4096,
+        )
+        if (
+            top_level != root
+            or head != release.source_sha
+            or tree != release.source_tree
+            or status
+        ):
+            raise ValueError
+        return root
+    except (OSError, UnicodeError, ValueError):
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+
+
+def _source_file_sha256(source_root: Path, source_sha: str, relative: str) -> str:
+    object_spec = f"{source_sha}:{relative}"
+    try:
+        raw_size = _git_output(
+            source_root,
+            "cat-file",
+            "-s",
+            object_spec,
+            maximum_bytes=64,
+        ).decode("ascii").strip()
+        if re.fullmatch(r"[0-9]+", raw_size) is None:
+            raise ValueError
+        size = int(raw_size)
+        if not 0 < size <= _MAX_SOURCE_BYTES:
+            raise ValueError
+        payload = _git_output(
+            source_root,
+            "cat-file",
+            "blob",
+            object_spec,
+            maximum_bytes=size,
+        )
+        if len(payload) != size:
+            raise ValueError
+    except (UnicodeError, ValueError):
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+    if not hmac.compare_digest(payload, _read_source_file(source_root / relative)):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
     return hashlib.sha256(payload).hexdigest()
 
@@ -414,7 +570,8 @@ def build_personal_dev_trusted_launcher_profile(
 ) -> dict[str, object]:
     """Derive the exact launcher profile from the checked-out source and profile."""
 
-    return {
+    source_root = _validate_source_root(source_root, release, _LAUNCHER_SOURCE_FILES)
+    value = {
         "contract": {
             "candidate_argv_absolute": True,
             "candidate_executable_identity": True,
@@ -424,7 +581,7 @@ def build_personal_dev_trusted_launcher_profile(
             "single_use_bootstrap_handoff": True,
         },
         "files": {
-            relative: _source_file_sha256(source_root, relative)
+            relative: _source_file_sha256(source_root, release.source_sha, relative)
             for relative in _LAUNCHER_SOURCE_FILES
         },
         "protocol_versions": dict(sorted(profile.protocol_versions.items())),
@@ -434,6 +591,8 @@ def build_personal_dev_trusted_launcher_profile(
             "tree": release.source_tree,
         },
     }
+    _validate_source_root(source_root, release, _LAUNCHER_SOURCE_FILES)
+    return value
 
 
 def build_personal_dev_scanner_finding_policy(
@@ -444,8 +603,9 @@ def build_personal_dev_scanner_finding_policy(
 ) -> dict[str, object]:
     """Derive the exact offline scanner policy from source and trusted release."""
 
+    source_root = _validate_source_root(source_root, release, (_SCANNER_SOURCE_FILE,))
     scanner = release.scanner
-    return {
+    value: dict[str, object] = {
         "argv": list(_SCANNER_ARGV),
         "components": list(PERSONAL_DEV_COMPONENTS),
         "denied_finding_fields": [
@@ -475,8 +635,14 @@ def build_personal_dev_scanner_finding_policy(
             "commit": release.source_sha,
             "tree": release.source_tree,
         },
-        "source_file_sha256": _source_file_sha256(source_root, _SCANNER_SOURCE_FILE),
+        "source_file_sha256": _source_file_sha256(
+            source_root,
+            release.source_sha,
+            _SCANNER_SOURCE_FILE,
+        ),
     }
+    _validate_source_root(source_root, release, (_SCANNER_SOURCE_FILE,))
+    return value
 
 
 def validate_personal_dev_policy_evidence(
@@ -521,17 +687,36 @@ def validate_personal_dev_policy_evidence(
 
 def _validate_postgres_state(payload: bytes) -> None:
     try:
+        if not payload.endswith(b"\n") or b"\r" in payload:
+            raise ValueError
         lines = payload.decode("ascii").splitlines()
-        parsed = []
+        parsed: list[tuple[str, str, int, str]] = []
         for line in lines:
-            table, count = line.split("\t", 1)
-            if not table or "\x00" in table or re.fullmatch(r"[0-9]+", count) is None:
+            record_type, name, numeric_value, state_value = line.split("\t")
+            if not name or "\x00" in name:
                 raise ValueError
-            parsed.append((table, int(count)))
+            if record_type == "table":
+                if (
+                    re.fullmatch(r"[0-9]+", numeric_value) is None
+                    or _DIGEST.fullmatch(state_value) is None
+                    or state_value == "0" * 64
+                ):
+                    raise ValueError
+            elif record_type == "sequence":
+                if (
+                    re.fullmatch(r"-?[0-9]+", numeric_value) is None
+                    or state_value not in {"f", "t"}
+                ):
+                    raise ValueError
+            else:
+                raise ValueError
+            parsed.append((record_type, name, int(numeric_value), state_value))
+        identities = [(record_type, name) for record_type, name, _, _ in parsed]
         if (
             not parsed
-            or parsed != sorted(parsed)
-            or len({item[0] for item in parsed}) != len(parsed)
+            or identities != sorted(identities)
+            or len(set(identities)) != len(identities)
+            or {record_type for record_type, _, _, _ in parsed} != {"sequence", "table"}
         ):
             raise ValueError
     except (UnicodeError, ValueError):
@@ -547,8 +732,7 @@ def _validate_minio_manifest(value: Any) -> int:
     objects = value["objects"]
     if (
         not isinstance(buckets, list)
-        or any(not isinstance(bucket, str) or not bucket for bucket in buckets)
-        or buckets != sorted(set(buckets))
+        or tuple(buckets) != _MINIO_BUCKETS
         or not isinstance(objects, list)
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
@@ -675,8 +859,10 @@ def build_personal_dev_backup_restore_evidence(
         minio_restored_manifest_path, canonical=True
     )
     object_count = _validate_minio_manifest(source_manifest_value)
-    if _validate_minio_manifest(restored_manifest_value) != object_count or not hmac.compare_digest(
-        source_manifest, restored_manifest
+    if (
+        object_count != 0
+        or _validate_minio_manifest(restored_manifest_value) != object_count
+        or not hmac.compare_digest(source_manifest, restored_manifest)
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
 
@@ -704,6 +890,7 @@ def build_personal_dev_backup_restore_evidence(
     value: dict[str, object] = {
         "cleanup": {
             "isolated_minio_absent": True,
+            "isolated_network_absent": True,
             "isolated_postgres_absent": True,
         },
         "completed_at": completed_at,

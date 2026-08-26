@@ -229,7 +229,7 @@ class _NetworkInput(_StrictModel):
     ingress_class_name: str
     ingress_cluster_issuer: str
     ingress_controller_source_cidrs: list[str] = Field(default_factory=list, max_length=32)
-    acme_http01_solver_port: int = Field(ge=1, le=65535)
+    acme_http01_solver_port: int = Field(default=8089, ge=1, le=65535)
     kubernetes_api_cidr: str
     kubernetes_api_port: int = Field(ge=1, le=65535)
     dns_namespace: str

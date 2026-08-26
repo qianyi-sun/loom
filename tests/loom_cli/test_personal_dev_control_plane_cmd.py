@@ -5,6 +5,7 @@ import importlib
 import io
 import json
 import os
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime
@@ -42,11 +43,27 @@ _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 _NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
 
 
+def _git_identity() -> tuple[str, str]:
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    return git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+
+
+_SOURCE_SHA, _SOURCE_TREE = _git_identity()
+
+
 def _release_value() -> dict[str, object]:
     return {
         "schema_version": 2,
-        "source_sha": "1" * 40,
-        "source_tree": "2" * 40,
+        "source_sha": _SOURCE_SHA,
+        "source_tree": _SOURCE_TREE,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
             "personal_dev_builder": (
@@ -132,6 +149,7 @@ def _acceptance_plan(
     backup_value = {
         "cleanup": {
             "isolated_minio_absent": True,
+            "isolated_network_absent": True,
             "isolated_postgres_absent": True,
         },
         "completed_at": "2026-08-17T20:55:00Z",
@@ -507,8 +525,8 @@ def test_render_emits_exact_yaml_and_canonical_evidence(
         "release_sha256": expected.release_sha256,
         "resource_count": expected.resource_count,
         "schema": "loom-personal-dev-control-plane-render-v1",
-        "source_sha": "1" * 40,
-        "source_tree": "2" * 40,
+        "source_sha": _SOURCE_SHA,
+        "source_tree": _SOURCE_TREE,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
     }
 
@@ -552,9 +570,66 @@ def test_render_policy_evidence_is_canonical_and_source_derived(
         "kind": kind,
         "schema": "loom-personal-dev-policy-evidence-render-v1",
         "sha256": hashlib.sha256(captured.out.encode("ascii")).hexdigest(),
-        "source_sha": "1" * 40,
-        "source_tree": "2" * 40,
+        "source_sha": _SOURCE_SHA,
+        "source_tree": _SOURCE_TREE,
     }
+
+
+def _backup_evidence_argv(
+    release_path: Path,
+    release_digest: str,
+    paths: dict[str, Path],
+    *,
+    names_are_bound: bool,
+) -> list[str]:
+    suffix = release_digest[:12]
+    postgres_name = f"loom-personal-dev-pg-restore-{suffix}"
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    if not names_are_bound:
+        postgres_name = "unbound-postgres-restore"
+    return [
+        "personal-dev-control-plane",
+        "render-backup-restore-evidence",
+        "--file",
+        str(_PROFILE),
+        "--trusted-release-file",
+        str(release_path),
+        "--trusted-release-sha256",
+        release_digest,
+        "--started-at",
+        "2026-08-26T19:00:00Z",
+        "--completed-at",
+        "2026-08-26T19:05:00Z",
+        "--postgres-dump-file",
+        str(paths["postgres.dump"]),
+        "--postgres-source-state-file",
+        str(paths["postgres.source.tsv"]),
+        "--postgres-restored-state-file",
+        str(paths["postgres.restored.tsv"]),
+        "--source-schema-head",
+        "0112",
+        "--restored-schema-head",
+        "0112",
+        "--minio-source-manifest-file",
+        str(paths["minio.source.json"]),
+        "--minio-restored-manifest-file",
+        str(paths["minio.restored.json"]),
+        "--secret-key-inventory-file",
+        str(paths["secrets.json"]),
+        "--pre-shadow-status-file",
+        str(paths["pre.json"]),
+        "--post-shadow-status-file",
+        str(paths["post.json"]),
+        "--storage-inventory-file",
+        str(paths["storage.json"]),
+        "--isolated-postgres-name",
+        postgres_name,
+        "--isolated-minio-name",
+        minio_name,
+        "--isolated-network-name",
+        network_name,
+    ]
 
 
 def test_render_backup_restore_evidence_uses_supported_derived_command(
@@ -594,59 +669,66 @@ def test_render_backup_restore_evidence_uses_supported_derived_command(
         )
     }
     result = dispatch(
-        [
-            "personal-dev-control-plane",
-            "render-backup-restore-evidence",
-            "--file",
-            str(_PROFILE),
-            "--trusted-release-file",
-            str(release_path),
-            "--trusted-release-sha256",
+        _backup_evidence_argv(
+            release_path,
             release_digest,
-            "--started-at",
-            "2026-08-26T19:00:00Z",
-            "--completed-at",
-            "2026-08-26T19:05:00Z",
-            "--postgres-dump-file",
-            str(paths["postgres.dump"]),
-            "--postgres-source-state-file",
-            str(paths["postgres.source.tsv"]),
-            "--postgres-restored-state-file",
-            str(paths["postgres.restored.tsv"]),
-            "--source-schema-head",
-            "0112",
-            "--restored-schema-head",
-            "0112",
-            "--minio-source-manifest-file",
-            str(paths["minio.source.json"]),
-            "--minio-restored-manifest-file",
-            str(paths["minio.restored.json"]),
-            "--secret-key-inventory-file",
-            str(paths["secrets.json"]),
-            "--pre-shadow-status-file",
-            str(paths["pre.json"]),
-            "--post-shadow-status-file",
-            str(paths["post.json"]),
-            "--storage-inventory-file",
-            str(paths["storage.json"]),
-            "--isolated-postgres-name",
-            "pg-restore",
-            "--isolated-minio-name",
-            "minio-restore",
-            "--isolated-network-name",
-            "restore-network",
-        ]
+            paths,
+            names_are_bound=True,
+        )
     )
 
     captured = capsys.readouterr()
     assert result == 0
-    assert cleanup_checked == [True]
+    assert cleanup_checked == [True, True]
     assert captured.out == json.dumps(expected, sort_keys=True, separators=(",", ":"))
     evidence = json.loads(captured.err)
     assert evidence["kind"] == "backup-restore-evidence"
     assert evidence["sha256"] == hashlib.sha256(captured.out.encode("ascii")).hexdigest()
     assert captured_inputs["postgres_dump_path"] == paths["postgres.dump"]
     assert captured_inputs["storage_inventory_path"] == paths["storage.json"]
+
+
+def test_render_backup_restore_evidence_rejects_unbound_cleanup_names(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    monkeypatch.setattr(command, "_assert_isolated_restore_cleanup", lambda _args: None)
+    monkeypatch.setattr(
+        command,
+        "build_personal_dev_backup_restore_evidence",
+        lambda **_kwargs: {"schema": "unexpected"},
+    )
+    paths = {
+        name: tmp_path / name
+        for name in (
+            "postgres.dump",
+            "postgres.source.tsv",
+            "postgres.restored.tsv",
+            "minio.source.json",
+            "minio.restored.json",
+            "secrets.json",
+            "pre.json",
+            "post.json",
+            "storage.json",
+        )
+    }
+
+    result = dispatch(
+        _backup_evidence_argv(
+            release_path,
+            release_digest,
+            paths,
+            names_are_bound=False,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev acceptance evidence inputs are invalid\n"
 
 
 def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
@@ -684,8 +766,8 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
         "release_sha256": expected.release_sha256,
         "resource_count": expected.resource_count,
         "schema": "loom-personal-dev-control-plane-render-v1",
-        "source_sha": "1" * 40,
-        "source_tree": "2" * 40,
+        "source_sha": _SOURCE_SHA,
+        "source_tree": _SOURCE_TREE,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
     }
 
@@ -722,8 +804,8 @@ def test_render_operational_emits_durable_plan_binding(
         "release_sha256": expected.release_sha256,
         "resource_count": expected.resource_count,
         "schema": "loom-personal-dev-control-plane-render-v1",
-        "source_sha": "1" * 40,
-        "source_tree": "2" * 40,
+        "source_sha": _SOURCE_SHA,
+        "source_tree": _SOURCE_TREE,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
     }
 

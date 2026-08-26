@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from loom import personal_dev_acceptance_evidence as acceptance_evidence
 from loom.personal_dev_acceptance_evidence import (
     PersonalDevAcceptanceEvidenceError,
     build_personal_dev_backup_restore_evidence,
@@ -39,7 +42,17 @@ def _write_owner_only(path: Path, value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _source_root(tmp_path: Path) -> Path:
+def _git(root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _source_root(tmp_path: Path, *, marker: str = "exact") -> tuple[Path, str, str]:
     root = tmp_path / "source"
     for relative in (
         "src/loom/personal_dev_builder_tools.py",
@@ -49,15 +62,21 @@ def _source_root(tmp_path: Path) -> Path:
     ):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"exact:{relative}\n", encoding="ascii")
-    return root
+        path.write_text(f"{marker}:{relative}\n", encoding="ascii")
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.name", "Loom test")
+    _git(root, "config", "user.email", "loom-test@example.invalid")
+    _git(root, "add", ".")
+    _git(root, "commit", "--quiet", "-m", f"{marker} source")
+    return root, _git(root, "rev-parse", "HEAD"), _git(root, "rev-parse", "HEAD^{tree}")
 
 
 def _inputs(tmp_path: Path):  # type: ignore[no-untyped-def]
     profile = load_personal_dev_control_plane_profile(_PROFILE_PATH)
+    source_root, source_sha, source_tree = _source_root(tmp_path)
     release, release_sha256 = _write_release(tmp_path)
+    release = replace(release, source_sha=source_sha, source_tree=source_tree)
     plan_value = _plan_value(profile, release, release_sha256)
-    source_root = _source_root(tmp_path)
     launcher = build_personal_dev_trusted_launcher_profile(
         profile=profile,
         release=release,
@@ -78,6 +97,7 @@ def _inputs(tmp_path: Path):  # type: ignore[no-untyped-def]
     backup_value = {
         "cleanup": {
             "isolated_minio_absent": True,
+            "isolated_network_absent": True,
             "isolated_postgres_absent": True,
         },
         "completed_at": "2026-08-26T19:05:00Z",
@@ -132,6 +152,123 @@ def _inputs(tmp_path: Path):  # type: ignore[no-untyped-def]
         scanner_path,
         backup_path,
     )
+
+
+@pytest.mark.parametrize("target", ["launcher", "scanner"])
+def test_policy_evidence_rejects_checkout_from_a_different_release(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    (
+        profile,
+        release,
+        _release_sha256,
+        _plan,
+        _source_root_value,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    wrong_root, _wrong_sha, _wrong_tree = _source_root(
+        tmp_path / "wrong",
+        marker="different",
+    )
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        if target == "launcher":
+            build_personal_dev_trusted_launcher_profile(
+                profile=profile,
+                release=release,
+                source_root=wrong_root,
+            )
+        else:
+            build_personal_dev_scanner_finding_policy(
+                profile=profile,
+                release=release,
+                source_root=wrong_root,
+            )
+
+
+def test_policy_evidence_rejects_git_environment_source_redirection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        profile,
+        release,
+        _release_sha256,
+        _plan,
+        source_root,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    redirected_root = tmp_path / "redirected"
+    redirected_root.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(source_root / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(redirected_root))
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_personal_dev_trusted_launcher_profile(
+            profile=profile,
+            release=release,
+            source_root=redirected_root,
+        )
+
+
+def test_policy_evidence_rejects_modified_bound_source_file(tmp_path: Path) -> None:
+    (
+        profile,
+        release,
+        _release_sha256,
+        _plan,
+        source_root,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    (source_root / "src/loom/personal_dev_builder_tools.py").write_text(
+        "modified after the trusted commit\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_personal_dev_scanner_finding_policy(
+            profile=profile,
+            release=release,
+            source_root=source_root,
+        )
+
+
+@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+def test_policy_evidence_rejects_index_hidden_bound_source_change(
+    tmp_path: Path,
+    index_flag: str,
+) -> None:
+    (
+        profile,
+        release,
+        _release_sha256,
+        _plan,
+        source_root,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    relative = "src/loom/personal_dev_builder_tools.py"
+    _git(source_root, "update-index", index_flag, relative)
+    (source_root / relative).write_text(
+        "modified but hidden from Git status\n",
+        encoding="ascii",
+    )
+    assert _git(source_root, "status", "--porcelain=v1", "--", relative) == ""
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_personal_dev_scanner_finding_policy(
+            profile=profile,
+            release=release,
+            source_root=source_root,
+        )
 
 
 def test_policy_evidence_is_exactly_derived_from_source_and_release(tmp_path: Path) -> None:
@@ -295,19 +432,18 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         return path
 
     postgres_dump = owner_file("postgres.dump", b"exact-postgres-dump")
-    source_state = owner_file("postgres.source.tsv", b"public.alembic_version\t1\n")
+    source_state = owner_file(
+        "postgres.source.tsv",
+        (
+            "sequence\tpublic.example_id_seq\t7\tt\n"
+            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+        ).encode("ascii"),
+    )
     restored_state = owner_file("postgres.restored.tsv", source_state.read_bytes())
     manifest_payload = json.dumps(
         {
             "buckets": ["artifacts", "trajectories"],
-            "objects": [
-                {
-                    "bucket": "artifacts",
-                    "key": "owner/object",
-                    "sha256": "5" * 64,
-                    "size": 7,
-                }
-            ],
+            "objects": [],
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -423,9 +559,26 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
             postgres_dump.read_bytes()
         ).hexdigest()
     )
-    assert value["minio"]["source_object_count"] == 1  # type: ignore[index]
+    assert value["minio"]["source_object_count"] == 0  # type: ignore[index]
+    assert value["cleanup"]["isolated_network_absent"] is True  # type: ignore[index]
 
-    restored_manifest.write_bytes(manifest_payload.replace(b'"size":7', b'"size":8'))
+    nonempty_manifest_payload = json.dumps(
+        {
+            "buckets": ["artifacts", "trajectories"],
+            "objects": [
+                {
+                    "bucket": "artifacts",
+                    "key": "owner/object",
+                    "sha256": "5" * 64,
+                    "size": 7,
+                }
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    source_manifest.write_bytes(nonempty_manifest_payload)
+    restored_manifest.write_bytes(nonempty_manifest_payload)
     with pytest.raises(PersonalDevAcceptanceEvidenceError):
         build_personal_dev_backup_restore_evidence(
             profile=profile,
@@ -445,3 +598,55 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
             post_shadow_status_path=post_status,
             storage_inventory_path=storage_path,
         )
+
+    incomplete_bucket_payload = json.dumps(
+        {"buckets": ["artifacts"], "objects": []},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    source_manifest.write_bytes(incomplete_bucket_payload)
+    restored_manifest.write_bytes(incomplete_bucket_payload)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_personal_dev_backup_restore_evidence(
+            profile=profile,
+            release=release,
+            release_sha256=release_sha256,
+            started_at="2026-08-26T19:00:00Z",
+            completed_at="2026-08-26T19:05:00Z",
+            postgres_dump_path=postgres_dump,
+            postgres_source_state_path=source_state,
+            postgres_restored_state_path=restored_state,
+            source_schema_head="0112",
+            restored_schema_head="0112",
+            minio_source_manifest_path=source_manifest,
+            minio_restored_manifest_path=restored_manifest,
+            secret_key_inventory_path=secret_path,
+            pre_shadow_status_path=pre_status,
+            post_shadow_status_path=post_status,
+            storage_inventory_path=storage_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        f"table\tpublic.alembic_version\t1\t{'5' * 64}\n",
+        "sequence\tpublic.example_id_seq\t7\tt\n",
+        (
+            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+            "sequence\tpublic.example_id_seq\t7\tt\n"
+        ),
+        (
+            "sequence\tpublic.example_id_seq\t7\tt\n"
+            "sequence\tpublic.example_id_seq\t8\tt\n"
+            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+        ),
+        (
+            "sequence\tpublic.example_id_seq\t7\ttrue\n"
+            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+        ),
+    ],
+)
+def test_postgres_state_rejects_incomplete_or_noncanonical_inventory(payload: str) -> None:
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence._validate_postgres_state(payload.encode("ascii"))

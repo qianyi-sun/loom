@@ -1115,9 +1115,11 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> Non
     assert "--network-alias minio-restore" in runbook
     assert '"$minio_image" server /data' in runbook
     assert '"$minio_client_image" -euc' in runbook
-    assert 'mc_live cat "local/$bucket/$key"' in runbook
-    assert 'mc_restore pipe "restore/$bucket/$key"' in runbook
-    assert 'mc_restore cat "restore/$bucket/$key"' in runbook
+    assert 'mc_live cat "local/$bucket/$key"' not in runbook
+    assert 'test ! -s "$minio_backup/$bucket.list.jsonl"' in runbook
+    assert 'test ! -s "$evidence_dir/minio.restored-$bucket.list.jsonl"' in runbook
+    assert 'mc_restore pipe "restore/$bucket/$key"' not in runbook
+    assert 'mc_restore cat "restore/$bucket/$key"' not in runbook
     assert 'cmp -s "$minio_source_manifest" "$minio_restored_manifest"' in runbook
     assert "render-backup-restore-evidence" in runbook
     assert '--pre-shadow-status-file "$evidence_dir/pre-backup.shadow-status.json"' in runbook

@@ -8,11 +8,14 @@ namespace exists, no personal worker exists, and the global manager executable
 new-capacity ceiling is exactly zero.
 
 The procedure is read-only against live Postgres and MinIO. It restores the
-captured bytes into disposable local Docker containers with no published port,
-compares exact logical state, then removes those containers and their private
-network. It never copies a Kubernetes Secret value into evidence. The only
-Secret-derived operations execute inside the existing Postgres and MinIO Pods;
-their environment values are neither printed nor returned.
+Postgres dump and exact empty MinIO bucket set into disposable local Docker
+containers with no published port, compares exact logical state, then removes
+those containers and their private network. Nonempty MinIO state fails closed:
+the pinned streaming client does not preserve Loom's required object content
+type and custom metadata. It never copies a Kubernetes Secret value into
+evidence. The only Secret-derived operations execute inside the existing
+Postgres and MinIO Pods; their environment values are neither printed nor
+returned.
 
 ## 1. Bind exact inputs and an empty owner-only output root
 
@@ -52,7 +55,7 @@ minio_source_manifest="$evidence_dir/minio.source-manifest.json"
 minio_restored_manifest="$evidence_dir/minio.restored-manifest.json"
 secret_inventory="$evidence_dir/secret-key-inventory.json"
 result="$evidence_dir/backup-restore-evidence.json"
-install -d -m 0700 "$minio_backup" "$minio_backup/objects"
+install -d -m 0700 "$minio_backup"
 ```
 
 Do not continue if the output root was reused. Do not use another operator's
@@ -119,8 +122,10 @@ The Secret inventory contains names and key names only. It must never contain
 
 ## 3. Dump and restore Postgres locally
 
-The state fingerprint contains only the schema head and exact per-table row
-counts. It deliberately excludes row values.
+The state fingerprint contains the schema head, every exact table name, row
+count, and SHA-256 of its canonical row JSON stream, plus every exact sequence
+name, `last_value`, and `is_called` state. Row values pass directly from `psql`
+into `sha256sum`; they are never retained or printed.
 
 ```bash
 postgres_pod="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get pod \
@@ -137,20 +142,42 @@ test -s "$postgres_dump"
 
 capture_live_postgres_state() {
   local destination="$1"
+  local sequences="$evidence_dir/postgres.sequences.txt"
   local tables="$evidence_dir/postgres.tables.txt"
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec "$postgres_pod" \
+    -c postgres -- /bin/sh -euc \
+    'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c \
+      "SELECT format('"'"'%I.%I'"'"',schemaname,sequencename) FROM pg_sequences WHERE schemaname='"'"'public'"'"' ORDER BY 1"' \
+    > "$sequences"
   kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec "$postgres_pod" \
     -c postgres -- /bin/sh -euc \
     'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c \
       "SELECT format('"'"'%I.%I'"'"',schemaname,tablename) FROM pg_tables WHERE schemaname='"'"'public'"'"' ORDER BY 1"' \
     > "$tables"
-  chmod 0600 "$tables"
+  chmod 0600 "$sequences" "$tables"
   : > "$destination"
+  while IFS= read -r sequence; do
+    sequence_state="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec \
+      "$postgres_pod" -c postgres -- /bin/sh -euc \
+      'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "SELECT last_value,is_called FROM $1"' \
+      sh "$sequence")"
+    IFS='|' read -r last_value is_called <<< "$sequence_state"
+    [[ "$last_value" =~ ^-?[0-9]+$ ]]
+    test "$is_called" = t || test "$is_called" = f
+    printf 'sequence\t%s\t%s\t%s\n' \
+      "$sequence" "$last_value" "$is_called" >> "$destination"
+  done < "$sequences"
   while IFS= read -r table; do
     count="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec \
       "$postgres_pod" -c postgres -- /bin/sh -euc \
       'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "SELECT count(*) FROM $1"' \
       sh "$table")"
-    printf '%s\t%s\n' "$table" "$count" >> "$destination"
+    row_sha256="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec \
+      "$postgres_pod" -c postgres -- /bin/sh -euc \
+      'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "COPY (SELECT to_jsonb(loom_row)::text FROM $1 AS loom_row ORDER BY to_jsonb(loom_row)::text COLLATE \"C\") TO STDOUT"' \
+      sh "$table" | sha256sum | awk '{print $1}')"
+    printf 'table\t%s\t%s\t%s\n' \
+      "$table" "$count" "$row_sha256" >> "$destination"
   done < "$tables"
   chmod 0600 "$destination"
 }
@@ -189,15 +216,35 @@ docker exec -i "$postgres_restore" pg_restore -U postgres -d postgres \
 
 docker exec "$postgres_restore" psql -AtX --set ON_ERROR_STOP=1 \
   -U postgres -d postgres -c \
+  "SELECT format('%I.%I',schemaname,sequencename) FROM pg_sequences WHERE schemaname='public' ORDER BY 1" \
+  > "$evidence_dir/postgres.restored-sequences.txt"
+docker exec "$postgres_restore" psql -AtX --set ON_ERROR_STOP=1 \
+  -U postgres -d postgres -c \
   "SELECT format('%I.%I',schemaname,tablename) FROM pg_tables WHERE schemaname='public' ORDER BY 1" \
   > "$evidence_dir/postgres.restored-tables.txt"
 : > "$postgres_restored_state"
+while IFS= read -r sequence; do
+  sequence_state="$(docker exec "$postgres_restore" psql -AtX \
+    --set ON_ERROR_STOP=1 -U postgres -d postgres \
+    -c "SELECT last_value,is_called FROM $sequence")"
+  IFS='|' read -r last_value is_called <<< "$sequence_state"
+  [[ "$last_value" =~ ^-?[0-9]+$ ]]
+  test "$is_called" = t || test "$is_called" = f
+  printf 'sequence\t%s\t%s\t%s\n' \
+    "$sequence" "$last_value" "$is_called" >> "$postgres_restored_state"
+done < "$evidence_dir/postgres.restored-sequences.txt"
 while IFS= read -r table; do
   count="$(docker exec "$postgres_restore" psql -AtX --set ON_ERROR_STOP=1 \
     -U postgres -d postgres -c "SELECT count(*) FROM $table")"
-  printf '%s\t%s\n' "$table" "$count" >> "$postgres_restored_state"
+  row_sha256="$(docker exec "$postgres_restore" psql -AtX --set ON_ERROR_STOP=1 \
+    -U postgres -d postgres -c \
+    "COPY (SELECT to_jsonb(loom_row)::text FROM $table AS loom_row ORDER BY to_jsonb(loom_row)::text COLLATE \"C\") TO STDOUT" | \
+    sha256sum | awk '{print $1}')"
+  printf 'table\t%s\t%s\t%s\n' "$table" "$count" "$row_sha256" \
+    >> "$postgres_restored_state"
 done < "$evidence_dir/postgres.restored-tables.txt"
-chmod 0600 "$evidence_dir/postgres.restored-tables.txt" "$postgres_restored_state"
+chmod 0600 "$evidence_dir/postgres.restored-sequences.txt" \
+  "$evidence_dir/postgres.restored-tables.txt" "$postgres_restored_state"
 restored_schema_head="$(docker exec "$postgres_restore" psql -AtX \
   --set ON_ERROR_STOP=1 -U postgres -d postgres -c \
   'SELECT version_num FROM alembic_version')"
@@ -205,12 +252,13 @@ test "$restored_schema_head" = "$source_schema_head"
 cmp -s "$postgres_source_state" "$postgres_restored_state"
 ```
 
-## 4. Copy every MinIO object and restore it through the S3 API
+## 4. Prove and recreate the exact empty MinIO bucket set
 
-The backup uses `mc ls` and `mc cat` inside the existing admin sidecar. Object
-keys travel as separate argv values and payloads are stored under SHA-256 file
-names, so a key cannot escape the owner-only directory. Empty buckets are
-preserved separately.
+The acceptance safeguard requires both retained buckets to contain zero
+objects. This is the measured live prerequisite and prevents a payload-only
+restore from silently discarding required `Content-Type` or custom metadata.
+The exact empty bucket set is recreated and re-listed through the isolated S3
+API. Any live or restored object is a stop condition.
 
 ```bash
 minio_pod="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get pod \
@@ -233,20 +281,7 @@ while IFS= read -r bucket; do
   test -n "$bucket"
   mc_live ls --recursive --json "local/$bucket" > "$minio_backup/$bucket.list.jsonl"
   chmod 0600 "$minio_backup/$bucket.list.jsonl"
-  while IFS= read -r object; do
-    key="$(jq -er '.key' <<<"$object")"
-    size="$(jq -er '.size' <<<"$object")"
-    identity="$(printf '%s\0%s' "$bucket" "$key" | sha256sum | awk '{print $1}')"
-    payload="$minio_backup/objects/$identity"
-    mc_live cat "local/$bucket/$key" > "$payload"
-    chmod 0600 "$payload"
-    test "$(stat -c %s "$payload")" = "$size"
-    payload_sha256="$(sha256sum "$payload" | awk '{print $1}')"
-    jq -cnS --arg bucket "$bucket" --arg key "$key" \
-      --arg sha256 "$payload_sha256" --argjson size "$size" \
-      '{bucket:$bucket,key:$key,sha256:$sha256,size:$size}' \
-      >> "$minio_backup/objects.jsonl"
-  done < "$minio_backup/$bucket.list.jsonl"
+  test ! -s "$minio_backup/$bucket.list.jsonl"
 done < "$minio_backup/buckets.txt"
 chmod 0600 "$minio_backup/objects.jsonl"
 
@@ -287,12 +322,6 @@ done
 while IFS= read -r bucket; do
   mc_restore mb --ignore-existing "restore/$bucket" >/dev/null
 done < "$minio_backup/buckets.txt"
-while IFS= read -r object; do
-  bucket="$(jq -er .bucket <<<"$object")"
-  key="$(jq -er .key <<<"$object")"
-  identity="$(printf '%s\0%s' "$bucket" "$key" | sha256sum | awk '{print $1}')"
-  mc_restore pipe "restore/$bucket/$key" < "$minio_backup/objects/$identity" >/dev/null
-done < "$minio_backup/objects.jsonl"
 
 mc_restore ls --json restore | jq -r \
   'select(.type == "folder") | .key | rtrimstr("/")' |
@@ -304,16 +333,7 @@ while IFS= read -r bucket; do
   mc_restore ls --recursive --json "restore/$bucket" \
     > "$evidence_dir/minio.restored-$bucket.list.jsonl"
   chmod 0600 "$evidence_dir/minio.restored-$bucket.list.jsonl"
-  while IFS= read -r object; do
-    key="$(jq -er '.key' <<<"$object")"
-    size="$(jq -er '.size' <<<"$object")"
-    payload_sha256="$(mc_restore cat "restore/$bucket/$key" | sha256sum |
-      awk '{print $1}')"
-    jq -cnS --arg bucket "$bucket" --arg key "$key" \
-      --arg sha256 "$payload_sha256" --argjson size "$size" \
-      '{bucket:$bucket,key:$key,sha256:$sha256,size:$size}' \
-      >> "$evidence_dir/minio.restored-objects.jsonl"
-  done < "$evidence_dir/minio.restored-$bucket.list.jsonl"
+  test ! -s "$evidence_dir/minio.restored-$bucket.list.jsonl"
 done < "$evidence_dir/minio.restored-buckets.txt"
 chmod 0600 "$evidence_dir/minio.restored-objects.jsonl"
 
@@ -335,8 +355,8 @@ chmod 0600 "$minio_restored_manifest"
 cmp -s "$minio_source_manifest" "$minio_restored_manifest"
 ```
 
-The restored-manifest producer re-lists every bucket and object and re-reads
-every payload through the isolated S3 API. MinIO readiness, a local file count,
+The restored-manifest producer re-lists every bucket and proves every bucket
+remains empty through the isolated S3 API. MinIO readiness, a local directory,
 or a manually edited manifest is not accepted as restore evidence.
 
 ## 5. Cleanup and emit the canonical record
@@ -392,9 +412,10 @@ Bind the printed digest into `storage.backup_restore_evidence_sha256`. The
 acceptance and operational renderer/status commands must receive this exact
 file through `--backup-restore-evidence-file`; they reject a noncanonical file,
 source/release/image/schema mismatch, unequal source/restored state, included
-Secret values, nonzero capacity/worker observations, or incomplete cleanup.
+Secret values, nonzero capacity/worker observations, or incomplete container
+or private-network cleanup.
 
-Retain the dump, every MinIO payload, both source/restored manifests, the
+Retain the dump, empty-bucket listings, both source/restored manifests, the
 Secret-key inventory, pre/post shadow status, storage inventory, and the
 canonical result under the owner-only evidence root. They are the restorable
 backup and its proof, not temporary QA output.

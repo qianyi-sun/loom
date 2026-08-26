@@ -179,6 +179,13 @@ def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
             args.trusted_release_file,
             args.trusted_release_sha256,
         )
+        suffix = args.trusted_release_sha256[:12]
+        if (
+            args.isolated_postgres_name != f"loom-personal-dev-pg-restore-{suffix}"
+            or args.isolated_minio_name != f"loom-personal-dev-minio-restore-{suffix}"
+            or args.isolated_network_name != f"loom-personal-dev-restore-{suffix}"
+        ):
+            raise ValueError("isolated restore identity is not release-bound")
         _assert_isolated_restore_cleanup(args)
         value = build_personal_dev_backup_restore_evidence(
             profile=profile,
@@ -206,6 +213,7 @@ def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
             allow_nan=False,
         )
         digest = hashlib.sha256(payload.encode("ascii")).hexdigest()
+        _assert_isolated_restore_cleanup(args)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         sys.stderr.write(_EVIDENCE_ERROR)
         return 2
