@@ -228,7 +228,7 @@ class _NetworkInput(_StrictModel):
     public_origin: str
     ingress_class_name: str
     ingress_cluster_issuer: str
-    ingress_controller_source_cidrs: list[str] = Field(min_length=1, max_length=32)
+    ingress_controller_source_cidrs: list[str] = Field(default_factory=list, max_length=32)
     kubernetes_api_cidr: str
     kubernetes_api_port: int = Field(ge=1, le=65535)
     dns_namespace: str
