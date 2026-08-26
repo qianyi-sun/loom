@@ -37,6 +37,41 @@ loom_oldlab_fail_readback() {
   exit 1
 }
 
+loom_oldlab_live_partition_is_exact() {
+  local expected
+  local field
+  local live_nodes
+  local node
+  local nodes_expression=""
+  local partition_state
+
+  partition_state="$(scontrol show partition "$PARTITION" -o)" || return 1
+  for expected in \
+    "PartitionName=$PARTITION" \
+    "AllowGroups=loom-rollout" \
+    "Default=NO" \
+    "MaxTime=2-00:00:00" \
+    "PriorityTier=100" \
+    "OverSubscribe=NO" \
+    "State=UP"; do
+    grep -E "(^|[[:space:]])$expected([[:space:]]|$)" \
+      <<<"$partition_state" >/dev/null || return 1
+  done
+  for field in $partition_state; do
+    case "$field" in
+      Nodes=*) nodes_expression="${field#Nodes=}" ;;
+    esac
+  done
+  [ -n "$nodes_expression" ] || return 1
+  live_nodes="$(scontrol show hostnames "$nodes_expression")" || return 1
+  [ "$live_nodes" = "$EXPECTED_NODES" ] || return 1
+  for node in trt-eai-oldlab-3 trt-eai-oldlab-4 trt-eai-oldlab-5; do
+    scontrol show node "$node" -o \
+      | grep -E '(^| )Partitions=([^ ]*,)?loom-staging(,| )' >/dev/null \
+      || return 1
+  done
+}
+
 loom_oldlab_converge_partition() {
   local anchor_count
   local expected
@@ -103,6 +138,13 @@ loom_oldlab_converge_partition() {
   if [ "$(grep -Fxc "$PARTITION_LINE" "$CONFIG" || true)" != "1" ]; then
     loom_oldlab_fail_readback \
       "durable OLDLAB staging partition readback failed" "$partition_added"
+  fi
+  if [ "$partition_added" = "0" ] \
+    && ! loom_oldlab_live_partition_is_exact; then
+    if ! scontrol reconfigure; then
+      echo "error: Slurm rejected the canonical durable OLDLAB staging partition reload" >&2
+      exit 1
+    fi
   fi
   if ! partition_state="$(scontrol show partition "$PARTITION" -o)"; then
     loom_oldlab_fail_readback \
