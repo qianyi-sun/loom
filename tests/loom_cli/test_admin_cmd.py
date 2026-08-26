@@ -1443,6 +1443,59 @@ def test_execution_finance_status_shows_budget_reservation_and_bill_overhead(
     assert "billed=1000000 allocated=250000 overhead=750000" in out
 
 
+def test_execution_provisioning_status_distinguishes_capacity_states(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, *, headers, params, timeout):  # type: ignore[no-untyped-def]
+        assert url == "http://cp:8080/admin/execution-capacity/status"
+        assert headers["Authorization"] == "Bearer admin-secret"
+        assert params == {"pool_id": "nebius-cpu"}
+        assert timeout == 10.0
+        return _StubResponse(
+            200,
+            json_data={
+                "targets": [
+                    {
+                        "target_id": "nebius-eu",
+                        "pool_id": "nebius-cpu",
+                        "policy": {"max_pending_jobs": 20},
+                        "observation": {
+                            "is_fresh": True,
+                            "provider_capacity_state": "available",
+                            "autoscaler_state": "scaling",
+                            "provider_used_nodes": 8,
+                            "provider_quota_nodes": 20,
+                            "pending_jobs": 3,
+                        },
+                        "command_backlog": 2,
+                        "authorization_counts": {"authorized": 1, "running": 4},
+                        "blockers": [],
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "provisioning-status",
+            "--pool-id",
+            "nebius-cpu",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "nebius-eu pool=nebius-cpu fresh=True" in out
+    assert "provider=available autoscaler=scaling nodes=8/20" in out
+    assert "pending=3/20 commands=2 authorized=1 running=4 blockers=-" in out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # loom admin environment-state apply/check
 # ──────────────────────────────────────────────────────────────────────

@@ -13,11 +13,14 @@ from loom.db.schema import (
     AdminAuditEvent,
     ExecutionAdmissionPolicy,
     ExecutionBudgetPolicy,
+    ExecutionCapacityObservation,
+    ExecutionCapacityPolicy,
     ExecutionCostReservation,
     ExecutionCostReservationDebit,
     ExecutionNodeCostAllocation,
     ExecutionNodeCostRecord,
     ExecutionPriceSnapshot,
+    ExecutionProvisioningAuthorization,
     ExecutionTargetPriceBinding,
     ServiceExecutionClass,
     ServiceExecutionTarget,
@@ -67,6 +70,9 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     with session_factory() as s:
+        s.execute(delete(ExecutionProvisioningAuthorization))
+        s.execute(delete(ExecutionCapacityObservation))
+        s.execute(delete(ExecutionCapacityPolicy))
         s.execute(delete(ExecutionNodeCostAllocation))
         s.execute(delete(ExecutionNodeCostRecord))
         s.execute(delete(ExecutionCostReservationDebit))
@@ -91,6 +97,9 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
         yield
     finally:
         with session_factory() as s:
+            s.execute(delete(ExecutionProvisioningAuthorization))
+            s.execute(delete(ExecutionCapacityObservation))
+            s.execute(delete(ExecutionCapacityPolicy))
             s.execute(delete(ExecutionNodeCostAllocation))
             s.execute(delete(ExecutionNodeCostRecord))
             s.execute(delete(ExecutionCostReservationDebit))
@@ -400,6 +409,97 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
             assert budget.status_code == 200, budget.text
             assert budget.json()["version"] == 1
 
+        capacity_policy = client.put(
+            "/admin/execution-capacity-policies/nebius-finance-api",
+            headers=headers,
+            json={
+                "enabled": True,
+                "max_nodes": 20,
+                "max_vcpu_millis": 1_280_000,
+                "max_memory_mib": 5_242_880,
+                "max_storage_mib": 20_971_520,
+                "node_cpu_millis": 64_000,
+                "node_memory_mib": 262_144,
+                "node_storage_mib": 1_048_576,
+                "max_pending_jobs": 20,
+                "max_unschedulable_jobs": 2,
+                "max_image_pull_backoff_jobs": 2,
+                "max_create_per_minute": 10,
+                "observation_max_age_seconds": 300,
+                "reason": "bounded Nebius provisioning",
+            },
+        )
+        assert capacity_policy.status_code == 200, capacity_policy.text
+        assert capacity_policy.json()["version"] == 1
+
+        observation_payload = {
+            "target_id": "nebius-finance-api",
+            "source": "nebius-capacity-export",
+            "source_version": "snapshot-1",
+            "observed_at": now.isoformat(),
+            "provider_capacity_state": "available",
+            "provider_capacity_reason": None,
+            "autoscaler_state": "ready",
+            "autoscaler_reason": None,
+            "provider_quota_nodes": 20,
+            "provider_quota_vcpu_millis": 1_280_000,
+            "provider_quota_memory_mib": 5_242_880,
+            "provider_quota_storage_mib": 20_971_520,
+            "provider_used_nodes": 1,
+            "provider_used_vcpu_millis": 64_000,
+            "provider_used_memory_mib": 262_144,
+            "provider_used_storage_mib": 1_048_576,
+            "active_nodes": 1,
+            "provisioned_vcpu_millis": 64_000,
+            "provisioned_memory_mib": 262_144,
+            "provisioned_storage_mib": 1_048_576,
+            "allocatable_cpu_millis": 62_000,
+            "allocatable_memory_mib": 250_000,
+            "allocatable_storage_mib": 1_000_000,
+            "requested_cpu_millis": 20_000,
+            "requested_memory_mib": 100_000,
+            "requested_storage_mib": 200_000,
+            "pending_jobs": 1,
+            "unschedulable_jobs": 0,
+            "image_pull_backoff_jobs": 0,
+            "pending_reasons": {"autoscaler_delay": 1},
+        }
+        capacity_observation = client.post(
+            "/admin/execution-capacity-observations",
+            headers=headers,
+            json=observation_payload,
+        )
+        assert capacity_observation.status_code == 200, capacity_observation.text
+        assert capacity_observation.json()["created"] is True
+        capacity_replay = client.post(
+            "/admin/execution-capacity-observations",
+            headers=headers,
+            json=observation_payload,
+        )
+        assert capacity_replay.status_code == 200, capacity_replay.text
+        assert capacity_replay.json()["created"] is False
+        capacity_conflict = client.post(
+            "/admin/execution-capacity-observations",
+            headers=headers,
+            json={**observation_payload, "pending_jobs": 2},
+        )
+        assert capacity_conflict.status_code == 400, capacity_conflict.text
+        assert "different contents" in capacity_conflict.json()["detail"]
+
+        capacity_status = client.get(
+            "/admin/execution-capacity/status?pool_id=nebius-finance-api-pool",
+            headers=headers,
+        )
+        assert capacity_status.status_code == 200, capacity_status.text
+        capacity_target = capacity_status.json()["targets"][0]
+        assert capacity_target["observation"]["is_fresh"] is True
+        assert capacity_target["observation"]["pending_reasons"] == {"autoscaler_delay": 1}
+        assert capacity_target["observation"]["provider_quota_nodes_headroom"] == 19
+        assert capacity_target["observation"]["allocatable_cpu_millis_free"] == 42_000
+        assert capacity_target["command_backlog"] == 0
+        assert capacity_target["recent_authorizations"] == []
+        assert capacity_target["blockers"] == []
+
         node_cost = client.post(
             "/admin/execution-node-cost-records",
             headers=headers,
@@ -470,6 +570,8 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
             "execution.price_snapshot.recorded",
             "execution.target_price_binding.upserted",
             "execution.budget_policy.upserted",
+            "execution.capacity_policy.upserted",
+            "execution.capacity_observation.recorded",
             "execution.node_cost.recorded",
         }.issubset(actions)
     engine.dispose()

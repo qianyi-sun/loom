@@ -209,6 +209,40 @@ finance-status` exposes the same budgets, reservations, billed allocations,
 and overhead. Every mutation writes `admin_audit_events`; none of these
 repository surfaces calls Nebius or changes live routing.
 
+Nebius Job creation has a third independent boundary for provisioning and
+provider quota. An enabled target policy fixes the maximum node, vCPU, memory,
+and storage footprint, the accepted node shape, outstanding Pending,
+Unschedulable, and image-pull-backoff counts, create rate, and maximum
+observation age. Immutable `execution_capacity_observations` retain provider
+quota and usage, physical-capacity state, Kubernetes provisioned/allocatable/
+requested resources, Pending reasons, autoscaler state, source/version, and a
+canonical digest. Configuration is never upgraded into capacity evidence.
+
+Immediately before a Nebius actuator calls Kubernetes `create`, it locks the
+target policy and requires the latest observation to be fresh. Admission adds
+the Pod request from the lease-bound finance envelope to every authorization
+created after that observation, accounts for currently free allocatable
+resources, and conservatively calculates any additional nodes from the accepted
+node shape. Both operator maxima and observed provider quota must admit the
+projected nodes, vCPU, memory, and storage. Scaling is refused when physical
+capacity is insufficient or unknown, or when the autoscaler is stalled or
+unknown. Existing fresh allocatable capacity does not require theoretical
+provider scale headroom.
+
+Each successful decision is an immutable, lease-bound
+`execution_provisioning_authorizations` row. Database transitions retain
+whether it is authorized, Pending, Unschedulable, image-pull blocked, running,
+or released. Concurrent actuators serialize on the target policy, so create
+rate and outstanding-Pending limits cannot both admit the same remaining slot.
+Capacity blockers defer the durable create command for bounded retry rather
+than calling Kubernetes or corrupting the lease. The authenticated
+`execution-capacity-policies`, `execution-capacity-observations`, and
+`execution-capacity/status` admin APIs plus `loom admin worker-pools
+provisioning-status` expose quota, allocatable/requested state, Pending reasons,
+autoscaler state, command backlog, authorization counts, and distinct refusal
+reasons. These repository surfaces accept persisted observation evidence; they
+do not query or mutate Nebius themselves.
+
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
@@ -232,7 +266,7 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113` through `0118` persist the complete provider-neutral
+Migrations `0113` through `0119` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;

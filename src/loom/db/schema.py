@@ -4427,6 +4427,152 @@ class ExecutionNodeCostAllocation(Base):
     )
 
 
+class ExecutionCapacityPolicy(Base):
+    """Target-scoped hard limits for Nebius Job provisioning."""
+
+    __tablename__ = "execution_capacity_policies"
+
+    target_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("execution_targets.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    max_nodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_vcpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    node_cpu_millis: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_memory_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_storage_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_pending_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_unschedulable_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_image_pull_backoff_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_create_per_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    observation_max_age_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionCapacityObservation(Base):
+    """Immutable provider, cluster, and autoscaler capacity readback."""
+
+    __tablename__ = "execution_capacity_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "target_id",
+            "source",
+            "source_version",
+            name="execution_capacity_observations_source_uidx",
+        ),
+        UniqueConstraint(
+            "target_id",
+            "observed_at",
+            name="execution_capacity_observations_target_time_uidx",
+        ),
+        Index(
+            "execution_capacity_observations_target_time_idx",
+            "target_id",
+            "observed_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    provider_capacity_state: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_capacity_reason: Mapped[str | None] = mapped_column(Text)
+    autoscaler_state: Mapped[str] = mapped_column(Text, nullable=False)
+    autoscaler_reason: Mapped[str | None] = mapped_column(Text)
+    provider_quota_nodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_quota_vcpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_quota_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_quota_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_used_nodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_used_vcpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_used_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_used_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active_nodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    provisioned_vcpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provisioned_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provisioned_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocatable_cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocatable_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocatable_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pending_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    unschedulable_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_pull_backoff_jobs: Mapped[int] = mapped_column(Integer, nullable=False)
+    pending_reasons_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observation_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionProvisioningAuthorization(Base):
+    """One durable pre-Kubernetes-create capacity authorization."""
+
+    __tablename__ = "execution_provisioning_authorizations"
+    __table_args__ = (
+        Index(
+            "execution_provisioning_authorizations_target_state_idx",
+            "target_id",
+            "state",
+            "authorized_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    lease_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_leases.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    observation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_capacity_observations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    policy_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_cpu_millis: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_memory_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_storage_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    incremental_nodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    incremental_vcpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    incremental_memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    incremental_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    decision_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    authorization_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'authorized'"))
+    authorized_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
 class ServiceExecutionCommand(Base):
     """At-least-once durable actuator command."""
 

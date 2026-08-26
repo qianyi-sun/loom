@@ -1127,6 +1127,59 @@ def _execution_finance_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _execution_provisioning_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-capacity/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution provisioning capacity:\n")
+    targets = data.get("targets", [])
+    if not targets:
+        sys.stdout.write("  no Nebius execution targets\n")
+        return 0
+    for row in targets:
+        observation = row.get("observation") or {}
+        policy = row.get("policy") or {}
+        counts = row.get("authorization_counts") or {}
+        blockers = row.get("blockers") or []
+        sys.stdout.write(
+            f"  {row['target_id']} pool={row['pool_id']} "
+            f"fresh={observation.get('is_fresh', False)} "
+            f"provider={observation.get('provider_capacity_state', 'unknown')} "
+            f"autoscaler={observation.get('autoscaler_state', 'unknown')} "
+            f"nodes={observation.get('provider_used_nodes', '-')}/"
+            f"{observation.get('provider_quota_nodes', '-')} "
+            f"pending={observation.get('pending_jobs', '-')}/"
+            f"{policy.get('max_pending_jobs', '-')} "
+            f"commands={row.get('command_backlog', 0)} "
+            f"authorized={counts.get('authorized', 0)} "
+            f"running={counts.get('running', 0)} "
+            f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+        )
+    return 0
+
+
 def _format_autoscaler_blocked_details(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
@@ -2414,6 +2467,24 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_finance_status.set_defaults(handler=_execution_finance_status)
+
+    p_provisioning_status = worker_pools_sub.add_parser(
+        "provisioning-status",
+        help="Show Nebius quota, allocatable, Pending, autoscaler, and create authority.",
+    )
+    _add_common_args(p_provisioning_status)
+    p_provisioning_status.add_argument(
+        "--pool-id",
+        default=None,
+        help="Limit provisioning capacity to one logical pool.",
+    )
+    p_provisioning_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_provisioning_status.set_defaults(handler=_execution_provisioning_status)
 
     p_env_state = sub.add_parser(
         "environment-state",

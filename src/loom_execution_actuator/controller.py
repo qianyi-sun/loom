@@ -9,6 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import ServiceExecutionLease
+from loom_control_plane.execution_capacity import (
+    ExecutionProvisioningBlockedError,
+    reserve_execution_provisioning,
+)
 from loom_control_plane.service_execution import (
     ClaimedExecutionCommand,
     ServiceExecutionConflict,
@@ -188,6 +192,9 @@ class ExecutionActuator:
     async def _create(
         self, lease: ServiceExecutionLease, *, now: datetime
     ) -> KubernetesJobObservation:
+        async with self._sessions() as session:
+            await reserve_execution_provisioning(session, lease_id=lease.id, now=now)
+            await session.commit()
         existing = await self._get(lease)
         if existing is not None:
             self._validate_observation(lease, existing)
@@ -258,6 +265,10 @@ class ExecutionActuator:
             delay = 5
             max_deliveries = 100
             code = "output_pending"
+        elif isinstance(exc, ExecutionProvisioningBlockedError):
+            delay = exc.retry_after_seconds
+            max_deliveries = 100
+            code = exc.reason
         elif isinstance(exc, KubernetesApiError):
             status_class = (
                 f"{exc.status_code // 100}xx" if exc.status_code is not None else "transport"
@@ -332,7 +343,12 @@ class ExecutionActuator:
                 },
                 now=now,
             )
-        except (ActuatorContractError, KubernetesApiError, ServiceExecutionConflict) as exc:
+        except (
+            ActuatorContractError,
+            ExecutionProvisioningBlockedError,
+            KubernetesApiError,
+            ServiceExecutionConflict,
+        ) as exc:
             await self._defer(command, exc, now=now)
 
     async def reconcile_full_once(self, *, now: datetime | None = None) -> int:

@@ -22,11 +22,14 @@ from loom.db.schema import (
     ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
+    ExecutionCapacityObservation,
+    ExecutionCapacityPolicy,
     ExecutionCostReservation,
     ExecutionCostReservationDebit,
     ExecutionNodeCostAllocation,
     ExecutionNodeCostRecord,
     ExecutionPriceSnapshot,
+    ExecutionProvisioningAuthorization,
     ExecutionTargetPriceBinding,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
@@ -60,6 +63,12 @@ from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
+from loom_control_plane.execution_capacity import (
+    create_execution_capacity_observation,
+    fetch_execution_capacity_status,
+    reserve_execution_provisioning,
+    upsert_execution_capacity_policy,
+)
 from loom_control_plane.execution_finance import (
     create_execution_price_snapshot,
     record_execution_node_cost,
@@ -126,6 +135,15 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 ExecutionCostReservation.trial_id.in_(owned_trials)
             )
             await session.execute(
+                delete(ExecutionProvisioningAuthorization).where(
+                    ExecutionProvisioningAuthorization.lease_id.in_(
+                        select(ServiceExecutionLease.id).where(
+                            ServiceExecutionLease.trial_id.in_(owned_trials)
+                        )
+                    )
+                )
+            )
+            await session.execute(
                 delete(ExecutionNodeCostAllocation).where(
                     ExecutionNodeCostAllocation.cost_reservation_id.in_(owned_cost_reservations)
                 )
@@ -166,6 +184,16 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
                 delete(ExecutionBudgetPolicy).where(
                     (ExecutionBudgetPolicy.scope_key == "nebius-cpu")
                     | (ExecutionBudgetPolicy.scope_key.like("nebius-staging-%"))
+                )
+            )
+            await session.execute(
+                delete(ExecutionCapacityObservation).where(
+                    ExecutionCapacityObservation.target_id.like("nebius-staging-%")
+                )
+            )
+            await session.execute(
+                delete(ExecutionCapacityPolicy).where(
+                    ExecutionCapacityPolicy.target_id.like("nebius-staging-%")
                 )
             )
             await session.execute(
@@ -494,6 +522,58 @@ async def _seed_ready_trial(
             reason="service execution test",
             now=now,
         )
+    await upsert_execution_capacity_policy(
+        session,
+        target_id=target.target_id,
+        enabled=True,
+        max_nodes=20,
+        max_vcpu_millis=1_280_000,
+        max_memory_mib=5_242_880,
+        max_storage_mib=20_971_520,
+        node_cpu_millis=64_000,
+        node_memory_mib=262_144,
+        node_storage_mib=1_048_576,
+        max_pending_jobs=100,
+        max_unschedulable_jobs=10,
+        max_image_pull_backoff_jobs=10,
+        max_create_per_minute=100,
+        observation_max_age_seconds=900,
+        reason="service execution test",
+        now=now,
+    )
+    await create_execution_capacity_observation(
+        session,
+        target_id=target.target_id,
+        source="service-execution-test",
+        source_version=target.target_id,
+        observed_at=now,
+        provider_capacity_state="available",
+        provider_capacity_reason=None,
+        autoscaler_state="ready",
+        autoscaler_reason=None,
+        provider_quota_nodes=20,
+        provider_quota_vcpu_millis=1_280_000,
+        provider_quota_memory_mib=5_242_880,
+        provider_quota_storage_mib=20_971_520,
+        provider_used_nodes=1,
+        provider_used_vcpu_millis=64_000,
+        provider_used_memory_mib=262_144,
+        provider_used_storage_mib=1_048_576,
+        active_nodes=1,
+        provisioned_vcpu_millis=64_000,
+        provisioned_memory_mib=262_144,
+        provisioned_storage_mib=1_048_576,
+        allocatable_cpu_millis=64_000,
+        allocatable_memory_mib=262_144,
+        allocatable_storage_mib=1_048_576,
+        requested_cpu_millis=0,
+        requested_memory_mib=0,
+        requested_storage_mib=0,
+        pending_jobs=0,
+        unschedulable_jobs=0,
+        image_pull_backoff_jobs=0,
+        pending_reasons={},
+    )
     return trial_id, target
 
 
@@ -766,6 +846,293 @@ async def test_nebius_paid_execution_fails_closed_without_price_or_during_emerge
                 await _reserve(session, trial_id=trial_id, target=target, now=now)
             await session.rollback()
             assert await session.scalar(select(func.count(ExecutionCostReservation.id))) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_reason"),
+    (
+        ("pending", "execution_capacity_pending_limit_exceeded"),
+        ("quota", "execution_capacity_provider_quota_nodes_exceeded"),
+        ("physical", "execution_capacity_physical_capacity_unavailable"),
+        ("stale", "execution_capacity_observation_stale"),
+    ),
+)
+async def test_actuator_defers_create_with_distinct_capacity_blocker(
+    postgres_url: str,
+    case: str,
+    expected_reason: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await upsert_execution_capacity_policy(
+                session,
+                target_id=target.target_id,
+                enabled=True,
+                max_nodes=20,
+                max_vcpu_millis=1_280_000,
+                max_memory_mib=5_242_880,
+                max_storage_mib=20_971_520,
+                node_cpu_millis=64_000,
+                node_memory_mib=262_144,
+                node_storage_mib=1_048_576,
+                max_pending_jobs=1 if case == "pending" else 100,
+                max_unschedulable_jobs=10,
+                max_image_pull_backoff_jobs=10,
+                max_create_per_minute=100,
+                observation_max_age_seconds=10 if case == "stale" else 900,
+                reason=f"{case} blocker test",
+                now=now + timedelta(seconds=1),
+            )
+            quota_nodes = 1 if case == "quota" else 20
+            quota_vcpu = 64_000 if case == "quota" else 1_280_000
+            quota_memory = 262_144 if case == "quota" else 5_242_880
+            quota_storage = 1_048_576 if case == "quota" else 20_971_520
+            cluster_requested = 64_000 if case in {"quota", "physical"} else 0
+            await create_execution_capacity_observation(
+                session,
+                target_id=target.target_id,
+                source="service-execution-test",
+                source_version=f"{target.target_id}-{case}-blocker",
+                observed_at=now + timedelta(seconds=1),
+                provider_capacity_state=("insufficient" if case == "physical" else "available"),
+                provider_capacity_reason=(
+                    "provider reports no physical placement" if case == "physical" else None
+                ),
+                autoscaler_state="ready",
+                autoscaler_reason=None,
+                provider_quota_nodes=quota_nodes,
+                provider_quota_vcpu_millis=quota_vcpu,
+                provider_quota_memory_mib=quota_memory,
+                provider_quota_storage_mib=quota_storage,
+                provider_used_nodes=1,
+                provider_used_vcpu_millis=64_000,
+                provider_used_memory_mib=262_144,
+                provider_used_storage_mib=1_048_576,
+                active_nodes=1,
+                provisioned_vcpu_millis=64_000,
+                provisioned_memory_mib=262_144,
+                provisioned_storage_mib=1_048_576,
+                allocatable_cpu_millis=64_000,
+                allocatable_memory_mib=262_144,
+                allocatable_storage_mib=1_048_576,
+                requested_cpu_millis=cluster_requested,
+                requested_memory_mib=(262_144 if cluster_requested else 0),
+                requested_storage_mib=(1_048_576 if cluster_requested else 0),
+                pending_jobs=1 if case == "pending" else 0,
+                unschedulable_jobs=0,
+                image_pull_backoff_jobs=0,
+                pending_reasons={"autoscaler_delay": 1} if case == "pending" else {},
+            )
+            await session.commit()
+
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+                runtime_class_name="loom-sandbox",
+            ),
+            controller_id="capacity-blocker-test",
+            command_lease_seconds=5,
+        )
+        actuator_time = now + timedelta(seconds=20 if case == "stale" else 2)
+        assert await actuator.run_commands_once(now=actuator_time) == 1
+        assert kubernetes.create_count == 0
+
+        async with sessions() as session:
+            command = (
+                await session.execute(
+                    select(ServiceExecutionCommand).where(
+                        ServiceExecutionCommand.lease_id == lease.id,
+                        ServiceExecutionCommand.command_type == "create",
+                    )
+                )
+            ).scalar_one()
+            assert command.state == "pending"
+            assert command.last_error_code == expected_reason
+            assert (
+                await session.scalar(
+                    select(func.count(ExecutionProvisioningAuthorization.id)).where(
+                        ExecutionProvisioningAuthorization.lease_id == lease.id
+                    )
+                )
+                == 0
+            )
+            status = await fetch_execution_capacity_status(
+                session,
+                pool_id=target.logical_pool_id,
+                now=actuator_time,
+            )
+            targets = status["targets"]
+            assert isinstance(targets, list)
+            target_status = targets[0]
+            assert isinstance(target_status, dict)
+            blockers = target_status["blockers"]
+            assert isinstance(blockers, list)
+            assert expected_reason in blockers
+    finally:
+        await engine.dispose()
+
+
+async def test_provisioning_pending_limit_is_race_safe_across_actuators(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    kubernetes = _FakeKubernetesJobApi()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            first_trial_id, target = await _seed_ready_trial(session, now=now)
+            first_trial = await session.get(Trial, first_trial_id)
+            assert first_trial is not None
+            second_trial_id = uuid4()
+            session.add(
+                Trial(
+                    id=second_trial_id,
+                    team_id=first_trial.team_id,
+                    task_id=first_trial.task_id,
+                    config={"agent": {"name": "test"}},
+                    requires_caps={"os": "linux", "cpu_arch": "x86_64"},
+                    state="queued",
+                    attempt_count=0,
+                )
+            )
+            first_lease = await _reserve(
+                session,
+                trial_id=first_trial_id,
+                target=target,
+                now=now,
+            )
+            second_lease = await _reserve(
+                session,
+                trial_id=second_trial_id,
+                target=target,
+                now=now,
+            )
+            await upsert_execution_capacity_policy(
+                session,
+                target_id=target.target_id,
+                enabled=True,
+                max_nodes=20,
+                max_vcpu_millis=1_280_000,
+                max_memory_mib=5_242_880,
+                max_storage_mib=20_971_520,
+                node_cpu_millis=64_000,
+                node_memory_mib=262_144,
+                node_storage_mib=1_048_576,
+                max_pending_jobs=1,
+                max_unschedulable_jobs=10,
+                max_image_pull_backoff_jobs=10,
+                max_create_per_minute=100,
+                observation_max_age_seconds=900,
+                reason="one pending create at a time",
+                now=now + timedelta(seconds=1),
+            )
+            await create_execution_capacity_observation(
+                session,
+                target_id=target.target_id,
+                source="service-execution-test",
+                source_version=f"{target.target_id}-race",
+                observed_at=now + timedelta(seconds=1),
+                provider_capacity_state="available",
+                provider_capacity_reason=None,
+                autoscaler_state="ready",
+                autoscaler_reason=None,
+                provider_quota_nodes=20,
+                provider_quota_vcpu_millis=1_280_000,
+                provider_quota_memory_mib=5_242_880,
+                provider_quota_storage_mib=20_971_520,
+                provider_used_nodes=1,
+                provider_used_vcpu_millis=64_000,
+                provider_used_memory_mib=262_144,
+                provider_used_storage_mib=1_048_576,
+                active_nodes=1,
+                provisioned_vcpu_millis=64_000,
+                provisioned_memory_mib=262_144,
+                provisioned_storage_mib=1_048_576,
+                allocatable_cpu_millis=64_000,
+                allocatable_memory_mib=262_144,
+                allocatable_storage_mib=1_048_576,
+                requested_cpu_millis=0,
+                requested_memory_mib=0,
+                requested_storage_mib=0,
+                pending_jobs=0,
+                unschedulable_jobs=0,
+                image_pull_backoff_jobs=0,
+                pending_reasons={},
+            )
+            await session.commit()
+
+        runtime = ExecutionTargetRuntime(
+            target_id=target.target_id,
+            namespace=target.namespace_name,
+            runtime_class_name="loom-sandbox",
+        )
+        actuators = (
+            ExecutionActuator(
+                sessions=sessions,
+                kubernetes=kubernetes,
+                target=runtime,
+                controller_id="capacity-race-a",
+                command_limit=1,
+                command_lease_seconds=5,
+            ),
+            ExecutionActuator(
+                sessions=sessions,
+                kubernetes=kubernetes,
+                target=runtime,
+                controller_id="capacity-race-b",
+                command_limit=1,
+                command_lease_seconds=5,
+            ),
+        )
+        assert sorted(
+            await asyncio.gather(
+                *(item.run_commands_once(now=now + timedelta(seconds=2)) for item in actuators)
+            )
+        ) == [1, 1]
+        assert kubernetes.create_count == 1
+
+        async with sessions() as session:
+            authorizations = (
+                (
+                    await session.execute(
+                        select(ExecutionProvisioningAuthorization).where(
+                            ExecutionProvisioningAuthorization.lease_id.in_(
+                                (first_lease.id, second_lease.id)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(authorizations) == 1
+            commands = (
+                (
+                    await session.execute(
+                        select(ServiceExecutionCommand).where(
+                            ServiceExecutionCommand.lease_id.in_((first_lease.id, second_lease.id)),
+                            ServiceExecutionCommand.command_type == "create",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert {row.state for row in commands} == {"acknowledged", "pending"}
+            blocked = next(row for row in commands if row.state == "pending")
+            assert blocked.last_error_code == "execution_capacity_pending_limit_exceeded"
     finally:
         await engine.dispose()
 
@@ -2151,11 +2518,34 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
                     )
                 )
             ).scalar_one()
+            capacity_authorization = (
+                await session.execute(
+                    select(ExecutionProvisioningAuthorization).where(
+                        ExecutionProvisioningAuthorization.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
             assert persisted is not None
             assert persisted.job_uid == f"job-uid-{lease.job_name}"
             assert persisted.observed_state == "creating"
             assert persisted.last_reconciled_at == now
             assert create_command.state == "acknowledged"
+            assert capacity_authorization.state == "pending"
+            assert capacity_authorization.decision_reason == "existing_allocatable"
+            capacity_policy = await session.get(ExecutionCapacityPolicy, target.target_id)
+            assert capacity_policy is not None
+            capacity_policy.enabled = False
+            await session.commit()
+
+        async with sessions() as session:
+            replayed_authorization = await reserve_execution_provisioning(
+                session,
+                lease_id=lease.id,
+                now=now + timedelta(milliseconds=1),
+            )
+            assert replayed_authorization is not None
+            assert replayed_authorization.id == capacity_authorization.id
+            await session.rollback()
 
         restarted = ExecutionActuator(
             sessions=sessions,
@@ -2193,6 +2583,15 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             assert persisted.output_commit_state == "unavailable"
             assert persisted.output_unavailable_reason == "cleanup_deadline_elapsed"
             assert persisted.deleted_at == now + timedelta(minutes=5, seconds=3)
+            capacity_authorization = (
+                await session.execute(
+                    select(ExecutionProvisioningAuthorization).where(
+                        ExecutionProvisioningAuthorization.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
+            assert capacity_authorization.state == "released"
+            assert capacity_authorization.released_at is not None
     finally:
         await engine.dispose()
 

@@ -21,6 +21,11 @@ from loom_control_plane.execution_admission import (
     fetch_execution_admission_status,
     upsert_execution_admission_policy,
 )
+from loom_control_plane.execution_capacity import (
+    create_execution_capacity_observation,
+    fetch_execution_capacity_status,
+    upsert_execution_capacity_policy,
+)
 from loom_control_plane.execution_finance import (
     create_execution_price_snapshot,
     fetch_execution_finance_status,
@@ -261,6 +266,67 @@ class _ExecutionCostSettlementPayload(BaseModel):
     billing_complete_through: datetime
 
     @field_validator("billing_complete_through", mode="before")
+    @classmethod
+    def _parse_datetime(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+
+class _ExecutionCapacityPolicyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool = False
+    max_nodes: int = Field(gt=0)
+    max_vcpu_millis: int = Field(gt=0)
+    max_memory_mib: int = Field(gt=0)
+    max_storage_mib: int = Field(gt=0)
+    node_cpu_millis: int = Field(gt=0)
+    node_memory_mib: int = Field(gt=0)
+    node_storage_mib: int = Field(gt=0)
+    max_pending_jobs: int = Field(gt=0)
+    max_unschedulable_jobs: int = Field(ge=0)
+    max_image_pull_backoff_jobs: int = Field(ge=0)
+    max_create_per_minute: int = Field(gt=0)
+    observation_max_age_seconds: int = Field(ge=10, le=900)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class _ExecutionCapacityObservationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    target_id: str = Field(min_length=1, max_length=120)
+    source: str = Field(min_length=1, max_length=120)
+    source_version: str = Field(min_length=1, max_length=160)
+    observed_at: datetime
+    provider_capacity_state: Literal["available", "insufficient", "unknown"]
+    provider_capacity_reason: str | None = Field(default=None, max_length=500)
+    autoscaler_state: Literal["ready", "scaling", "stalled", "unknown"]
+    autoscaler_reason: str | None = Field(default=None, max_length=500)
+    provider_quota_nodes: int = Field(gt=0)
+    provider_quota_vcpu_millis: int = Field(gt=0)
+    provider_quota_memory_mib: int = Field(gt=0)
+    provider_quota_storage_mib: int = Field(gt=0)
+    provider_used_nodes: int = Field(ge=0)
+    provider_used_vcpu_millis: int = Field(ge=0)
+    provider_used_memory_mib: int = Field(ge=0)
+    provider_used_storage_mib: int = Field(ge=0)
+    active_nodes: int = Field(ge=0)
+    provisioned_vcpu_millis: int = Field(ge=0)
+    provisioned_memory_mib: int = Field(ge=0)
+    provisioned_storage_mib: int = Field(ge=0)
+    allocatable_cpu_millis: int = Field(ge=0)
+    allocatable_memory_mib: int = Field(ge=0)
+    allocatable_storage_mib: int = Field(ge=0)
+    requested_cpu_millis: int = Field(ge=0)
+    requested_memory_mib: int = Field(ge=0)
+    requested_storage_mib: int = Field(ge=0)
+    pending_jobs: int = Field(ge=0)
+    unschedulable_jobs: int = Field(ge=0)
+    image_pull_backoff_jobs: int = Field(ge=0)
+    pending_reasons: dict[str, int]
+
+    @field_validator("observed_at", mode="before")
     @classmethod
     def _parse_datetime(cls, value: object) -> object:
         if isinstance(value, str):
@@ -1068,6 +1134,124 @@ async def get_execution_finance_status(
     await _require_admin_scope(request, authorization, "admin:worker_pools")
     async with request.app.state.session_factory() as session:
         return await fetch_execution_finance_status(session, pool_id=pool_id)
+
+
+@router.put("/execution-capacity-policies/{target_id}")
+async def put_execution_capacity_policy(
+    target_id: str,
+    request: Request,
+    payload: _ExecutionCapacityPolicyPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_execution_capacity_policy(
+                session,
+                target_id=target_id,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.capacity_policy.upserted",
+                    target_type="execution_capacity_policy",
+                    target_id=row.target_id,
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "enabled": row.enabled,
+                        "max_nodes": row.max_nodes,
+                        "max_vcpu_millis": row.max_vcpu_millis,
+                        "max_memory_mib": row.max_memory_mib,
+                        "max_storage_mib": row.max_storage_mib,
+                        "max_pending_jobs": row.max_pending_jobs,
+                        "max_unschedulable_jobs": row.max_unschedulable_jobs,
+                        "max_image_pull_backoff_jobs": row.max_image_pull_backoff_jobs,
+                        "max_create_per_minute": row.max_create_per_minute,
+                        "observation_max_age_seconds": row.observation_max_age_seconds,
+                        "version": row.version,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "target_id": row.target_id,
+                "enabled": row.enabled,
+                "max_nodes": row.max_nodes,
+                "max_vcpu_millis": row.max_vcpu_millis,
+                "max_memory_mib": row.max_memory_mib,
+                "max_storage_mib": row.max_storage_mib,
+                "node_cpu_millis": row.node_cpu_millis,
+                "node_memory_mib": row.node_memory_mib,
+                "node_storage_mib": row.node_storage_mib,
+                "max_pending_jobs": row.max_pending_jobs,
+                "max_unschedulable_jobs": row.max_unschedulable_jobs,
+                "max_image_pull_backoff_jobs": row.max_image_pull_backoff_jobs,
+                "max_create_per_minute": row.max_create_per_minute,
+                "observation_max_age_seconds": row.observation_max_age_seconds,
+                "reason": row.reason,
+                "version": row.version,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/execution-capacity-observations")
+async def post_execution_capacity_observation(
+    request: Request,
+    payload: _ExecutionCapacityObservationPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row, created = await create_execution_capacity_observation(
+                session,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.capacity_observation.recorded",
+                    target_type="execution_capacity_observation",
+                    target_id=str(row.id),
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "created": created,
+                        "target_id": row.target_id,
+                        "source": row.source,
+                        "source_version": row.source_version,
+                        "provider_capacity_state": row.provider_capacity_state,
+                        "autoscaler_state": row.autoscaler_state,
+                        "observation_sha256": row.observation_sha256,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "created": created,
+                "target_id": row.target_id,
+                "source": row.source,
+                "source_version": row.source_version,
+                "observed_at": row.observed_at.isoformat(),
+                "provider_capacity_state": row.provider_capacity_state,
+                "autoscaler_state": row.autoscaler_state,
+                "observation_sha256": row.observation_sha256,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/execution-capacity/status")
+async def get_execution_capacity_status(
+    request: Request,
+    pool_id: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        return await fetch_execution_capacity_status(session, pool_id=pool_id)
 
 
 @router.get("/worker-pools/{pool_name}/prod-pressure")
