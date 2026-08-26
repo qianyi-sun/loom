@@ -299,17 +299,43 @@ for identity in sorted(identities):
 PY
 }
 
+assert_live_identity_delta() {
+  local previous_identities="$1"
+  local live_identities="$2"
+  local allowed_missing_identities="$3"
+  local live_missing_identities="$4"
+  local live_unexpected_identities="$5"
+  LC_ALL=C comm -23 "$previous_identities" "$live_identities" \
+    > "$live_missing_identities"
+  LC_ALL=C comm -13 "$previous_identities" "$live_identities" \
+    > "$live_unexpected_identities"
+  test ! -s "$live_unexpected_identities" || return 1
+  if test -s "$live_missing_identities"; then
+    cmp -s "$live_missing_identities" "$allowed_missing_identities" || return 1
+  fi
+}
+
 assert_forward_identity_contract() {
+  local allowed_missing_identities
   local current_identities
   local live_cluster_inventory
   local live_identities
+  local live_missing_identities
   local live_namespaced_inventory
+  local live_unexpected_identities
   local previous_identities
+  allowed_missing_identities="$(mktemp "$evidence_dir/forward-allowed-missing.XXXXXX.txt")"
   current_identities="$(mktemp "$evidence_dir/forward-current-identities.XXXXXX.txt")"
   previous_identities="$(mktemp "$evidence_dir/forward-previous-identities.XXXXXX.txt")"
   live_identities="$(mktemp "$evidence_dir/forward-live-identities.XXXXXX.txt")"
+  live_missing_identities="$(mktemp "$evidence_dir/forward-live-missing.XXXXXX.txt")"
   live_namespaced_inventory="$(mktemp "$evidence_dir/forward-live-namespaced.XXXXXX.json")"
   live_cluster_inventory="$(mktemp "$evidence_dir/forward-live-cluster.XXXXXX.json")"
+  live_unexpected_identities="$(mktemp "$evidence_dir/forward-live-unexpected.XXXXXX.txt")"
+  printf '%s\n' \
+    '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-acme-http01-ingress"]' \
+    '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-capacity-manager-ingress"]' \
+    > "$allowed_missing_identities"
   render_identity_set "$shadow_render" > "$current_identities"
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
     deployments.apps,statefulsets.apps,jobs.batch,persistentvolumeclaims,pods,\
@@ -332,8 +358,10 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
   done
   live_identity_set "$live_namespaced_inventory" "$live_cluster_inventory" \
     > "$live_identities"
-  chmod 0600 "$current_identities" "$previous_identities" "$live_identities" \
-    "$live_namespaced_inventory" "$live_cluster_inventory"
+  chmod 0600 "$allowed_missing_identities" "$current_identities" \
+    "$previous_identities" "$live_identities" "$live_missing_identities" \
+    "$live_namespaced_inventory" "$live_cluster_inventory" \
+    "$live_unexpected_identities"
   if test -e "$previous_shadow_render" || test -L "$previous_shadow_render"; then
     test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
     test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
@@ -343,12 +371,16 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
       "$previous_shadow_sha256"
     render_identity_set "$previous_shadow_render" > "$previous_identities"
     cmp -s "$current_identities" "$previous_identities"
-    cmp -s "$live_identities" "$previous_identities"
+    assert_live_identity_delta "$previous_identities" "$live_identities" \
+      "$allowed_missing_identities" "$live_missing_identities" \
+      "$live_unexpected_identities"
   else
     test ! -s "$live_identities"
   fi
-  rm -f "$current_identities" "$previous_identities" "$live_identities" \
-    "$live_namespaced_inventory" "$live_cluster_inventory"
+  rm -f "$allowed_missing_identities" "$current_identities" \
+    "$previous_identities" "$live_identities" "$live_missing_identities" \
+    "$live_namespaced_inventory" "$live_cluster_inventory" \
+    "$live_unexpected_identities"
 }
 
 assert_forward_storage_lineage_contract() {
@@ -462,9 +494,12 @@ Review the complete server-side diff. Any deletion, PVC replacement, personal
 namespace, mutable image, enabled personal flag, nonzero activation replica,
 or capacity resource outside the reviewed shadow is a stop condition. A first
 installation also requires no existing package-owned top-level resource. An
-upgrade requires the live, previous-reviewed, and new non-derived resource
-identity sets to match; any identity transition needs a separate cleanup plan
-because server-side apply does not prune absent objects.
+upgrade requires the previous-image rollback manifest and new forward manifest
+to have the same non-derived identity set. Live state must either match it or
+be missing exactly the two reviewed additive NetworkPolicies for the first
+#1573/#1576 upgrade; every live-only identity, deletion, replacement, or other
+missing identity remains a stop condition. Both policies remain in the rollback
+manifest because server-side apply does not prune absent objects.
 Before asking the API server for a diff, an upgrade also requires the new and
 previous-reviewed PostgreSQL and MinIO `volumeClaimTemplates`, live
 StatefulSet templates, and generated Bound PVCs to agree after normalization of

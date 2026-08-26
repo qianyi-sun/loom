@@ -495,12 +495,76 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert 'kind == "Job" and migration_name.fullmatch(name)' in runbook
     assert "live_identity_set" in runbook
     assert 'test ! -s "$live_identities"' in runbook
-    assert 'cmp -s "$live_identities" "$previous_identities"' in runbook
+    assert "assert_live_identity_delta" in runbook
+    assert "loom-personal-dev-acme-http01-ingress" in runbook
+    assert "loom-personal-dev-capacity-manager-ingress" in runbook
+    assert 'test ! -s "$live_unexpected_identities"' in runbook
+    assert 'cmp -s "$live_missing_identities" "$allowed_missing_identities"' in runbook
     assert 'cmp -s "$current_identities_tmp" "$previous_identities_tmp"' in runbook
     assert "rollback_diff_status=0" in runbook
     assert "|| rollback_diff_status=$?" in runbook
     assert 'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1' in runbook
     assert 'sha256sum "$rollback_status_evidence"' in runbook
+
+
+@pytest.mark.parametrize(
+    ("live_variant", "expected_returncode"),
+    [
+        ("exact", 0),
+        ("both-reviewed-missing", 0),
+        ("one-reviewed-missing", 1),
+        ("unreviewed-missing", 1),
+        ("live-only", 1),
+    ],
+)
+def test_personal_management_identity_delta_allows_only_the_exact_first_transition(
+    tmp_path: Path,
+    live_variant: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    start = runbook.index("assert_live_identity_delta() {")
+    end = runbook.index("\n}\n\nassert_forward_identity_contract", start) + 2
+    function_source = runbook[start:end]
+    base = '["v1","Service","loom-dev","loom-personal-dev-management"]'
+    reviewed = [
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-acme-http01-ingress"]',
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-capacity-manager-ingress"]',
+    ]
+    previous_values = sorted([base, *reviewed])
+    live_values = list(previous_values)
+    if live_variant == "both-reviewed-missing":
+        live_values = [base]
+    elif live_variant == "one-reviewed-missing":
+        live_values = sorted([base, reviewed[0]])
+    elif live_variant == "unreviewed-missing":
+        live_values = list(reviewed)
+    elif live_variant == "live-only":
+        live_values = sorted([*previous_values, '["v1","Secret","loom-dev","unexpected"]'])
+
+    paths = {
+        name: tmp_path / f"{name}.txt"
+        for name in ("previous", "live", "allowed", "missing", "unexpected")
+    }
+    paths["previous"].write_text("\n".join(previous_values) + "\n", encoding="utf-8")
+    paths["live"].write_text("\n".join(live_values) + "\n", encoding="utf-8")
+    paths["allowed"].write_text("\n".join(reviewed) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            function_source
+            + '\nassert_live_identity_delta "$1" "$2" "$3" "$4" "$5"',
+            "identity-delta-test",
+            *(str(paths[name]) for name in paths),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
 
 
 @pytest.mark.parametrize(
