@@ -3542,6 +3542,32 @@ class Trial(Base):
             "state != 'succeeded' OR result IS NOT NULL",
             name="trials_succeeded_has_result",
         ),
+        CheckConstraint(
+            "execution_route_generation >= 0",
+            name="trials_execution_route_generation_check",
+        ),
+        CheckConstraint(
+            "(execution_route_pool_name IS NULL AND execution_route_json IS NULL "
+            "AND execution_route_sha256 IS NULL) OR "
+            "(length(trim(execution_route_pool_name)) BETWEEN 1 AND 80 "
+            "AND execution_route_generation > 0 "
+            "AND execution_route_json->>'schema_version' = "
+            "'loom.execution-routing-decision.v1' "
+            "AND execution_route_json->>'selected_pool_id' = execution_route_pool_name "
+            "AND execution_route_sha256 ~ '^sha256:[0-9a-f]{64}$')",
+            name="trials_execution_route_group_check",
+        ),
+        CheckConstraint(
+            "autoscaler_pool_name IS NULL OR "
+            "execution_route_pool_name = autoscaler_pool_name",
+            name="trials_autoscaler_route_pool_check",
+        ),
+        Index(
+            "trials_queued_execution_route_idx",
+            "execution_route_pool_name",
+            "submitted_at",
+            postgresql_where=text("state = 'queued'"),
+        ),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     team_id: Mapped[UUID] = mapped_column(
@@ -3558,6 +3584,15 @@ class Trial(Base):
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+    execution_route_generation: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    execution_route_pool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_route_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    execution_route_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -3783,6 +3818,14 @@ class ServiceExecutionLease(Base):
             name="execution_leases_resource_generation_check",
         ),
         CheckConstraint(
+            "routing_generation > 0 AND length(selected_pool_id) BETWEEN 1 AND 80 "
+            "AND routing_reason IN "
+            "('fresh_executable_capacity','configured_scale_headroom','operator_pin',"
+            "'preexisting_assignment','admin_target_binding') "
+            "AND routing_decision_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="execution_leases_routing_identity_check",
+        ),
+        CheckConstraint(
             "desired_state IN ('create','start','cancel','timeout','retry','finalize',"
             "'delete_pending','deleted')",
             name="execution_leases_desired_check",
@@ -3888,6 +3931,10 @@ class ServiceExecutionLease(Base):
     target_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("execution_targets.id", ondelete="RESTRICT")
     )
+    routing_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    selected_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    routing_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    routing_decision_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     workload_requirements_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     workload_requirements_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     runtime_contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -8,6 +9,8 @@ from pydantic import ValidationError
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
     ExecutionClassV1,
+    ExecutionRouteCandidateV1,
+    ExecutionRoutingDecisionV1,
     ExecutionTargetV1,
     ExecutionTopologyV1,
     ImageMaterialization,
@@ -262,3 +265,71 @@ def test_contracts_do_not_accept_silent_schema_version_downgrade() -> None:
     values["schema_version"] = "loom.workload-requirements.v0"
     with pytest.raises(ValidationError, match=r"loom\.workload-requirements\.v1"):
         WorkloadRequirementsV1.model_validate(values)
+
+
+def test_routing_decision_binds_one_canonical_candidate_and_capacity_reason() -> None:
+    now = datetime.now(UTC)
+    candidates = (
+        ExecutionRouteCandidateV1(
+            logical_pool_id="gb10",
+            adapter_kind="legacy_worker_claim",
+            operator_weight=0,
+            enabled=True,
+            healthy=True,
+            draining=False,
+            configured_slots=150,
+            active_slots=10,
+            occupied_slots=4,
+            pending_slots=0,
+            assigned_queued_slots=1,
+            available_slots=5,
+            capacity_evidence_kind="fresh_executable_capacity",
+            capacity_observed_at=now,
+        ),
+        ExecutionRouteCandidateV1(
+            logical_pool_id="nebius-cpu",
+            adapter_kind="kubernetes_job",
+            target_id="nebius-eu-north1-staging",
+            execution_class_id="linux-amd64-cpu-pod-v1",
+            operator_weight=0,
+            enabled=False,
+            healthy=False,
+            draining=False,
+            configured_slots=0,
+            active_slots=0,
+            occupied_slots=0,
+            pending_slots=0,
+            assigned_queued_slots=0,
+            available_slots=0,
+            capacity_evidence_kind="unavailable",
+            blockers=("disabled", "no_capacity_headroom", "zero_configured_slots"),
+        ),
+    )
+    decision = ExecutionRoutingDecisionV1(
+        generation=3,
+        requirements_sha256="sha256:" + "a" * 64,
+        selected_pool_id="gb10",
+        selected_adapter_kind="legacy_worker_claim",
+        reason="fresh_executable_capacity",
+        decided_at=now,
+        candidates=candidates,
+    )
+    assert decision.selected_pool_id == "gb10"
+    with pytest.raises(ValidationError, match="evidence does not match"):
+        ExecutionRoutingDecisionV1.model_validate(
+            {
+                **decision.model_dump(),
+                "reason": "configured_scale_headroom",
+            }
+        )
+    with pytest.raises(ValidationError, match="selected candidate is not eligible"):
+        ExecutionRoutingDecisionV1.model_validate(
+            {
+                **decision.model_dump(),
+                "selected_pool_id": "nebius-cpu",
+                "selected_adapter_kind": "kubernetes_job",
+                "selected_target_id": "nebius-eu-north1-staging",
+                "selected_execution_class_id": "linux-amd64-cpu-pod-v1",
+                "reason": "operator_pin",
+            }
+        )

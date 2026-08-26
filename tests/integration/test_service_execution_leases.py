@@ -28,6 +28,11 @@ from loom.db.schema import (
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
+    CapacityEvidenceKind,
+    ExecutionAdapterKind,
+    ExecutionRouteCandidateV1,
+    ExecutionRoutingDecisionV1,
+    ExecutionRoutingReason,
     ExecutionTargetV1,
     ImageMaterialization,
     IsolationLevel,
@@ -212,11 +217,14 @@ def _target(suffix: str) -> ExecutionTargetV1:
 
 
 def _requirements(
-    *, verifier_topology: VerifierTopology = VerifierTopology.IN_ATTEMPT
+    *,
+    verifier_topology: VerifierTopology = VerifierTopology.IN_ATTEMPT,
+    data_residency: str | None = None,
 ) -> WorkloadRequirementsV1:
     return WorkloadRequirementsV1(
         operating_system="linux",
         cpu_architecture="x86_64",
+        data_residency=data_residency,
         gpu_vendor="none",
         gpu_count=0,
         cpu_millis=1000,
@@ -447,20 +455,30 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 .scalars()
                 .all()
             )
-            history_count = await session.scalar(
-                select(func.count(ServiceExecutionLeaseHistory.id)).where(
+            history = (
+                await session.execute(
+                    select(ServiceExecutionLeaseHistory).where(
                     ServiceExecutionLeaseHistory.lease_id == lease_id
+                    )
                 )
-            )
+            ).scalar_one()
             assert trial is not None
             assert (trial.state, trial.attempt_count) == ("claimed", 1)
+            route = ExecutionRoutingDecisionV1.model_validate(trial.execution_route_json)
+            assert route.reason == ExecutionRoutingReason.ADMIN_TARGET_BINDING
+            assert route.selected_pool_id == "nebius-cpu"
             assert persisted is not None
             assert (persisted.attempt, persisted.generation) == (1, 1)
+            assert persisted.routing_generation == route.generation
+            assert persisted.selected_pool_id == route.selected_pool_id
+            assert persisted.routing_decision_sha256 == trial.execution_route_sha256
             assert persisted.last_event_ordinal == 0
             assert len(commands) == 1
             assert (commands[0].command_type, commands[0].state) == ("create", "pending")
-            assert history_count == 1
+            assert commands[0].payload_json["selected_pool_id"] == "nebius-cpu"
+            assert history.snapshot_json["selected_pool_id"] == "nebius-cpu"
             projection = execution_lease_projection(persisted)
+            assert projection["selected_pool_id"] == "nebius-cpu"
             assert projection["runtime_identity"]["image_admission_sha256"].startswith("sha256:")
             assert {
                 item["image_ref"] for item in projection["runtime_identity"]["image_admissions"]
@@ -477,6 +495,103 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 request_id=request_id,
             )
             assert replay.id == lease_id
+
+        async with sessions() as session:
+            with pytest.raises(DBAPIError, match="route can change only while queued"):
+                await session.execute(
+                    update(Trial)
+                    .where(Trial.id == trial_id)
+                    .values(execution_route_pool_name="gb10")
+                )
+                await session.commit()
+            await session.rollback()
+
+        async with sessions() as session:
+            with pytest.raises(DBAPIError, match="immutable identity changed"):
+                await session.execute(
+                    update(ServiceExecutionLease)
+                    .where(ServiceExecutionLease.id == lease_id)
+                    .values(selected_pool_id="gb10")
+                )
+                await session.commit()
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+async def test_kubernetes_reservation_rejects_a_legacy_worker_route(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    requirements = _requirements()
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            decision = ExecutionRoutingDecisionV1(
+                generation=1,
+                requirements_sha256=canonical_digest(requirements.model_dump(mode="json")),
+                selected_pool_id="gb10",
+                selected_adapter_kind=ExecutionAdapterKind.LEGACY_WORKER_CLAIM,
+                reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+                decided_at=now,
+                candidates=(
+                    ExecutionRouteCandidateV1(
+                        logical_pool_id="gb10",
+                        adapter_kind=ExecutionAdapterKind.LEGACY_WORKER_CLAIM,
+                        enabled=True,
+                        healthy=True,
+                        draining=False,
+                        configured_slots=1,
+                        active_slots=1,
+                        occupied_slots=0,
+                        pending_slots=0,
+                        assigned_queued_slots=1,
+                        available_slots=0,
+                        capacity_evidence_kind=CapacityEvidenceKind.PREEXISTING_ASSIGNMENT,
+                    ),
+                ),
+            )
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            trial.execution_route_generation = decision.generation
+            trial.execution_route_pool_name = decision.selected_pool_id
+            trial.execution_route_json = decision.model_dump(mode="json")
+            trial.execution_route_sha256 = canonical_digest(trial.execution_route_json)
+
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="different execution authority",
+            ):
+                await _reserve(
+                    session,
+                    trial_id=trial_id,
+                    target=target,
+                    now=now,
+                    requirements=requirements,
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_kubernetes_reservation_rejects_target_residency_drift(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            with pytest.raises(ServiceExecutionConflict, match="violates data residency"):
+                await _reserve(
+                    session,
+                    trial_id=trial_id,
+                    target=target,
+                    now=now,
+                    requirements=_requirements(data_residency="ca"),
+                )
     finally:
         await engine.dispose()
 

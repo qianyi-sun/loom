@@ -18,9 +18,13 @@ or a route outside the explicit execution egress set.
 Security `restricted`, a namespace, NetworkPolicy, and a dedicated node group
 are defense in depth; they do not replace the hostile-code isolation boundary.
 A missing, unhealthy, shared-kernel, or unaccepted RuntimeClass rejects
-placement. There is no ordinary-Pod fallback and no cross-environment or
-cross-pool fallback. One-attempt-per-node would be a separate execution class
-with its own wipe and cost acceptance; it is not implied by this decision.
+placement. There is no ordinary-Pod fallback and no cross-environment fallback.
+Cross-pool recovery is allowed only after Loom revokes the old attempt
+authority, proves resource/seat cleanup, returns the Trial to queued state, and
+persists a new routing generation for the next attempt. It is never an
+in-place fallback for the same authoritative generation. One-attempt-per-node
+would be a separate execution class with its own wipe and cost acceptance; it
+is not implied by this decision.
 
 Repository merge is not live acceptance. It does not create a Nebius project,
 cluster, node group, CNI policy, RuntimeClass, trust key, credential, or route.
@@ -29,7 +33,7 @@ cluster, node group, CNI policy, RuntimeClass, trust key, credential, or route.
 
 | Boundary | Authority | Enforced rule |
 | --- | --- | --- |
-| Trial and immutable runtime identity | Loom/Postgres | Lease generation binds team, trial attempt, candidate SHA, task revision, command identity, runtime contract, and image admission evidence. |
+| Trial and immutable runtime identity | Loom/Postgres | Routing generation binds the selected pool/adapter; lease generation binds team, trial attempt, candidate SHA, task revision, command identity, runtime contract, and image admission evidence. |
 | Pod lifecycle | Namespace actuator | It may create/read/delete Jobs and read Pods in one namespace. It cannot read Secrets, exec, read logs, mutate policy, nodes, namespaces, or cluster resources. |
 | Workload identity | Control Plane and Gateway | A service token is at most 600 seconds, has a unique audit ID, explicitly binds even a null provider route, and atomically carries lease, generation, role, candidate, task, command, and runtime digests. Gateway re-reads all current authority before upstream dispatch. |
 | Cloud and upstream credentials | Nodes, registry, Gateway, object service | Nodes pull images. Pods receive no Kubernetes token, image-pull credential, Nebius key, registry key, or raw model-provider key. Model calls use only Gateway. |
@@ -77,7 +81,9 @@ cancel/timeout; that revokes its generation before the actuator deletes the
 UID-matched Job. Scaling the actuator to zero stops reconciliation but does not
 revoke active tokens and is therefore not a complete kill switch. Removing a
 NetworkPolicy, changing RuntimeClass to `runc`, broadening a selector, or
-falling back to another pool is forbidden rollback behavior.
+changing a claimed Trial's pool or issuing a second adapter authority for the
+same attempt is forbidden rollback behavior. A later cross-pool retry must use
+the revocation, cleanup, queued-state, and new-route sequence above.
 
 Trust-key rotation is additive: configure old and new public keys, admit and
 run a new-key canary, stop issuing old-key evidence, wait for every old bundle

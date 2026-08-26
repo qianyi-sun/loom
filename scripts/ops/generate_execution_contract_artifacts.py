@@ -17,13 +17,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from loom.execution_contract import (  # noqa: E402
     ExecutionClassV1,
+    ExecutionRouteCandidateV1,
+    ExecutionRoutingDecisionV1,
     ExecutionTargetV1,
     ExecutionTopologyV1,
     WorkloadRequirementsV1,
 )
 
 POLICY_PATH = ROOT / "config" / "service-execution-compatibility.toml"
-REPORT_PATH = ROOT / "docs" / "evidence" / "service-workload-compatibility-v1.json"
+REPORT_PATH = ROOT / "docs" / "evidence" / "service-workload-compatibility-v2.json"
 ENTRYPOINT_FILES = (
     ROOT / "packages" / "loom-benchmarks" / "pyproject.toml",
     ROOT / "packages" / "loom-benchmark-terminal-bench-2" / "pyproject.toml",
@@ -33,12 +35,23 @@ TOPOLOGY_PATH = ROOT / "config" / "service-execution-topology.json"
 SCHEMA_OUTPUTS = {
     ROOT / "docs" / "evidence" / "loom.execution-class.v1.schema.json": ExecutionClassV1,
     ROOT / "docs" / "evidence" / "loom.execution-target.v1.schema.json": ExecutionTargetV1,
+    ROOT / "docs" / "evidence" / "loom.execution-route-candidate.v1.schema.json": (
+        ExecutionRouteCandidateV1
+    ),
+    ROOT / "docs" / "evidence" / "loom.execution-routing-decision.v1.schema.json": (
+        ExecutionRoutingDecisionV1
+    ),
     ROOT / "docs" / "evidence" / "loom.execution-topology.v1.schema.json": (ExecutionTopologyV1),
     ROOT / "docs" / "evidence" / "loom.workload-requirements.v1.schema.json": (
         WorkloadRequirementsV1
     ),
 }
-_DISPOSITIONS = {"supported", "conversion_required", "unsupported"}
+_DISPOSITIONS = {
+    "supported",
+    "conversion_required",
+    "runtime_admission_required",
+    "unsupported",
+}
 
 
 def _json_bytes(value: object) -> bytes:
@@ -63,8 +76,26 @@ def _load_entrypoints() -> dict[str, dict[str, str]]:
 
 
 def _validate_policy(raw: dict[str, Any]) -> None:
-    if raw.get("schema_version") != "loom.service-workload-compatibility-policy.v1":
+    if raw.get("schema_version") != "loom.service-workload-compatibility-policy.v2":
         raise ValueError("unsupported compatibility policy schema")
+    pool_policies = raw.get("pool_policies", [])
+    pool_ids = [row.get("logical_pool_id") for row in pool_policies]
+    if sorted(pool_ids) != ["gb10", "nebius-cpu", "oldlab"] or len(set(pool_ids)) != 3:
+        raise ValueError("compatibility policy must define the three accepted service pools")
+    workload_policy_pool_id = raw.get("workload_policy_pool_id")
+    for row in pool_policies:
+        mode = row.get("mode")
+        if row["logical_pool_id"] == workload_policy_pool_id:
+            if mode != "workload_specific":
+                raise ValueError("workload policy pool must use workload_specific mode")
+        elif (
+            mode != "runtime_admission"
+            or row.get("default_disposition") != "runtime_admission_required"
+            or not row.get("owner")
+            or not row.get("reason")
+            or not row.get("required_actions")
+        ):
+            raise ValueError("legacy pool policies require explicit runtime admission evidence")
     for collection in ("policies", "additional_workloads", "pipeline_profile_policies"):
         for row in raw.get(collection, []):
             if row.get("disposition") not in _DISPOSITIONS:
@@ -141,10 +172,48 @@ def build_report() -> dict[str, Any]:
     ids = [row["workload_id"] for row in workloads]
     if len(ids) != len(set(ids)):
         raise ValueError("compatibility report contains duplicate workload ids")
-    counts = {
-        disposition: sum(row["disposition"] == disposition for row in workloads)
-        for disposition in sorted(_DISPOSITIONS)
-    }
+    pool_policies = sorted(raw["pool_policies"], key=lambda row: row["logical_pool_id"])
+    workload_policy_pool_id = raw["workload_policy_pool_id"]
+    routed_workloads: list[dict[str, Any]] = []
+    for row in workloads:
+        specific = {
+            "disposition": row.pop("disposition"),
+            "owner": row.pop("owner"),
+            "reason": row.pop("reason"),
+            "required_actions": row.pop("required_changes"),
+        }
+        pool_dispositions = []
+        for pool in pool_policies:
+            if pool["logical_pool_id"] == workload_policy_pool_id:
+                disposition = specific
+            else:
+                disposition = {
+                    "disposition": pool["default_disposition"],
+                    "owner": pool["owner"],
+                    "reason": pool["reason"],
+                    "required_actions": pool["required_actions"],
+                }
+            pool_dispositions.append(
+                {"logical_pool_id": pool["logical_pool_id"], **disposition}
+            )
+        routed_workloads.append({**row, "pool_dispositions": pool_dispositions})
+    pool_summary = {}
+    for pool_id in sorted(row["logical_pool_id"] for row in pool_policies):
+        decisions = [
+            decision
+            for workload in routed_workloads
+            for decision in workload["pool_dispositions"]
+            if decision["logical_pool_id"] == pool_id
+        ]
+        pool_summary[pool_id] = {
+            "total": len(decisions),
+            **{
+                disposition: sum(
+                    decision["disposition"] == disposition for decision in decisions
+                )
+                for disposition in sorted(_DISPOSITIONS)
+            },
+        }
     source_hash = hashlib.sha256()
     source_hash.update(policy_bytes)
     for path in ENTRYPOINT_FILES:
@@ -153,12 +222,13 @@ def build_report() -> dict[str, Any]:
     source_hash.update(RESOURCE_PROFILES_PATH.relative_to(ROOT).as_posix().encode("utf-8"))
     source_hash.update(RESOURCE_PROFILES_PATH.read_bytes())
     return {
-        "schema_version": "loom.service-workload-compatibility-report.v1",
-        "logical_pool_id": raw["logical_pool_id"],
+        "schema_version": "loom.service-workload-compatibility-report.v2",
+        "accepted_pool_ids": [row["logical_pool_id"] for row in pool_policies],
+        "workload_policy_pool_id": workload_policy_pool_id,
         "execution_class_id": raw["execution_class_id"],
         "source_sha256": source_hash.hexdigest(),
-        "summary": {"total": len(workloads), **counts},
-        "workloads": workloads,
+        "summary": {"total_workloads": len(routed_workloads), "pools": pool_summary},
+        "workloads": routed_workloads,
     }
 
 

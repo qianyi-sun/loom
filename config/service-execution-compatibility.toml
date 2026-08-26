@@ -1,6 +1,26 @@
-schema_version = "loom.service-workload-compatibility-policy.v1"
-logical_pool_id = "nebius-cpu"
+schema_version = "loom.service-workload-compatibility-policy.v2"
+workload_policy_pool_id = "nebius-cpu"
 execution_class_id = "linux-amd64-cpu-pod-v1"
+
+[[pool_policies]]
+logical_pool_id = "nebius-cpu"
+mode = "workload_specific"
+
+[[pool_policies]]
+logical_pool_id = "oldlab"
+mode = "runtime_admission"
+default_disposition = "runtime_admission_required"
+owner = "qianyi-sun"
+reason = "OLDLAB remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task."
+required_actions = ["project the exact TaskConfig into legacy claim requirements", "require matching fresh executable worker evidence before claim"]
+
+[[pool_policies]]
+logical_pool_id = "gb10"
+mode = "runtime_admission"
+default_disposition = "runtime_admission_required"
+owner = "qianyi-sun"
+reason = "GB10 remains an accepted service pool, but static catalog membership does not prove a compatible fresh worker for a materialized task."
+required_actions = ["project the exact TaskConfig into legacy claim requirements", "require matching fresh executable worker evidence before claim"]
 
 # Every first-party benchmark entry point must match exactly one policy. The
 # generator fails closed on missing or overlapping rules and expands these

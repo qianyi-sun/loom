@@ -14,6 +14,7 @@ the durable execution control plane introduced by #1540 will persist.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -53,6 +54,26 @@ class ImageMaterialization(StrEnum):
 class VerifierTopology(StrEnum):
     IN_ATTEMPT = "in_attempt"
     SEPARATE_EXECUTION = "separate_execution"
+
+
+class ExecutionAdapterKind(StrEnum):
+    LEGACY_WORKER_CLAIM = "legacy_worker_claim"
+    KUBERNETES_JOB = "kubernetes_job"
+
+
+class CapacityEvidenceKind(StrEnum):
+    FRESH_EXECUTABLE = "fresh_executable_capacity"
+    CONFIGURED_SCALE_HEADROOM = "configured_scale_headroom"
+    UNAVAILABLE = "unavailable"
+    PREEXISTING_ASSIGNMENT = "preexisting_assignment"
+
+
+class ExecutionRoutingReason(StrEnum):
+    FRESH_EXECUTABLE_CAPACITY = "fresh_executable_capacity"
+    CONFIGURED_SCALE_HEADROOM = "configured_scale_headroom"
+    OPERATOR_PIN = "operator_pin"
+    PREEXISTING_ASSIGNMENT = "preexisting_assignment"
+    ADMIN_TARGET_BINDING = "admin_target_binding"
 
 
 class ExecutionClassV1(_StrictContract):
@@ -182,6 +203,7 @@ class WorkloadRequirementsV1(_StrictContract):
     schema_version: Literal["loom.workload-requirements.v1"] = "loom.workload-requirements.v1"
     operating_system: Literal["linux", "windows"]
     cpu_architecture: Literal["x86_64", "arm64", "any"]
+    data_residency: str | None = Field(default=None, pattern=r"^[a-z]{2}$")
     gpu_vendor: Literal["none", "nvidia"]
     gpu_count: int = Field(ge=0)
     cpu_millis: int | None = Field(gt=0)
@@ -228,6 +250,132 @@ class ExecutionAdmissionV1(_StrictContract):
     def _decision_matches_reasons(self) -> ExecutionAdmissionV1:
         if self.compatible == bool(self.reasons):
             raise ValueError("compatible must be true exactly when reasons is empty")
+        return self
+
+
+class ExecutionRouteCandidateV1(_StrictContract):
+    """One independently evidenced physical-pool candidate."""
+
+    logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    adapter_kind: ExecutionAdapterKind
+    target_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    execution_class_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9-]{0,79}$",
+    )
+    environment: Literal["development", "staging", "production"] | None = None
+    region: str | None = Field(default=None, min_length=1, max_length=80)
+    data_residency: str | None = Field(default=None, pattern=r"^[a-z]{2}$")
+    operator_weight: int = Field(default=0, ge=-1_000, le=1_000)
+    budget_eligible: bool = True
+    estimated_cost_microusd_per_slot_hour: int | None = Field(default=None, ge=0)
+    enabled: bool
+    healthy: bool
+    draining: bool
+    configured_slots: int = Field(ge=0)
+    active_slots: int = Field(ge=0)
+    occupied_slots: int = Field(ge=0)
+    pending_slots: int = Field(ge=0)
+    assigned_queued_slots: int = Field(ge=0)
+    available_slots: int = Field(ge=0)
+    capacity_evidence_kind: CapacityEvidenceKind
+    capacity_observed_at: datetime | None = None
+    blockers: tuple[str, ...] = Field(default=(), max_length=32)
+
+    @model_validator(mode="after")
+    def _candidate_evidence_is_coherent(self) -> ExecutionRouteCandidateV1:
+        if self.adapter_kind == ExecutionAdapterKind.KUBERNETES_JOB and (
+            self.target_id is None or self.execution_class_id is None
+        ):
+            raise ValueError("Kubernetes routing candidates require target and class identity")
+        if self.capacity_evidence_kind == CapacityEvidenceKind.FRESH_EXECUTABLE and (
+            self.capacity_observed_at is None or self.available_slots <= 0
+        ):
+            raise ValueError("fresh executable capacity requires timestamped available slots")
+        if self.capacity_evidence_kind == CapacityEvidenceKind.CONFIGURED_SCALE_HEADROOM and (
+            self.available_slots <= 0
+        ):
+            raise ValueError("configured scale headroom requires a positive bounded slot count")
+        if self.capacity_evidence_kind == CapacityEvidenceKind.UNAVAILABLE and self.available_slots:
+            raise ValueError("unavailable routing candidates cannot advertise slots")
+        if not self.budget_eligible and (
+            "budget_ineligible" not in self.blockers or self.available_slots != 0
+        ):
+            raise ValueError("budget-ineligible candidates require a blocker and zero slots")
+        if self.budget_eligible and "budget_ineligible" in self.blockers:
+            raise ValueError("budget blocker conflicts with an eligible candidate")
+        if len(self.blockers) != len(set(self.blockers)) or tuple(sorted(self.blockers)) != (
+            self.blockers
+        ):
+            raise ValueError("routing candidate blockers must be unique and sorted")
+        return self
+
+
+class ExecutionRoutingDecisionV1(_StrictContract):
+    """Immutable reason and evidence for one selected physical pool."""
+
+    schema_version: Literal["loom.execution-routing-decision.v1"] = (
+        "loom.execution-routing-decision.v1"
+    )
+    generation: int = Field(gt=0)
+    requirements_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    selected_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    selected_adapter_kind: ExecutionAdapterKind
+    selected_target_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9-]{0,79}$",
+    )
+    selected_execution_class_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9-]{0,79}$",
+    )
+    reason: ExecutionRoutingReason
+    decided_at: datetime
+    candidates: tuple[ExecutionRouteCandidateV1, ...] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _selection_matches_exact_candidate(self) -> ExecutionRoutingDecisionV1:
+        keys = [(item.logical_pool_id, item.target_id or "") for item in self.candidates]
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("routing candidates must have unique canonical pool/target order")
+        selected = [
+            item
+            for item in self.candidates
+            if item.logical_pool_id == self.selected_pool_id
+            and item.target_id == self.selected_target_id
+        ]
+        if len(selected) != 1:
+            raise ValueError("routing decision must select exactly one candidate")
+        candidate = selected[0]
+        if (
+            candidate.adapter_kind != self.selected_adapter_kind
+            or candidate.execution_class_id != self.selected_execution_class_id
+        ):
+            raise ValueError("selected routing identity drift")
+        if self.reason not in {
+            ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+            ExecutionRoutingReason.ADMIN_TARGET_BINDING,
+        } and (
+            not candidate.enabled
+            or not candidate.healthy
+            or candidate.draining
+            or candidate.blockers
+            or candidate.available_slots <= 0
+        ):
+            raise ValueError("selected candidate is not eligible for the recorded reason")
+        if self.reason in {
+            ExecutionRoutingReason.FRESH_EXECUTABLE_CAPACITY,
+            ExecutionRoutingReason.CONFIGURED_SCALE_HEADROOM,
+        } and candidate.capacity_evidence_kind.value != self.reason.value:
+            raise ValueError("selected candidate evidence does not match the routing reason")
+        if self.reason == ExecutionRoutingReason.OPERATOR_PIN and (
+            candidate.capacity_evidence_kind
+            not in {
+                CapacityEvidenceKind.FRESH_EXECUTABLE,
+                CapacityEvidenceKind.CONFIGURED_SCALE_HEADROOM,
+            }
+        ):
+            raise ValueError("operator pin requires eligible capacity evidence")
         return self
 
 

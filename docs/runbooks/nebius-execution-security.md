@@ -27,8 +27,10 @@ Before any hostile test:
    that the Control Plane has only public keys. Prove an unknown key, a changed
    SBOM digest, an expired statement, an extra image, and high/critical/unknown
    severity each fail reservation.
-5. Confirm no active lease from another environment or logical pool can be
-   selected as fallback.
+5. Read back the Trial routing generation, selected pool/adapter/target,
+   routing reason and digest; confirm the lease, create command, and history
+   carry the same identity. Confirm no active worker claim or lease from
+   another environment or logical pool can be selected as fallback.
 
 Save command output rather than only exit status. Redact tokens and credentials;
 never place them in the evidence directory.
@@ -95,7 +97,7 @@ Run reviewed escape and containment tests against the actual handler:
   cleanup latency at the intended concurrency.
 
 Any escape, host visibility, unbounded resource, ordinary-Pod fallback,
-cross-pool placement, or missing cleanup evidence is a hard failure. Disable
+unrecorded cross-pool placement, duplicate adapter authority, or missing cleanup evidence is a hard failure. Disable
 the target, revoke active generations, preserve evidence, and do not continue
 to a performance or traffic canary.
 

@@ -1,18 +1,19 @@
 # Nebius service execution contract
 
-Status: accepted target architecture for issue #1548, with the provider-neutral
-durable execution control plane from #1540 and namespace-scoped Kubernetes Job
-actuator from #1549 implemented but not traffic-enabled. Infrastructure,
-sandbox-runtime acceptance, live canaries, cutover, and retirement remain
-separately authorized work.
+Status: accepted hybrid target architecture for issue #1548. The
+provider-neutral durable control plane and namespace-scoped Kubernetes Job
+adapter are implemented but not traffic-enabled. Infrastructure,
+sandbox-runtime acceptance, live canaries, routing-policy changes, maintenance
+drains, and any future pool retirement remain separately authorized work.
 
 ## Decision
 
-Loom service mode converges on one execution architecture: hostile CPU tasks
-run as Kubernetes execution units on the logical `nebius-cpu` pool. A trial
-declares provider-neutral `WorkloadRequirementsV1`; admission resolves an
-`ExecutionClassV1`; a later durable lease binds that class to one healthy
-regional `ExecutionTargetV1`. Trials never select a provider, region, cluster,
+Loom service mode has one provider-neutral admission and authority model over
+three accepted concurrent pools: `nebius-cpu`, `oldlab`, and `gb10`. Nebius
+uses fenced Kubernetes Job execution units; OLDLAB and GB10 retain the existing
+worker-claim adapter. A trial declares `WorkloadRequirementsV1`; Loom records
+one versioned routing decision, then exactly one adapter may obtain execution
+authority for that attempt. Trials never select a provider, region, cluster,
 worker name, or reusable slot directly.
 
 The checked contracts live in
@@ -21,22 +22,25 @@ repo-known compatibility report live under `docs/evidence/`. Unknown fields,
 unknown schema versions, implicit resource limits, mutable images, or a
 capability that would be silently weakened fail admission.
 
-This decision does not make current Docker workers or a configured Nebius quota
-equivalent to executable Kubernetes capacity.
+This decision does not retire, disable, or subordinate OLDLAB/GB10, and does
+not make configured slots, a registered worker, or Nebius quota equivalent to
+fresh executable capacity.
 
 ## Authority topology
 
 | State | Authority | Rule |
 | --- | --- | --- |
 | Task, batch, trial, immutable workload requirements | Loom/Postgres | Written before fan-out; user input cannot write derived admission fields. |
-| Execution class, target catalog, desired lease, attempt generation | Loom/Postgres | Versioned desired state and fencing authority. The lease work belongs to #1540. |
+| Execution class, pool candidates, routing decision, desired lease, attempt generation | Loom/Postgres | Versioned selection and fencing authority; a selected adapter/pool is immutable once execution authority is issued. |
+| OLDLAB/GB10 worker claims | Existing Loom scheduler and workers | May claim only a queued Trial routed to their exact pool; they do not interpret a Nebius lease. |
 | Provider project, Kubernetes cluster, node group, Pod/Job, RuntimeClass | Nebius/Kubernetes | Observed resource state only; never the source of trial intent. |
 | Reconciliation cursor, observation, condition, retry | Loom/Postgres | The reconciler records every comparison and action outcome. |
 | Trial artifacts and immutable image identity | Object store/registry plus Postgres digest references | A mutable tag or local-only build is not executable service identity. |
 
-The Nebius actuator is the only component allowed to translate desired targets
-and leases into provider or Kubernetes operations. API handlers persist intent;
-they do not call Nebius or create Pods inline. The reconciler reads one fenced
+The Nebius actuator is the only adapter allowed to translate a
+`kubernetes_job` route and lease into Kubernetes operations. Existing worker
+claim paths remain the adapters for `legacy_worker_claim` routes. API handlers
+persist intent; they do not call Nebius or create Pods inline. The reconciler reads one fenced
 desired generation, observes the provider and Kubernetes objects, performs an
 idempotent action, and records the resulting observation. A stale generation,
 unknown object owner, target-health failure, or ambiguous action outcome stops
@@ -44,9 +48,9 @@ progress and never broadens placement.
 
 The identity chain is:
 
-`task revision -> workload requirements digest -> execution class version ->`
-`lease generation -> execution target -> Kubernetes owner UID -> execution`
-`unit UID -> attempt generation -> artifact digests`.
+`task revision -> workload requirements digest -> routing generation and digest ->`
+`selected pool/adapter -> lease or worker claim -> attempt generation ->`
+`provider resource identity -> artifact digests`.
 
 Kubernetes garbage collection may remove children owned by a task-scoped
 execution object. It cannot decide that a Loom attempt succeeded, failed, or
@@ -94,8 +98,37 @@ capability is false.
 
 ## Logical pool and regional policy
 
+The accepted service pool identities and adapter boundaries are:
+
+| Pool | Adapter | Eligibility evidence |
+| --- | --- | --- |
+| `oldlab` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
+| `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
+| `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
+
+Normal scheduling evaluates all compatible candidates without exposing a
+physical-pool selector to users. It records candidate health, draining state,
+configured/active/occupied/pending/assigned slots, capacity observation time,
+adapter identity, environment/region/residency, budget eligibility, estimated
+per-slot cost, operator weight, selected reason, and a canonical digest in
+`ExecutionRoutingDecisionV1`. Fresh executable capacity is preferred over
+configured scale headroom; within the same operator weight, lower known cost is
+preferred. A budget-ineligible candidate is blocked. An operator-only weight
+may order otherwise eligible candidates; it cannot override capability,
+security, health, residency, budget, drain, or capacity blockers. An explicit
+admin target binding is audited and is not a normal user workflow.
+
+`Trial.execution_route_generation` advances while the Trial is queued. The
+selected pool, adapter, target/class when applicable, reason, candidate
+evidence, and digest are copied into the immutable execution lease/outbox or
+honored by the legacy claim query. Once a worker claim or execution lease owns
+the attempt, the route cannot change. Cross-pool recovery first revokes the old
+authority, proves cleanup/seat release, returns the Trial to queued state, and
+creates a new routing generation for the next attempt. It never creates two
+authorities for one attempt generation.
+
 `config/service-execution-topology.json` is the machine-validated target
-topology:
+topology for the `nebius-cpu` adapter:
 
 | Environment | Target | Role | Residency |
 | --- | --- | --- | --- |
@@ -106,8 +139,8 @@ topology:
 
 Development, staging, and production cannot share a target identity or health
 observation. Every target is probed independently; a target becomes ineligible
-when its observation is older than its declared stale threshold. Placement is
-environment-local and health-first. Production prefers `eu-north1` and may
+when its observation is older than its declared stale threshold. Nebius target
+placement is environment-local and health-first. Production prefers `eu-north1` and may
 fail over to `eu-west1` only when the secondary target is independently healthy
 and the durable lease policy permits the transition. Queued work does not
 cross environments or leave EU residency to recover capacity.
@@ -117,10 +150,13 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113`, `0114`, and `0115` persist the complete provider-neutral
+Migrations `0113` through `0116` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;
+- one canonical routing decision and monotonically increasing routing
+  generation on each Trial, with the selected pool/reason/digest frozen into
+  every Kubernetes lease and its history;
 - one attempt `execution_leases` identity per `(trial, attempt)` and, when
   required, one parent-bound verifier identity for the same attempt; each has
   a generation that can advance only by one and can never regain authority
@@ -130,9 +166,11 @@ desired/observed state without making a Nebius or Kubernetes call:
 - idempotent `execution_events` and database-generated
   `execution_lease_history` snapshots.
 
-The reservation transaction locks a queued Trial, increments its attempt,
-creates the lease, and appends the `create` command. A crash before commit
-leaves all four effects absent. Command consumers use bounded delivery leases;
+The reservation transaction locks a queued Trial, creates or verifies its
+Kubernetes route, increments its attempt, creates the lease, and appends the
+`create` command. A crash before commit leaves every effect absent. A Trial
+already routed to a legacy worker pool cannot also reserve a Kubernetes lease.
+Command consumers use bounded delivery leases;
 an expired claim redelivers the same command and idempotency key. Exact event
 and acknowledgement replay is accepted, while changed replay is rejected.
 Event arrival may be out of order: all valid events are retained, but only a
@@ -319,20 +357,22 @@ class.
 
 `config/service-execution-compatibility.toml` assigns every repo-known
 benchmark entry point, dynamic service workload class, and pipeline resource
-profile an owner, disposition, reason, and required changes. Generate the
-deterministic report and schemas with:
+profile an independent `nebius-cpu`, `oldlab`, and `gb10` disposition, owner,
+reason, and required action. Generate the deterministic report and schemas with:
 
 ```bash
 python scripts/ops/generate_execution_contract_artifacts.py
 python scripts/ops/generate_execution_contract_artifacts.py --check
 ```
 
-The generator fails on missing/overlapping rules and duplicate identities. At
-this decision point no benchmark is marked supported: all current first-party
-benchmark images still require immutable image materialization and explicit
-bounded resources/network policy. OSWorld and GPU/host-specialized Behavior
-profiles are intentionally unsupported; the remaining workloads require
-conversion.
+The generator fails on missing/overlapping rules, missing accepted-pool
+identities, and duplicate workload identities. At this decision point no
+workload is statically supported on Nebius: 66 require conversion and OSWorld
+plus the two GPU/host-specialized Behavior profiles are unsupported there.
+Every catalog row has `runtime_admission_required` for OLDLAB and GB10. That
+disposition preserves both accepted service paths while requiring the exact
+materialized task capability and fresh worker evidence; it is not a claim that
+either pool can currently execute every row.
 
 The report covers the repository's current static catalog. Operator-local,
 remapped, user-supplied, and live database TaskSets are unbounded classes, not
@@ -352,55 +392,59 @@ backend keep their domain-specific names.
 | `GET /api/v1/backends`, overview/monitor `available_backends` | Replaced by an execution-class catalog with admissibility and target-health summaries. | Backend catalog route removed. |
 | NewBatch backend picker and BatchDetail/Run Library backend labels | Display resolved execution class and compatibility reasons; no provider/target selector. | Backend picker removed. |
 | `Trial.requires_caps` | Versioned frozen `WorkloadRequirementsV1` projection is stored alongside legacy JSON during bounded migration. | Legacy unversioned caps removed. |
-| Worker `capabilities[].backend` and `Worker.pool_name` | Observed runtime/target telemetry only; never submission identity. | Kubernetes target/Pod observations replace reusable service-worker slots. |
-| `required_worker_pools` / `required_worker_pool` | Release-smoke-only evidence until equivalent target-bound canaries exist. User batches remain forbidden from setting it. | Removed after legacy release evidence retires. |
-| `autoscaler_pool_name`, physical pool policies, slot counts | Read-only legacy drain evidence; cannot satisfy a lease. | Replaced by target health, desired executions, and observed Pods/nodes. |
+| Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
+| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence; user batches remain forbidden from setting it. | Operator control remains distinct from normal provider-neutral scheduling. |
+| `autoscaler_pool_name`, physical pool policies, slot counts | Legacy-adapter assignment must match the versioned Trial route; configured and fresh capacity are reported separately. | Retained while OLDLAB/GB10 operate, alongside target/Pod evidence for Nebius. |
 | `loom run --backend` | Unchanged local-only driver selection. | Docker, Daytona, Modal, and fake may remain CLI-only and never appear in service admission or capacity. |
 
-There is no permanent dual path. Compatibility shims have an owner, telemetry,
-and removal gate; they cannot create new legacy rows after the service cutover.
+Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
+specific fields have an owner and telemetry, but their existence is not a
+deprecation or retirement schedule.
 
 ## Migration and authority gates
 
-The only accepted order is:
+The accepted repository and rollout boundaries are:
 
 1. Merge this contract, generated schemas/inventory, and terminology map.
-2. Add immutable requirements, target, lease, attempt-generation, and
-   reconciliation persistence under #1540 without changing traffic. Complete
-   in repository; traffic remains disabled pending later gates.
-3. Implement the fail-closed Nebius actuator and observed-state reconciler.
-4. Provision development infrastructure, then prove sandbox/runtime and
+2. Add immutable requirements, route, target, lease, attempt-generation, and
+   reconciliation persistence without changing live traffic.
+3. Keep existing OLDLAB/GB10 routes operational; test route selection and
+   duplicate-authority fences in the repository and an authorized environment.
+4. Implement the fail-closed Nebius actuator and observed-state reconciler.
+5. Provision development infrastructure, then prove sandbox/runtime and
    workload conversion; provisioning authority is separate from repository
    merge authority.
-5. Provision isolated staging, run bounded canaries, and record target health,
+6. Provision isolated staging, run bounded canaries, and record target health,
    node-backed capacity, Pod outcomes, artifact hashes, cleanup, and cost.
-6. Provision and accept both production regions before any production route
+7. Provision and accept both production regions before any production route
    can use them.
-7. Cut over traffic only through the protected rollout authority with explicit
-   candidate, lease, health, rollback, and operator approval evidence.
-8. Disable new legacy service submissions, drain legacy attempts, verify no
-   durable references or active work remain, then remove backend/pool/worker
-   service scheduling and its compatibility shims.
+8. Change pool weights, enable a Nebius route, or independently drain one pool
+   only through protected rollout authority with explicit candidate, route,
+   health, capacity, rollback, and operator approval evidence.
+9. Retire a pool only under a future explicit owner decision; this architecture
+   neither requires nor authorizes OLDLAB/GB10 retirement.
 
 Passing repository CI authorizes merge only. Merge does not authorize or prove
 infrastructure. Provisioned infrastructure does not authorize or prove a live
-canary. A successful canary does not authorize traffic cutover. Cutover does
-not authorize legacy retirement until drain and rollback-retention gates pass.
+canary. A successful canary does not authorize pool-weight changes, a drain,
+traffic routing, or retirement.
 
 ## Reconciliation invariants
 
-- Missing or stale target health queues work; it never causes cross-target
-  guessing.
-- One active lease generation owns at most one active Kubernetes execution
-  unit for an attempt.
+- Missing or stale candidate health makes that candidate ineligible; it never
+  causes cross-target or cross-pool guessing.
+- One route and attempt generation owns at most one worker claim or Kubernetes
+  execution unit, never both.
 - Observations from a stale lease/attempt generation cannot advance state.
 - Unknown provider/Kubernetes objects are quarantined, not adopted by name.
 - Cancel stops and cleans the active generation but is not a data rollback.
 - Provider quota, configured autoscaler maximum, registered node, healthy API,
   or free-looking slot is not executable capacity. Capacity is observed only
   from fresh healthy target, node, and admitted execution evidence.
-- Repository merge, provisioning, canary, cutover, and retirement each require
-  their own authority and evidence.
+- Configured quota/slots and fresh executable capacity are separate fields for
+  every pool and any aggregate view.
+- Repository merge, provisioning, canary, routing-policy change, drain, and
+  retirement each require their own authority and evidence.
 
 ## Follow-on ownership
 
@@ -411,5 +455,6 @@ not authorize legacy retirement until drain and rollback-retention gates pass.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
 - #1551: sandbox runtime and hostile-workload empirical acceptance.
-- Later #1536 children: actuator, workload conversion, canary, production
-  cutover, and legacy retirement in the order above.
+- Later #1536 children: infrastructure, workload conversion, canary, and
+  independently authorized production routing. No child implicitly owns
+  OLDLAB/GB10 retirement.

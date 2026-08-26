@@ -67,6 +67,19 @@
       "title": "Custom Dns",
       "type": "boolean"
     },
+    "data_residency": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z]{2}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Data Residency"
+    },
     "ephemeral_storage_mib": {
       "anyOf": [
         {

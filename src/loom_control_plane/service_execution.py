@@ -21,7 +21,12 @@ from loom.db.schema import (
     Trial,
 )
 from loom.execution_contract import (
+    CapacityEvidenceKind,
+    ExecutionAdapterKind,
     ExecutionClassV1,
+    ExecutionRouteCandidateV1,
+    ExecutionRoutingDecisionV1,
+    ExecutionRoutingReason,
     ExecutionTargetV1,
     WorkloadRequirementsV1,
     evaluate_execution_admission,
@@ -327,6 +332,88 @@ async def set_execution_target_health(
     return target
 
 
+def _bind_kubernetes_execution_route(
+    *,
+    trial: Trial,
+    target: ServiceExecutionTarget,
+    execution_class_id: str,
+    requirements_digest: str,
+    current_time: datetime,
+) -> tuple[ExecutionRoutingDecisionV1, str]:
+    """Bind or validate the trial's sole physical execution route."""
+
+    if trial.execution_route_json is None:
+        if (
+            trial.execution_route_pool_name is not None
+            or trial.execution_route_sha256 is not None
+        ):
+            raise ServiceExecutionConflict("trial execution route is incomplete")
+        decision = ExecutionRoutingDecisionV1(
+            generation=trial.execution_route_generation + 1,
+            requirements_sha256=requirements_digest,
+            selected_pool_id=target.logical_pool_id,
+            selected_adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
+            selected_target_id=target.id,
+            selected_execution_class_id=execution_class_id,
+            reason=ExecutionRoutingReason.ADMIN_TARGET_BINDING,
+            decided_at=current_time,
+            candidates=(
+                ExecutionRouteCandidateV1(
+                    logical_pool_id=target.logical_pool_id,
+                    adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
+                    target_id=target.id,
+                    execution_class_id=execution_class_id,
+                    environment=target.environment,
+                    region=target.region,
+                    data_residency=target.data_residency,
+                    enabled=target.desired_state == "active",
+                    healthy=(
+                        target.observed_state == "ready"
+                        and target.health_status == "healthy"
+                    ),
+                    draining=False,
+                    configured_slots=0,
+                    active_slots=0,
+                    occupied_slots=0,
+                    pending_slots=0,
+                    assigned_queued_slots=0,
+                    available_slots=0,
+                    capacity_evidence_kind=CapacityEvidenceKind.PREEXISTING_ASSIGNMENT,
+                    capacity_observed_at=target.health_observed_at,
+                ),
+            ),
+        )
+        decision_json = decision.model_dump(mode="json")
+        decision_digest = canonical_digest(decision_json)
+        trial.execution_route_generation = decision.generation
+        trial.execution_route_pool_name = decision.selected_pool_id
+        trial.execution_route_json = decision_json
+        trial.execution_route_sha256 = decision_digest
+        return decision, decision_digest
+
+    try:
+        decision = ExecutionRoutingDecisionV1.model_validate(trial.execution_route_json)
+    except ValueError as exc:
+        raise ServiceExecutionConflict("trial execution route is invalid") from exc
+    decision_digest = canonical_digest(decision.model_dump(mode="json"))
+    if (
+        decision_digest != trial.execution_route_sha256
+        or decision.generation != trial.execution_route_generation
+        or decision.selected_pool_id != trial.execution_route_pool_name
+    ):
+        raise ServiceExecutionConflict("trial execution route identity drift")
+    if decision.requirements_sha256 != requirements_digest:
+        raise ServiceExecutionConflict("trial execution route requirements drift")
+    if (
+        decision.selected_adapter_kind != ExecutionAdapterKind.KUBERNETES_JOB
+        or decision.selected_pool_id != target.logical_pool_id
+        or decision.selected_target_id != target.id
+        or decision.selected_execution_class_id != execution_class_id
+    ):
+        raise ServiceExecutionConflict("trial is routed to a different execution authority")
+    return decision, decision_digest
+
+
 async def reserve_trial_execution(
     session: AsyncSession,
     *,
@@ -451,6 +538,11 @@ async def reserve_trial_execution(
         raise ServiceExecutionConflict("execution target is not ready")
     if target.health_status != "healthy" or target.health_observed_at is None:
         raise ServiceExecutionConflict("execution target is not healthy")
+    if (
+        requirements.data_residency is not None
+        and target.data_residency != requirements.data_residency
+    ):
+        raise ServiceExecutionConflict("execution target violates data residency")
     stale_after = int(target.spec_json["health_stale_after_seconds"])
     if target.health_observed_at + timedelta(seconds=stale_after) <= current_time:
         raise ServiceExecutionConflict("execution target health is stale")
@@ -465,6 +557,20 @@ async def reserve_trial_execution(
         validate_runtime_plan_requirements(runtime_contract, requirements)
     except ValueError as exc:
         raise ServiceExecutionConflict(str(exc)) from exc
+
+    routing_decision, routing_decision_digest = _bind_kubernetes_execution_route(
+        trial=trial,
+        target=target,
+        execution_class_id=execution_class_id,
+        requirements_digest=requirements_digest,
+        current_time=current_time,
+    )
+    if parent_lease is not None and (
+        parent_lease.routing_generation != routing_decision.generation
+        or parent_lease.selected_pool_id != routing_decision.selected_pool_id
+        or parent_lease.routing_decision_sha256 != routing_decision_digest
+    ):
+        raise ServiceExecutionConflict("verifier parent lease binds a different execution route")
 
     generation = 1
     lease_id = uuid4()
@@ -489,6 +595,10 @@ async def reserve_trial_execution(
         resource_generation=generation,
         execution_class_id=execution_class_id,
         target_id=target_id,
+        routing_generation=routing_decision.generation,
+        selected_pool_id=routing_decision.selected_pool_id,
+        routing_reason=routing_decision.reason.value,
+        routing_decision_sha256=routing_decision_digest,
         workload_requirements_json=requirements_json,
         workload_requirements_sha256=requirements_digest,
         runtime_contract_json=runtime_contract_json,
@@ -513,6 +623,10 @@ async def reserve_trial_execution(
         "parent_lease_id": str(parent_lease.id) if parent_lease is not None else None,
         "execution_class_id": execution_class_id,
         "target_id": target_id,
+        "routing_generation": routing_decision.generation,
+        "selected_pool_id": routing_decision.selected_pool_id,
+        "routing_reason": routing_decision.reason.value,
+        "routing_decision_sha256": routing_decision_digest,
         "provider_scope_key": provider_scope,
         "namespace_name": namespace_name,
         "job_name": job_name,
@@ -1296,6 +1410,10 @@ def execution_lease_projection(lease: ServiceExecutionLease) -> dict[str, Any]:
         "resource_generation": lease.resource_generation,
         "execution_class_id": lease.execution_class_id,
         "target_id": lease.target_id,
+        "routing_generation": lease.routing_generation,
+        "selected_pool_id": lease.selected_pool_id,
+        "routing_reason": lease.routing_reason,
+        "routing_decision_sha256": lease.routing_decision_sha256,
         "runtime_contract_sha256": lease.runtime_contract_sha256,
         "runtime_identity": runtime_identity,
         "desired_state": lease.desired_state,
