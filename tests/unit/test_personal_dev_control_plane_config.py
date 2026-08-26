@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 from collections.abc import Callable
@@ -100,6 +101,16 @@ def _write_profile(tmp_path: Path, transform: Callable[[str], str]) -> Path:
     return path
 
 
+def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
+    entry = "ingress_controller_source_cidrs = " + json.dumps(value) + "\n"
+    lines = [
+        line
+        for line in text.splitlines()
+        if not line.startswith("ingress_controller_source_cidrs = ")
+    ]
+    return "\n".join(lines).replace("[network]\n", "[network]\n" + entry, 1) + "\n"
+
+
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
@@ -133,6 +144,14 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
     assert profile.network.kubernetes_api_cidr != "0.0.0.0/0"
     assert profile.network.kubernetes_api_port == 443
+    assert profile.network.ingress_controller_source_cidrs == (
+        "192.168.50.14/32",
+        "192.168.50.15/32",
+        "192.168.50.16/32",
+        "192.168.50.17/32",
+        "192.168.50.103/32",
+    )
+    assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
     assert profile.protocol_versions == {
         "capacity-agent": "v1",
         "claim-guard": "v1",
@@ -320,6 +339,72 @@ def test_profile_rejects_missing_and_duplicate_pools(tmp_path: Path) -> None:
         load_personal_dev_control_plane_profile(missing)
     with pytest.raises((ValidationError, ValueError)):
         load_personal_dev_control_plane_profile(duplicate)
+
+
+@pytest.mark.parametrize(
+    "cidrs",
+    [
+        [],
+        ["192.168.50.14/32", "192.168.50.14/32"],
+        ["192.168.50.0/24"],
+        ["8.8.8.8/32"],
+        ["127.0.0.1/32"],
+        ["169.254.1.1/32"],
+        ["224.0.0.1/32"],
+        ["0.0.0.0/32"],
+        ["240.0.0.1/32"],
+        ["192.168.50.14/32", True],
+        ["192.168.50.14/32", 1921685015],
+        [f"10.0.0.{number}/32" for number in range(1, 34)],
+    ],
+)
+def test_profile_rejects_non_host_or_unsafe_ingress_controller_sources(
+    tmp_path: Path,
+    cidrs: list[object],
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(text, cidrs),
+    )
+
+    with pytest.raises(ValidationError):
+        load_personal_dev_control_plane_profile(path)
+
+
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "0.0.0.1/32",
+        "198.18.0.1/32",
+        "198.51.100.1/32",
+        "2001:db8::1/128",
+    ],
+)
+def test_profile_rejects_special_use_sources_that_is_private_would_accept(
+    tmp_path: Path,
+    cidr: str,
+) -> None:
+    """Replacing explicit private-use membership with is_private must fail this matrix."""
+
+    assert ipaddress.ip_network(cidr, strict=True).network_address.is_private
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(text, [cidr]),
+    )
+
+    with pytest.raises(ValidationError):
+        load_personal_dev_control_plane_profile(path)
+
+
+def test_profile_accepts_ipv6_ula_ingress_controller_source(tmp_path: Path) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(text, ["fd00::1/128"]),
+    )
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.network.ingress_controller_source_cidrs == ("fd00::1/128",)
 
 
 @pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "empty", "oversized"])

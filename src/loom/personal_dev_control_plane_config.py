@@ -59,6 +59,18 @@ _PRINCIPAL_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?")
 _KEY_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _SCHEMA_HEAD = re.compile(r"[0-9]{4}")
 _CANONICAL_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_PRIVATE_USE_IPV4_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_PRIVATE_USE_IPV6_NETWORK = ipaddress.ip_network("fc00::/7")
+
+
+def _is_private_use_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in _PRIVATE_USE_IPV4_NETWORKS)
+    return address in _PRIVATE_USE_IPV6_NETWORK
 
 
 class _StrictModel(BaseModel):
@@ -216,6 +228,7 @@ class _NetworkInput(_StrictModel):
     public_origin: str
     ingress_class_name: str
     ingress_cluster_issuer: str
+    ingress_controller_source_cidrs: list[str] = Field(min_length=1, max_length=32)
     kubernetes_api_cidr: str
     kubernetes_api_port: int = Field(ge=1, le=65535)
     dns_namespace: str
@@ -277,6 +290,37 @@ class _NetworkInput(_StrictModel):
     def _capacity_manager_origin_is_exact(cls, value: str) -> str:
         if value != "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443":
             raise ValueError("capacity manager origin differs from loom-dev")
+        return value
+
+    @field_validator("ingress_controller_source_cidrs")
+    @classmethod
+    def _ingress_controller_sources_are_exact_private_hosts(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+        networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for cidr in value:
+            try:
+                network = ipaddress.ip_network(cidr, strict=True)
+            except ValueError:
+                raise ValueError("ingress controller source CIDR is invalid") from None
+            address = network.network_address
+            if (
+                cidr != str(network)
+                or network.prefixlen != network.max_prefixlen
+                or not _is_private_use_address(address)
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_unspecified
+                or address.is_reserved
+            ):
+                raise ValueError("ingress controller source must be one private host")
+            networks.append(network)
+        if len({str(network) for network in networks}) != len(networks):
+            raise ValueError("ingress controller source CIDRs must be unique")
+        if value != [str(network) for network in sorted(networks, key=lambda item: int(item.network_address))]:
+            raise ValueError("ingress controller source CIDRs must be in canonical order")
         return value
 
     @field_validator("kubernetes_api_cidr")
@@ -841,6 +885,7 @@ class PersonalDevControlPlaneNetwork:
     public_origin: str
     ingress_class_name: str
     ingress_cluster_issuer: str
+    ingress_controller_source_cidrs: tuple[str, ...]
     kubernetes_api_cidr: str
     kubernetes_api_port: int
     dns_namespace: str
@@ -1244,7 +1289,14 @@ def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPla
         identities=PersonalDevControlPlaneIdentities(**parsed.identities.model_dump()),
         storage=PersonalDevControlPlaneStorage(**parsed.storage.model_dump()),
         builder=PersonalDevBuilderTrust(**parsed.builder.model_dump()),
-        network=PersonalDevControlPlaneNetwork(**parsed.network.model_dump()),
+        network=PersonalDevControlPlaneNetwork(
+            **{
+                **parsed.network.model_dump(),
+                "ingress_controller_source_cidrs": tuple(
+                    parsed.network.ingress_controller_source_cidrs
+                ),
+            }
+        ),
         limits=PersonalDevControlPlaneLimits(**parsed.limits.model_dump()),
         resources=PersonalDevControlPlaneResources(
             postgres=_resource_envelope(parsed.resources.postgres),

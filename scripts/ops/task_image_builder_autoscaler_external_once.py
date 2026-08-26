@@ -25,7 +25,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 if TYPE_CHECKING:
     from scripts.ops import worker_pool_autoscaler_external_once as transport
 else:
-    import worker_pool_autoscaler_external_once as transport  # noqa: E402
+    import worker_pool_autoscaler_external_once as transport
 
 from loom.db.schema import Token  # noqa: E402
 from loom.worker_token import DEFAULT_WORKER_TOKEN_ENV_KEY, read_env_file_value  # noqa: E402

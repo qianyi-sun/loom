@@ -1511,6 +1511,13 @@ def _network_policies(
                                     "matchLabels": profile.lifecycle_client.match_labels()
                                 }
                             },
+                            {
+                                "podSelector": {
+                                    "matchLabels": {
+                                        "app": "loom-personal-dev-management"
+                                    }
+                                }
+                            },
                             *(
                                 (
                                     {
