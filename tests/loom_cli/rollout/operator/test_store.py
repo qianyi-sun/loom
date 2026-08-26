@@ -118,6 +118,39 @@ def make_request(
     )
 
 
+def _legacy_rollout_request_payload(
+    *,
+    request_id: str = REQUEST_ID,
+) -> dict[str, object]:
+    """Return the exact immutable request schema used before preflight bindings."""
+    return {
+        "caller": {"schema_version": 1, "uid": 2002, "username": "hongjian"},
+        "candidate": {
+            "fetched_at": "2026-07-13T20:00:00Z",
+            "image_tag": "staging-abcdef1",
+            "remote_url": APPROVED_REMOTE_URL,
+            "resolved_sha": RESOLVED_SHA,
+            "schema_version": 1,
+            "target_ref": "origin/dev",
+        },
+        "command": "start",
+        "request_id": request_id,
+        "requested_at": "2026-07-13T20:00:01Z",
+        "rollout_id": "staging-abcdef1",
+        "runner_config_sha256": "2" * 64,
+        "schema_version": 1,
+        "status": "pending",
+    }
+
+
+def _write_legacy_rollout_request(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
 def make_envelope(
     *,
     request_id: str = REQUEST_ID,
@@ -934,6 +967,79 @@ def test_request_and_attempt_inventory_is_exact_sorted_and_typed(tmp_path: Path)
     assert store.request_ids() == (REQUEST_ID, second_request_id)
     assert store.attempt_numbers(REQUEST_ID) == (1, 2)
     assert store.attempt_numbers(second_request_id) == ()
+
+
+def test_request_inventory_accepts_exact_preflightless_legacy_rollout_request(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    request_path = store.create_request(make_request())
+    _write_legacy_rollout_request(request_path, _legacy_rollout_request_payload())
+
+    assert store.request_ids() == (REQUEST_ID,)
+    with pytest.raises(RequestStoreError, match="missing keys"):
+        store.read_request(REQUEST_ID)
+
+
+def test_request_inventory_rejects_invalid_preflightless_legacy_rollout_request(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    request_path = store.create_request(make_request())
+    payload = _legacy_rollout_request_payload()
+    payload["runner_config_sha256"] = "invalid"
+    _write_legacy_rollout_request(request_path, payload)
+
+    with pytest.raises(RequestStoreError, match="runner_config_sha256"):
+        store.request_ids()
+
+
+def test_request_inventory_rejects_legacy_rollout_beside_preflight_authority(
+    tmp_path: Path,
+) -> None:
+    store = RequestStore(tmp_path)
+    preflight_path = store.create_preflight_request(make_preflight_request())
+    request_path = preflight_path.with_name("request.json")
+    _write_legacy_rollout_request(request_path, _legacy_rollout_request_payload())
+
+    with pytest.raises(RequestStoreError, match="missing keys"):
+        store.request_ids()
+
+
+def test_request_inventory_rejects_preflight_published_after_legacy_absence_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RequestStore(tmp_path)
+    request_path = store.create_request(make_request())
+    _write_legacy_rollout_request(request_path, _legacy_rollout_request_payload())
+    original_read = store.read_preflight_request
+    published = False
+
+    def publish_after_absence(request_id: str) -> PreflightRequest:
+        nonlocal published
+        try:
+            return original_read(request_id)
+        except RequestStoreError:
+            if not published:
+                published = True
+                preflight_path = request_path.with_name("preflight.json")
+                preflight_path.write_text(
+                    json.dumps(
+                        make_preflight_request().to_dict(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                preflight_path.chmod(0o600)
+            raise
+
+    monkeypatch.setattr(store, "read_preflight_request", publish_after_absence)
+
+    with pytest.raises(RequestStoreError, match="missing keys"):
+        store.request_ids()
 
 
 @pytest.mark.parametrize("unsafe_kind", ["unknown-file", "symlink"])
