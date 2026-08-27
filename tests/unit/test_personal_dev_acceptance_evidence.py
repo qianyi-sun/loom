@@ -1172,6 +1172,61 @@ def test_acceptance_result_v2_loads_canonical_concurrent_owner_evidence(
     )
 
 
+def test_acceptance_result_v2_rejects_equal_updated_candidates_across_owners(
+    tmp_path: Path,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    owners = value["owners"]  # type: ignore[assignment]
+    owner_0_updated_candidate = owners[0]["updated"]["candidate_sha"]
+    owners[1]["updated"]["candidate_sha"] = owner_0_updated_candidate
+    owners[1]["destroyed"]["candidate_sha"] = owner_0_updated_candidate
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+@pytest.mark.parametrize("denial_index", range(6))
+def test_acceptance_result_v2_rejects_empty_denial_target_status_evidence(
+    tmp_path: Path,
+    denial_index: int,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    denials = value["cross_owner_denials"]  # type: ignore[assignment]
+    denials[denial_index]["target_before_sha256"] = _EMPTY_SHA256
+    denials[denial_index]["target_after_sha256"] = _EMPTY_SHA256
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+@pytest.mark.parametrize(
+    "status_field",
+    [
+        "after_denials",
+        "after_destroy",
+        "after_initial",
+        "after_redeploy",
+        "after_updates",
+        "pre_deploy",
+        "pre_rollback",
+        "rollback_shadow",
+    ],
+)
+def test_acceptance_result_v2_rejects_empty_mandatory_status_evidence(
+    tmp_path: Path,
+    status_field: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    status_sha256s = value["status_sha256s"]  # type: ignore[assignment]
+    status_sha256s[status_field] = _EMPTY_SHA256
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
 @pytest.mark.parametrize("unsafe_kind", ["mode", "hardlink", "symlink", "race"])
 def test_acceptance_result_v2_rejects_unsafe_file_metadata_or_race(
     tmp_path: Path,

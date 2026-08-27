@@ -28,6 +28,7 @@ from loom.personal_dev_control_plane_config import (
 from loom.personal_dev_expected_denial import expected_hidden_denial_sha256
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _GIT_IDENTITY = re.compile(r"[0-9a-f]{40}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
@@ -228,6 +229,13 @@ def _validated_digest(value: str) -> str:
     return value
 
 
+def _validated_nonempty_evidence_digest(value: str) -> str:
+    validated = _validated_digest(value)
+    if hmac.compare_digest(validated, _EMPTY_SHA256):
+        raise ValueError("nonempty evidence digest is invalid")
+    return validated
+
+
 def _validated_uuid(value: str) -> str:
     try:
         parsed = UUID(value)
@@ -349,12 +357,15 @@ class _CrossOwnerDenial(_StrictModel):
     @field_validator(
         "stdout_sha256",
         "stderr_sha256",
-        "target_before_sha256",
-        "target_after_sha256",
     )
     @classmethod
     def _digest(cls, value: str) -> str:
         return _validated_digest(value)
+
+    @field_validator("target_before_sha256", "target_after_sha256")
+    @classmethod
+    def _nonempty_evidence_digest(cls, value: str) -> str:
+        return _validated_nonempty_evidence_digest(value)
 
     @field_validator(
         "actor_team_id",
@@ -386,7 +397,7 @@ class _AcceptanceStatusSha256s(_StrictModel):
     @field_validator("*")
     @classmethod
     def _digest(cls, value: str) -> str:
-        return _validated_digest(value)
+        return _validated_nonempty_evidence_digest(value)
 
 
 class PersonalDevAcceptanceResultV2(_StrictModel):
@@ -628,7 +639,6 @@ def _validate_denial_matrix(
     plan: PersonalDevAcceptancePlan,
     denials: tuple[_CrossOwnerDenial, ...],
 ) -> None:
-    empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     expected = tuple(
         (actor_index, target_index, operation)
         for actor_index, target_index in ((0, 1), (1, 0))
@@ -650,7 +660,7 @@ def _validate_denial_matrix(
             or denial.target_user_id != str(target.user_id)
             or denial.operation != operation
             or denial.exit_code != 1
-            or not hmac.compare_digest(denial.stdout_sha256, empty_sha256)
+            or not hmac.compare_digest(denial.stdout_sha256, _EMPTY_SHA256)
             or not hmac.compare_digest(
                 denial.stderr_sha256,
                 expected_hidden_denial_sha256(operation),
@@ -738,6 +748,11 @@ def load_personal_dev_acceptance_result(
             )
         ):
             raise ValueError("acceptance result owner identities are not disjoint")
+        if hmac.compare_digest(
+            result.owners[0].updated.candidate_sha,
+            result.owners[1].updated.candidate_sha,
+        ):
+            raise ValueError("acceptance result owner candidates are not independent")
 
         _validate_denial_matrix(plan, result.cross_owner_denials)
         expected_targets = (

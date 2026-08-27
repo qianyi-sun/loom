@@ -194,26 +194,62 @@ reviewed_server="$(reviewed_public_origin "$profile")"
 
 assert_owner_only_file() {
   local path="$1"
-  test -f "$path" && test ! -L "$path"
-  test "$(realpath -e "$path")" = "$path"
-  test "$(stat -c %u "$path")" = "$(id -u)"
-  test "$(stat -c %a "$path")" = 600
-  test "$(stat -c %h "$path")" = 1
+  local maximum_bytes="${2:-4194304}"
+  test -f "$path" && test ! -L "$path" || return 1
+  test "$(realpath -e -- "$path")" = "$path" || return 1
+  test "$(stat -c %u -- "$path")" = "$(id -u)" || return 1
+  test "$(stat -c %a -- "$path")" = 600 || return 1
+  test "$(stat -c %h -- "$path")" = 1 || return 1
+  test "$(stat -c %s -- "$path")" -gt 0 || return 1
+  test "$(stat -c %s -- "$path")" -le "$maximum_bytes" || return 1
 }
 
+declare -A reviewed_file_identity=()
+declare -A reviewed_file_sha256=()
+declare -A reviewed_file_maximum=()
+
+capture_file_binding() {
+  local path="$1"
+  local maximum_bytes="$2"
+  local identity
+  local sha256
+  assert_owner_only_file "$path" "$maximum_bytes" || return 1
+  identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' -- "$path")"
+  sha256="$(sha256sum -- "$path" | awk '{print $1}')"
+  assert_owner_only_file "$path" "$maximum_bytes" || return 1
+  test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' -- "$path")" = "$identity" || return 1
+  reviewed_file_identity["$path"]="$identity"
+  reviewed_file_sha256["$path"]="$sha256"
+  reviewed_file_maximum["$path"]="$maximum_bytes"
+}
+
+assert_file_binding() {
+  local path="$1"
+  local maximum_bytes="${reviewed_file_maximum[$path]-}"
+  test -n "$maximum_bytes" || return 1
+  assert_owner_only_file "$path" "$maximum_bytes" || return 1
+  test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' -- "$path")" = \
+    "${reviewed_file_identity[$path]}" || return 1
+  test "$(sha256sum -- "$path" | awk '{print $1}')" = \
+    "${reviewed_file_sha256[$path]}" || return 1
+}
+
+external_artifacts=(
+  "$trusted_release"
+  "$operational_plan"
+  "$acceptance_plan"
+  "$acceptance_result"
+  "$acceptance_rollback_manifest"
+  "$rollback_evidence"
+  "$backup_restore_evidence"
+  "$trusted_launcher_profile"
+  "$scanner_finding_policy"
+)
 for path in \
-  "$trusted_release" \
-  "$operational_plan" \
-  "$acceptance_plan" \
-  "$acceptance_result" \
-  "$acceptance_rollback_manifest" \
-  "$rollback_evidence" \
-  "$backup_restore_evidence" \
-  "$trusted_launcher_profile" \
-  "$scanner_finding_policy" \
-  "$kubeconfig"; do
-  assert_owner_only_file "$path"
+  "${external_artifacts[@]}"; do
+  capture_file_binding "$path" 16777216
 done
+capture_file_binding "$kubeconfig" 1048576
 
 test "$(sha256sum "$trusted_release" | awk '{print $1}')" = "$trusted_release_sha256"
 test "$(sha256sum "$operational_plan" | awk '{print $1}')" = "$operational_plan_sha256"
@@ -246,11 +282,60 @@ operational_evidence_args=(
 )
 
 cd "$repo"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-test "$(git rev-parse HEAD)" = "$(jq -r .source.commit "$operational_plan")"
-test "$(git rev-parse 'HEAD^{tree}')" = "$(jq -r .source.tree "$operational_plan")"
-test "$(kubectl --kubeconfig "$kubeconfig" config current-context)" = \
-  "$expected_kube_context"
+source_commit="$(jq -r .source.commit "$operational_plan")"
+source_tree="$(jq -r .source.tree "$operational_plan")"
+
+assert_exact_source() {
+  test "$(pwd -P)" = "$repo" || return 1
+  test "$(git rev-parse --show-toplevel)" = "$repo" || return 1
+  if git symbolic-ref --quiet HEAD >/dev/null; then
+    return 1
+  fi
+  test -z "$(git status --porcelain=v1 --untracked-files=all)" || return 1
+  test "$(git rev-parse HEAD)" = "$source_commit" || return 1
+  test "$(git rev-parse 'HEAD^{tree}')" = "$source_tree" || return 1
+}
+
+assert_reviewed_kubeconfig() {
+  assert_file_binding "$kubeconfig" || return 1
+  test "$(kubectl --kubeconfig "$kubeconfig" config current-context)" = \
+    "$expected_kube_context" || return 1
+}
+
+assert_server_side_diff_unchanged() {
+  local manifest="$1"
+  local reviewed_diff="$2"
+  local label="$3"
+  local recheck
+  local diff_status=0
+  case "$label" in
+    operational|rollback) ;;
+    *) return 1 ;;
+  esac
+  test -f "$reviewed_diff" && test ! -L "$reviewed_diff" || return 1
+  test "$(realpath -e -- "$reviewed_diff")" = "$reviewed_diff" || return 1
+  test "$(stat -c %u -- "$reviewed_diff")" = "$(id -u)" || return 1
+  test "$(stat -c %a -- "$reviewed_diff")" = 600 || return 1
+  test "$(stat -c %h -- "$reviewed_diff")" = 1 || return 1
+  test "$(stat -c %s -- "$reviewed_diff")" -le 16777216 || return 1
+  recheck="$(mktemp "$evidence_dir/$label.diff-recheck.XXXXXX.txt")"
+  kubectl --kubeconfig "$kubeconfig" diff --server-side \
+    --field-manager=loom-personal-dev-control-plane \
+    -f "$manifest" > "$recheck" 2>&1 || diff_status=$?
+  if ! test "$diff_status" -eq 0 && ! test "$diff_status" -eq 1; then
+    rm -f -- "$recheck"
+    return 1
+  fi
+  chmod 0600 "$recheck"
+  if ! cmp -s "$recheck" "$reviewed_diff"; then
+    rm -f -- "$recheck"
+    return 1
+  fi
+  rm -f -- "$recheck"
+}
+
+assert_exact_source
+assert_reviewed_kubeconfig
 ```
 
 The operational plan is canonical, non-secret control evidence. It must bind
@@ -402,6 +487,258 @@ jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' \
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
   "https://$management_host/api/v1/health" \
   > "$evidence_dir/management.shadow-health.json"
+
+secret_keys() {
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace loom-dev get secret "$1" \
+    -o 'go-template={{range $key, $value := .data}}{{$key}}{{"\n"}}{{end}}' \
+    | LC_ALL=C sort
+}
+
+assert_secret_key_inventory() {
+  local expected_management
+  expected_management="$(printf '%s\n' \
+    admin-secrets.toml \
+    capacity-lifecycle-ca.pem \
+    capacity-lifecycle-certificate.pem \
+    capacity-lifecycle-private-key.pem \
+    capacity-lifecycle-token \
+    capacity-reporter-ca.pem \
+    capacity-reporter-certificate.pem \
+    capacity-reporter-private-key.pem \
+    config.json \
+    dev-instance-database-admin-url \
+    minio-access-key \
+    minio-secret-key \
+    postgres-database \
+    postgres-password \
+    postgres-user \
+    secret-store-master-key \
+    svc-db-url | LC_ALL=C sort)"
+  test "$(secret_keys loom-personal-dev-management)" = "$expected_management"
+  test "$(secret_keys loom-personal-dev-activation-public)" = public-key
+  test "$(secret_keys loom-personal-dev-activation-agent)" = private-key
+}
+
+assert_storage_and_migration() {
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace loom-dev get persistentvolumeclaims \
+    -l app.kubernetes.io/managed-by=loom-personal-dev-control-plane -o json \
+    | jq -e '.items | length >= 3 and all(.[]; .status.phase == "Bound")' >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace loom-dev get jobs -l app=loom-personal-dev-migration -o json \
+    | jq -e '
+        .items | length >= 1 and
+        any(.[]; any(.status.conditions[]?;
+          .type == "Complete" and .status == "True")) and
+        all(.[]; all(.status.conditions[]?;
+          .type != "Failed" or .status != "True"))
+      ' >/dev/null
+}
+
+assert_runtime_scanner_release_bindings() {
+  local field
+  local runtime_class
+  local runtime_handler
+  local runtime_profile_sha256
+  test "$(jq -r .schema_version "$trusted_release")" = 2
+  test "$(jq -cS .images "$trusted_release")" = \
+    "$(jq -cS .release.images "$operational_plan")"
+  for field in \
+    binary_sha256 \
+    cache_identity_sha256 \
+    database_sha256 \
+    database_metadata_sha256 \
+    java_database_sha256 \
+    java_database_metadata_sha256; do
+    test "$(jq -r ".scanner.$field" "$trusted_release")" = \
+      "$(jq -r ".builder.scanner_$field" "$operational_plan")"
+  done
+  runtime_class="$(jq -r .builder.runtime_class_name "$operational_plan")"
+  runtime_handler="$(jq -r .builder.runtime_handler "$operational_plan")"
+  runtime_profile_sha256="$(jq -r .builder.runtime_profile_sha256 "$operational_plan")"
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
+    "runtimeclass.node.k8s.io/$runtime_class" -o json \
+    | jq -e \
+      --arg name "$runtime_class" \
+      --arg handler "$runtime_handler" \
+      --arg profile "$runtime_profile_sha256" '
+        .apiVersion == "node.k8s.io/v1" and .kind == "RuntimeClass" and
+        .metadata.name == $name and .handler == $handler and
+        .metadata.annotations["loom.dev/runtime-profile-sha256"] == $profile and
+        .scheduling.nodeSelector == {
+          "kubernetes.io/arch":"amd64",
+          "kubernetes.io/os":"linux",
+          "loom.dev/personal-dev-runtime-profile-a":$profile[0:32],
+          "loom.dev/personal-dev-runtime-profile-b":$profile[32:64]
+        } and
+        (.scheduling.tolerations // []) == [] and
+        (has("overhead") | not)
+      ' >/dev/null
+}
+
+assert_no_dynamic_namespaces_or_workers() {
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get namespaces -o json \
+    | jq -e '[.items[].metadata.name |
+        select(startswith("loom-dev-") or startswith("loom-build-"))] |
+        length == 0' >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get deployments -A -o json \
+    | jq -e '[.items[] |
+        select(
+          .metadata.namespace == "loom-dev" or
+          (.metadata.namespace | startswith("loom-dev-")) or
+          (.metadata.namespace | startswith("loom-build-"))) |
+        select(
+          .metadata.name == "loom-worker" or
+          ((.metadata.name // "") | test("^loom-worker-g[1-9][0-9]*$")) or
+          .metadata.labels.app == "loom-worker" or
+          .spec.template.metadata.labels.app == "loom-worker" or
+          any(.spec.template.spec.containers[]?;
+            .name == "worker" or
+            ((.image // "") | test("/loom-worker(@sha256:|$)")) or
+            any(.env[]?;
+              .name == "LOOM_SVC_K8S_WORKER_ENABLED" and .value == "true")))] |
+        length == 0' >/dev/null
+}
+
+assert_dns_tls_ingress() {
+  local certificate
+  local dns_addresses
+  local ingress
+  local network_policy
+  local solver_policy
+  local health
+  dns_addresses="$(mktemp "$evidence_dir/management-dns-recheck.XXXXXX.txt")"
+  solver_policy="$(mktemp "$evidence_dir/acme-policy-recheck.XXXXXX.json")"
+  network_policy="$(mktemp "$evidence_dir/management-policy-recheck.XXXXXX.json")"
+  ingress="$(mktemp "$evidence_dir/management-ingress-recheck.XXXXXX.json")"
+  certificate="$(mktemp "$evidence_dir/management-certificate-recheck.XXXXXX.json")"
+  health="$(mktemp "$evidence_dir/management-health-recheck.XXXXXX.json")"
+  getent ahosts "$management_host" | awk '{print $1}' | LC_ALL=C sort -u \
+    > "$dns_addresses"
+  test -s "$dns_addresses"
+  test "$(cat "$dns_addresses")" = \
+    "$(awk '{print $1}' "$evidence_dir/management.dns.txt" | LC_ALL=C sort -u)"
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+    networkpolicy/loom-personal-dev-acme-http01-ingress -o json > "$solver_policy"
+  jq -e --argjson port "$solver_port" '
+    .spec.podSelector.matchLabels == {"acme.cert-manager.io/http01-solver":"true"} and
+    .spec.policyTypes == ["Ingress"] and (.spec | has("egress") | not) and
+    (.spec.ingress[0] | has("from") | not) and
+    .spec.ingress[0].ports == [{port:$port,protocol:"TCP"}]
+  ' "$solver_policy" >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+    networkpolicy/loom-personal-dev-management-ingress -o json > "$network_policy"
+  jq -e '
+    .spec.podSelector.matchLabels == {"app":"loom-personal-dev-management"} and
+    .spec.policyTypes == ["Ingress"] and (.spec | has("egress") | not) and
+    (.spec.ingress[0] | has("from") | not) and
+    .spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]
+  ' "$network_policy" >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+    ingress/loom-personal-dev-management -o json > "$ingress"
+  jq -e --arg host "$management_host" '
+    .spec.rules == [{host:$host,http:.spec.rules[0].http}] and
+    .spec.tls[0].hosts == [$host]
+  ' "$ingress" >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+    certificate/loom-personal-dev-management-tls -o json > "$certificate"
+  jq -e --arg host "$management_host" '
+    (.spec.dnsNames | index($host)) != null and
+    any(.status.conditions[]?; .type == "Ready" and .status == "True")
+  ' "$certificate" >/dev/null
+  curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+    "https://$management_host/api/v1/health" > "$health"
+  rm -f -- "$dns_addresses" "$solver_policy" "$network_policy" \
+    "$ingress" "$certificate" "$health"
+}
+
+assert_current_artifacts() {
+  local path
+  assert_exact_source
+  for path in "${external_artifacts[@]}" "$kubeconfig" \
+    "$operational_render" "$operational_render_evidence" \
+    "$shadow_render" "$shadow_render_evidence"; do
+    assert_file_binding "$path"
+  done
+  test "${reviewed_file_sha256[$trusted_release]}" = "$trusted_release_sha256"
+  test "${reviewed_file_sha256[$operational_plan]}" = "$operational_plan_sha256"
+  test "${reviewed_file_sha256[$acceptance_plan]}" = "$acceptance_plan_sha256"
+  test "${reviewed_file_sha256[$acceptance_result]}" = "$acceptance_result_sha256"
+  test "${reviewed_file_sha256[$acceptance_rollback_manifest]}" = \
+    "$acceptance_rollback_manifest_sha256"
+  test "${reviewed_file_sha256[$rollback_evidence]}" = \
+    "$rollback_shadow_status_sha256"
+}
+
+assert_ready_shadow_status() {
+  local output
+  output="$(mktemp "$evidence_dir/pre-apply-shadow.XXXXXX.json")"
+  "$loom_cli" admin personal-dev-control-plane status \
+    --namespace loom-dev \
+    --kubeconfig "$kubeconfig" \
+    --file "$profile" \
+    --trusted-release-file "$trusted_release" \
+    --trusted-release-sha256 "$trusted_release_sha256" > "$output"
+  chmod 0600 "$output"
+  jq -e '
+    .schema == "loom-personal-dev-control-plane-status-v1" and
+    .mode == "shadow" and .ready == true and .blockers == [] and
+    .manager_ceiling == 0 and all(.components[]; .ready == true)
+  ' "$output" >/dev/null
+  rm -f -- "$output"
+}
+
+assert_operational_manager_boundary() {
+  local output
+  local status_rc=0
+  output="$(mktemp "$evidence_dir/pre-apply-operational-boundary.XXXXXX.json")"
+  "$loom_cli" admin personal-dev-control-plane status-operational \
+    --namespace loom-dev \
+    --kubeconfig "$kubeconfig" \
+    --file "$profile" \
+    --trusted-release-file "$trusted_release" \
+    --trusted-release-sha256 "$trusted_release_sha256" \
+    --operational-plan-file "$operational_plan" \
+    --operational-plan-sha256 "$operational_plan_sha256" \
+    "${operational_evidence_args[@]}" > "$output" || status_rc=$?
+  test "$status_rc" -eq 0 || test "$status_rc" -eq 1
+  chmod 0600 "$output"
+  jq -e --arg plan "$operational_plan_sha256" '
+    .schema == "loom-personal-dev-control-plane-status-v1" and
+    .mode == "operational" and .operational_plan_sha256 == $plan and
+    .capacity_publication_ready == true and .manager_ceiling == 0 and
+    .worker_available == false and
+    any(.components[]; .name == "manager" and .ready == true) and
+    any(.components[]; .name == "runtime-class" and .ready == true) and
+    any(.components[];
+      .name == "personal-workers" and .observed == 0 and .ready == true)
+  ' "$output" >/dev/null
+  rm -f -- "$output"
+}
+
+assert_operational_interlocks() {
+  assert_current_artifacts
+  assert_reviewed_kubeconfig
+  assert_secret_key_inventory
+  assert_storage_and_migration
+  assert_runtime_scanner_release_bindings
+  assert_no_dynamic_namespaces_or_workers
+  assert_dns_tls_ingress
+  assert_ready_shadow_status
+  assert_operational_manager_boundary
+}
+
+assert_rollback_interlocks() {
+  assert_current_artifacts
+  assert_reviewed_kubeconfig
+  assert_secret_key_inventory
+  assert_storage_and_migration
+  assert_runtime_scanner_release_bindings
+  assert_no_dynamic_namespaces_or_workers
+  assert_dns_tls_ingress
+  assert_operational_manager_boundary
+}
 ```
 
 Do not use `--resolve`, `-k`, an alternate CA, or a local port-forward as DNS,
@@ -459,6 +796,37 @@ jq -e --arg yaml "$shadow_render_sha256" '
   .schema == "loom-personal-dev-control-plane-render-v1" and
   .mode == "shadow" and .yaml_sha256 == $yaml
 ' "$shadow_render_evidence" >/dev/null
+
+capture_file_binding "$operational_render" 16777216
+capture_file_binding "$operational_render_evidence" 4194304
+capture_file_binding "$shadow_render" 16777216
+capture_file_binding "$shadow_render_evidence" 4194304
+
+assert_operational_render_binding() {
+  assert_file_binding "$operational_render"
+  assert_file_binding "$operational_render_evidence"
+  test "${reviewed_file_sha256[$operational_render]}" = \
+    "$operational_render_sha256"
+  jq -e \
+    --arg plan "$operational_plan_sha256" \
+    --arg yaml "$operational_render_sha256" '
+      .schema == "loom-personal-dev-control-plane-render-v1" and
+      .mode == "operational" and .operational_plan_sha256 == $plan and
+      .yaml_sha256 == $yaml
+    ' "$operational_render_evidence" >/dev/null
+}
+
+assert_shadow_render_binding() {
+  assert_file_binding "$shadow_render"
+  assert_file_binding "$shadow_render_evidence"
+  test "${reviewed_file_sha256[$shadow_render]}" = "$shadow_render_sha256"
+  test "$shadow_render_sha256" = \
+    "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
+  jq -e --arg yaml "$shadow_render_sha256" '
+    .schema == "loom-personal-dev-control-plane-render-v1" and
+    .mode == "shadow" and .yaml_sha256 == $yaml
+  ' "$shadow_render_evidence" >/dev/null
+}
 ```
 
 Byte-review the complete YAML and canonical render records. Record a structural
@@ -478,9 +846,9 @@ kubectl --kubeconfig "$kubeconfig" diff --server-side \
 test "$diff_status" -eq 0 || test "$diff_status" -eq 1
 chmod 0600 "$evidence_dir/operational.server-side-diff.txt"
 
-# Re-run every source, file-identity, release, storage, Secret, RuntimeClass,
-# manager-ceiling, namespace, worker, DNS, TLS, and diff interlock immediately
-# before this apply.
+assert_server_side_diff_unchanged "$operational_render" "$evidence_dir/operational.server-side-diff.txt" operational
+assert_operational_interlocks
+assert_operational_render_binding
 kubectl --kubeconfig "$kubeconfig" apply --server-side \
   --field-manager=loom-personal-dev-control-plane \
   -f "$operational_render" \
@@ -673,7 +1041,10 @@ shadow_recheck_evidence="$(mktemp "$evidence_dir/shadow-recheck.XXXXXX.json")"
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   > "$shadow_recheck" 2> "$shadow_recheck_evidence"
+chmod 0600 "$shadow_recheck" "$shadow_recheck_evidence"
 cmp -s "$shadow_recheck" "$shadow_render"
+cmp -s "$shadow_recheck_evidence" "$shadow_render_evidence"
+rm -f -- "$shadow_recheck" "$shadow_recheck_evidence"
 
 kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get namespaces -o json \
   | jq -e '[.items[].metadata.name |
@@ -687,9 +1058,11 @@ kubectl --kubeconfig "$kubeconfig" diff --server-side \
   > "$evidence_dir/rollback.server-side-diff.txt" 2>&1 \
   || rollback_diff_status=$?
 test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1
+chmod 0600 "$evidence_dir/rollback.server-side-diff.txt"
 
-# Re-run every source, release, file-identity, storage, Secret, RuntimeClass,
-# manager-ceiling, namespace, worker, and rollback-diff interlock here.
+assert_server_side_diff_unchanged "$shadow_render" "$evidence_dir/rollback.server-side-diff.txt" rollback
+assert_rollback_interlocks
+assert_shadow_render_binding
 kubectl --kubeconfig "$kubeconfig" apply --server-side \
   --field-manager=loom-personal-dev-control-plane \
   -f "$shadow_render" \

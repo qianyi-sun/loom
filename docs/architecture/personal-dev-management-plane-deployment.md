@@ -291,11 +291,13 @@ claim.
 
 Repository implementation does not establish the live prerequisites by
 itself. DNS and TLS, provisioned Secret inventories, the measured gVisor
-RuntimeClass, candidate GHCR publication, backup/restore evidence, verified
-two-owner schema-v2 acceptance, and a successful operational apply/status
-remain separate operational gates. None may be inferred from a successful
-render or from scanner-cache preparation, and the executable ceiling remains
-zero throughout these gates.
+RuntimeClass, candidate GHCR publication, backup/restore evidence, the
+applicable verified acceptance gate (schema v1 for the reviewed #1280
+sole-owner route, or schema v2 before a multi-person launch), and a successful
+operational apply/status remain separate operational gates. Neither acceptance
+schema supersedes the other route's authority. None of these gates may be
+inferred from a successful render or from scanner-cache preparation, and the
+executable ceiling remains zero throughout them.
 
 ## Credential boundaries
 

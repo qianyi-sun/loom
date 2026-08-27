@@ -21,11 +21,15 @@ loom_cli.secret_source for the rationale.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from typing import cast
+from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 
@@ -345,21 +349,186 @@ def _format_scopes(scopes: object) -> str:
 
 
 _SCOPE = re.compile(r"[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*)*")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_TOKEN_PREFIX = re.compile(r"[0-9a-f]{8}")
+_UTC_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)",
+)
+_AUTH_KINDS = frozenset({"bearer", "session"})
+_CREDENTIAL_TYPES = frozenset({
+    "browser_session",
+    "user_owned_api_token",
+    "service_credential",
+    "legacy_team_token",
+    "staging_readonly_probe",
+    "admin_bearer_token",
+    "worker_token",
+    "step_session",
+})
+_PRINCIPAL_TYPES = frozenset({
+    "user", "team", "readonly_probe", "admin", "worker", "step_session",
+})
+_ROLES = frozenset({"owner", "member", "viewer", "platform_admin"})
+_MAX_ORIGIN_LENGTH = 2048
+_MAX_HOST_LENGTH = 253
+_MAX_SCOPE_COUNT = 64
+_MAX_SCOPE_LENGTH = 128
+_MAX_TIMESTAMP_LENGTH = 32
+_JSON_PROJECTION_ERROR = "error: invalid whoami JSON projection\n"
 
 
-def _optional_string(value: object) -> str | None:
-    return value if isinstance(value, str) else None
+def _validated_json_origin(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= _MAX_ORIGIN_LENGTH
+        or not value.isascii()
+        or any(character.isspace() or ord(character) < 32 or ord(character) == 127
+               for character in value)
+    ):
+        raise ValueError("invalid origin")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except ValueError as exc:
+        raise ValueError("invalid origin") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or hostname is None
+        or username is not None
+        or password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or len(hostname) > _MAX_HOST_LENGTH
+        or port == 0
+    ):
+        raise ValueError("invalid origin")
+
+    if ":" in hostname:
+        if "%" in hostname:
+            raise ValueError("invalid origin")
+        try:
+            address = ipaddress.IPv6Address(hostname)
+        except ValueError as exc:
+            raise ValueError("invalid origin") from exc
+        rendered_host = f"[{address.compressed}]"
+    elif hostname.replace(".", "").isdigit() and "." in hostname:
+        try:
+            address_v4 = ipaddress.IPv4Address(hostname)
+        except ValueError as exc:
+            raise ValueError("invalid origin") from exc
+        rendered_host = str(address_v4)
+    else:
+        labels = hostname.split(".")
+        if any(_DNS_LABEL.fullmatch(label) is None for label in labels):
+            raise ValueError("invalid origin")
+        rendered_host = hostname
+
+    origin = f"{parsed.scheme}://{rendered_host}"
+    if port is not None:
+        origin += f":{port}"
+    if value != origin:
+        raise ValueError("invalid origin")
+    return origin
+
+
+def _validated_optional_enum(
+    value: object,
+    members: frozenset[str],
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in members:
+        raise ValueError("invalid enum")
+    return value
+
+
+def _validated_optional_uuid(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("invalid UUID")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise ValueError("invalid UUID") from exc
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("invalid UUID")
+    return value
+
+
+def _validated_optional_timestamp(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= _MAX_TIMESTAMP_LENGTH
+        or _UTC_TIMESTAMP.fullmatch(value) is None
+    ):
+        raise ValueError("invalid timestamp")
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as exc:
+        raise ValueError("invalid timestamp") from exc
+    return value
+
+
+def _validated_optional_token_prefix(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _TOKEN_PREFIX.fullmatch(value) is None:
+        raise ValueError("invalid token prefix")
+    return value
 
 
 def _validated_scope_list(scopes: object) -> list[str]:
-    """Return only the bounded, non-secret scope strings from a whoami response."""
-    if not isinstance(scopes, Sequence) or isinstance(scopes, str):
+    """Validate all scope strings before returning the public projection."""
+    if scopes is None:
         return []
-    return [
-        scope
-        for scope in scopes
-        if isinstance(scope, str) and _SCOPE.fullmatch(scope) is not None
-    ]
+    if (
+        not isinstance(scopes, Sequence)
+        or isinstance(scopes, (str, bytes, bytearray))
+        or len(scopes) > _MAX_SCOPE_COUNT
+    ):
+        raise ValueError("invalid scopes")
+    result: list[str] = []
+    for scope in scopes:
+        if (
+            not isinstance(scope, str)
+            or not 1 <= len(scope) <= _MAX_SCOPE_LENGTH
+            or _SCOPE.fullmatch(scope) is None
+        ):
+            raise ValueError("invalid scopes")
+        result.append(scope)
+    return result
+
+
+def _validated_whoami_json_projection(
+    data: object,
+    *,
+    server: str,
+) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise ValueError("invalid response")
+    return {
+        "auth_kind": _validated_optional_enum(data.get("auth_kind"), _AUTH_KINDS),
+        "credential_type": _validated_optional_enum(
+            data.get("credential_type"), _CREDENTIAL_TYPES,
+        ),
+        "expires_at": _validated_optional_timestamp(data.get("expires_at")),
+        "principal_type": _validated_optional_enum(
+            data.get("principal_type"), _PRINCIPAL_TYPES,
+        ),
+        "role": _validated_optional_enum(data.get("role"), _ROLES),
+        "scopes": sorted(set(_validated_scope_list(data.get("scopes")))),
+        "server": server,
+        "team_id": _validated_optional_uuid(data.get("team_id")),
+        "token_prefix": _validated_optional_token_prefix(data.get("token_prefix")),
+        "user_id": _validated_optional_uuid(data.get("user_id")),
+    }
 
 
 def _principal_label(data: dict[str, object]) -> str:
@@ -411,35 +580,43 @@ def _whoami(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {e}\n")
         return 2
 
+    json_origin: str | None = None
+    if args.format == "json":
+        try:
+            json_origin = _validated_json_origin(cfg.server_url)
+        except ValueError:
+            sys.stderr.write(_JSON_PROJECTION_ERROR)
+            return 2
+
     try:
         with authed_client(cfg) as c:
             response = c.get("/api/v1/auth/whoami")
             data = assert_2xx(response, action="inspect authenticated principal")
-            persist_session_credentials_from_response(cfg, response, data=data)
     except HttpStatusError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
     except httpx.RequestError as e:
         sys.stderr.write(f"error: could not reach {cfg.server_url}: {e}\n")
         return 2
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        if args.format != "json":
+            raise
+        sys.stderr.write(_JSON_PROJECTION_ERROR)
+        return 2
 
     if args.format == "json":
-        record = {
-            "auth_kind": _optional_string(data.get("auth_kind")),
-            "credential_type": _optional_string(data.get("credential_type")),
-            "expires_at": _optional_string(data.get("expires_at")),
-            "principal_type": _optional_string(data.get("principal_type")),
-            "role": _optional_string(data.get("role")),
-            "scopes": sorted(set(_validated_scope_list(data.get("scopes")))),
-            "server": cfg.server_url,
-            "team_id": _optional_string(data.get("team_id")),
-            "token_prefix": _optional_string(data.get("token_prefix")),
-            "user_id": _optional_string(data.get("user_id")),
-        }
+        assert json_origin is not None
+        try:
+            record = _validated_whoami_json_projection(data, server=json_origin)
+        except ValueError:
+            sys.stderr.write(_JSON_PROJECTION_ERROR)
+            return 2
+        persist_session_credentials_from_response(cfg, response, data=data)
         json.dump(record, sys.stdout, separators=(",", ":"), sort_keys=True)
         sys.stdout.write("\n")
         return 0
 
+    persist_session_credentials_from_response(cfg, response, data=data)
     print(f"Server:    {cfg.server_url}")
     print(f"Principal: {_principal_label(data)}")
     if data.get("username") or data.get("user_id"):

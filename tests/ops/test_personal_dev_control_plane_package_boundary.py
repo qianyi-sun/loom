@@ -59,6 +59,39 @@ def _shell_command_block(document: str, command: str, output: str) -> str:
     return textwrap.dedent("\n".join(lines[start : end + 1]))
 
 
+def _fenced_bash(document: str) -> str:
+    blocks = re.findall(r"^```bash\n(.*?)^```$", document, flags=re.DOTALL | re.MULTILINE)
+    assert blocks
+    return "\n".join(blocks)
+
+
+def _executable_calls_are_ordered(
+    document: str,
+    *,
+    start: str,
+    apply: str,
+    calls: tuple[str, ...],
+) -> bool:
+    bash = _fenced_bash(document)
+    try:
+        start_index = bash.index(start)
+        apply_index = bash.index(apply, start_index)
+    except ValueError:
+        return False
+    executable = [
+        line.strip()
+        for line in bash[start_index:apply_index].splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    positions: list[int] = []
+    for call in calls:
+        try:
+            positions.append(executable.index(call))
+        except ValueError:
+            return False
+    return positions == sorted(positions) and len(set(positions)) == len(calls)
+
+
 def _sidecar_status(**changes: str) -> bytes:
     fields = {
         "Uid": "1000\t1000\t1000\t1000",
@@ -1746,7 +1779,7 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '--trusted-launcher-profile-file "$trusted_launcher_profile"' in runbook
     assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
     assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
-    assert runbook.count('"${operational_evidence_args[@]}"') == 3
+    assert runbook.count('"${operational_evidence_args[@]}"') == 4
     assert 'test "$solver_port" = 8089' in runbook
     assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
     assert "networkpolicy/loom-personal-dev-management-ingress" in runbook
@@ -1786,6 +1819,259 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
     assert ".owner_count == 2" in runbook
     assert ".cross_owner_denial_count == 6" in runbook
+
+
+@pytest.mark.parametrize(
+    ("start", "apply", "calls"),
+    [
+        (
+            'test "$diff_status" -eq 0 || test "$diff_status" -eq 1',
+            'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+            (
+                'assert_server_side_diff_unchanged "$operational_render" '
+                '"$evidence_dir/operational.server-side-diff.txt" operational',
+                "assert_operational_interlocks",
+                "assert_operational_render_binding",
+            ),
+        ),
+        (
+            'test "$rollback_diff_status" -eq 0 || '
+            'test "$rollback_diff_status" -eq 1',
+            'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+            (
+                'assert_server_side_diff_unchanged "$shadow_render" '
+                '"$evidence_dir/rollback.server-side-diff.txt" rollback',
+                "assert_rollback_interlocks",
+                "assert_shadow_render_binding",
+            ),
+        ),
+    ],
+)
+def test_multi_owner_durable_launch_executes_pre_apply_calls_in_order_and_mutations_fail(
+    start: str,
+    apply: str,
+    calls: tuple[str, ...],
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    assert _executable_calls_are_ordered(
+        runbook,
+        start=start,
+        apply=apply,
+        calls=calls,
+    )
+
+    for call in calls:
+        executable_line = f"\n{call}\n"
+        assert executable_line in runbook
+        removed = runbook.replace(executable_line, "\n", 1)
+        assert not _executable_calls_are_ordered(
+            removed,
+            start=start,
+            apply=apply,
+            calls=calls,
+        )
+        commented = runbook.replace(executable_line, f"\n# {call}\n", 1)
+        assert not _executable_calls_are_ordered(
+            commented,
+            start=start,
+            apply=apply,
+            calls=calls,
+        )
+        displaced = runbook.replace(executable_line, "\n", 1) + f"\n```bash\n{call}\n```\n"
+        assert not _executable_calls_are_ordered(
+            displaced,
+            start=start,
+            apply=apply,
+            calls=calls,
+        )
+
+
+def test_multi_owner_durable_launch_captures_and_immediately_revalidates_render_bindings() -> (
+    None
+):
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    render = runbook.index('operational_render_sha256="$(sha256sum')
+    forward_diff = runbook.index("diff_status=0", render)
+    for call in (
+        'capture_file_binding "$operational_render" 16777216',
+        'capture_file_binding "$operational_render_evidence" 4194304',
+        'capture_file_binding "$shadow_render" 16777216',
+        'capture_file_binding "$shadow_render_evidence" 4194304',
+    ):
+        assert call in runbook[render:forward_diff]
+    assert 'cmp -s "$shadow_recheck_evidence" "$shadow_render_evidence"' in runbook
+    assert 'assert_file_binding "$operational_render"' in _fenced_shell_function(
+        runbook,
+        "assert_operational_render_binding",
+    )
+    assert 'assert_file_binding "$operational_render_evidence"' in _fenced_shell_function(
+        runbook,
+        "assert_operational_render_binding",
+    )
+    assert 'assert_file_binding "$shadow_render"' in _fenced_shell_function(
+        runbook,
+        "assert_shadow_render_binding",
+    )
+    assert 'assert_file_binding "$shadow_render_evidence"' in _fenced_shell_function(
+        runbook,
+        "assert_shadow_render_binding",
+    )
+
+
+def test_multi_owner_durable_launch_file_binding_helpers_detect_byte_or_identity_drift(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in ("assert_owner_only_file", "capture_file_binding", "assert_file_binding")
+    )
+    bound = tmp_path / "bound.json"
+    bound.write_bytes(b"reviewed-bytes")
+    bound.chmod(0o600)
+    program = (
+        "set -euo pipefail\n"
+        "declare -A reviewed_file_identity=()\n"
+        "declare -A reviewed_file_sha256=()\n"
+        "declare -A reviewed_file_maximum=()\n"
+        + functions
+        + "\n"
+        + f"bound={shlex.quote(str(bound))}\n"
+        + 'capture_file_binding "$bound" 64\n'
+        + 'assert_file_binding "$bound"\n'
+        + 'printf changed-bytes > "$bound"\n'
+        + 'if assert_file_binding "$bound"; then exit 90; fi\n'
+        + "printf 'drift-detected\\n'\n"
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "drift-detected\n"
+
+
+def test_multi_owner_durable_launch_diff_recheck_helper_requires_exact_reviewed_bytes(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    function = _fenced_shell_function(runbook, "assert_server_side_diff_unchanged")
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+    manifest = evidence_dir / "reviewed.yaml"
+    manifest.write_text("manifest\n", encoding="ascii")
+    reviewed = evidence_dir / "reviewed.diff"
+    reviewed.write_text("reviewed diff\n", encoding="ascii")
+    reviewed.chmod(0o600)
+    arguments = evidence_dir / "kubectl.arguments"
+    program = (
+        "set -euo pipefail\n"
+        "umask 077\n"
+        + function
+        + "\n"
+        + f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+        + f"kubeconfig={shlex.quote(str(tmp_path / 'kubeconfig'))}\n"
+        + f"arguments={shlex.quote(str(arguments))}\n"
+        + "kubectl() {\n"
+        + "  printf '%s\\n' \"$*\" > \"$arguments\"\n"
+        + "  printf '%s\\n' \"$fake_diff\"\n"
+        + "  return 1\n"
+        + "}\n"
+        + f"manifest={shlex.quote(str(manifest))}\n"
+        + f"reviewed={shlex.quote(str(reviewed))}\n"
+        + "fake_diff='reviewed diff'\n"
+        + 'assert_server_side_diff_unchanged "$manifest" "$reviewed" operational\n'
+        + "fake_diff='changed diff'\n"
+        + 'if assert_server_side_diff_unchanged "$manifest" "$reviewed" operational; '
+        + "then exit 90; fi\n"
+        + "printf 'drift-detected\\n'\n"
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "drift-detected\n"
+    assert arguments.read_text() == (
+        f'--kubeconfig {tmp_path / "kubeconfig"} diff --server-side '
+        f'--field-manager=loom-personal-dev-control-plane -f {manifest}\n'
+    )
+
+
+def test_multi_owner_durable_launch_rollback_accepts_fail_closed_operational_status(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in ("assert_operational_manager_boundary", "assert_rollback_interlocks")
+    )
+    calls = tmp_path / "calls.txt"
+    status = {
+        "schema": "loom-personal-dev-control-plane-status-v1",
+        "mode": "operational",
+        "operational_plan_sha256": "a" * 64,
+        "capacity_publication_ready": True,
+        "manager_ceiling": 0,
+        "worker_available": False,
+        "components": [
+            {"name": "manager", "ready": True},
+            {"name": "runtime-class", "ready": True},
+            {"name": "personal-workers", "observed": 0, "ready": True},
+        ],
+    }
+    program = (
+        "set -euo pipefail\n"
+        + functions
+        + "\n"
+        + "assert_current_artifacts() { :; }\n"
+        + "assert_reviewed_kubeconfig() { :; }\n"
+        + "assert_secret_key_inventory() { :; }\n"
+        + "assert_storage_and_migration() { :; }\n"
+        + "assert_runtime_scanner_release_bindings() { :; }\n"
+        + "assert_no_dynamic_namespaces_or_workers() { :; }\n"
+        + "assert_dns_tls_ingress() { :; }\n"
+        + f"calls={shlex.quote(str(calls))}\n"
+        + f"status_json={shlex.quote(json.dumps(status))}\n"
+        + "loom_cli_stub() {\n"
+        + "  printf 'status-operational\\n' >> \"$calls\"\n"
+        + "  printf '%s\\n' \"$status_json\"\n"
+        + "  return 1\n"
+        + "}\n"
+        + "loom_cli=loom_cli_stub\n"
+        + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        + "kubeconfig=/unused/kubeconfig\n"
+        + "profile=/unused/profile\n"
+        + "trusted_release=/unused/release\n"
+        + "trusted_release_sha256=" + "b" * 64 + "\n"
+        + "operational_plan=/unused/plan\n"
+        + "operational_plan_sha256=" + "a" * 64 + "\n"
+        + "operational_evidence_args=()\n"
+        + "assert_rollback_interlocks\n"
+        + "printf 'rollback-safe\\n'\n"
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "rollback-safe\n"
+    assert calls.read_text() == "status-operational\n"
 
 
 @pytest.mark.parametrize(
