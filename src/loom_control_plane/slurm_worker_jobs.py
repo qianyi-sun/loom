@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 ACTIVE_STATES = {"pending", "running"}
 TERMINAL_STATES = {"completed", "failed", "cancelled", "stale"}
+UNRECOVERABLE_SLURM_STATES = frozenset({"REQUEUE_HOLD"})
 _SECRET_KEY_PARTS = (
     "TOKEN",
     "SECRET",
@@ -120,11 +121,24 @@ def redact_env(env: dict[str, str] | None) -> dict[str, str]:
     return redacted
 
 
+def _slurm_state_token(raw_state: str | None) -> str:
+    return (raw_state or "PENDING").strip().upper().split(maxsplit=1)[0]
+
+
+def is_unrecoverable_slurm_state(raw_state: str | None) -> bool:
+    return _slurm_state_token(raw_state) in UNRECOVERABLE_SLURM_STATES
+
+
 def _normalize_slurm_state(raw_state: str | None) -> str:
     if raw_state is None:
         return "pending"
-    token = raw_state.strip().upper().split(maxsplit=1)[0]
-    if token in {"PENDING", "CONFIGURING", "RESIZING", "REQUEUE_FED"}:
+    token = _slurm_state_token(raw_state)
+    if token in {
+        "PENDING",
+        "CONFIGURING",
+        "RESIZING",
+        "REQUEUE_FED",
+    }:
         return "pending"
     if token in {"RUNNING", "COMPLETING"}:
         return "running"
