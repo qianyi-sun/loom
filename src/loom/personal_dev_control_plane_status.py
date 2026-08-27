@@ -153,6 +153,12 @@ class PersonalDevShadowStatus:
     manager_ceiling: int | None
     components: tuple[PersonalDevShadowComponent, ...]
 
+    @property
+    def worker_available(self) -> bool:
+        """Shadow mode never publishes executable personal-worker capacity."""
+
+        return False
+
     def to_dict(self) -> dict[str, object]:
         return {
             "blockers": list(self.blockers),
@@ -163,6 +169,7 @@ class PersonalDevShadowStatus:
             "ready": self.ready,
             "release_sha256": self.release_sha256,
             "schema": "loom-personal-dev-control-plane-status-v1",
+            "worker_available": self.worker_available,
         }
 
 
@@ -1392,7 +1399,7 @@ def _observe_personal_dev_status(
     mode_commands = (
         (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND)
         if enabled
-        else (_MANAGER_COMMAND,)
+        else (_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND)
     )
     results = {
         command: _run(runner, command, deadline)
@@ -1921,8 +1928,6 @@ def _observe_personal_dev_status(
     except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
         blockers.add("resource_inventory_invalid")
 
-    personal_workers = 0
-    worker_inventory_ok = True
     if not enabled:
         manager_ceiling, manager_blocker = _manager_status(results[_MANAGER_COMMAND])
         if manager_blocker:
@@ -1935,15 +1940,17 @@ def _observe_personal_dev_status(
             enabled_plan,
         )
         blockers.update(manager_blockers)
-        try:
-            personal_workers, worker_inventory_ok = _personal_worker_inventory(
-                results[_DEPLOYMENTS_COMMAND]
-            )
-        except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
-            worker_inventory_ok = False
-            blockers.add("deployment_inventory_invalid")
-        if not worker_inventory_ok and "deployment_inventory_invalid" not in blockers:
-            blockers.add("unexpected_personal_worker")
+
+    personal_workers = 0
+    worker_inventory_ok = False
+    try:
+        personal_workers, worker_inventory_ok = _personal_worker_inventory(
+            results[_DEPLOYMENTS_COMMAND]
+        )
+    except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
+        blockers.add("deployment_inventory_invalid")
+    if not worker_inventory_ok and "deployment_inventory_invalid" not in blockers:
+        blockers.add("unexpected_personal_worker")
 
     digest_observed = (
         "resource_digest_drift" not in blockers
@@ -1958,14 +1965,13 @@ def _observe_personal_dev_status(
         PersonalDevShadowComponent("namespaces", namespace_observed, namespace_ok),
         PersonalDevShadowComponent("runtime-class", runtime_observed, runtime_ok),
     ]
-    if enabled:
-        component_values.append(
-            PersonalDevShadowComponent(
-                "personal-workers",
-                personal_workers,
-                worker_inventory_ok,
-            )
+    component_values.append(
+        PersonalDevShadowComponent(
+            "personal-workers",
+            personal_workers,
+            worker_inventory_ok,
         )
+    )
     components = tuple(sorted(component_values, key=lambda component: component.name))
     stable_blockers = tuple(sorted(blockers))
     if enabled:

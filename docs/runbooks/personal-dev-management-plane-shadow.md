@@ -596,6 +596,9 @@ jq -e \
    .mode == "shadow" and .ready == true and .blockers == [] and
    .manager_ceiling == 0 and .input_sha256 == $input and
    .release_sha256 == $release and
+   .worker_available == false and
+   any(.components[]; .name == "personal-workers" and
+       .observed == 0 and .ready == true) and
    all(.components[]; .ready == true)' \
   "$status_evidence"
 sha256sum "$status_evidence" > "$status_evidence.sha256"
@@ -605,7 +608,7 @@ chmod 0600 "$status_evidence.sha256"
 The successful canonical shape is:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":30,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1"}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":30,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
 The namespaced observed count may include bounded retained successful migration
@@ -762,7 +765,10 @@ uv run --no-sync loom admin personal-dev-control-plane status \
 chmod 0600 "$rollback_status_evidence"
 jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and
        .mode == "shadow" and .ready == true and .blockers == [] and
-       .manager_ceiling == 0 and all(.components[]; .ready == true)' \
+       .manager_ceiling == 0 and .worker_available == false and
+       any(.components[]; .name == "personal-workers" and
+           .observed == 0 and .ready == true) and
+       all(.components[]; .ready == true)' \
   "$rollback_status_evidence"
 sha256sum "$rollback_status_evidence" > "$rollback_status_evidence.sha256"
 chmod 0600 "$rollback_status_evidence.sha256"
