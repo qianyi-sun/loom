@@ -100,7 +100,8 @@ cross-owner matrix in both directions:
 
 - read: `loom dev status` for the other owner's name;
 - update: `loom service up` for the other owner's name using the actor's
-  already-ready candidate and explicit expected epoch zero; and
+  already-ready candidate and the fixed positive noncreating epoch sentinel
+  `1`; and
 - destroy: `loom dev destroy` for the other owner's name, fenced by the exact
   positive operation epoch in the target owner's pinned before-status record.
 
@@ -119,7 +120,11 @@ receipt and exits 1. Candidate lookup, validation or preflight failure,
 credential rejection, server failure, unexpected success, and response detail
 never produce that receipt. The fixed receipt contains only schema,
 `resource_hidden`, target method/phase, and status 404; the target response body
-is discarded.
+is discarded. The route supplies the same phase marker for a missing target and
+an existing foreign target, so the marker proves which application handler
+answered without becoming a resource-existence oracle. The target owner's
+pinned before/after status records, not a distinguishable denial response,
+prove that the named target existed throughout the probe.
 
 Owner 0 then destroys normally. Owner 1 destroys with retained data, redeploys
 the same name using the exact epoch captured in its destroyed status, and
@@ -183,9 +188,14 @@ plan-bound `status-acceptance` command; `rollback_shadow` is produced by the
 ordinary inert-shadow status command after cleanup and rollback.
 
 The CLI adds a read-only `verify-acceptance-result` command. It loads the exact
-v2 plan and result, validates their relationship, and emits one canonical
-secret-free verification record. The durable operational plan may bind only
-the verified v2 result for the final multi-person launch evidence, and
+v2 plan and result plus the result-bound rollback-shadow status, validates
+their relationship, and emits one canonical secret-free verification record.
+The rollback status must contain the canonical ordered shadow components
+(`cluster-resources`, `manager`, `namespaced-resources`, `namespaces`,
+`personal-workers`, and `runtime-class`), with positive resource inventories,
+one manager, one shared namespace, one runtime class, and zero personal
+workers. The durable operational plan may bind only the verified v2 result for
+the final multi-person launch evidence, and
 `personal-dev-multi-owner-durable-launch.md` verifies it before render.
 
 ## Capacity and rollback invariants

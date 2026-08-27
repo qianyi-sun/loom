@@ -53,6 +53,7 @@ from loom.personal_dev_environment import (
 from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentConflictError,
     PersonalDevEnvironmentEpochFencedError,
+    PersonalDevEnvironmentNotFoundError,
     PersonalDevEnvironmentOperationFencedError,
     SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
@@ -879,7 +880,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
             missing_name = "missing-probe"
-            with pytest.raises(PersonalDevEnvironmentEpochFencedError):
+            with pytest.raises(PersonalDevEnvironmentNotFoundError):
                 await authority.apply(
                     replace(
                         request,

@@ -49,8 +49,12 @@ def _rollback_shadow_status_value() -> dict[str, object]:
     return {
         "blockers": [],
         "components": [
-            {"name": "management", "observed": 1, "ready": True},
+            {"name": "cluster-resources", "observed": 6, "ready": True},
+            {"name": "manager", "observed": 1, "ready": True},
+            {"name": "namespaced-resources", "observed": 31, "ready": True},
+            {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},
+            {"name": "runtime-class", "observed": 1, "ready": True},
         ],
         "input_sha256": "1" * 64,
         "manager_ceiling": 0,
@@ -99,8 +103,15 @@ def test_rollback_shadow_status_loads_canonical_zero_capacity_evidence(
         "duplicate-component",
         "malformed-component",
         "empty-components",
+        "missing-canonical-component",
         "missing-personal-workers",
+        "noncanonical-component-order",
+        "invalid-cluster-resource-count",
+        "invalid-manager-count",
+        "invalid-namespaced-resource-count",
+        "invalid-namespace-count",
         "personal-workers-nonzero",
+        "invalid-runtime-class-count",
     ],
 )
 def test_rollback_shadow_status_rejects_untrusted_or_nonzero_capacity_evidence(
@@ -140,10 +151,31 @@ def test_rollback_shadow_status_rejects_untrusted_or_nonzero_capacity_evidence(
         value["components"].append("not-a-component")  # type: ignore[union-attr]
     elif invalid_kind == "empty-components":
         value["components"] = []
+    elif invalid_kind == "missing-canonical-component":
+        value["components"] = value["components"][1:]  # type: ignore[index]
     elif invalid_kind == "missing-personal-workers":
-        value["components"] = [value["components"][0]]  # type: ignore[index]
+        value["components"] = [  # type: ignore[index]
+            component
+            for component in value["components"]  # type: ignore[union-attr]
+            if component["name"] != "personal-workers"  # type: ignore[index]
+        ]
+    elif invalid_kind == "noncanonical-component-order":
+        value["components"][0], value["components"][1] = (  # type: ignore[index]
+            value["components"][1],  # type: ignore[index]
+            value["components"][0],  # type: ignore[index]
+        )
+    elif invalid_kind == "invalid-cluster-resource-count":
+        value["components"][0]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-manager-count":
+        value["components"][1]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-namespaced-resource-count":
+        value["components"][2]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-namespace-count":
+        value["components"][3]["observed"] = 2  # type: ignore[index]
     elif invalid_kind == "personal-workers-nonzero":
-        value["components"][1]["observed"] = 1  # type: ignore[index]
+        value["components"][4]["observed"] = 1  # type: ignore[index]
+    elif invalid_kind == "invalid-runtime-class-count":
+        value["components"][5]["observed"] = 0  # type: ignore[index]
 
     sha256 = _write_owner_only(path, value)
     if invalid_kind == "wrong-digest":

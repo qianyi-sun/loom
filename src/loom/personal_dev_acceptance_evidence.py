@@ -1204,6 +1204,14 @@ def _validate_minio_manifest(value: Any) -> int:
 
 
 def _validate_shadow_status(value: Any) -> None:
+    expected_components = (
+        "cluster-resources",
+        "manager",
+        "namespaced-resources",
+        "namespaces",
+        "personal-workers",
+        "runtime-class",
+    )
     expected_fields = {
         "blockers",
         "components",
@@ -1237,7 +1245,7 @@ def _validate_shadow_status(value: Any) -> None:
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
 
     component_names: list[str] = []
-    personal_worker_count: int | None = None
+    component_observed: dict[str, int] = {}
     for component in value["components"]:
         if (
             not isinstance(component, dict)
@@ -1250,9 +1258,16 @@ def _validate_shadow_status(value: Any) -> None:
         ):
             raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
         component_names.append(component["name"])
-        if component["name"] == "personal-workers":
-            personal_worker_count = component["observed"]
-    if len(component_names) != len(set(component_names)) or personal_worker_count != 0:
+        component_observed[component["name"]] = component["observed"]
+    if (
+        tuple(component_names) != expected_components
+        or component_observed["cluster-resources"] <= 0
+        or component_observed["manager"] != 1
+        or component_observed["namespaced-resources"] <= 0
+        or component_observed["namespaces"] != 1
+        or component_observed["personal-workers"] != 0
+        or component_observed["runtime-class"] != 1
+    ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
 
 

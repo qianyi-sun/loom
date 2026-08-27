@@ -322,7 +322,9 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   explicit expected epoch, and `--quiet`; destroy requires an explicit positive
   `--expected-operation-epoch`. Only the intended target request's HTTP 404
   writes the canonical receipt to stderr and returns 1. Every other outcome
-  returns without a receipt and without response detail.
+  returns without a receipt and without response detail. Missing and foreign
+  targets carry the same application-origin phase marker, preventing the probe
+  surface from revealing target existence.
 - Adds an ordinary `loom dev destroy --expected-operation-epoch EPOCH` direct
   path. Omitting it preserves the existing ownership-filtered GET and retry
   semantics exactly.
@@ -340,11 +342,16 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   loom admin personal-dev-control-plane verify-acceptance-result \
     --acceptance-plan-file PATH --acceptance-plan-sha256 DIGEST \
     --acceptance-result-file PATH --acceptance-result-sha256 DIGEST \
-    --acceptance-manifest-sha256 DIGEST
+    --acceptance-manifest-sha256 DIGEST \
+    --rollback-shadow-status-file PATH
   ```
 
-  It emits one canonical record with schema, plan/result/manifest/release/shadow
-  digests, owner count `2`, denial count `6`, and `verified:true`.
+  It requires the result-bound, owner-only canonical rollback status with the
+  exact ordered shadow component inventory, positive shared resource counts,
+  one manager, one shared namespace, one runtime class, and zero personal
+  workers. It emits one canonical record with schema,
+  plan/result/manifest/release/shadow/rollback-status digests, owner count `2`,
+  denial count `6`, and `verified:true`.
 
 - [ ] **Step 1: Write failing secret-free whoami JSON tests**
 

@@ -653,9 +653,7 @@ def _visible(
     *,
     operation: Literal["read", "destroy"],
 ) -> DevInstanceRecord:
-    if record is None:
-        raise HTTPException(status_code=404, detail="dev instance not found")
-    if not is_admin(ctx) and record.owner_user_id != ctx.user_id:
+    if record is None or (not is_admin(ctx) and record.owner_user_id != ctx.user_id):
         raise HTTPException(
             status_code=404,
             detail="dev instance not found",

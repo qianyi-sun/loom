@@ -754,8 +754,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         capacity_supported_architectures: list[str] | None = None
         if environment is None:
             if requested.expected_operation_epoch != 0:
-                raise PersonalDevEnvironmentEpochFencedError(
-                    "personal-dev environment does not exist at the expected epoch",
+                raise PersonalDevEnvironmentNotFoundError(
+                    "personal-dev environment not found",
                 )
             await self._assert_limits(requested, replacing_name=None)
             subject_id = uuid4()

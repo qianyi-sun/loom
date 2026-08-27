@@ -349,7 +349,7 @@ async def test_cross_owner_detail_is_hidden_with_exact_read_phase() -> None:
     }
 
 
-async def test_missing_detail_is_hidden_without_a_denial_phase() -> None:
+async def test_missing_detail_is_indistinguishable_from_cross_owner_detail() -> None:
     with pytest.raises(HTTPException) as exc:
         await get_dev_instance(
             "absent",
@@ -358,7 +358,9 @@ async def test_missing_detail_is_hidden_without_a_denial_phase() -> None:
         )
 
     assert exc.value.status_code == 404
-    assert exc.value.headers is None
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_read",
+    }
 
 
 async def test_cross_owner_destroy_is_hidden_with_exact_destroy_phase() -> None:
@@ -385,7 +387,7 @@ async def test_cross_owner_destroy_is_hidden_with_exact_destroy_phase() -> None:
     }
 
 
-async def test_missing_destroy_is_hidden_without_a_denial_phase() -> None:
+async def test_missing_destroy_is_indistinguishable_from_cross_owner_destroy() -> None:
     with pytest.raises(HTTPException) as exc:
         await delete_dev_instance(
             "absent",
@@ -396,7 +398,9 @@ async def test_missing_destroy_is_hidden_without_a_denial_phase() -> None:
         )
 
     assert exc.value.status_code == 404
-    assert exc.value.headers is None
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_destroy",
+    }
 
 
 async def test_mutation_fails_closed_when_runtime_is_not_configured() -> None:
