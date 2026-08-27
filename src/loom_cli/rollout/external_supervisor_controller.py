@@ -26,6 +26,7 @@ _REQUIRED_FIELDS = frozenset(
         "unit-set-digest",
         "live-evidence-digest",
         "pending-transition-digest",
+        "runtime-state",
         "transition-digest",
         "unit-directory",
     }
@@ -44,6 +45,7 @@ class ExternalSupervisorControllerBinding:
     predecessor_unit_set_digest: str
     predecessor_live_evidence_digest: str
     predecessor_pending_transition_digest: str
+    predecessor_runtime_state: str
     unit_directory: str
     transition_digest: str
 
@@ -57,6 +59,11 @@ class ExternalSupervisorControllerBinding:
         if (
             _HOST_RE.fullmatch(self.execution_host) is None
             or self.predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
+            or self.predecessor_runtime_state not in {"ready", "repairable"}
+            or (
+                self.predecessor_runtime_state == "repairable"
+                and self.predecessor_kind != "canonical"
+            )
             or self.unit_directory != expected_unit_directory
             or bool(units) == absent
             or any(
@@ -109,6 +116,7 @@ class ExternalSupervisorControllerBinding:
         predecessor_unit_set_digest: str,
         predecessor_live_evidence_digest: str,
         predecessor_pending_transition_digest: str,
+        predecessor_runtime_state: str,
         unit_directory: str,
         target_artifact_digest: str,
         target_profile_sha256: str,
@@ -127,6 +135,7 @@ class ExternalSupervisorControllerBinding:
             predecessor_unit_set_digest=predecessor_unit_set_digest,
             predecessor_live_evidence_digest=predecessor_live_evidence_digest,
             predecessor_pending_transition_digest=predecessor_pending_transition_digest,
+            predecessor_runtime_state=predecessor_runtime_state,
             unit_directory=unit_directory,
             transition_digest=external_supervisor_transition_digest(
                 unit_directory=unit_directory,
@@ -157,6 +166,7 @@ class ExternalSupervisorControllerBinding:
             f"{prefix}unit-set-digest": self.predecessor_unit_set_digest,
             f"{prefix}live-evidence-digest": self.predecessor_live_evidence_digest,
             f"{prefix}pending-transition-digest": (self.predecessor_pending_transition_digest),
+            f"{prefix}runtime-state": self.predecessor_runtime_state,
             f"{prefix}unit-directory": self.unit_directory,
             f"{prefix}transition-digest": self.transition_digest,
             **{
@@ -221,6 +231,7 @@ def parse_external_supervisor_controller_bindings(
             predecessor_unit_set_digest=fields["unit-set-digest"],
             predecessor_live_evidence_digest=fields["live-evidence-digest"],
             predecessor_pending_transition_digest=fields["pending-transition-digest"],
+            predecessor_runtime_state=fields["runtime-state"],
             unit_directory=fields["unit-directory"],
             transition_digest=fields["transition-digest"],
         )

@@ -93,6 +93,7 @@ def _controller_predecessors(
         "unit-set-digest",
         "live-evidence-digest",
         "pending-transition-digest",
+        "runtime-state",
         "unit-directory",
     }
     result: dict[str, dict[str, object]] = {}
@@ -317,6 +318,7 @@ def derive_attestation_bindings(
             predecessor_pending_transition_digest=str(
                 controller_predecessor["pending-transition-digest"]
             ),
+            predecessor_runtime_state=str(controller_predecessor["runtime-state"]),
             unit_directory=str(controller_predecessor["unit-directory"]),
             target_artifact_digest=controller_artifacts[host],
             target_profile_sha256=target_profile_sha256,

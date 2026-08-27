@@ -197,7 +197,7 @@ class TimerCompensationEvidence:
 
     def __post_init__(self) -> None:
         valid_reason = {
-            "intent": {"supervisor-mutation"},
+            "intent": {"supervisor-mutation", "supervisor-repair"},
             "activated": {"timer-active", "timer-disabled"},
             "canonical": {"canonical-promoted"},
             "recovered": {"target-reactivated"},
@@ -293,6 +293,24 @@ class TimerCompensationEvidence:
                     or (
                         (self.service_name in predecessor.unit_payloads)
                         != (self.timer_name in predecessor.unit_payloads)
+                    )
+                )
+            )
+            or (
+                self.phase == "intent"
+                and self.reason == "supervisor-repair"
+                and (
+                    self.predecessor_kind != "canonical"
+                    or predecessor is None
+                    or predecessor.record_kind != "activation"
+                    or (predecessor.candidate_sha, predecessor.candidate_tree)
+                    == (target.candidate_sha, target.candidate_tree)
+                    or self.service_name not in predecessor.unit_payloads
+                    or self.timer_name not in predecessor.unit_payloads
+                    or not _identity_pair_desired_active(
+                        predecessor,
+                        self.service_name,
+                        self.timer_name,
                     )
                 )
             )
@@ -1719,7 +1737,7 @@ class FixedExternalSupervisorTransport:
         )
         # A verified caller may re-attest an already exact canonical
         # predecessor to a new request-bound plan without changing unit bytes.
-        if current != expected or live_state not in {"exact", "ready"}:
+        if current != expected or live_state not in {"exact", "ready", "repairable"}:
             raise RuntimeError("protected external supervisor state changed before apply")
         transition_group_id = uuid4().hex
         target = ExternalSupervisorCanonicalIdentity.build(
@@ -1755,7 +1773,14 @@ class FixedExternalSupervisorTransport:
                 TimerCompensationEvidence.build(
                     **identity,
                     phase="intent",
-                    reason="supervisor-mutation",
+                    reason=(
+                        "supervisor-repair"
+                        if live_state == "repairable"
+                        and _service_runtime_is_repairable_failure(
+                            current.service_statuses[supervisor.service_name]
+                        )
+                        else "supervisor-mutation"
+                    ),
                 )
             )
         publications = {
@@ -1838,6 +1863,9 @@ class FixedExternalSupervisorTransport:
         identities = tuple(self._evidence_identity(intent) for intent in intents)
         try:
             target, predecessor, covered_units = self._validate_transition_group(intents)
+            repairable_predecessor_services = frozenset(
+                intent.service_name for intent in intents if intent.reason == "supervisor-repair"
+            )
             pointer = self.store.read_canonical()
             target_is_active = pointer == target
             predecessor_is_active = (
@@ -1864,6 +1892,9 @@ class FixedExternalSupervisorTransport:
                     "protected external supervisor target transition coverage drifted"
                 )
             desired = target if target_is_active else predecessor
+            allowed_failed_services = (
+                repairable_predecessor_services if predecessor_is_active else frozenset()
+            )
             current = {name: self.store.read_unit(name) for name in target.unit_payloads}
             desired_payloads = {
                 name: (
@@ -1913,10 +1944,14 @@ class FixedExternalSupervisorTransport:
                 ):
                     timer_name = f"{service_name.removesuffix('.service')}.timer"
                     if _identity_pair_desired_active(desired, service_name, timer_name):
-                        self.control.start_service(
-                            service_name,
-                            timeout_seconds=_RECONCILIATION_SERVICE_TIMEOUT_SECONDS,
-                        )
+                        try:
+                            self.control.start_service(
+                                service_name,
+                                timeout_seconds=_RECONCILIATION_SERVICE_TIMEOUT_SECONDS,
+                            )
+                        except Exception:
+                            if service_name not in allowed_failed_services:
+                                raise
                         self.control.enable_timer(timer_name)
                         self.control.start_timer(timer_name)
                     else:
@@ -1957,6 +1992,7 @@ class FixedExternalSupervisorTransport:
             verified = self._verify_reactivated_identity(
                 desired,
                 require_bound_runtime=(desired.record_kind == "activation"),
+                allowed_failed_services=allowed_failed_services,
             ) and all(
                 self._verify_reconciled_runtime(
                     service_name,
@@ -2289,6 +2325,7 @@ class FixedExternalSupervisorTransport:
         target: ExternalSupervisorCanonicalIdentity,
         *,
         require_bound_runtime: bool,
+        allowed_failed_services: frozenset[str] = frozenset(),
     ) -> bool:
         expected_runtime = _expected_identity_runtime_digest(target)
         if (require_bound_runtime and target.runtime_evidence_digest != expected_runtime) or any(
@@ -2306,21 +2343,28 @@ class FixedExternalSupervisorTransport:
             for name in target.unit_payloads
             if name.endswith(".timer")
         }
+        failed_services: set[str] = set()
         for service_name, service in services.items():
             timer_name = f"{service_name.removesuffix('.service')}.timer"
             timer = timers.get(timer_name)
             if timer is None:
                 return False
             if _identity_pair_desired_active(target, service_name, timer_name):
+                successful = service.result == "success" and service.exec_main_status == 0
+                repairable_failure = (
+                    service_name in allowed_failed_services
+                    and _service_runtime_is_repairable_failure(service)
+                )
                 if (
                     not _definition_is_fresh(service_name, service, unit_dir=self.unit_dir)
-                    or service.result != "success"
-                    or service.exec_main_status != 0
+                    or not (successful or repairable_failure)
                     or not _definition_is_fresh(timer_name, timer, unit_dir=self.unit_dir)
                     or timer.unit_file_state != "enabled"
                     or timer.active_state != "active"
                 ):
                     return False
+                if repairable_failure:
+                    failed_services.add(service_name)
             elif not self._verify_reconciled_runtime(
                 service_name,
                 timer_name,
@@ -2328,7 +2372,7 @@ class FixedExternalSupervisorTransport:
                 target.unit_payloads[timer_name].encode(),
             ):
                 return False
-        return (
+        return bool(failed_services) or (
             _normalized_identity_runtime_digest(target, services=services, timers=timers)
             == expected_runtime
         )
@@ -2534,13 +2578,14 @@ def _observed_activation_runtime_digest(
     )
 
 
-def canonical_external_supervisor_runtime_ready(
+def _canonical_external_supervisor_runtime_state(
     identity: ExternalSupervisorCanonicalIdentity,
     *,
     unit_payloads: Mapping[str, bytes | None],
     timer_statuses: Mapping[str, TimerRuntimeStatus],
     service_statuses: Mapping[str, ServiceRuntimeStatus],
-) -> bool:
+    allowed_failed_services: frozenset[str] = frozenset(),
+) -> str:
     expected_payloads = {name: payload.encode() for name, payload in identity.unit_payloads.items()}
     if (
         dict(unit_payloads) != expected_payloads
@@ -2548,20 +2593,26 @@ def canonical_external_supervisor_runtime_ready(
         != {name for name in identity.unit_payloads if name.endswith(".timer")}
         or set(service_statuses)
         != {name for name in identity.unit_payloads if name.endswith(".service")}
+        or identity.runtime_evidence_digest != _expected_identity_runtime_digest(identity)
     ):
-        return False
+        return "drifted"
+    failed_services: set[str] = set()
     for service_name, service in service_statuses.items():
         timer_name = f"{service_name.removesuffix('.service')}.timer"
         timer = timer_statuses[timer_name]
         if _identity_pair_desired_active(identity, service_name, timer_name):
+            successful = service.result == "success" and service.exec_main_status == 0
+            repairable_failure = (
+                service_name in allowed_failed_services
+                and _service_runtime_is_repairable_failure(service)
+            )
             if (
                 not _definition_is_fresh(
                     service_name,
                     service,
                     unit_dir=Path(identity.unit_dir),
                 )
-                or service.result != "success"
-                or service.exec_main_status != 0
+                or not (successful or repairable_failure)
                 or not _definition_is_fresh(
                     timer_name,
                     timer,
@@ -2570,7 +2621,9 @@ def canonical_external_supervisor_runtime_ready(
                 or timer.unit_file_state != "enabled"
                 or timer.active_state != "active"
             ):
-                return False
+                return "drifted"
+            if repairable_failure:
+                failed_services.add(service_name)
         else:
             no_result = service.result == "" and service.exec_main_status is None
             success = service.result == "success" and service.exec_main_status == 0
@@ -2589,16 +2642,62 @@ def canonical_external_supervisor_runtime_ready(
                 or timer.unit_file_state != "disabled"
                 or timer.active_state != "inactive"
             ):
-                return False
-    try:
-        runtime_digest = _normalized_identity_runtime_digest(
+                return "drifted"
+    return "repairable" if failed_services else "ready"
+
+
+def canonical_external_supervisor_runtime_ready(
+    identity: ExternalSupervisorCanonicalIdentity,
+    *,
+    unit_payloads: Mapping[str, bytes | None],
+    timer_statuses: Mapping[str, TimerRuntimeStatus],
+    service_statuses: Mapping[str, ServiceRuntimeStatus],
+) -> bool:
+    return (
+        _canonical_external_supervisor_runtime_state(
             identity,
-            services=service_statuses,
-            timers=timer_statuses,
+            unit_payloads=unit_payloads,
+            timer_statuses=timer_statuses,
+            service_statuses=service_statuses,
         )
-    except ValueError:
-        return False
-    return identity.runtime_evidence_digest == runtime_digest
+        == "ready"
+    )
+
+
+def canonical_external_supervisor_runtime_repairable(
+    identity: ExternalSupervisorCanonicalIdentity,
+    *,
+    unit_payloads: Mapping[str, bytes | None],
+    timer_statuses: Mapping[str, TimerRuntimeStatus],
+    service_statuses: Mapping[str, ServiceRuntimeStatus],
+) -> bool:
+    active_services = frozenset(
+        service_name
+        for service_name in service_statuses
+        if _identity_pair_desired_active(
+            identity,
+            service_name,
+            f"{service_name.removesuffix('.service')}.timer",
+        )
+    )
+    return (
+        _canonical_external_supervisor_runtime_state(
+            identity,
+            unit_payloads=unit_payloads,
+            timer_statuses=timer_statuses,
+            service_statuses=service_statuses,
+            allowed_failed_services=active_services,
+        )
+        == "repairable"
+    )
+
+
+def _service_runtime_is_repairable_failure(status: ServiceRuntimeStatus) -> bool:
+    return (
+        status.result == "exit-code"
+        and status.exec_main_status is not None
+        and 1 <= status.exec_main_status <= 255
+    )
 
 
 def _definition_is_fresh(
@@ -2657,6 +2756,56 @@ def classify_external_supervisor_live_state(
         return "drifted"
     if predecessor is not None and not set(predecessor.unit_payloads).issubset(expected_units):
         return "drifted"
+
+    if (
+        predecessor is not None
+        and predecessor.record_kind == "activation"
+        and (predecessor.candidate_sha, predecessor.candidate_tree)
+        != (artifact.candidate_sha, artifact.candidate_tree)
+    ):
+        predecessor_units = set(predecessor.unit_payloads)
+        expected_predecessor_payloads = {
+            name: (predecessor.unit_payloads[name].encode() if name in predecessor_units else None)
+            for name in expected_units
+        }
+        candidate_only_units_absent = all(
+            (
+                observation.timer_statuses[name].load_state == "not-found"
+                and observation.timer_statuses[name].unit_file_state
+                in {"", "disabled", "not-found"}
+                and observation.timer_statuses[name].active_state == "inactive"
+                and observation.timer_statuses[name].fragment_path == ""
+                and observation.timer_statuses[name].need_daemon_reload == "no"
+            )
+            if name.endswith(".timer")
+            else (
+                observation.service_statuses[name].load_state == "not-found"
+                and observation.service_statuses[name].result == ""
+                and observation.service_statuses[name].exec_main_status is None
+                and observation.service_statuses[name].fragment_path == ""
+                and observation.service_statuses[name].need_daemon_reload == "no"
+            )
+            for name in set(expected_units) - predecessor_units
+        )
+        if (
+            dict(observation.unit_payloads) == expected_predecessor_payloads
+            and candidate_only_units_absent
+            and canonical_external_supervisor_runtime_repairable(
+                predecessor,
+                unit_payloads={name: observation.unit_payloads[name] for name in predecessor_units},
+                timer_statuses={
+                    name: status
+                    for name, status in observation.timer_statuses.items()
+                    if name in predecessor_units
+                },
+                service_statuses={
+                    name: status
+                    for name, status in observation.service_statuses.items()
+                    if name in predecessor_units
+                },
+            )
+        ):
+            return "repairable"
 
     all_target = True
     for supervisor in artifact.supervisors:
@@ -2805,5 +2954,6 @@ __all__ = [
     "TimerRuntimeStatus",
     "build_fixed_external_supervisor_transport",
     "canonical_external_supervisor_runtime_ready",
+    "canonical_external_supervisor_runtime_repairable",
     "classify_external_supervisor_live_state",
 ]
