@@ -1735,6 +1735,67 @@ def test_multi_owner_launch_requires_a_new_canonical_evidence_directory(
         assert prepare(unsafe).returncode != 0
 
 
+def test_concurrent_acceptance_requires_a_new_canonical_outside_evidence_directory(
+    tmp_path: Path,
+) -> None:
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
+    prepare_function = _indented_shell_function(runbook, "prepare_new_evidence_dir")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def prepare(path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash"],
+            input=(
+                "set -euo pipefail\n"
+                "umask 077\n"
+                + f"repo={shlex.quote(str(repo))}\n"
+                + prepare_function
+                + "\n"
+                + f"prepare_new_evidence_dir {shlex.quote(str(path))}\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=tmp_path,
+        )
+
+    fresh = tmp_path / "fresh"
+    fresh_result = prepare(fresh)
+    assert fresh_result.returncode == 0, fresh_result.stderr
+    assert fresh.is_dir()
+    assert not fresh.is_symlink()
+    assert fresh.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o700
+    assert list(fresh.iterdir()) == []
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    nonempty = tmp_path / "nonempty"
+    nonempty.mkdir()
+    (nonempty / "stale.json").write_text("{}\n", encoding="ascii")
+    leaf_symlink = tmp_path / "leaf-symlink"
+    leaf_symlink.symlink_to(existing, target_is_directory=True)
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+
+    unsafe_paths = (
+        existing,
+        nonempty,
+        leaf_symlink,
+        symlink_parent / "child",
+        repo / "contained",
+        real_parent / ".." / "noncanonical",
+        Path("relative-evidence"),
+    )
+    for unsafe in unsafe_paths:
+        assert prepare(unsafe).returncode != 0
+
+
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
 

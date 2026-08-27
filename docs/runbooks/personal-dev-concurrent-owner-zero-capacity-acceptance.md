@@ -102,8 +102,27 @@ exactly the aggregate release, its evidence, and its digest.
     acceptance_verification="$evidence_dir/acceptance-result-verification.json"
     denials_jsonl="$evidence_dir/cross-owner-denials.jsonl"
 
-    install -d -m 0700 "$evidence_dir"
-    test -z "$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print -quit)"
+    prepare_new_evidence_dir() {
+      local path="$1"
+      local parent
+      test "${path#/}" != "$path"
+      test "$(realpath -m -- "$path")" = "$path"
+      parent="$(dirname -- "$path")"
+      test -d "$parent" && test ! -L "$parent"
+      test "$(realpath -e -- "$parent")" = "$parent"
+      test "$(stat -c %u -- "$parent")" = "$(id -u)"
+      case "$path" in
+        "$repo"|"$repo"/*) return 1 ;;
+      esac
+      test ! -e "$path" && test ! -L "$path"
+      mkdir -m 0700 -- "$path"
+      test -d "$path" && test ! -L "$path"
+      test "$(realpath -e -- "$path")" = "$path"
+      test "$(stat -c %u -- "$path")" = "$(id -u)"
+      test "$(stat -c %a -- "$path")" = 700
+      test -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)"
+    }
+    prepare_new_evidence_dir "$evidence_dir"
     test -x "$loom_cli"
     test -x "$python_cli"
     export PYTHONPATH=src:.
