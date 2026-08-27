@@ -12,9 +12,10 @@ the byte-exact inert rollback and global executable-capacity ceiling `0`.
 **Architecture:** Keep schema-v1 single-owner acceptance byte-compatible and
 add schema-v2 with exactly two canonical distinct owners. Reuse the existing
 acceptance render/runtime interlock; add strict lifecycle/result evidence and
-secret-free JSON identity output, then update the bounded #1280 runbook to run
-two sessions concurrently, prove six denied cross-owner operations leave target
-state unchanged, clean up normally, and restore the exact shadow.
+secret-free JSON identity output, then add a separately named concurrent-owner
+runbook that runs two sessions, proves six denied cross-owner operations leave
+target state unchanged, cleans up normally, and restores the exact shadow. Keep
+the bounded #1280 sole-owner runbooks byte-identical.
 
 **Tech Stack:** Python 3.11, Pydantic v2, dataclasses, argparse, canonical JSON,
 pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
@@ -27,8 +28,10 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
 - The global executable-new-capacity ceiling remains exactly `0`.
 - Never activate a worker, execute or submit a task, call `sbatch`/`scancel`,
   enable a pool executor, or enable physical OLDLAB/GB10 capacity.
-- Live personal lifecycle activity is permitted only inside the bounded #1280
-  acceptance window and must end with byte-exact inert-shadow restoration.
+- Live schema-v2 personal lifecycle activity is permitted only inside a
+  separately reviewed concurrent-owner certification window and must end with
+  byte-exact inert-shadow restoration. The bounded #1280 window retains its
+  protected schema-v1 sole-owner procedure.
 - `loom-dev` remains shared infrastructure only; personal applications use
   `loom-dev-<name>` and builders use bounded `loom-build-*` sandboxes.
 - `min_slots` remains configurable with default `0`; this acceptance always
@@ -433,28 +436,31 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
 
 ---
 
-### Task 4: Exact two-owner live acceptance and rollback runbook
+### Task 4: Separate two-owner live acceptance and durable-launch runbooks
 
 **Files:**
 
-- Modify: `docs/runbooks/personal-dev-zero-capacity-acceptance.md`
-- Modify: `docs/runbooks/personal-dev-durable-launch.md`
+- Create: `docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md`
+- Create: `docs/runbooks/personal-dev-multi-owner-durable-launch.md`
+- Preserve: `docs/runbooks/personal-dev-zero-capacity-acceptance.md`
+- Preserve: `docs/runbooks/personal-dev-durable-launch.md`
+- Modify: `docs/runbooks/README.md`
 - Modify: `docs/architecture/multi-dev-environments.md`
 - Modify: `docs/architecture/personal-dev-management-plane-deployment.md`
 - Modify: `tests/ops/test_personal_dev_control_plane_package_boundary.py`
 
 **Interfaces:**
 
-- The bounded acceptance runbook requires schema v2 and two exact owner-only XDG
-  roots. It produces canonical result schema
+- The separate concurrent-owner acceptance runbook requires schema v2 and two
+  exact owner-only XDG roots. It produces canonical result schema
   `loom-personal-dev-zero-capacity-acceptance-result-v2` only after final
   cleanup and inert rollback.
-- The durable-launch runbook accepts only a v2 result that passes
-  `verify-acceptance-result` before any operational render/apply.
+- The separate multi-owner durable-launch runbook accepts only a v2 result that
+  passes `verify-acceptance-result` before any operational render/apply.
 - No new mutable command exists outside the already approved Kubernetes apply
   and personal lifecycle surfaces.
 
-- [ ] **Step 1: Replace single-owner package-boundary assertions with failing v2 assertions**
+- [ ] **Step 1: Add failing v2 path assertions while preserving v1 fixtures**
 
   Require all of the following exact shapes:
 
@@ -477,7 +483,9 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   verification, and byte-exact shadow reapply/status.
 
   Forbid the old variables/phrases `owner_xdg`, `primary_name`, `retained_name`,
-  singular `.acceptance_owner`, and `.subject_id != $previous`.
+  singular `.acceptance_owner`, and `.subject_id != $previous` only in the new
+  concurrent-owner runbook. Require exact protected-base SHA-256 values for
+  both existing #1280 runbooks.
 
 - [ ] **Step 2: Run the package-boundary test and record RED**
 
@@ -486,7 +494,7 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
     tests/ops/test_personal_dev_control_plane_package_boundary.py
   ```
 
-- [ ] **Step 3: Rewrite the owner/session and lifecycle sections exactly**
+- [ ] **Step 3: Create the v2 owner/session and lifecycle procedure exactly**
 
   Pin both XDG roots/configs independently, require different real paths and
   device/inode identities, capture canonical whoami JSON, and compare owner 0/1
@@ -518,7 +526,7 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   canonical denial entries from file SHA-256 values only after comparing stderr
   byte-for-byte with the operation's literal canonical receipt.
 
-- [ ] **Step 4: Correct retained-name fencing and assemble v2 evidence after rollback**
+- [ ] **Step 4: Bind retained-name fencing and assemble v2 evidence after rollback**
 
   Capture both fields before owner-1 destroy:
 
@@ -537,10 +545,11 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
 
 - [ ] **Step 5: Update durable/architecture docs and validate extracted shell**
 
-  State that the v1 single-owner record remains historical compatibility but
-  final multi-person launch requires v2. Update the durable runbook to retain
-  the v2 plan/result and call the verifier before render. Extract every fenced
-  Bash block from both runbooks and run `bash -n` on each non-illustrative
+  State that the v1 single-owner record retains the #1280 authority but final
+  multi-person launch requires v2. Create the multi-owner durable runbook to
+  retain the v2 plan/result and call the verifier before render. Route both
+  architecture documents to all four explicit paths. Extract every fenced Bash
+  block from the two new v2 runbooks and run `bash -n` on each non-illustrative
   block. Keep all task/worker/Slurm/capacity mutation strings absent except
   explicit prohibitions.
 
@@ -551,8 +560,9 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
     tests/ops/test_personal_dev_control_plane_package_boundary.py \
     tests/ops/test_ci_secret_isolation.py
   git diff --check
-  git add docs/runbooks/personal-dev-zero-capacity-acceptance.md \
-    docs/runbooks/personal-dev-durable-launch.md \
+  git add docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md \
+    docs/runbooks/personal-dev-multi-owner-durable-launch.md \
+    docs/runbooks/README.md \
     docs/architecture/multi-dev-environments.md \
     docs/architecture/personal-dev-management-plane-deployment.md \
     tests/ops/test_personal_dev_control_plane_package_boundary.py
@@ -639,5 +649,6 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   clean detached worktree, regenerate launcher/scanner/backup-restore evidence,
   render and review the v2 acceptance plus exact inert rollback, bind the two
   provisioned owner identities without printing credentials, and stop before
-  mutation unless the bounded #1280 window, both live sessions, zero ceiling,
-  rollback deadline, and all preflight interlocks are simultaneously valid.
+  mutation unless the separately reviewed concurrent-owner window, both live
+  sessions, zero ceiling, rollback deadline, and all preflight interlocks are
+  simultaneously valid.

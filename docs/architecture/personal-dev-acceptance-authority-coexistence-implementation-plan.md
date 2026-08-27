@@ -202,10 +202,12 @@ Git, GitHub protected checks.
 
 - [ ] **Step 3: Create the v2 durable procedure and restore the v1 procedure**
 
-  Copy the current reviewed v2 durable runbook bytes into
-  `personal-dev-multi-owner-durable-launch.md`. Change only its title and links
-  so it points to the concurrent-owner acceptance runbook and identifies v2 as
-  the required second-owner gate.
+  Copy the current reviewed v2 durable runbook into
+  `personal-dev-multi-owner-durable-launch.md`. Change only its title,
+  authority-scoping prose, and links so it points to the concurrent-owner
+  acceptance runbook, identifies v2 as the required second-owner gate, and
+  contains no #1280-window authority claim. Keep every executable Bash block
+  byte-identical to the reviewed v2 procedure.
 
   Restore `personal-dev-durable-launch.md` exactly from protected base
   `82ac07ea594734d70d31351dab5f8935c8e2d5e9` using `apply_patch`.

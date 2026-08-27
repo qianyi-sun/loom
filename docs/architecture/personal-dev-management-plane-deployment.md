@@ -57,16 +57,17 @@ The package is delivered in three repository increments:
    restricted-builder authority, activation-agent authority, RBAC, and network
    policy with personal lifecycle mutation disabled and the activation agent
    at zero replicas. Prove deployment and rollback at this state.
-2. **Zero-capacity personal acceptance interlock.** Accept one canonical,
+2. **Zero-capacity personal acceptance interlocks.** Accept one canonical,
    digest-pinned operator plan and render the same release with the personal
    controller and builder enabled and the activation agent at one replica.
    Runtime startup and operator status both recheck the global manager and
-   refuse any nonzero executable ceiling. Schema v1 preserves the historical
-   single-owner record; schema v2 authorizes exactly two distinct owners for
-   the final multi-person gate. Neither contract can allocate a worker.
-3. **Durable zero-capacity operational contract.** After the complete
-   acceptance runbook has retired both owner-controlled environments and restored the
-   reviewed shadow, accept a separate canonical operational plan.
+   refuse any nonzero executable ceiling. Schema v1 preserves the #1280
+   sole-owner/two-environment authority; schema v2 authorizes exactly two
+   distinct owners only through a separate gate before a second person is
+   onboarded. Neither contract can allocate a worker.
+3. **Durable zero-capacity operational contracts.** After the applicable
+   acceptance runbook has retired every owner-controlled environment and
+   restored the reviewed shadow, accept a separate canonical operational plan.
    `render-operational` enables the same personal application authorities
    without retaining the expiring acceptance binding. `status-operational`
    continuously verifies the immutable release and plan, the global-manager
@@ -414,10 +415,19 @@ a namespace or PVC directly. If an environment cannot be retired safely, keep
 the zero-capacity operational plane fail closed, retain its data and evidence,
 and do not apply shadow over unresolved dynamic authority.
 
-## Live acceptance
+## Live acceptance authorities
 
-After the shadow rehearsal and acceptance interlock are merged, published, and
-deployed, #1280 closes only after this controlled test:
+The #1280 owner may complete the approved
+[sole-owner zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
+and corresponding
+[sole-owner durable launch](../runbooks/personal-dev-durable-launch.md). That
+sole-owner/two-environment procedure proves one authenticated owner can exercise
+two isolated arbitrary-source deployments at ceiling zero; it does not certify
+cross-owner isolation.
+
+Before a second person is onboarded, the plane must return to the exact inert
+shadow and a separately reviewed window must execute the
+[concurrent-owner zero-capacity acceptance](../runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md):
 
 1. Two exact plan owners authenticate through separate pinned owner-only XDG
    roots using existing non-rotating user-owned API bearer tokens, and each
@@ -447,11 +457,11 @@ Physical one-slot x86_64, arm64, and architecture-neutral task execution is not
 part of this acceptance. It follows the separately reviewed #906 activation
 interlock after both pool executors and no-dual-writer evidence are complete.
 
-After all eight steps, the acceptance runbook has completed final manager-first
-cleanup, returned to the byte-reviewed shadow, and produced a verified v2
-result. Durable launch is a subsequent
+After all eight steps, the concurrent-owner acceptance runbook has completed
+final manager-first cleanup, returned to the byte-reviewed shadow, and produced
+a verified schema-v2 result. Multi-person durable launch is a subsequent
 operation under the
-[personal-development durable launch runbook](../runbooks/personal-dev-durable-launch.md):
+[multi-owner durable launch runbook](../runbooks/personal-dev-multi-owner-durable-launch.md):
 render and review both operational and shadow manifests, apply operational,
 prove `status-operational`, DNS/TLS, and stable-route behavior, and retain the
 operational manifest only while ceiling `0` and `worker_available=false` remain

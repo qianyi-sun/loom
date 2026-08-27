@@ -17,6 +17,13 @@ digest-pinned acceptance manifest, manager identity, expiry, backup/restore
 evidence, and byte-reviewed inert rollback remain in force. No operational
 manifest, worker, task, Slurm command, or nonzero executable capacity is added.
 
+The existing `personal-dev-zero-capacity-acceptance.md` and
+`personal-dev-durable-launch.md` paths retain their #1280 sole-owner meaning.
+This design is implemented only by
+`personal-dev-concurrent-owner-zero-capacity-acceptance.md` and
+`personal-dev-multi-owner-durable-launch.md`; a schema-v1 result cannot be used
+to onboard a second person.
+
 This is preferable to either replacing the v1 schema or running a procedural
 second session outside the plan:
 
@@ -117,8 +124,9 @@ is discarded.
 Owner 0 then destroys normally. Owner 1 destroys with retained data, redeploys
 the same name using the exact epoch captured in its destroyed status, and
 destroys it finally. Redeploy must preserve `subject_id`
-while rotating `subject_incarnation`; the existing runbook's assertion that
-`subject_id` rotates contradicts the lifecycle authority and is corrected.
+while rotating `subject_incarnation`. This schema-v2 retained-name contract is
+owned by the separate concurrent-owner procedure; it does not reinterpret or
+rewrite the protected schema-v1 sole-owner runbook.
 The incarnation is the generation fence that prevents retired credentials and
 acknowledgements from controlling the new deployment.
 
@@ -177,7 +185,8 @@ ordinary inert-shadow status command after cleanup and rollback.
 The CLI adds a read-only `verify-acceptance-result` command. It loads the exact
 v2 plan and result, validates their relationship, and emits one canonical
 secret-free verification record. The durable operational plan may bind only
-the verified v2 result for the final multi-person launch evidence.
+the verified v2 result for the final multi-person launch evidence, and
+`personal-dev-multi-owner-durable-launch.md` verifies it before render.
 
 ## Capacity and rollback invariants
 
@@ -206,16 +215,19 @@ identity output. Request-sequence CLI tests prove each accepted receipt comes
 from its intended target request and that explicit fencing bypasses only the
 destroy/redeploy preflight it replaces. CLI tests also prove invalid
 plans and results fail before runner construction. Package-boundary tests parse
-the runbook shell and require two XDG roots, concurrent commands, all six
-denials, exact state comparisons, incarnation rotation, repeated zero-capacity
-checks, normal teardown, and byte-exact rollback.
+the `personal-dev-concurrent-owner-zero-capacity-acceptance.md` shell and
+require two XDG roots, concurrent commands, all six denials, exact state
+comparisons, incarnation rotation, repeated zero-capacity checks, normal
+teardown, and byte-exact rollback. They separately preserve both #1280 runbooks
+byte-for-byte.
 
 The change ships through a normal protected PR after the evidence-hardening PR
 is merged. The live run uses a new trusted release from the final protected
-commit and remains inside the bounded #1280 acceptance window. Missing or
-expired credentials, either owner, any plan/result mismatch, any cross-owner
-success, any target-state change, any worker, any nonzero ceiling, or incomplete
-cleanup stops the procedure and preserves the inert safety boundary.
+commit and remains inside a separately reviewed concurrent-owner certification
+window opened before a second person is onboarded. Missing or expired
+credentials, either owner, any plan/result mismatch, any cross-owner success,
+any target-state change, any worker, any nonzero ceiling, or incomplete cleanup
+stops the procedure and preserves the inert safety boundary.
 
 ## Non-goals
 

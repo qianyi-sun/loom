@@ -1330,16 +1330,35 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     runbook_index = _read("docs/runbooks/README.md")
     fleet = _read("deploy/dev-fleet/README.md")
     architecture = _read("docs/architecture/multi-dev-environments.md")
-    normalized_architecture = " ".join(architecture.casefold().split())
+    deployment_architecture = _read(
+        "docs/architecture/personal-dev-management-plane-deployment.md"
+    )
 
-    for document in (runbook_index, fleet, architecture):
-        assert "personal-dev-zero-capacity-acceptance.md" in document
+    required = (
+        "personal-dev-zero-capacity-acceptance.md",
+        "personal-dev-durable-launch.md",
+        "personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+        "personal-dev-multi-owner-durable-launch.md",
+    )
+    for path in required:
+        assert path in runbook_index
+        assert path in architecture
+        assert path in deployment_architecture
+    assert "personal-dev-zero-capacity-acceptance.md" in fleet
     assert "render-acceptance" in fleet
     assert "status-acceptance" in fleet
-    assert "two concurrent isolated environments" in normalized_architecture
-    assert "two pinned authenticated acceptance owners" in normalized_architecture
-    assert "verified schema-v2 result" in normalized_architecture
+    for document in (architecture, deployment_architecture):
+        normalized = " ".join(document.casefold().split())
+        assert "sole-owner/two-environment" in normalized
+        assert "before a second person is onboarded" in normalized
+        assert "verified schema-v2 result" in normalized
     assert "worker_available=false" in architecture
+
+
+def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
+    assert _document_sha256(
+        "docs/runbooks/personal-dev-durable-launch.md"
+    ) == "7c8da975d9eb807ea727d44f57d64afaa9b420724c60015057a2215109247601"
 
 
 def test_durable_launch_uses_the_exact_checkout_cli() -> None:
@@ -1361,8 +1380,32 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert '(.spec.ingress[0] | has("from") | not)' in runbook
     assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
+
+
+def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+
+    assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
+    assert 'test -x "$loom_cli"' in runbook
+    assert runbook.count('"$loom_cli" admin personal-dev-control-plane') >= 7
+    assert "operational_evidence_args=(" in runbook
+    assert '--source-root "$repo"' in runbook
+    assert '--trusted-launcher-profile-file "$trusted_launcher_profile"' in runbook
+    assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
+    assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
+    assert runbook.count('"${operational_evidence_args[@]}"') == 3
+    assert 'test "$solver_port" = 8089' in runbook
+    assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
+    assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
+    assert '(.spec | has("egress") | not)' in runbook
+    assert '(.spec.ingress[0] | has("from") | not)' in runbook
+    assert '--proto \'=https\' --tlsv1.2' in runbook
+    assert "/home/hongjian/loom/.venv" not in runbook
     assert "schema-v1 single-owner record remains historical compatibility" in runbook
     assert "final multi-person launch requires a verified schema-v2 result" in runbook
+    assert "separately reviewed multi-owner durable-launch window" in runbook
+    assert "#1280" not in runbook
+    assert "personal-dev-concurrent-owner-zero-capacity-acceptance.md" in runbook
     assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
     assert 'acceptance_result="<absolute-owner-only-acceptance-result-v2.json>"' in runbook
     verify = runbook.index("verify-acceptance-result")
@@ -1373,6 +1416,8 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert '--acceptance-result-file "$acceptance_result"' in runbook
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in runbook
     assert '--acceptance-manifest-sha256 "$acceptance_manifest_sha256"' in runbook
+    assert ".owner_count == 2" in runbook
+    assert ".cross_owner_denial_count == 6" in runbook
 
 
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:

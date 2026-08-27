@@ -1,8 +1,9 @@
-# Personal-development durable zero-capacity launch
+# Personal-development multi-owner durable zero-capacity launch
 
 This runbook enables the personal application plane as a durable operational
-service after the complete single-owner zero-capacity acceptance has finished and
-returned the shared management plane to its byte-reviewed inert shadow. It does
+service after the complete two-owner zero-capacity acceptance has finished and
+returned the shared management plane to its byte-reviewed inert shadow. The
+schema-v1 single-owner record remains historical compatibility, but before a second person is onboarded the final multi-person launch requires a verified schema-v2 result. It does
 not extend the acceptance window and does not leave an acceptance manifest
 running. The durable manifest is generated from a separate operational plan by
 `render-operational` and observed by `status-operational`.
@@ -16,7 +17,7 @@ authority over physical task capacity and any nonzero ceiling.
 
 Repository merge, a completed acceptance result, DNS configuration, and a
 successful render are necessary but not sufficient live authority. Execute the
-mutable sections only inside an explicit #1280 durable-launch window with the
+mutable sections only inside a separately reviewed multi-owner durable-launch window with the
 exact candidate, operator, rollback manifest, and evidence paths reviewed in
 advance.
 
@@ -24,7 +25,7 @@ advance.
 
 Stop before apply if any of these conditions holds:
 
-- the full `personal-dev-zero-capacity-acceptance.md` procedure did not finish,
+- the full `personal-dev-concurrent-owner-zero-capacity-acceptance.md` procedure did not finish,
   including final owner destroy and inert-shadow rollback;
 - the operational plan does not bind the exact canonical acceptance result and
   the retained shadow-rollback evidence;
@@ -64,7 +65,11 @@ trusted_release="<absolute-owner-only-trusted-release.json>"
 trusted_release_sha256="<reviewed-trusted-release-sha256>"
 operational_plan="<absolute-owner-only-operational-plan.json>"
 operational_plan_sha256="<reviewed-operational-plan-sha256>"
-acceptance_result="<absolute-owner-only-acceptance-result.json>"
+acceptance_plan="<absolute-owner-only-acceptance-plan.json>"
+acceptance_plan_sha256="<reviewed-v2-acceptance-plan-sha256>"
+acceptance_result="<absolute-owner-only-acceptance-result-v2.json>"
+acceptance_result_sha256="<reviewed-v2-acceptance-result-sha256>"
+acceptance_manifest_sha256="<reviewed-acceptance-manifest-sha256>"
 rollback_evidence="<absolute-owner-only-acceptance-shadow-rollback-evidence>"
 backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
 trusted_launcher_profile="<absolute-owner-only-source-derived-trusted-launcher-profile>"
@@ -84,6 +89,7 @@ pre_launch_status="$evidence_dir/pre-launch-shadow.status.json"
 post_launch_status="$evidence_dir/post-launch-operational.status.json"
 final_launch_status="$evidence_dir/final-operational.status.json"
 rollback_status="$evidence_dir/rollback-shadow.status.json"
+acceptance_verification="$evidence_dir/acceptance-result-verification.json"
 
 assert_owner_only_file() {
   local path="$1"
@@ -97,6 +103,7 @@ assert_owner_only_file() {
 for path in \
   "$trusted_release" \
   "$operational_plan" \
+  "$acceptance_plan" \
   "$acceptance_result" \
   "$rollback_evidence" \
   "$backup_restore_evidence" \
@@ -108,7 +115,9 @@ done
 
 test "$(sha256sum "$trusted_release" | awk '{print $1}')" = "$trusted_release_sha256"
 test "$(sha256sum "$operational_plan" | awk '{print $1}')" = "$operational_plan_sha256"
-test "$(sha256sum "$acceptance_result" | awk '{print $1}')" = \
+test "$(sha256sum "$acceptance_plan" | awk '{print $1}')" = "$acceptance_plan_sha256"
+test "$(sha256sum "$acceptance_result" | awk '{print $1}')" = "$acceptance_result_sha256"
+test "$acceptance_result_sha256" = \
   "$(jq -r .approval.acceptance_result_sha256 "$operational_plan")"
 test "$(sha256sum "$rollback_evidence" | awk '{print $1}')" = \
   "$(jq -r .approval.rollback_evidence_sha256 "$operational_plan")"
@@ -143,18 +152,36 @@ expiry. Choosing a distant acceptance expiry is not an operational plan.
 
 ## 2. Prove the accepted procedure ended in the exact shadow
 
-The acceptance result must be canonical and report the exact acceptance owner,
-two-environment create/update and isolation, destroy, retained-data redeploy,
-and final cleanup. The
+The acceptance result must be canonical v2 evidence for two exact owners, six
+ordered cross-owner denials, concurrent create/update, normal and retained-data
+destroy, retained-name redeploy, final cleanup, and inert rollback. Run the
+strict read-only verifier before any operational render or apply. The
 acceptance runbook's last apply and status must prove the byte-reviewed shadow,
-not an expired or still-active acceptance manifest.
+not an expired or still-active acceptance manifest. The verifier independently
+binds every denial digest to the canonical target GET, PUT, or DELETE HTTP 404
+receipt; nonempty arbitrary stderr is not acceptance evidence.
 
 ```bash
 test "$(jq -r .schema "$acceptance_result")" = \
-  "loom-personal-dev-zero-capacity-acceptance-result-v1"
+  "loom-personal-dev-zero-capacity-acceptance-result-v2"
 test "$(jq -r .release_sha256 "$acceptance_result")" = "$trusted_release_sha256"
 test "$(jq -r .shadow_manifest_sha256 "$acceptance_result")" = \
   "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
+
+"$loom_cli" admin personal-dev-control-plane verify-acceptance-result \
+  --acceptance-plan-file "$acceptance_plan" \
+  --acceptance-plan-sha256 "$acceptance_plan_sha256" \
+  --acceptance-result-file "$acceptance_result" \
+  --acceptance-result-sha256 "$acceptance_result_sha256" \
+  --acceptance-manifest-sha256 "$acceptance_manifest_sha256" \
+  > "$acceptance_verification"
+chmod 0600 "$acceptance_verification"
+jq -e --arg result "$acceptance_result_sha256" '
+  .schema == "loom-personal-dev-zero-capacity-acceptance-verification-v1" and
+  .verified == true and .owner_count == 2 and
+  .cross_owner_denial_count == 6 and
+  .acceptance_result_sha256 == $result
+' "$acceptance_verification" >/dev/null
 
 "$loom_cli" admin personal-dev-control-plane status \
   --namespace loom-dev \
@@ -367,24 +394,24 @@ route behavior.
 
 Use one reviewed authenticated owner session and a small arbitrary source
 snapshot. This is a personal application launch smoke, not another substitute
-for the completed single-owner acceptance. Do not submit a TaskSet, Batch, Trial,
+for the completed two-owner acceptance. Do not submit a TaskSet, Batch, Trial,
 Slurm job, or model call.
 
 ```bash
-owner_xdg="<absolute-mode-0700-launch-owner-xdg-config-root>"
+launch_xdg_config_root="<absolute-mode-0700-launch-xdg-config-root>"
 owner_source="<absolute-small-arbitrary-source-root>"
 owner_name="<reviewed-launch-smoke-name>"
-assert_owner_only_file "$owner_xdg/loom/config.toml"
+assert_owner_only_file "$launch_xdg_config_root/loom/config.toml"
 
-XDG_CONFIG_HOME="$owner_xdg" loom auth whoami \
+XDG_CONFIG_HOME="$launch_xdg_config_root" loom auth whoami \
   > "$evidence_dir/launch-owner.whoami.txt"
-XDG_CONFIG_HOME="$owner_xdg" loom service up \
+XDG_CONFIG_HOME="$launch_xdg_config_root" loom service up \
   --environment "dev-$owner_name" \
   --source-root "$owner_source" \
   --min-slots 0 \
   --max-slots 2 \
   > "$evidence_dir/launch-owner.deploy.txt" 2>&1
-XDG_CONFIG_HOME="$owner_xdg" loom dev status "$owner_name" --format json \
+XDG_CONFIG_HOME="$launch_xdg_config_root" loom dev status "$owner_name" --format json \
   > "$evidence_dir/launch-owner.status.json"
 chmod 0600 "$evidence_dir/launch-owner.status.json"
 jq -e '
@@ -414,7 +441,7 @@ Retire the launch-smoke environment through the same normal path so the
 rollback path remains immediately executable:
 
 ```bash
-XDG_CONFIG_HOME="$owner_xdg" loom dev destroy "$owner_name" --format json \
+XDG_CONFIG_HOME="$launch_xdg_config_root" loom dev destroy "$owner_name" --format json \
   > "$evidence_dir/launch-owner.destroy.json"
 chmod 0600 "$evidence_dir/launch-owner.destroy.json"
 jq -e '.status == "deleted"' "$evidence_dir/launch-owner.destroy.json" >/dev/null
