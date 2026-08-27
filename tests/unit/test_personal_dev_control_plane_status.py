@@ -424,8 +424,8 @@ def _healthy_fixture(
         },
         _MANAGER: '{"executable_new_capacity_ceiling":0,"status":"ready"}\n',
         _DEPLOYMENTS: {
-            "apiVersion": "apps/v1",
-            "kind": "DeploymentList",
+            "apiVersion": "v1",
+            "kind": "List",
             "items": [item for item in namespaced if item["kind"] == "Deployment"],
         },
     }
@@ -688,8 +688,8 @@ def _enabled_healthy_runner(
             "observer_principal_id": plan.principals.lifecycle_principal_id,
         },
         _DEPLOYMENTS: {
-            "apiVersion": "apps/v1",
-            "kind": "DeploymentList",
+            "apiVersion": "v1",
+            "kind": "List",
             "items": deployments,
         },
     }
@@ -1740,7 +1740,7 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
     elif mutation == "deployments-wrong-kind":
         deployments = runner.responses[_DEPLOYMENTS]
         assert isinstance(deployments, dict)
-        deployments["kind"] = "List"
+        deployments["kind"] = "DeploymentList"
     elif mutation == "bool-returncode":
         runner.responses[_CONTEXT] = subprocess.CompletedProcess(
             list(_CONTEXT),
@@ -1924,6 +1924,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
     [
         ("personal-worker", "unexpected_personal_worker"),
         ("deployments-wrong-kind", "deployment_inventory_invalid"),
+        ("deployments-wrong-api-version", "deployment_inventory_invalid"),
     ],
 )
 def test_shadow_status_fails_closed_on_personal_worker_inventory(
@@ -1950,10 +1951,14 @@ def test_shadow_status_fails_closed_on_personal_worker_inventory(
                 },
             }
         )
+    elif mutation == "deployments-wrong-kind":
+        deployments = runner.responses[_DEPLOYMENTS]
+        assert isinstance(deployments, dict)
+        deployments["kind"] = "DeploymentList"
     else:
         deployments = runner.responses[_DEPLOYMENTS]
         assert isinstance(deployments, dict)
-        deployments["kind"] = "List"
+        deployments["apiVersion"] = "apps/v1"
 
     result = _observe(expected, runner)
 

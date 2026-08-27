@@ -3159,25 +3159,6 @@ def _network_policies(
             "policyTypes": ["Ingress"],
             "ingress": [
                 {
-                    "from": [
-                        *(
-                            {"ipBlock": {"cidr": cidr}}
-                            for cidr in profile.network.ingress_controller_source_cidrs
-                        ),
-                        {
-                            "namespaceSelector": {
-                                "matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}
-                            },
-                            "podSelector": {
-                                "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
-                            },
-                        },
-                        {
-                            "podSelector": {
-                                "matchLabels": {"app": "loom-personal-dev-activation-agent"}
-                            }
-                        },
-                    ],
                     "ports": [{"protocol": "TCP", "port": 8090}],
                 }
             ],

@@ -233,6 +233,16 @@ jq -e --argjson port "$solver_port" '
   .spec.ingress[0].ports == [{port:$port,protocol:"TCP"}]
 ' "$evidence_dir/management.acme-http01-network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-management-ingress -o json \
+  > "$evidence_dir/management.network-policy.json"
+jq -e '
+  .spec.podSelector.matchLabels == {"app":"loom-personal-dev-management"} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  (.spec.ingress[0] | has("from") | not) and
+  .spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]
+' "$evidence_dir/management.network-policy.json" >/dev/null
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
