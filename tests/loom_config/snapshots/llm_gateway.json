@@ -9,6 +9,11 @@
     "default": "None",
     "required": false
   },
+  "artifacts_bucket": {
+    "annotation": "<class 'str'>",
+    "default": "'artifacts'",
+    "required": false
+  },
   "bind_host": {
     "annotation": "<class 'str'>",
     "default": "'0.0.0.0'",
@@ -89,6 +94,26 @@
     "default": "9101",
     "required": false
   },
+  "minio_access_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
+  "minio_endpoint": {
+    "annotation": "<class 'str'>",
+    "default": "'http://loom-minio:9000'",
+    "required": false
+  },
+  "minio_region": {
+    "annotation": "<class 'str'>",
+    "default": "'us-east-1'",
+    "required": false
+  },
+  "minio_secret_key": {
+    "annotation": "<class 'pydantic.types.SecretStr'>",
+    "default": "PydanticUndefined",
+    "required": true
+  },
   "openai_api_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",
@@ -103,6 +128,16 @@
     "annotation": "<class 'pydantic.types.SecretStr'>",
     "default": "PydanticUndefined",
     "required": true
+  },
+  "storage_auth_kind": {
+    "annotation": "<class 'str'>",
+    "default": "'static_keys'",
+    "required": false
+  },
+  "storage_backend": {
+    "annotation": "<class 'str'>",
+    "default": "'minio'",
+    "required": false
   },
   "together_api_key": {
     "annotation": "pydantic.types.SecretStr | None",

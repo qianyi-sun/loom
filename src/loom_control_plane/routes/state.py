@@ -28,6 +28,11 @@ from loom.family_run.registry import resolve_plugin
 from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
+from loom_control_plane.routes.execution_fence import (
+    OptionalExecutionGenerationHeader,
+    OptionalExecutionLeaseIdHeader,
+    enforce_trial_execution_fence,
+)
 
 router = APIRouter()
 
@@ -38,7 +43,9 @@ _ALLOWED_FROM: dict[TrialState, set[TrialState]] = {
     TrialState.SUCCEEDED: {TrialState.CLAIMED, TrialState.RUNNING},
     TrialState.FAILED: {TrialState.CLAIMED, TrialState.RUNNING},
     TrialState.CANCELLED: {
-        TrialState.QUEUED, TrialState.CLAIMED, TrialState.RUNNING,
+        TrialState.QUEUED,
+        TrialState.CLAIMED,
+        TrialState.RUNNING,
     },
 }
 
@@ -71,7 +78,9 @@ SELECT id
 """)
 
 _TERMINAL = {
-    TrialState.SUCCEEDED, TrialState.FAILED, TrialState.CANCELLED,
+    TrialState.SUCCEEDED,
+    TrialState.FAILED,
+    TrialState.CANCELLED,
 }
 
 # #672 family-runs: at finalize, load the batch's family_run_spec and the
@@ -164,10 +173,15 @@ async def _finalize_family(
     including ``noop``.
     """
     row = (
-        await session.execute(
-            _FAMILY_FINALIZE_LOAD_SQL, {"trial_id": trial_id},
+        (
+            await session.execute(
+                _FAMILY_FINALIZE_LOAD_SQL,
+                {"trial_id": trial_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         return
 
@@ -232,6 +246,8 @@ async def patch_state(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
@@ -243,7 +259,8 @@ async def patch_state(
         worker_id = UUID(payload["worker_id"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"state + worker_id required: {exc}",
+            status_code=400,
+            detail=f"state + worker_id required: {exc}",
         ) from exc
 
     # Bug 1 fix: validate state against the TrialState enum upfront so we
@@ -254,7 +271,7 @@ async def patch_state(
         raise HTTPException(
             status_code=400,
             detail=f"invalid state {new_state_str!r}; "
-                   f"must be one of {sorted(s.value for s in TrialState)}",
+            f"must be one of {sorted(s.value for s in TrialState)}",
         ) from exc
     if new_state not in _ALLOWED_FROM:
         raise HTTPException(
@@ -284,41 +301,65 @@ async def patch_state(
     has_result = result_payload is not None
 
     async with request.app.state.session_factory() as session:
+        await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="result",
+            lock=True,
+        )
         if new_state == TrialState.SUCCEEDED and not has_result:
-            missing_result = (await session.execute(_SUCCEEDED_RESULT_GUARD_SQL, {
-                "trial_id": trial_id,
-                "worker_id": worker_id,
-                "allowed_from": allowed_from,
-            })).first()
+            missing_result = (
+                await session.execute(
+                    _SUCCEEDED_RESULT_GUARD_SQL,
+                    {
+                        "trial_id": trial_id,
+                        "worker_id": worker_id,
+                        "allowed_from": allowed_from,
+                    },
+                )
+            ).first()
             if missing_result is not None:
                 STATE_PATCH_TOTAL.labels(
-                    endpoint="state", result="invalid",
+                    endpoint="state",
+                    result="invalid",
                 ).inc()
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        "state 'succeeded' requires result to be supplied "
-                        "or already persisted"
+                        "state 'succeeded' requires result to be supplied or already persisted"
                     ),
                 )
-        row = (await session.execute(_PATCH_SQL, {
-            "trial_id": trial_id,
-            "worker_id": worker_id,
-            "new_state": new_state.value,
-            "result_payload": result_payload,
-            "has_result": has_result,
-            "failure_reason": failure_reason_str,
-            "failure_message": failure_message_str,
-            "is_terminal": new_state in _TERMINAL,
-            "allowed_from": allowed_from,
-        })).mappings().one_or_none()
+        row = (
+            (
+                await session.execute(
+                    _PATCH_SQL,
+                    {
+                        "trial_id": trial_id,
+                        "worker_id": worker_id,
+                        "new_state": new_state.value,
+                        "result_payload": result_payload,
+                        "has_result": has_result,
+                        "failure_reason": failure_reason_str,
+                        "failure_message": failure_message_str,
+                        "is_terminal": new_state in _TERMINAL,
+                        "allowed_from": allowed_from,
+                    },
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
 
         # #672 family-runs: on terminal state, evaluate the advance
         # predicate + persist the family's new position within the same
         # transaction. No-op for non-family trials.
         if row is not None and new_state in _TERMINAL:
             await _finalize_family(
-                session, trial_id=trial_id, new_state=new_state,
+                session,
+                trial_id=trial_id,
+                new_state=new_state,
             )
 
         await session.commit()

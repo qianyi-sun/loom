@@ -1673,10 +1673,13 @@ dependencies = [
 [package.optional-dependencies]
 cluster = [
     { name = "kubernetes" },
+    { name = "nebius" },
 ]
 dev = [
     { name = "hypothesis" },
+    { name = "kubernetes" },
     { name = "mypy" },
+    { name = "nebius" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1719,12 +1722,15 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1,<4.0" },
     { name = "jsonschema", specifier = ">=4.21,<5.0" },
     { name = "kubernetes", marker = "extra == 'cluster'", specifier = ">=28.1,<32.0" },
+    { name = "kubernetes", marker = "extra == 'dev'", specifier = ">=28.1,<32.0" },
     { name = "litellm", specifier = ">=1.70,<2.0" },
     { name = "loom-benchmark-terminal-bench-2", marker = "extra == 'rollout'", editable = "packages/loom-benchmark-terminal-bench-2" },
     { name = "loom-benchmarks", marker = "extra == 'rollout'", editable = "packages/loom-benchmarks" },
     { name = "loom-bundle-checksum", editable = "packages/loom-bundle-checksum" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.66.55,<0.80" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
+    { name = "nebius", marker = "extra == 'cluster'", specifier = ">=0.6,<0.7" },
+    { name = "nebius", marker = "extra == 'dev'", specifier = ">=0.6,<0.7" },
     { name = "numpy", specifier = ">=2.0,<3.0" },
     { name = "openai", specifier = ">=1.55,<3.0" },
     { name = "pillow", specifier = ">=12.0,<13.0" },
@@ -2239,6 +2245,26 @@ wheels = [
 ]
 
 [[package]]
+name = "nebius"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "certifi" },
+    { name = "cryptography" },
+    { name = "grpcio" },
+    { name = "portalocker" },
+    { name = "protobuf" },
+    { name = "pyjwt" },
+    { name = "pyyaml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/02/af48b2e859c999ffc3c5059cf9fa230fbd781011cd96f497b430a6359cfa/nebius-0.6.1.tar.gz", hash = "sha256:38fc070840c8909e0a47f3d12e6033c6d14837a323dcefbd2784cbf92bfaaf31", size = 1419639, upload-time = "2026-08-26T09:39:53.916Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/15/51e2737ac6c533faebfc8f8c072c952d9610895a60bc40febb677eb5948f/nebius-0.6.1-py3-none-any.whl", hash = "sha256:2ed4e54c36a0dfdc3a841af592ba43e543c5c7994a464d19e12539df547679b0", size = 1369453, upload-time = "2026-08-26T09:39:52.209Z" },
+]
+
+[[package]]
 name = "networkx"
 version = "3.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2652,6 +2678,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "portalocker"
+version = "4.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/8e/27672cd2dde9d2345ead0352146a401be4ec0af132be86ca7a2db24afb09/portalocker-4.3.0.tar.gz", hash = "sha256:69bf8e46769d66eb0a23219b9550253d2c3b5f03400202a2333784c1e6395e32", size = 263582, upload-time = "2026-08-25T18:05:20.267Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6a/76/57be9bb352b3f91c80671a7b7ce2cd51f99ad324c89df82a098df9b9e609/portalocker-4.3.0-py3-none-any.whl", hash = "sha256:aa91709ccfc322b8225171392d64a2f9fc833f15f5ab741cfba6d3fba285ce31", size = 129554, upload-time = "2026-08-25T18:05:18.64Z" },
 ]
 
 [[package]]

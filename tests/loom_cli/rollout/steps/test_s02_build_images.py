@@ -108,8 +108,10 @@ class TestBuildImagesCoverage:
         rendered = _locally_tagged_deployment_images()
         primary = {name for name, _, _ in rollout_images_from_worktree(_repo_root())}
 
-        assert primary == rendered
-        assert len(primary) == 8
+        # The execution runtime is a primary release image consumed by
+        # short-lived Jobs rather than a standing Deployment/StatefulSet.
+        assert primary == rendered | {"loom-execution-runtime"}
+        assert len(primary) == 10
 
     def test_candidate_roles_form_exact_ten_image_contract(self) -> None:
         primary = rollout_images_from_worktree(_repo_root())
@@ -441,7 +443,7 @@ def test_run_builds_exact_candidate_plan_and_persists_v2_identities(
     envelope = json.loads(step_dir.artifact_path("image-matrix.json").read_text())
     assert envelope["schema_version"] == 2
     assert envelope["image_ids"] == _image_ids()
-    assert len(envelope["primary_images"]) == 8
+    assert len(envelope["primary_images"]) == 10
     assert len(envelope["auxiliary_images"]) == 2
 
 

@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import Text, column, create_engine, insert, select, table
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
 
@@ -14,7 +15,6 @@ from loom.db.schema import (
     Task,
     TaskImageMaterialization,
     Team,
-    Trial,
     TrialTaskImageMaterialization,
 )
 
@@ -47,6 +47,15 @@ def test_migration_backfills_unlinked_dockerfile_trials_and_round_trips() -> Non
         _alembic(database_url, "upgrade", "0097")
         engine = create_engine(database_url)
         sessions = sessionmaker(engine)
+        legacy_trials = table(
+            "trials",
+            column("id", UUID(as_uuid=True)),
+            column("team_id", UUID(as_uuid=True)),
+            column("task_id", Text),
+            column("config", JSONB),
+            column("requires_caps", JSONB),
+            column("state", Text),
+        )
         team_id = uuid4()
         trial_id = uuid4()
         task_id = f"legacy-task-image/{uuid4()}"
@@ -73,7 +82,7 @@ def test_migration_backfills_unlinked_dockerfile_trials_and_round_trips() -> Non
                     )
                 )
                 session.execute(
-                    insert(Trial).values(
+                    insert(legacy_trials).values(
                         id=trial_id,
                         team_id=team_id,
                         task_id=task_id,

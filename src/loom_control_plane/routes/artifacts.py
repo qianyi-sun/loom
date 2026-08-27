@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Trial as TrialRow
+from loom_control_plane.routes.execution_fence import (
+    OptionalExecutionGenerationHeader,
+    OptionalExecutionLeaseIdHeader,
+    enforce_trial_execution_fence,
+)
 
 router = APIRouter()
 
@@ -27,7 +33,8 @@ def _validate_key(key: str) -> None:
         raise HTTPException(status_code=400, detail="key must not contain NUL")
     if key.startswith("/"):
         raise HTTPException(
-            status_code=400, detail="key must be relative (no leading /)",
+            status_code=400,
+            detail="key must be relative (no leading /)",
         )
     for segment in key.split("/"):
         if segment in ("", "..", "."):
@@ -42,20 +49,21 @@ async def mint_artifact_upload_url(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
-    if ctx is None or (
-        "submit" not in ctx.scopes and "worker:index" not in ctx.scopes
-    ):
+    if ctx is None or ("submit" not in ctx.scopes and "worker:index" not in ctx.scopes):
         raise HTTPException(status_code=401, detail="not authorized")
 
     try:
-        trial_id = payload["trial_id"]
+        trial_id = UUID(str(payload["trial_id"]))
         key = payload["key"]
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"trial_id + key required: {exc}",
+            status_code=400,
+            detail=f"trial_id + key required: {exc}",
         ) from exc
     _validate_key(key)
 
@@ -67,14 +75,24 @@ async def mint_artifact_upload_url(
     # under team A's own prefix but using team B's trial_id, polluting the
     # cross-team artifact index.
     async with request.app.state.session_factory() as session:
-        trial_team = (await session.execute(
-            select(TrialRow.team_id).where(TrialRow.id == trial_id),
-        )).scalar_one_or_none()
+        await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="artifact",
+        )
+        trial_team = (
+            await session.execute(
+                select(TrialRow.team_id).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
 
     if ctx.team_id is not None:
         if trial_team is None or trial_team != ctx.team_id:
             raise HTTPException(
-                status_code=403, detail="trial belongs to another team",
+                status_code=403,
+                detail="trial belongs to another team",
             )
         team_id = ctx.team_id
     else:

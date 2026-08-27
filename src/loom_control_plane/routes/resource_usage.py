@@ -13,6 +13,11 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import Trial, TrialResourceUsage, Worker
 from loom.models.resource_usage import ResourceCounters, TrialResourceUsageReport
 from loom.resource_usage_store import report_values
+from loom_control_plane.routes.execution_fence import (
+    OptionalExecutionGenerationHeader,
+    OptionalExecutionLeaseIdHeader,
+    enforce_trial_execution_fence,
+)
 
 router = APIRouter()
 _GAUGE_COUNTERS = frozenset({"memory_current_bytes", "pids_current"})
@@ -32,6 +37,8 @@ async def put_trial_resource_usage(
     report: TrialResourceUsageReport,
     request: Request,
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, object]:
     if report.trial_id != trial_id:
         raise HTTPException(status_code=400, detail="trial_id path/body mismatch")
@@ -44,6 +51,16 @@ async def put_trial_resource_usage(
         ).scalar_one_or_none()
         if trial is None:
             raise HTTPException(status_code=404, detail="trial not found")
+        fence = await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="usage",
+            lock=True,
+        )
+        if fence is not None and report.attempt_count != fence.attempt:
+            raise HTTPException(status_code=409, detail="execution_generation_fenced")
         if report.attempt_count > trial.attempt_count:
             raise HTTPException(status_code=409, detail="resource usage attempt is ahead of trial")
         if (

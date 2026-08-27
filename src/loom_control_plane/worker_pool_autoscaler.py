@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -32,11 +32,16 @@ from loom.dev_instance import (
     dev_pool_instance_name,
     validate_dev_instance,
 )
+from loom.execution_contract import PoolCapacityV1
 from loom.worker_token import (
     WORKER_AUTH_FINGERPRINT_ENV_KEY,
     worker_token_fingerprint_from_env_file,
 )
-from loom_control_plane.autoscaler_demand_router import assign_neutral_queued_trials
+from loom_control_plane.autoscaler_demand_router import (
+    assign_neutral_queued_trials,
+    pool_demand_state_from_policy,
+    route_candidate_from_pool_state,
+)
 from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmWorkerCapacitySnapshot,
@@ -638,6 +643,65 @@ def autoscaler_policy_to_dict(
     }
 
 
+def _routing_capacity_to_dict(
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    assigned_queued_slots: int,
+    now: datetime,
+    capacity_freshness_seconds: int,
+) -> dict[str, object]:
+    state = pool_demand_state_from_policy(
+        row,
+        now=now,
+        capacity_freshness_seconds=capacity_freshness_seconds,
+        assigned_queued_slots=assigned_queued_slots,
+    )
+    candidate = route_candidate_from_pool_state(state)
+    observed_at = state.capacity_observed_at
+    fresh_until = (
+        observed_at + timedelta(seconds=capacity_freshness_seconds)
+        if observed_at is not None
+        else None
+    )
+    capacity = PoolCapacityV1(
+        logical_pool_id=state.pool_name,
+        adapter_kind=state.adapter_kind,
+        environment=state.environment,
+        region=state.region,
+        data_residency=state.data_residency,
+        configured_ceiling_slots=state.max_slots,
+        configured_scale_headroom_slots=state.demand_headroom,
+        observed_active_slots=state.active_slots,
+        observed_occupied_slots=state.occupied_slots,
+        observed_pending_slots=state.pending_slots,
+        assigned_queued_slots=state.assigned_queued_slots,
+        # Stale observations are retained for diagnosis but never presented as
+        # currently executable capacity.
+        executable_free_slots=(
+            state.unassigned_free_slots
+            if candidate.capacity_evidence_kind.value == "fresh_executable_capacity"
+            else 0
+        ),
+        capacity_evidence_kind=candidate.capacity_evidence_kind,
+        capacity_observed_at=observed_at,
+        capacity_fresh_until=fresh_until,
+        capacity_is_fresh=state.capacity_is_fresh,
+        capacity_freshness_seconds=capacity_freshness_seconds,
+        aggregate_executable_eligible=(
+            state.capacity_is_fresh
+            and candidate.capacity_evidence_kind.value == "fresh_executable_capacity"
+        ),
+        enabled=state.enabled,
+        healthy=candidate.healthy,
+        draining=state.draining,
+        budget_eligible=state.budget_eligible,
+        estimated_cost_microusd_per_slot_hour=state.estimated_cost_microusd_per_slot_hour,
+        operator_weight=state.operator_weight,
+        blockers=candidate.blockers,
+    )
+    return capacity.model_dump(mode="json")
+
+
 def _validate_policy_fields(
     *,
     actuator: str,
@@ -665,6 +729,26 @@ def _validate_policy_fields(
         raise ValueError("scale_down_cooldown_seconds must be >= 0")
     if drain_timeout_seconds <= 0:
         raise ValueError("drain_timeout_seconds must be > 0")
+
+
+def _validate_routing_config(actuator_config: Mapping[str, Any]) -> None:
+    weight = actuator_config.get("routing_weight")
+    if weight is not None and (
+        not isinstance(weight, int) or isinstance(weight, bool) or not -1_000 <= weight <= 1_000
+    ):
+        raise ValueError("actuator_config.routing_weight must be an integer in [-1000, 1000]")
+    cost = actuator_config.get("routing_cost_microusd_per_slot_hour")
+    if cost is not None and (not isinstance(cost, int) or isinstance(cost, bool) or cost < 0):
+        raise ValueError(
+            "actuator_config.routing_cost_microusd_per_slot_hour must be a non-negative integer",
+        )
+    budget_eligible = actuator_config.get("routing_budget_eligible")
+    if budget_eligible is not None and not isinstance(budget_eligible, bool):
+        raise ValueError("actuator_config.routing_budget_eligible must be a boolean")
+    for field in ("routing_region", "routing_data_residency"):
+        value = actuator_config.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"actuator_config.{field} must be a non-empty string")
 
 
 async def get_autoscaler_policy(
@@ -803,6 +887,8 @@ async def upsert_autoscaler_policy(
         scale_down_cooldown_seconds=scale_down_cooldown_seconds,
         drain_timeout_seconds=drain_timeout_seconds,
     )
+    normalized_actuator_config = dict(actuator_config or {})
+    _validate_routing_config(normalized_actuator_config)
     # Dev-instance admission (design phase 4 / #1166): a ``dev-<name>`` pool
     # policy must stay inside the dev envelope — slurm actuator, per-instance
     # cap, and the fleet-wide Σ(max_slots) budget across all live dev pools.
@@ -842,7 +928,7 @@ async def upsert_autoscaler_policy(
     row.drain_timeout_seconds = int(drain_timeout_seconds)
     row.force = bool(force)
     row.disabled_reason = disabled_reason
-    row.actuator_config = dict(actuator_config or {})
+    row.actuator_config = normalized_actuator_config
     row.updated_at = now
     await session.flush()
     return row
@@ -853,7 +939,12 @@ async def fetch_autoscaler_status(
     *,
     environment: str | None = None,
     pool_name: str | None = None,
+    capacity_freshness_seconds: int = 120,
+    now: datetime | None = None,
 ) -> dict[str, list[dict[str, object]]]:
+    if capacity_freshness_seconds <= 0:
+        raise ValueError("capacity_freshness_seconds must be > 0")
+    current_time = now or datetime.now(UTC)
     stmt = select(WorkerPoolAutoscalerPolicy)
     if environment:
         stmt = stmt.where(WorkerPoolAutoscalerPolicy.environment == environment)
@@ -871,7 +962,31 @@ async def fetch_autoscaler_status(
         .scalars()
         .all()
     )
-    return {"policies": [autoscaler_policy_to_dict(row) for row in rows]}
+    routed_counts = {
+        str(route_pool): int(count)
+        for route_pool, count in (
+            await session.execute(
+                select(Trial.execution_route_pool_name, func.count(Trial.id))
+                .where(
+                    Trial.state == "queued",
+                    Trial.execution_route_pool_name.is_not(None),
+                )
+                .group_by(Trial.execution_route_pool_name),
+            )
+        ).all()
+        if route_pool is not None
+    }
+    policies: list[dict[str, object]] = []
+    for row in rows:
+        payload = autoscaler_policy_to_dict(row)
+        payload["routing_capacity"] = _routing_capacity_to_dict(
+            row,
+            assigned_queued_slots=routed_counts.get(row.pool_name, 0),
+            now=current_time,
+            capacity_freshness_seconds=capacity_freshness_seconds,
+        )
+        policies.append(payload)
+    return {"policies": policies}
 
 
 def _policy_to_config(row: WorkerPoolAutoscalerPolicy) -> AutoscalerPolicyConfig:

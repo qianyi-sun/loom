@@ -36,7 +36,10 @@ from loom.security.secret_store import (
 )
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
-from loom_llm_gateway.execution_attempt_dispatch import authorize_execution_attempt_dispatch
+from loom_llm_gateway.execution_attempt_dispatch import (
+    authorize_execution_attempt_dispatch,
+    authorize_trial_execution_dispatch,
+)
 from loom_llm_gateway.llm_calls import record_failed_call
 from loom_llm_gateway.rate_card import (
     CostEstimate,
@@ -95,6 +98,7 @@ async def verify_facade_auth(
             detail="execution-attempt tokens are not supported by this route",
         )
     await authorize_execution_attempt_dispatch(session, ctx)
+    await authorize_trial_execution_dispatch(session, ctx)
     return ctx
 
 

@@ -91,6 +91,19 @@ def test_image_and_smoke_jobs_consume_only_their_route_maps() -> None:
         assert f"['{route_key}']" in job["runs-on"]
 
 
+def test_unmerged_execution_images_stay_on_hosted_amd64_runners() -> None:
+    images = _workflow("images")["jobs"]
+    route_key_script = next(
+        step["run"] for step in images["image-route"]["steps"] if step.get("id") == "keys"
+    )
+    runs_on = images["build"]["runs-on"]
+
+    for image in ("execution-actuator", "execution-runtime"):
+        assert f'"{image}"' in route_key_script
+        assert f"matrix.image == '{image}'" in runs_on
+    assert "fromJSON('[\"ubuntu-24.04\"]')" in runs_on
+
+
 def test_static_repository_route_variables_are_no_longer_job_placement_inputs() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     for workflow_path in (repo_root / ".github/workflows").glob("*.yml"):

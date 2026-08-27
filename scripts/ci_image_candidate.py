@@ -140,6 +140,14 @@ def _expected_artifact_name(image: str, architecture: str, run_attempt: int) -> 
     return f"image-candidate-archive-{image}-{architecture}-attempt-{run_attempt}"
 
 
+def _artifact_attempt(artifact_name: str, image: str, architecture: str) -> int:
+    prefix = f"image-candidate-archive-{image}-{architecture}-attempt-"
+    suffix = artifact_name.removeprefix(prefix)
+    if not artifact_name.startswith(prefix) or not suffix.isdigit():
+        raise CandidateError("candidate artifact name does not match its image")
+    return _require_positive_integer(int(suffix), "candidate artifact run attempt")
+
+
 def validate_record(payload: object) -> dict[str, object]:
     if not isinstance(payload, Mapping):
         raise CandidateError("candidate record must be an object")
@@ -157,7 +165,9 @@ def validate_record(payload: object) -> dict[str, object]:
         raise CandidateError("candidate architecture/platform mismatch")
     artifact_name = _require_string(payload.get("artifact_name"), "artifact_name")
     if artifact_name != _expected_artifact_name(
-        row["image"], row["architecture"], int(common["run_attempt"])
+        row["image"],
+        row["architecture"],
+        _require_positive_integer(common.get("run_attempt"), "run_attempt"),
     ):
         raise CandidateError("candidate artifact name does not match its image")
     archive_sha256 = _require_string(payload.get("archive_sha256"), "archive_sha256")
@@ -198,7 +208,7 @@ def build_record(args: argparse.Namespace) -> dict[str, object]:
     )
 
 
-def _identity(payload: Mapping[str, object]) -> tuple[object, ...]:
+def _run_identity(payload: Mapping[str, object]) -> tuple[object, ...]:
     return tuple(
         payload[key]
         for key in (
@@ -208,7 +218,6 @@ def _identity(payload: Mapping[str, object]) -> tuple[object, ...]:
             "base_sha",
             "tree_sha",
             "run_id",
-            "run_attempt",
         )
     )
 
@@ -219,12 +228,23 @@ def aggregate_records(
     if not record_paths:
         raise CandidateError("candidate record directory is empty")
     records = [validate_record(_load_json(path)) for path in record_paths]
-    identities = {_identity(record) for record in records}
+    identities = {_run_identity(record) for record in records}
     if len(identities) != 1:
         raise CandidateError("candidate records do not share one source identity")
-    actual = {(str(record["image"]), str(record["architecture"])): record for record in records}
-    if len(actual) != len(records):
-        raise CandidateError("candidate records contain duplicate image architectures")
+    actual: dict[tuple[str, str], dict[str, object]] = {}
+    attempts: set[tuple[str, str, int]] = set()
+    for record in records:
+        identity = (str(record["image"]), str(record["architecture"]))
+        attempt = _require_positive_integer(record.get("run_attempt"), "run_attempt")
+        attempt_identity = (*identity, attempt)
+        if attempt_identity in attempts:
+            raise CandidateError("candidate records contain duplicate image architecture attempts")
+        attempts.add(attempt_identity)
+        previous = actual.get(identity)
+        if previous is None or attempt > _require_positive_integer(
+            previous.get("run_attempt"), "run_attempt"
+        ):
+            actual[identity] = record
     expected = {(row["image"], row["architecture"]): row for row in expected_matrix}
     if set(actual) != set(expected):
         raise CandidateError(
@@ -236,13 +256,20 @@ def aggregate_records(
         observed = actual[identity]
         if any(observed[key] != row[key] for key in MATRIX_KEYS):
             raise CandidateError(f"candidate matrix fields changed for {identity}")
-    first = records[0]
+    first = next(iter(actual.values()))
+    latest_attempt = max(
+        _require_positive_integer(record.get("run_attempt"), "run_attempt")
+        for record in actual.values()
+    )
     builds = [
         {
             **row,
             "candidate_artifact": str(actual[(row["image"], row["architecture"])]["artifact_name"]),
             "archive_sha256": str(actual[(row["image"], row["architecture"])]["archive_sha256"]),
-            "archive_size": int(actual[(row["image"], row["architecture"])]["archive_size"]),
+            "archive_size": _require_positive_integer(
+                actual[(row["image"], row["architecture"])].get("archive_size"),
+                "archive_size",
+            ),
         }
         for row in expected_matrix
     ]
@@ -257,9 +284,9 @@ def aggregate_records(
                 "base_sha",
                 "tree_sha",
                 "run_id",
-                "run_attempt",
             )
         },
+        "run_attempt": latest_attempt,
         "builds": builds,
     }
 
@@ -297,6 +324,7 @@ def validate_index(
         raise CandidateError("candidate index builds must be an array")
     expected = {(row["image"], row["architecture"]): row for row in expected_matrix}
     validated: dict[tuple[str, str], dict[str, object]] = {}
+    candidate_attempts: list[int] = []
     for index, item in enumerate(builds):
         if not isinstance(item, Mapping):
             raise CandidateError(f"candidate index build {index} must be an object")
@@ -317,8 +345,12 @@ def validate_index(
         candidate_artifact = _require_string(
             item.get("candidate_artifact"), f"builds[{index}].candidate_artifact"
         )
-        if candidate_artifact != _expected_artifact_name(*identity, int(common["run_attempt"])):
+        candidate_attempt = _artifact_attempt(candidate_artifact, *identity)
+        if candidate_attempt > _require_positive_integer(
+            common.get("run_attempt"), "run_attempt"
+        ):
             raise CandidateError(f"candidate artifact is invalid for {identity}")
+        candidate_attempts.append(candidate_attempt)
         archive_sha256 = _require_string(
             item.get("archive_sha256"), f"builds[{index}].archive_sha256"
         )
@@ -335,6 +367,8 @@ def validate_index(
         }
     if set(validated) != set(expected):
         raise CandidateError("candidate index does not cover the expected matrix")
+    if max(candidate_attempts) != common["run_attempt"]:
+        raise CandidateError("candidate index run attempt does not match its newest build")
     return {
         "schema": SCHEMA,
         **common,

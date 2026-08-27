@@ -48,6 +48,11 @@ from loom.pipeline.work_protocol import (
 )
 from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
+from loom_control_plane.routes.execution_fence import (
+    OptionalExecutionGenerationHeader,
+    OptionalExecutionLeaseIdHeader,
+    enforce_trial_execution_fence,
+)
 from loom_control_plane.scheduler.claim import (
     WorkClaimConflictError,
     claim_one,
@@ -763,6 +768,8 @@ async def pre_start_heartbeat(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    execution_lease_id: OptionalExecutionLeaseIdHeader = None,
+    execution_generation: OptionalExecutionGenerationHeader = None,
 ) -> dict[str, str]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
@@ -778,6 +785,14 @@ async def pre_start_heartbeat(
         ) from exc
 
     async with request.app.state.session_factory() as session:
+        await enforce_trial_execution_fence(
+            session,
+            trial_id=trial_id,
+            lease_id=execution_lease_id,
+            generation=execution_generation,
+            surface="heartbeat",
+            lock=True,
+        )
         row = (
             (
                 await session.execute(

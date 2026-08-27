@@ -149,12 +149,12 @@ def load_source_lock(repo_root: Path) -> SourceLock:
     if (
         ffmpeg["name"] != "ffmpeg"
         or ffmpeg["version"] != "7.1.5-12-g1fdbca85aa"
-        or ffmpeg["binary_version"] != "n7.1.5-12-g1fdbca85aa-20260813"
-        or ffmpeg["release_tag"] != "autobuild-2026-08-13-17-03"
+        or ffmpeg["binary_version"] != "n7.1.5-12-g1fdbca85aa-20260731"
+        or ffmpeg["release_tag"] != "autobuild-2026-07-31-14-10"
         or ffmpeg["license"] != "LGPL-2.1-or-later"
         or ffmpeg["url"]
         != "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-        "autobuild-2026-08-13-17-03/"
+        "autobuild-2026-07-31-14-10/"
         "ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-lgpl-shared-7.1.tar.xz"
     ):
         raise SourceLockError("FFmpeg runtime asset drift")

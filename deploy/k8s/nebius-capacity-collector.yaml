@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loom-execution-capacity-collector
+  namespace: loom-nebius-staging
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-execution-capacity-collector
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loom-execution-capacity-collector
+subjects:
+  - kind: ServiceAccount
+    name: loom-execution-capacity-collector
+    namespace: loom-nebius-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loom-execution-capacity-collector
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loom-execution-capacity-collector
+  namespace: loom-nebius-staging
+spec:
+  # Repository wiring remains inert until the target, exact quota names,
+  # credentials, and live-readback acceptance are separately authorized.
+  suspend: true
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 30
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 10
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: loom-execution-capacity-collector
+            app.kubernetes.io/part-of: loom
+        spec:
+          serviceAccountName: loom-execution-capacity-collector
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: prepare-credentials
+              image: loom-execution-actuator:0.8
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - -m
+                - loom_execution_capacity_collector.secret_init
+                - --source
+                - /var/run/loom-projected
+                - --destination
+                - /var/run/loom-owned/credentials
+              volumeMounts:
+                - name: projected-credentials
+                  mountPath: /var/run/loom-projected
+                  readOnly: true
+                - name: credentials
+                  mountPath: /var/run/loom-owned
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+          containers:
+            - name: collector
+              image: loom-execution-actuator:0.8
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "loom_execution_capacity_collector"]
+              envFrom:
+                - configMapRef:
+                    name: loom-execution-capacity-collector
+              env:
+                - name: LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_CREDENTIALS_FILE
+                  value: /var/run/loom-owned/credentials/nebius-credentials.json
+                - name: LOOM_EXECUTION_CAPACITY_COLLECTOR_CONTROL_PLANE_BEARER_TOKEN_FILE
+                  value: /var/run/loom-owned/credentials/control-plane-token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 1
+                  memory: 512Mi
+              volumeMounts:
+                - name: credentials
+                  mountPath: /var/run/loom-owned
+                  readOnly: true
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            - name: projected-credentials
+              projected:
+                defaultMode: 288
+                sources:
+                  - secret:
+                      name: loom-execution-capacity-collector-nebius
+                      items:
+                        - key: credentials.json
+                          path: nebius-credentials.json
+                  - secret:
+                      name: loom-execution-capacity-collector-control-plane
+                      items:
+                        - key: token
+                          path: control-plane-token
+            - name: credentials
+              emptyDir: {}

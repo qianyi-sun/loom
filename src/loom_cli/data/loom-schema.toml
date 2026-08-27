@@ -49,37 +49,43 @@ required    = true
 secret      = { key = "step-jwt-signing-key", generate = "openssl rand -hex 64" }
 description = "HS256 step-JWT key. CP mints, gateway verifies; mismatch → 401 on every facade call."
 
+[service_config.execution_image_admission_public_keys_json]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = '{"schema_version":1,"keys":[]}'
+description = "Bounded Ed25519 public-key registry for signed execution image admission evidence. The empty default intentionally rejects every service-execution reservation."
+
 [service_config.storage_backend]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "minio"
 description = "Object-store backend. S3-compatible values are minio (default), s3, r2, b2, and wasabi. The renderer library also supports gcs, but `bootstrap-storage-lifecycle` applies only S3-compatible backends. This value selects the renderer and credential chain."
 
 [service_config.storage_auth_kind]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "static_keys"
 description = "Credentials strategy. static_keys reads minio-access-key and minio-secret-key from loom-secrets for MinIO and other S3-compatible stores. irsa lets boto3 use an AWS IAM role from the projected service-account token. workload_identity and sa_json describe GCS credentials for renderer-library consumers; the lifecycle CLI does not apply GCS policies."
 
 [service_config.minio_endpoint]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "http://loom-minio:9000"
 
 [service_config.minio_access_key]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "SecretStr"
 required    = true
 secret      = { key = "minio-access-key" }
 
 [service_config.minio_secret_key]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "SecretStr"
 required    = true
 secret      = { key = "minio-secret-key" }
 
 [service_config.minio_region]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "us-east-1"
 
@@ -1027,7 +1033,7 @@ python_type = "str"
 description = "Public-facing MinIO endpoint for presigned URLs. When unset, falls back to minio_endpoint (works for in-cluster clients only)."
 
 [service_config.artifacts_bucket]
-used_by     = ["control-plane", "loom-service", "worker"]
+used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"
 default     = "artifacts"
 description = "Object-store bucket for trial artifacts (Harbor native files, verifier audit). Must match across control-plane, workers, and loom-service so signed URLs, uploads, downloads, and delivery export agree."
