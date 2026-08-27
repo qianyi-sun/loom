@@ -671,7 +671,7 @@ successful target responses cannot certify a denial.
       local target_epoch
       local rc=0
 
-      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$before"
+      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json | jq -cS . > "$before"
       target_epoch="$(jq -er ".operation_epoch | select(type == \"number\" and . > 0)" "$before")"
       case "$operation" in
         read)
@@ -695,7 +695,7 @@ successful target responses cannot certify a denial.
       printf '%s\n' "$expected_receipt" > "$expected_stderr"
       cmp -s "$stderr" "$expected_stderr"
       rm -f "$expected_stderr"
-      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$after"
+      XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json | jq -cS . > "$after"
       chmod 0600 "$before" "$after" "$stdout" "$stderr"
       assert_canonical_json_line "$before"
       assert_canonical_json_line "$after"

@@ -9,6 +9,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,14 @@ def _read(relative: str) -> str:
 
 def _document_sha256(relative: str) -> str:
     return hashlib.sha256((_ROOT / relative).read_bytes()).hexdigest()
+
+
+def _indented_shell_function(document: str, name: str) -> str:
+    start = document.index(f"    {name}() {{")
+    end_match = re.search(r"^    }$", document[start:], flags=re.MULTILINE)
+    assert end_match is not None
+    end = start + end_match.end()
+    return textwrap.dedent(document[start:end])
 
 
 def _sidecar_status(**changes: str) -> bytes:
@@ -1170,6 +1179,73 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert runbook.count("rollout status deployment/loom-personal-dev-management") >= 2
     assert "capture_scanner_cache_init_status" in runbook
     assert runbook.count("personal-dev-scanner-cache-init") >= 2
+
+
+def test_concurrent_owner_denial_probe_canonicalizes_pretty_cli_status(
+    tmp_path: Path,
+) -> None:
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
+    canonical_function = _indented_shell_function(
+        runbook,
+        "assert_canonical_json_line",
+    )
+    denial_function = _indented_shell_function(runbook, "probe_cross_owner_denial")
+    acceptance_plan = tmp_path / "acceptance-plan.json"
+    acceptance_plan.write_text(
+        json.dumps(
+            {
+                "acceptance_owners": [
+                    {"team_id": "team-0", "user_id": "user-0"},
+                    {"team_id": "team-1", "user_id": "user-1"},
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        encoding="ascii",
+    )
+    denials_jsonl = tmp_path / "cross-owner-denials.jsonl"
+    program = (
+        "set -euo pipefail\n"
+        + canonical_function
+        + "\n"
+        + denial_function
+        + "\n"
+        + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        + f"acceptance_plan={shlex.quote(str(acceptance_plan))}\n"
+        + f"denials_jsonl={shlex.quote(str(denials_jsonl))}\n"
+        + r'''
+loom() {
+  if [[ " $* " == *" --expected-hidden-denial "* ]]; then
+    printf '%s\n' '{"error_code":"resource_hidden","http_method":"GET","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_read"}' >&2
+    return 1
+  fi
+  printf '%s\n' '{' '  "operation_epoch": 7,' '  "name": "target"' '}'
+}
+assert_live_acceptance() {
+  printf '%s\n' '{}' > "$1"
+}
+: > "$denials_jsonl"
+probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 read
+'''
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    before = tmp_path / "denial-0-1-read.before.json"
+    after = tmp_path / "denial-0-1-read.after.json"
+    assert before.read_bytes() == b'{"name":"target","operation_epoch":7}\n'
+    assert after.read_bytes() == before.read_bytes()
+    denial = json.loads(denials_jsonl.read_text(encoding="ascii"))
+    assert denial["target_before_sha256"] == denial["target_after_sha256"]
 
 
 def test_concurrent_owner_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> (
