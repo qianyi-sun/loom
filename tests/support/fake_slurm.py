@@ -340,7 +340,7 @@ class FakeSlurm:
                 memory_bytes=512 * 1024 * 1024 * 1024,
                 gpus=8,
             ),
-            command_timeout_seconds=0.5,
+            command_timeout_seconds=5.0,
             max_stdout_bytes=64 * 1024,
             max_stderr_bytes=16 * 1024,
         ).model_copy(update=authority_changes)
