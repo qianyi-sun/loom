@@ -219,6 +219,22 @@ owner-only input to stable bytes.
       rm -f "$checked"
     }
 
+    reviewed_public_origin() {
+      "$python_cli" - "$1" <<'PY'
+    import sys
+    import tomllib
+    from pathlib import Path
+
+    with Path(sys.argv[1]).open("rb") as stream:
+        value = tomllib.load(stream)["network"]["public_origin"]
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise SystemExit("invalid network.public_origin")
+    print(value)
+    PY
+    }
+
+    reviewed_server="$(reviewed_public_origin "$profile")"
+
     test -d "$trusted_release_artifact" && test ! -L "$trusted_release_artifact"
     test "$(realpath -e "$trusted_release_artifact")" = "$trusted_release_artifact"
     test "$(stat -c %u "$trusted_release_artifact")" = "$(id -u)"
@@ -547,6 +563,16 @@ checkout and from each other.
     owner_0_principal="$(jq -cS '{user_id,team_id}' "$owner_0_whoami")"
     owner_1_principal="$(jq -cS '{user_id,team_id}' "$owner_1_whoami")"
     test "$owner_0_principal" != "$owner_1_principal"
+
+    assert_reviewed_owner_servers() {
+      local owner_0_server owner_1_server
+      owner_0_server="$(jq -er '.server | select(type == "string" and length > 0)' "$owner_0_whoami")"
+      owner_1_server="$(jq -er '.server | select(type == "string" and length > 0)' "$owner_1_whoami")"
+      test "$owner_0_server" = "$owner_1_server"
+      test "$owner_0_server" = "$reviewed_server"
+      test "$owner_1_server" = "$reviewed_server"
+    }
+    assert_reviewed_owner_servers
 
     assert_owner_sessions() {
       local owner_0_check owner_1_check

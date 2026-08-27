@@ -33,7 +33,9 @@ def _document_sha256(relative: str) -> str:
 
 
 def _indented_shell_function(document: str, name: str) -> str:
-    start = document.index(f"    {name}() {{")
+    marker = f"    {name}() {{"
+    assert marker in document, f"missing shell function: {name}"
+    start = document.index(marker)
     end_match = re.search(r"^    }$", document[start:], flags=re.MULTILINE)
     assert end_match is not None
     end = start + end_match.end()
@@ -1246,6 +1248,99 @@ probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 read
     assert after.read_bytes() == before.read_bytes()
     denial = json.loads(denials_jsonl.read_text(encoding="ascii"))
     assert denial["target_before_sha256"] == denial["target_after_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("owner_0_server", "owner_1_server", "expected_returncode"),
+    [
+        (
+            "https://loom-service.dev.yylx.world",
+            "https://loom-service.dev.yylx.world",
+            0,
+        ),
+        (
+            "https://loom-service.dev.yylx.world",
+            "https://unrelated.example",
+            1,
+        ),
+        ("https://unrelated.example", "https://unrelated.example", 1),
+    ],
+)
+def test_concurrent_owner_sessions_share_the_reviewed_management_plane(
+    tmp_path: Path,
+    owner_0_server: str,
+    owner_1_server: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
+    origin_function = _indented_shell_function(runbook, "reviewed_public_origin")
+    server_function = _indented_shell_function(
+        runbook,
+        "assert_reviewed_owner_servers",
+    )
+    whoami_template = {
+        "auth_kind": "bearer",
+        "credential_type": "user_owned_api_token",
+        "expires_at": None,
+        "principal_type": "team",
+        "role": None,
+        "scopes": ["read:own", "submit"],
+        "team_id": "team",
+        "user_id": "user",
+    }
+    owner_0_whoami = tmp_path / "owner-0.whoami.json"
+    owner_1_whoami = tmp_path / "owner-1.whoami.json"
+    owner_0_whoami.write_text(
+        json.dumps(
+            {**whoami_template, "server": owner_0_server},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    owner_1_whoami.write_text(
+        json.dumps(
+            {
+                **whoami_template,
+                "server": owner_1_server,
+                "team_id": "other-team",
+                "user_id": "other-user",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    program = (
+        "set -euo pipefail\n"
+        + origin_function
+        + "\n"
+        + server_function
+        + "\n"
+        + f"python_cli={shlex.quote(sys.executable)}\n"
+        + f"profile={shlex.quote(str(_ROOT / 'deploy/dev-fleet/personal-dev-control-plane.toml'))}\n"
+        + f"owner_0_whoami={shlex.quote(str(owner_0_whoami))}\n"
+        + f"owner_1_whoami={shlex.quote(str(owner_1_whoami))}\n"
+        + 'reviewed_server="$(reviewed_public_origin "$profile")"\n'
+        + "assert_reviewed_owner_servers\n"
+        + "printf '%s\\n' \"$reviewed_server\"\n"
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    if expected_returncode == 0:
+        assert result.stdout == "https://loom-service.dev.yylx.world\n"
 
 
 def test_concurrent_owner_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> (
