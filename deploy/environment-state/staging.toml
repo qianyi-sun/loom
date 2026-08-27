@@ -161,8 +161,11 @@ repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-$
 registry_docker_config_dir = "/shared_work2/loom-staging-rollout/credentials/task-image-builder-docker"
 partition = "gb10"
 time_limit = "04:00:00"
-requested_cpus = 20
-requested_memory_mib = 115000
+# Every managed GB10 node advertises one specialized core and 110000 MiB to
+# Slurm (CfgTRES=cpu=19,mem=110000M). The exclusive builder request must fit
+# that schedulable boundary or sbatch --test-only rejects reconciliation.
+requested_cpus = 19
+requested_memory_mib = 110000
 requested_concurrency = 1
 max_jobs = 1
 pending_job_cap = 1
