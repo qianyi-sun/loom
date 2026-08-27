@@ -1120,7 +1120,8 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert 'XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json' in normalized
     assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json' in normalized
     assert '--candidate "$actor_candidate"' in normalized
-    assert '--expected-operation-epoch 0' in normalized
+    assert '--expected-operation-epoch 1' in normalized
+    assert '--expected-operation-epoch 0' not in normalized
     assert '--min-slots 0' in normalized
     assert '--quiet' in normalized
     assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json' in normalized
@@ -1258,6 +1259,70 @@ probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 read
     assert after.read_bytes() == before.read_bytes()
     denial = json.loads(denials_jsonl.read_text(encoding="ascii"))
     assert denial["target_before_sha256"] == denial["target_after_sha256"]
+
+
+def test_concurrent_owner_update_denial_probe_uses_noncreating_sentinel_epoch(
+    tmp_path: Path,
+) -> None:
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
+    canonical_function = _indented_shell_function(
+        runbook,
+        "assert_canonical_json_line",
+    )
+    denial_function = _indented_shell_function(runbook, "probe_cross_owner_denial")
+    acceptance_plan = tmp_path / "acceptance-plan.json"
+    acceptance_plan.write_text(
+        '{"acceptance_owners":[{"team_id":"team-0","user_id":"user-0"},'
+        '{"team_id":"team-1","user_id":"user-1"}]}',
+        encoding="ascii",
+    )
+    denials_jsonl = tmp_path / "cross-owner-denials.jsonl"
+    calls = tmp_path / "loom-calls.txt"
+    program = (
+        "set -euo pipefail\n"
+        + canonical_function
+        + "\n"
+        + denial_function
+        + "\n"
+        + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        + f"acceptance_plan={shlex.quote(str(acceptance_plan))}\n"
+        + f"denials_jsonl={shlex.quote(str(denials_jsonl))}\n"
+        + f"calls={shlex.quote(str(calls))}\n"
+        + r'''
+loom() {
+  printf '%s\n' "$*" >> "$calls"
+  if [[ " $* " == *" --expected-hidden-denial "* ]]; then
+    printf '%s\n' '{"error_code":"resource_hidden","http_method":"PUT","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_update"}' >&2
+    return 1
+  fi
+  printf '%s\n' '{"name":"target","operation_epoch":7}'
+}
+assert_live_acceptance() {
+  printf '%s\n' '{}' > "$1"
+}
+: > "$denials_jsonl"
+probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 update
+'''
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    update_call = next(
+        line
+        for line in calls.read_text(encoding="utf-8").splitlines()
+        if line.startswith("service up ")
+    )
+    assert "--expected-operation-epoch 1" in update_call
+    assert "--expected-operation-epoch 0" not in update_call
 
 
 @pytest.mark.parametrize(

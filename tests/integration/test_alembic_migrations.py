@@ -878,6 +878,33 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         )
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            missing_name = "missing-probe"
+            with pytest.raises(PersonalDevEnvironmentEpochFencedError):
+                await authority.apply(
+                    replace(
+                        request,
+                        name=missing_name,
+                        expected_operation_epoch=1,
+                        idempotency_key=uuid4(),
+                    ),
+                    access_binding=_PERSONAL_DEV_ACCESS,
+                    now=now,
+                )
+            assert (
+                await session.execute(
+                    select(DevInstance).where(DevInstance.name == missing_name),
+                )
+            ).scalar_one_or_none() is None
+            assert (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM dev_lifecycle_operations "
+                        "WHERE environment_name = :name",
+                    ),
+                    {"name": missing_name},
+                )
+            ).scalar_one() == 0
+
             created = await authority.apply(
                 request,
                 access_binding=_PERSONAL_DEV_ACCESS,

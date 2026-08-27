@@ -209,6 +209,25 @@ def test_apply_rejects_an_invalid_operation_identity() -> None:
             )
 
 
+@pytest.mark.parametrize("epoch", [0, -1, False])
+def test_expected_hidden_denial_rejects_nonpositive_epoch_before_http(epoch: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    with httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        with pytest.raises(PersonalDevDeployError, match="positive"):
+            PersonalDevDeployClient(http_client).apply_expected_hidden_denial(
+                name="alice",
+                candidate=_candidate(),
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=epoch,
+            )
+
+
 def test_wait_rejects_a_ready_projection_that_drifted_from_the_apply() -> None:
     drifted = _environment(status="ready", epoch=1)
     drifted["candidate_sha"] = "d" * 64

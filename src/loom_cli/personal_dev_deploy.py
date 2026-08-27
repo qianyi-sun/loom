@@ -244,6 +244,14 @@ class PersonalDevDeployClient:
         The response body is intentionally never parsed or copied into output.
         """
 
+        if (
+            type(expected_operation_epoch) is not int
+            or expected_operation_epoch <= 0
+        ):
+            raise PersonalDevDeployError(
+                "expected hidden-denial operation epoch must be positive",
+            )
+
         response = self._request_apply(
             name=name,
             candidate=candidate,

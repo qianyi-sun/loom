@@ -379,7 +379,7 @@ def test_personal_update_expected_hidden_denial_binds_candidate_then_target_put(
             payload = json.loads(request.content)
             assert payload["candidate_id"] == candidate_id
             assert payload["candidate_sha"] == candidate_sha
-            assert payload["expected_operation_epoch"] == 0
+            assert payload["expected_operation_epoch"] == 1
             assert payload["min_slots"] == 0
             return httpx.Response(
                 404,
@@ -411,7 +411,7 @@ def test_personal_update_expected_hidden_denial_binds_candidate_then_target_put(
                     "--candidate",
                     candidate_sha,
                     "--expected-operation-epoch",
-                    "0",
+                    "1",
                     "--min-slots",
                     "0",
                     "--quiet",
@@ -491,7 +491,7 @@ def test_personal_update_expected_hidden_denial_requires_exact_put_404_marker(
                     "--candidate",
                     candidate_sha,
                     "--expected-operation-epoch",
-                    "0",
+                    "1",
                     "--min-slots",
                     "0",
                     "--quiet",
@@ -546,7 +546,7 @@ def test_personal_update_expected_hidden_denial_cannot_certify_candidate_failure
                     "--candidate",
                     candidate_sha,
                     "--expected-operation-epoch",
-                    "0",
+                    "1",
                     "--quiet",
                     "--expected-hidden-denial",
                 ]
@@ -594,7 +594,7 @@ def test_personal_update_expected_hidden_denial_hides_malformed_candidate_output
                     "--candidate",
                     candidate_sha,
                     "--expected-operation-epoch",
-                    "0",
+                    "1",
                     "--quiet",
                     "--expected-hidden-denial",
                 ]
@@ -663,7 +663,7 @@ def test_personal_update_expected_hidden_denial_rejects_non_404_target_response(
                     "--candidate",
                     candidate_sha,
                     "--expected-operation-epoch",
-                    "0",
+                    "1",
                     "--quiet",
                     "--expected-hidden-denial",
                 ]
@@ -695,13 +695,13 @@ def test_personal_update_expected_hidden_denial_requires_probe_boundaries_before
         "--candidate",
         "c" * 64,
         "--expected-operation-epoch",
-        "0",
+        "1",
         "--quiet",
         "--expected-hidden-denial",
     ]
     removals = {
         "candidate": ("--candidate", "c" * 64),
-        "epoch": ("--expected-operation-epoch", "0"),
+        "epoch": ("--expected-operation-epoch", "1"),
         "quiet": ("--quiet",),
     }
     for value in removals[missing]:
@@ -712,6 +712,34 @@ def test_personal_update_expected_hidden_denial_requires_probe_boundaries_before
         side_effect=AssertionError("invalid expected-denial mode must fail before auth"),
     ):
         rc = main(command)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+
+
+def test_personal_update_expected_hidden_denial_rejects_zero_epoch_before_auth(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch(
+        "loom_cli.server_client.require_logged_in",
+        side_effect=AssertionError("zero-epoch denial probe must fail before auth"),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--environment",
+                "dev-alice",
+                "--candidate",
+                "c" * 64,
+                "--expected-operation-epoch",
+                "0",
+                "--quiet",
+                "--expected-hidden-denial",
+            ]
+        )
 
     captured = capsys.readouterr()
     assert rc == 2

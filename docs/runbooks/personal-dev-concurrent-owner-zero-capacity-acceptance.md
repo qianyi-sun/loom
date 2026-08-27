@@ -725,7 +725,7 @@ successful target responses cannot certify a denial.
           ;;
         update)
           expected_receipt='{"error_code":"resource_hidden","http_method":"PUT","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_update"}'
-          XDG_CONFIG_HOME="$actor_xdg" loom service up --environment "dev-$target_name" --candidate "$actor_candidate" --expected-operation-epoch 0 --min-slots 0 --quiet --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$?
+          XDG_CONFIG_HOME="$actor_xdg" loom service up --environment "dev-$target_name" --candidate "$actor_candidate" --expected-operation-epoch 1 --min-slots 0 --quiet --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$?
           ;;
         destroy)
           expected_receipt='{"error_code":"resource_hidden","http_method":"DELETE","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_destroy"}'

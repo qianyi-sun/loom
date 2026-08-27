@@ -814,6 +814,7 @@ def _up(args: argparse.Namespace) -> int:
         not args.environment.startswith("dev-")
         or args.candidate is None
         or args.expected_operation_epoch is None
+        or args.expected_operation_epoch <= 0
         or not args.quiet
     ):
         from loom.personal_dev_expected_denial import EXPECTED_HIDDEN_DENIAL_ERROR
@@ -1106,7 +1107,7 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         "--expected-hidden-denial",
         action="store_true",
         help=(
-            "With --candidate, an explicit epoch, and --quiet, emit only the "
+            "With --candidate, a positive explicit epoch, and --quiet, emit only the "
             "canonical receipt when the target PUT returns hidden-resource HTTP 404."
         ),
     )
