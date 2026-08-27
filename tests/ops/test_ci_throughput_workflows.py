@@ -872,6 +872,32 @@ def test_image_candidates_are_internal_pr_only_and_untrusted_build_is_read_only(
     assert archive_step["with"]["path"].endswith(".docker.tar")
 
 
+def test_image_candidate_records_survive_failed_job_reruns() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    build_steps = jobs["build"]["steps"]
+    record = next(
+        step for step in build_steps if step.get("name") == "Record candidate archive provenance"
+    )
+    upload = next(
+        step for step in build_steps if step.get("name") == "Upload candidate archive record"
+    )
+    download = next(
+        step
+        for step in jobs["candidate-index"]["steps"]
+        if step.get("name") == "Download candidate archive records"
+    )
+
+    assert '--output "/tmp/${IMAGE_NAME}-${ARCHITECTURE}-attempt-${RUN_ATTEMPT}.json"' in record[
+        "run"
+    ]
+    assert upload["with"]["path"] == (
+        "/tmp/${{ matrix.image }}-${{ matrix.architecture }}-"
+        "attempt-${{ github.run_attempt }}.json"
+    )
+    assert download["with"]["pattern"] == "image-candidate-record-*-attempt-*"
+    assert download["with"]["merge-multiple"] is True
+
+
 def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
     publish = jobs["publish"]
