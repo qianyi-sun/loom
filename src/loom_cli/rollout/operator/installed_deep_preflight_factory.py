@@ -29,7 +29,6 @@ from loom_cli.rollout.external_supervisor_readiness import (
 )
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
-from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.manifest_readiness import RenderManifest
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
@@ -106,6 +105,23 @@ def _hash_json(value: object) -> str:
 
 
 _GB10_CONTROLLER_DEADLINE_RESERVE_SECONDS = 600
+
+# Keep this independent from the primary release-image plan.  Some primary
+# images (currently the execution actuator and short-lived execution runtime)
+# are published for separate workload paths but are not emitted by
+# ``render_manifests`` for the staging cluster.
+_RENDERED_ROLLOUT_IMAGES = frozenset(
+    {
+        "loom-control-plane",
+        "loom-egress-xds",
+        "loom-family-orchestrator",
+        "loom-llm-gateway",
+        "loom-pipeline-orchestrator",
+        "loom-service",
+        "loom-web",
+        "loom-worker",
+    }
+)
 
 
 class _GB10ControllerRunner(Protocol):
@@ -635,7 +651,7 @@ def build_installed_deep_preflight_composition(
 
     manifest_image_names = frozenset(
         name
-        for name, _path in ROLLOUT_IMAGES
+        for name in _RENDERED_ROLLOUT_IMAGES
         if name != "loom-worker" or cluster.k8s_worker.enabled
     )
 
