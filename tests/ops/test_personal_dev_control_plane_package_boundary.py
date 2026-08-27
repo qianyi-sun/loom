@@ -42,6 +42,16 @@ def _indented_shell_function(document: str, name: str) -> str:
     return textwrap.dedent(document[start:end])
 
 
+def _fenced_shell_function(document: str, name: str) -> str:
+    marker = f"\n{name}() {{"
+    assert marker in document, f"missing shell function: {name}"
+    start = document.index(marker) + 1
+    end_match = re.search(r"^}$", document[start:], flags=re.MULTILINE)
+    assert end_match is not None
+    end = start + end_match.end()
+    return document[start:end]
+
+
 def _sidecar_status(**changes: str) -> bytes:
     fields = {
         "Uid": "1000\t1000\t1000\t1000",
@@ -1589,6 +1599,97 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '--acceptance-manifest-sha256 "$acceptance_manifest_sha256"' in runbook
     assert ".owner_count == 2" in runbook
     assert ".cross_owner_denial_count == 6" in runbook
+
+
+@pytest.mark.parametrize(
+    ("launch_server", "expected_returncode"),
+    [
+        ("https://loom-service.dev.yylx.world", 0),
+        ("https://unrelated.example", 1),
+    ],
+)
+def test_multi_owner_launch_smoke_uses_exact_cli_and_reviewed_server(
+    tmp_path: Path,
+    launch_server: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    origin_function = _fenced_shell_function(runbook, "reviewed_public_origin")
+    cli_function = _fenced_shell_function(runbook, "launch_owner_cli")
+    server_function = _fenced_shell_function(runbook, "assert_launch_owner_server")
+    exact_marker = tmp_path / "exact-cli.marker"
+    bare_marker = tmp_path / "bare-cli.marker"
+    exact_cli = tmp_path / "reviewed-loom"
+    exact_cli.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            test "$XDG_CONFIG_HOME" = "$EXPECTED_XDG"
+            test "$*" = "auth whoami --format json"
+            printf '%s|%s\\n' "$XDG_CONFIG_HOME" "$*" > "$EXACT_MARKER"
+            printf '{"auth_kind":"bearer","credential_type":"user_owned_api_token","expires_at":null,"principal_type":"team","role":null,"scopes":["read:own","submit"],"server":"%s","team_id":"team","user_id":"user"}\\n' "$FAKE_SERVER"
+            """
+        ),
+        encoding="ascii",
+    )
+    exact_cli.chmod(0o700)
+    path_dir = tmp_path / "path"
+    path_dir.mkdir()
+    bare_cli = path_dir / "loom"
+    bare_cli.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' invoked > \"$BARE_MARKER\"\nexit 99\n",
+        encoding="ascii",
+    )
+    bare_cli.chmod(0o700)
+    launch_xdg = tmp_path / "xdg"
+    launch_xdg.mkdir()
+    launch_owner_whoami = tmp_path / "launch-owner.whoami.json"
+    program = (
+        "set -euo pipefail\n"
+        + origin_function
+        + "\n"
+        + cli_function
+        + "\n"
+        + server_function
+        + "\n"
+        + f"python_cli={shlex.quote(sys.executable)}\n"
+        + f"profile={shlex.quote(str(_ROOT / 'deploy/dev-fleet/personal-dev-control-plane.toml'))}\n"
+        + f"loom_cli={shlex.quote(str(exact_cli))}\n"
+        + f"launch_xdg_config_root={shlex.quote(str(launch_xdg))}\n"
+        + f"launch_owner_whoami={shlex.quote(str(launch_owner_whoami))}\n"
+        + 'reviewed_server="$(reviewed_public_origin "$profile")"\n'
+        + 'launch_owner_cli auth whoami --format json | jq -cS . > "$launch_owner_whoami"\n'
+        + "assert_launch_owner_server\n"
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "BARE_MARKER": str(bare_marker),
+            "EXACT_MARKER": str(exact_marker),
+            "EXPECTED_XDG": str(launch_xdg),
+            "FAKE_SERVER": launch_server,
+            "PATH": f"{path_dir}:{environment['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    assert exact_marker.read_text(encoding="ascii") == (
+        f"{launch_xdg}|auth whoami --format json\n"
+    )
+    assert not bare_marker.exists()
+    if expected_returncode == 0:
+        whoami = json.loads(launch_owner_whoami.read_text(encoding="ascii"))
+        assert whoami["server"] == "https://loom-service.dev.yylx.world"
 
 
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:

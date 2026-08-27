@@ -61,6 +61,7 @@ umask 077
 repo="<absolute-clean-detached-loom-checkout>"
 profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
 loom_cli="$repo/.venv/bin/loom"
+python_cli="$repo/.venv/bin/python"
 trusted_release="<absolute-owner-only-trusted-release.json>"
 trusted_release_sha256="<reviewed-trusted-release-sha256>"
 operational_plan="<absolute-owner-only-operational-plan.json>"
@@ -78,6 +79,7 @@ kubeconfig="<absolute-reviewed-self-contained-mode-0600-kubeconfig>"
 expected_kube_context="<reviewed-context>"
 
 test -x "$loom_cli"
+test -x "$python_cli"
 
 evidence_dir="<new-absolute-owner-only-durable-launch-evidence-directory>"
 install -d -m 0700 "$evidence_dir"
@@ -90,6 +92,22 @@ post_launch_status="$evidence_dir/post-launch-operational.status.json"
 final_launch_status="$evidence_dir/final-operational.status.json"
 rollback_status="$evidence_dir/rollback-shadow.status.json"
 acceptance_verification="$evidence_dir/acceptance-result-verification.json"
+
+reviewed_public_origin() {
+  "$python_cli" - "$1" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+with Path(sys.argv[1]).open("rb") as stream:
+    value = tomllib.load(stream)["network"]["public_origin"]
+if not isinstance(value, str) or not value or value != value.strip():
+    raise SystemExit("invalid network.public_origin")
+print(value)
+PY
+}
+
+reviewed_server="$(reviewed_public_origin "$profile")"
 
 assert_owner_only_file() {
   local path="$1"
@@ -403,15 +421,28 @@ owner_source="<absolute-small-arbitrary-source-root>"
 owner_name="<reviewed-launch-smoke-name>"
 assert_owner_only_file "$launch_xdg_config_root/loom/config.toml"
 
-XDG_CONFIG_HOME="$launch_xdg_config_root" loom auth whoami \
-  > "$evidence_dir/launch-owner.whoami.txt"
-XDG_CONFIG_HOME="$launch_xdg_config_root" loom service up \
+launch_owner_cli() {
+  XDG_CONFIG_HOME="$launch_xdg_config_root" "$loom_cli" "$@"
+}
+
+launch_owner_whoami="$evidence_dir/launch-owner.whoami.json"
+launch_owner_cli auth whoami --format json | jq -cS . > "$launch_owner_whoami"
+chmod 0600 "$launch_owner_whoami"
+
+assert_launch_owner_server() {
+  local launch_owner_server
+  launch_owner_server="$(jq -er '.server | select(type == "string" and length > 0)' "$launch_owner_whoami")"
+  test "$launch_owner_server" = "$reviewed_server"
+}
+assert_launch_owner_server
+
+launch_owner_cli service up \
   --environment "dev-$owner_name" \
   --source-root "$owner_source" \
   --min-slots 0 \
   --max-slots 2 \
   > "$evidence_dir/launch-owner.deploy.txt" 2>&1
-XDG_CONFIG_HOME="$launch_xdg_config_root" loom dev status "$owner_name" --format json \
+launch_owner_cli dev status "$owner_name" --format json \
   > "$evidence_dir/launch-owner.status.json"
 chmod 0600 "$evidence_dir/launch-owner.status.json"
 jq -e '
@@ -441,7 +472,7 @@ Retire the launch-smoke environment through the same normal path so the
 rollback path remains immediately executable:
 
 ```bash
-XDG_CONFIG_HOME="$launch_xdg_config_root" loom dev destroy "$owner_name" --format json \
+launch_owner_cli dev destroy "$owner_name" --format json \
   > "$evidence_dir/launch-owner.destroy.json"
 chmod 0600 "$evidence_dir/launch-owner.destroy.json"
 jq -e '.status == "deleted"' "$evidence_dir/launch-owner.destroy.json" >/dev/null
