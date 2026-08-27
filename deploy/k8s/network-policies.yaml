@@ -202,6 +202,12 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-gateway-router
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: loom-nebius-staging
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: execution-unit
     ports:
     - port: 9100
       protocol: TCP

@@ -1206,17 +1206,90 @@ async def test_policy_upsert_and_status_helpers_use_normalized_fields() -> None:
     assert updated.enabled is False
     assert updated.max_slots == 20
 
-    status_session = _FakeSession([_FakeResult(scalars=[created, updated])])
+    created.last_decision_at = now - timedelta(seconds=30)
+    created.last_actual_slots = 6
+    created.last_occupied_slots = 2
+    created.last_pending_slots = 1
+    status_session = _FakeSession(
+        [
+            _FakeResult(scalars=[created, updated]),
+            _FakeResult(rows=[("oldlab", 2)]),
+        ]
+    )
     status = await fetch_autoscaler_status(
         cast(Any, status_session),
         environment="production",
         pool_name="oldlab",
+        now=now,
     )
 
     assert [policy["pool_name"] for policy in status["policies"]] == [
         "oldlab",
         "oldlab",
     ]
+    capacity = status["policies"][0]["routing_capacity"]
+    assert isinstance(capacity, dict)
+    assert capacity["schema_version"] == "loom.pool-capacity.v1"
+    assert capacity["assigned_queued_slots"] == 2
+    assert capacity["executable_free_slots"] == 2
+    assert capacity["configured_scale_headroom_slots"] == 7
+    assert capacity["capacity_evidence_kind"] == "fresh_executable_capacity"
+    assert capacity["aggregate_executable_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    ("actuator_config", "message"),
+    [
+        ({"routing_weight": True}, "routing_weight"),
+        ({"routing_weight": 1001}, "routing_weight"),
+        ({"routing_cost_microusd_per_slot_hour": -1}, "routing_cost"),
+        ({"routing_budget_eligible": "yes"}, "routing_budget_eligible"),
+        ({"routing_region": " "}, "routing_region"),
+    ],
+)
+async def test_policy_upsert_rejects_invalid_routing_controls(
+    actuator_config: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await upsert_autoscaler_policy(
+            cast(Any, _FakeSession()),
+            environment="production",
+            pool_name="oldlab",
+            actuator="slurm",
+            enabled=True,
+            min_slots=0,
+            max_slots=1,
+            scale_up_threshold_slots=1,
+            scale_down_idle_seconds=600,
+            scale_up_cooldown_seconds=60,
+            scale_down_cooldown_seconds=300,
+            drain_timeout_seconds=600,
+            actuator_config=actuator_config,
+        )
+
+
+async def test_status_does_not_upgrade_stale_observation_to_executable_capacity() -> None:
+    now = datetime(2026, 6, 27, 12, 10, tzinfo=UTC)
+    row = _policy_row(
+        last_decision_at=now - timedelta(seconds=121),
+        last_actual_slots=20,
+        last_occupied_slots=1,
+    )
+    status = await fetch_autoscaler_status(
+        cast(
+            Any,
+            _FakeSession([_FakeResult(scalars=[row]), _FakeResult(rows=[("oldlab", 3)])]),
+        ),
+        now=now,
+    )
+    capacity = status["policies"][0]["routing_capacity"]
+    assert isinstance(capacity, dict)
+    assert capacity["capacity_is_fresh"] is False
+    assert capacity["observed_active_slots"] == 20
+    assert capacity["executable_free_slots"] == 0
+    assert capacity["capacity_evidence_kind"] == "configured_scale_headroom"
+    assert capacity["aggregate_executable_eligible"] is False
 
 
 async def test_load_observation_counts_slots_and_matching_queue() -> None:

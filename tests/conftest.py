@@ -28,6 +28,8 @@ def _default_step_jwt_signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("LOOM_CP_STEP_JWT_SIGNING_KEY", _TEST_STEP_JWT_SIGNING_KEY)
     monkeypatch.setenv("LOOM_GW_STEP_JWT_SIGNING_KEY", _TEST_STEP_JWT_SIGNING_KEY)
+    monkeypatch.setenv("LOOM_GW_MINIO_ACCESS_KEY", "test-minio-access-key")
+    monkeypatch.setenv("LOOM_GW_MINIO_SECRET_KEY", "test-minio-secret-key")
 
 
 @pytest.fixture(scope="session")

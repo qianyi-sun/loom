@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "IsolationLevel": {
+      "description": "Minimum hostile-code isolation supplied by an execution class.",
+      "enum": [
+        "shared_kernel",
+        "sandboxed_runtime",
+        "dedicated_ephemeral_node"
+      ],
+      "title": "IsolationLevel",
+      "type": "string"
+    },
+    "NetworkAccess": {
+      "enum": [
+        "none",
+        "gateway_only",
+        "approved_allowlist",
+        "unrestricted_public"
+      ],
+      "title": "NetworkAccess",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned, provider-neutral capabilities for one execution class.",
+  "properties": {
+    "class_id": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+      "title": "Class Id",
+      "type": "string"
+    },
+    "cpu_architecture": {
+      "enum": [
+        "x86_64",
+        "arm64"
+      ],
+      "title": "Cpu Architecture",
+      "type": "string"
+    },
+    "gpu_vendor": {
+      "enum": [
+        "none",
+        "nvidia"
+      ],
+      "title": "Gpu Vendor",
+      "type": "string"
+    },
+    "isolation_level": {
+      "$ref": "#/$defs/IsolationLevel"
+    },
+    "maximum_cpu_millis": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Maximum Cpu Millis"
+    },
+    "maximum_ephemeral_storage_mib": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Maximum Ephemeral Storage Mib"
+    },
+    "maximum_memory_mib": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Maximum Memory Mib"
+    },
+    "maximum_sidecars": {
+      "minimum": 0,
+      "title": "Maximum Sidecars",
+      "type": "integer"
+    },
+    "network_access": {
+      "items": {
+        "$ref": "#/$defs/NetworkAccess"
+      },
+      "title": "Network Access",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "operating_system": {
+      "const": "linux",
+      "title": "Operating System",
+      "type": "string"
+    },
+    "permits_host_devices": {
+      "title": "Permits Host Devices",
+      "type": "boolean"
+    },
+    "permits_host_network": {
+      "title": "Permits Host Network",
+      "type": "boolean"
+    },
+    "permits_host_path": {
+      "title": "Permits Host Path",
+      "type": "boolean"
+    },
+    "permits_nested_containers": {
+      "title": "Permits Nested Containers",
+      "type": "boolean"
+    },
+    "permits_privileged": {
+      "title": "Permits Privileged",
+      "type": "boolean"
+    },
+    "requires_immutable_image": {
+      "title": "Requires Immutable Image",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "loom.execution-class.v1",
+      "default": "loom.execution-class.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "supports_custom_dns": {
+      "title": "Supports Custom Dns",
+      "type": "boolean"
+    },
+    "supports_extra_hosts": {
+      "title": "Supports Extra Hosts",
+      "type": "boolean"
+    },
+    "supports_separate_verifier": {
+      "title": "Supports Separate Verifier",
+      "type": "boolean"
+    },
+    "supports_task_image_build": {
+      "title": "Supports Task Image Build",
+      "type": "boolean"
+    },
+    "supports_tmpfs": {
+      "title": "Supports Tmpfs",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "class_id",
+    "operating_system",
+    "cpu_architecture",
+    "gpu_vendor",
+    "isolation_level",
+    "network_access",
+    "maximum_sidecars",
+    "supports_separate_verifier",
+    "supports_custom_dns",
+    "supports_extra_hosts",
+    "supports_tmpfs",
+    "supports_task_image_build",
+    "requires_immutable_image",
+    "permits_privileged",
+    "permits_host_path",
+    "permits_host_network",
+    "permits_nested_containers",
+    "permits_host_devices"
+  ],
+  "title": "ExecutionClassV1",
+  "type": "object"
+}

@@ -134,13 +134,13 @@ def test_checked_in_stage1_source_lock_is_closed_and_self_consistent() -> None:
     assert lock.raw["base_image"]["platform"] == "linux/amd64"
     assert lock.raw["runtime_assets"] == [
         {
-            "binary_version": "n7.1.5-12-g1fdbca85aa-20260813",
+            "binary_version": "n7.1.5-12-g1fdbca85aa-20260731",
             "license": "LGPL-2.1-or-later",
             "name": "ffmpeg",
-            "release_tag": "autobuild-2026-08-13-17-03",
-            "sha256": "sha256:b33b9c56b28dbc709a7938e2461d34caefc897a6090ac02da8fc55f82d6d5451",
+            "release_tag": "autobuild-2026-07-31-14-10",
+            "sha256": "sha256:f5f0ad52c6ee28a222eb10838c231469a10ad325f84063d3bc0aadf08164b3ec",
             "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-            "autobuild-2026-08-13-17-03/"
+            "autobuild-2026-07-31-14-10/"
             "ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-lgpl-shared-7.1.tar.xz",
             "version": "7.1.5-12-g1fdbca85aa",
         }

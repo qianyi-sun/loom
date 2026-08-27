@@ -1,0 +1,150 @@
+{
+  "$defs": {
+    "ExecutionTargetV1": {
+      "additionalProperties": false,
+      "description": "Provider-bound regional target kept outside trial requirements.",
+      "properties": {
+        "data_residency": {
+          "const": "eu",
+          "title": "Data Residency",
+          "type": "string"
+        },
+        "environment": {
+          "enum": [
+            "development",
+            "staging",
+            "production"
+          ],
+          "title": "Environment",
+          "type": "string"
+        },
+        "execution_class_id": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "title": "Execution Class Id",
+          "type": "string"
+        },
+        "failure_domain": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Failure Domain",
+          "type": "string"
+        },
+        "health_check_id": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "title": "Health Check Id",
+          "type": "string"
+        },
+        "health_check_interval_seconds": {
+          "maximum": 300,
+          "minimum": 5,
+          "title": "Health Check Interval Seconds",
+          "type": "integer"
+        },
+        "health_role": {
+          "enum": [
+            "primary",
+            "secondary"
+          ],
+          "title": "Health Role",
+          "type": "string"
+        },
+        "health_stale_after_seconds": {
+          "maximum": 900,
+          "minimum": 10,
+          "title": "Health Stale After Seconds",
+          "type": "integer"
+        },
+        "logical_pool_id": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "title": "Logical Pool Id",
+          "type": "string"
+        },
+        "namespace_name": {
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "title": "Namespace Name",
+          "type": "string"
+        },
+        "provider": {
+          "const": "nebius",
+          "title": "Provider",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Region",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "loom.execution-target.v1",
+          "default": "loom.execution-target.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "target_id": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "title": "Target Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "logical_pool_id",
+        "execution_class_id",
+        "environment",
+        "provider",
+        "region",
+        "failure_domain",
+        "data_residency",
+        "namespace_name",
+        "health_role",
+        "health_check_id",
+        "health_check_interval_seconds",
+        "health_stale_after_seconds"
+      ],
+      "title": "ExecutionTargetV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Checked environment and regional bindings for one logical pool.",
+  "properties": {
+    "execution_class_id": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+      "title": "Execution Class Id",
+      "type": "string"
+    },
+    "logical_pool_id": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+      "title": "Logical Pool Id",
+      "type": "string"
+    },
+    "placement_policy": {
+      "const": "environment-local-health-first",
+      "title": "Placement Policy",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "loom.execution-topology.v1",
+      "default": "loom.execution-topology.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/ExecutionTargetV1"
+      },
+      "minItems": 4,
+      "title": "Targets",
+      "type": "array"
+    }
+  },
+  "required": [
+    "logical_pool_id",
+    "execution_class_id",
+    "placement_policy",
+    "targets"
+  ],
+  "title": "ExecutionTopologyV1",
+  "type": "object"
+}

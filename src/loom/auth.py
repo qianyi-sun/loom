@@ -18,6 +18,7 @@ synthetic `token_hash=b""` + `type="step_session"`.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -32,6 +33,9 @@ from loom.db.schema import Token, User
 
 _STEP_JWT_PREFIX = "loom_step_"
 _TOKEN_TOUCH_DEBOUNCE = timedelta(seconds=60)
+_SERVICE_EXECUTION_MAX_TTL_SEC = 600
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CANDIDATE_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 _ROLE_SCOPES: dict[str, list[str]] = {
     "viewer": ["read:own"],
@@ -100,6 +104,13 @@ class AuthContext:
     execution_spec_digest: str | None = None
     control_binding_snapshot_digest: str | None = None
     execution_authorization_digest: str | None = None
+    service_execution_lease_id: UUID | None = None
+    service_execution_generation: int | None = None
+    service_execution_role: Literal["attempt", "verifier"] | None = None
+    service_execution_runtime_contract_sha256: str | None = None
+    service_execution_candidate_sha: str | None = None
+    service_execution_task_revision_sha256: str | None = None
+    service_execution_command_identity_sha256: str | None = None
     # Browser-session principal fields (#326). They stay None for
     # bearer/worker/step auth so the existing token path remains stable.
     user_id: UUID | None = None
@@ -147,6 +158,13 @@ def mint_step_jwt(
     execution_spec_digest: str | None = None,
     control_binding_snapshot_digest: str | None = None,
     execution_authorization_digest: str | None = None,
+    service_execution_lease_id: UUID | None = None,
+    service_execution_generation: int | None = None,
+    service_execution_role: Literal["attempt", "verifier"] | None = None,
+    service_execution_runtime_contract_sha256: str | None = None,
+    service_execution_candidate_sha: str | None = None,
+    service_execution_task_revision_sha256: str | None = None,
+    service_execution_command_identity_sha256: str | None = None,
 ) -> str:
     """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`
     and optionally `provider_connection_id` (cluster-deploy.md /
@@ -177,8 +195,72 @@ def mint_step_jwt(
     if trial_id is not None:
         payload["trial_id"] = str(trial_id)
         payload["subject_kind"] = "trial"
+        service_authority = (
+            service_execution_lease_id,
+            service_execution_generation,
+            service_execution_role,
+            service_execution_runtime_contract_sha256,
+            service_execution_candidate_sha,
+            service_execution_task_revision_sha256,
+            service_execution_command_identity_sha256,
+        )
+        if any(value is not None for value in service_authority) and not all(
+            value is not None for value in service_authority
+        ):
+            raise ValueError("service execution JWT authority must be complete")
+        if service_execution_lease_id is not None:
+            if service_execution_generation is None or service_execution_generation <= 0:
+                raise ValueError("service execution generation must be positive")
+            if ttl_sec > _SERVICE_EXECUTION_MAX_TTL_SEC:
+                raise ValueError("service execution JWT TTL exceeds 600 seconds")
+            if not provider_connection_id_bound:
+                raise ValueError("service execution provider route must be explicitly bound")
+            if step_jwt_id is None:
+                raise ValueError("service execution JWT id is required")
+            assert service_execution_role is not None
+            expected_step = "agent" if service_execution_role == "attempt" else "verifier"
+            if step_id != expected_step:
+                raise ValueError("service execution JWT step does not match execution role")
+            assert service_execution_runtime_contract_sha256 is not None
+            assert service_execution_candidate_sha is not None
+            assert service_execution_task_revision_sha256 is not None
+            assert service_execution_command_identity_sha256 is not None
+            if (
+                _SHA256.fullmatch(service_execution_runtime_contract_sha256) is None
+                or _CANDIDATE_SHA.fullmatch(service_execution_candidate_sha) is None
+                or _SHA256.fullmatch(service_execution_task_revision_sha256) is None
+                or _SHA256.fullmatch(service_execution_command_identity_sha256) is None
+            ):
+                raise ValueError("service execution JWT identity is malformed")
+            payload["service_execution_lease_id"] = str(service_execution_lease_id)
+            payload["jti"] = str(step_jwt_id)
+            payload["service_execution_generation"] = service_execution_generation
+            payload["service_execution_role"] = service_execution_role
+            payload["service_execution_runtime_contract_sha256"] = (
+                service_execution_runtime_contract_sha256
+            )
+            payload["service_execution_candidate_sha"] = service_execution_candidate_sha
+            payload["service_execution_task_revision_sha256"] = (
+                service_execution_task_revision_sha256
+            )
+            payload["service_execution_command_identity_sha256"] = (
+                service_execution_command_identity_sha256
+            )
     else:
         assert execution_attempt_id is not None
+        if any(
+            value is not None
+            for value in (
+                service_execution_lease_id,
+                service_execution_generation,
+                service_execution_role,
+                service_execution_runtime_contract_sha256,
+                service_execution_candidate_sha,
+                service_execution_task_revision_sha256,
+                service_execution_command_identity_sha256,
+            )
+        ):
+            raise ValueError("service execution authority is only valid for trial JWTs")
         payload["execution_attempt_id"] = str(execution_attempt_id)
         payload["subject_kind"] = "execution_attempt"
         if step_jwt_id is not None:
@@ -230,6 +312,80 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
             or execution_attempt_lease_epoch <= 0
         ):
             raise ValueError("invalid execution attempt lease epoch")
+        raw_service_lease_id = payload.get("service_execution_lease_id")
+        service_execution_lease_id = (
+            UUID(raw_service_lease_id) if isinstance(raw_service_lease_id, str) else None
+        )
+        service_execution_generation = payload.get("service_execution_generation")
+        service_execution_role = payload.get("service_execution_role")
+        service_execution_runtime_contract_sha256 = payload.get(
+            "service_execution_runtime_contract_sha256"
+        )
+        service_execution_candidate_sha = payload.get("service_execution_candidate_sha")
+        service_execution_task_revision_sha256 = payload.get(
+            "service_execution_task_revision_sha256"
+        )
+        service_execution_command_identity_sha256 = payload.get(
+            "service_execution_command_identity_sha256"
+        )
+        service_authority = (
+            service_execution_lease_id,
+            service_execution_generation,
+            service_execution_role,
+            service_execution_runtime_contract_sha256,
+            service_execution_candidate_sha,
+            service_execution_task_revision_sha256,
+            service_execution_command_identity_sha256,
+        )
+        if any(value is not None for value in service_authority) and not all(
+            value is not None for value in service_authority
+        ):
+            raise ValueError("incomplete service execution JWT authority")
+        if service_execution_generation is not None and (
+            not isinstance(service_execution_generation, int)
+            or isinstance(service_execution_generation, bool)
+            or service_execution_generation <= 0
+        ):
+            raise ValueError("invalid service execution generation")
+        if raw_trial_id is None and service_execution_lease_id is not None:
+            raise ValueError("service execution authority requires a trial subject")
+        if service_execution_lease_id is not None:
+            if (
+                payload.get("iss") != "loom-control-plane"
+                or payload.get("sub") != "step-session"
+                or payload.get("subject_kind") != "trial"
+                or payload.get("scopes") != ["llm:call"]
+            ):
+                raise ValueError("invalid service execution JWT envelope")
+            if service_execution_role not in {"attempt", "verifier"}:
+                raise ValueError("invalid service execution role")
+            expected_step = "agent" if service_execution_role == "attempt" else "verifier"
+            if payload.get("step_id") != expected_step:
+                raise ValueError("service execution step does not match role")
+            if not provider_connection_id_bound:
+                raise ValueError("service execution provider route is unbound")
+            if (
+                not isinstance(service_execution_runtime_contract_sha256, str)
+                or _SHA256.fullmatch(service_execution_runtime_contract_sha256) is None
+                or not isinstance(service_execution_candidate_sha, str)
+                or _CANDIDATE_SHA.fullmatch(service_execution_candidate_sha) is None
+                or not isinstance(service_execution_task_revision_sha256, str)
+                or _SHA256.fullmatch(service_execution_task_revision_sha256) is None
+                or not isinstance(service_execution_command_identity_sha256, str)
+                or _SHA256.fullmatch(service_execution_command_identity_sha256) is None
+            ):
+                raise ValueError("invalid service execution identity")
+            issued_at = payload.get("iat")
+            expires_at = payload.get("exp")
+            if (
+                not isinstance(issued_at, int)
+                or isinstance(issued_at, bool)
+                or not isinstance(expires_at, int)
+                or isinstance(expires_at, bool)
+                or expires_at <= issued_at
+                or expires_at - issued_at > _SERVICE_EXECUTION_MAX_TTL_SEC
+            ):
+                raise ValueError("invalid service execution JWT lifetime")
     except (TypeError, ValueError) as exc:
         raise jwt.InvalidTokenError("invalid execution-attempt JWT authority") from exc
     return AuthContext(
@@ -240,9 +396,7 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         expires_at=datetime.fromtimestamp(payload["exp"], tz=UTC),
         trial_id=UUID(raw_trial_id) if isinstance(raw_trial_id, str) else None,
         execution_attempt_id=(
-            UUID(raw_execution_attempt_id)
-            if isinstance(raw_execution_attempt_id, str)
-            else None
+            UUID(raw_execution_attempt_id) if isinstance(raw_execution_attempt_id, str) else None
         ),
         step_id=payload["step_id"],
         provider_connection_id=provider_connection_id,
@@ -262,6 +416,31 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         execution_authorization_digest=(
             payload.get("execution_authorization_digest")
             if isinstance(payload.get("execution_authorization_digest"), str)
+            else None
+        ),
+        service_execution_lease_id=service_execution_lease_id,
+        service_execution_generation=service_execution_generation,
+        service_execution_role=(
+            service_execution_role if service_execution_role in {"attempt", "verifier"} else None
+        ),
+        service_execution_runtime_contract_sha256=(
+            service_execution_runtime_contract_sha256
+            if isinstance(service_execution_runtime_contract_sha256, str)
+            else None
+        ),
+        service_execution_candidate_sha=(
+            service_execution_candidate_sha
+            if isinstance(service_execution_candidate_sha, str)
+            else None
+        ),
+        service_execution_task_revision_sha256=(
+            service_execution_task_revision_sha256
+            if isinstance(service_execution_task_revision_sha256, str)
+            else None
+        ),
+        service_execution_command_identity_sha256=(
+            service_execution_command_identity_sha256
+            if isinstance(service_execution_command_identity_sha256, str)
             else None
         ),
     )

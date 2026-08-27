@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+ENV PYTHONPATH=/app/src
+WORKDIR /app
+COPY deploy/execution-actuator-requirements.txt ./deploy/execution-actuator-requirements.txt
+RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requirements.txt
+COPY src/loom/__init__.py src/loom/execution_contract.py \
+    src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
+    src/loom/startup_retry.py ./src/loom/
+COPY src/loom/db ./src/loom/db
+COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
+    src/loom/models/networking.py src/loom/models/skill.py src/loom/models/task.py \
+    src/loom/models/types.py ./src/loom/models/
+COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
+COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
+    src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
+    src/loom_control_plane/metrics.py src/loom_control_plane/service_execution.py \
+    ./src/loom_control_plane/
+COPY src/loom_execution_actuator ./src/loom_execution_actuator
+COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
+COPY migrations ./migrations
+USER 65532:65532
+EXPOSE 8093
+CMD ["python", "-m", "loom_execution_actuator"]

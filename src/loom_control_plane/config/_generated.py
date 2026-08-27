@@ -32,6 +32,7 @@ class ControlPlaneSettings(BaseSettings):
     db_url: PostgresDsn
     db_url_pool: PostgresDsn | None = None
     dev_reload: bool = False
+    execution_image_admission_public_keys_json: str = "{\"schema_version\":1,\"keys\":[]}"
     family_adapter_call_timeout_sec: float = 300.0
     family_orchestrator_poll_sec: float = 5.0
     family_state_download_timeout_sec: float = 120.0

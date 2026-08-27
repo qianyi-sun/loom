@@ -10,6 +10,13 @@ uses the file-backed singleton secret described in
 
 Postgres + MinIO are the only stateful services.
 
+The accepted terminal service-execution topology is the Nebius Kubernetes
+contract in [Nebius service execution](nebius-service-execution.md). The
+worker/backend/pool flow described on this page remains current behavior during
+the bounded migration; it is not the terminal architecture and must not be
+extended as a second long-lived service path. Local CLI driver selection is
+outside that migration.
+
 Local service-mode development uses `docker compose`, so operators need Docker
 CLI with the Compose plugin before running
 `loom service up --environment local`, `down`, or `status`. On macOS, install

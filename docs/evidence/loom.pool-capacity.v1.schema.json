@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "CapacityEvidenceKind": {
+      "enum": [
+        "fresh_executable_capacity",
+        "configured_scale_headroom",
+        "unavailable",
+        "preexisting_assignment"
+      ],
+      "title": "CapacityEvidenceKind",
+      "type": "string"
+    },
+    "ExecutionAdapterKind": {
+      "enum": [
+        "legacy_worker_claim",
+        "kubernetes_job"
+      ],
+      "title": "ExecutionAdapterKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Normalized capacity evidence without upgrading configuration to capacity.",
+  "properties": {
+    "adapter_kind": {
+      "$ref": "#/$defs/ExecutionAdapterKind"
+    },
+    "aggregate_executable_eligible": {
+      "title": "Aggregate Executable Eligible",
+      "type": "boolean"
+    },
+    "assigned_queued_slots": {
+      "minimum": 0,
+      "title": "Assigned Queued Slots",
+      "type": "integer"
+    },
+    "blockers": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Blockers",
+      "type": "array"
+    },
+    "budget_eligible": {
+      "title": "Budget Eligible",
+      "type": "boolean"
+    },
+    "capacity_evidence_kind": {
+      "$ref": "#/$defs/CapacityEvidenceKind"
+    },
+    "capacity_fresh_until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Capacity Fresh Until"
+    },
+    "capacity_freshness_seconds": {
+      "exclusiveMinimum": 0,
+      "title": "Capacity Freshness Seconds",
+      "type": "integer"
+    },
+    "capacity_is_fresh": {
+      "title": "Capacity Is Fresh",
+      "type": "boolean"
+    },
+    "capacity_observed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Capacity Observed At"
+    },
+    "configured_ceiling_slots": {
+      "minimum": 0,
+      "title": "Configured Ceiling Slots",
+      "type": "integer"
+    },
+    "configured_scale_headroom_slots": {
+      "minimum": 0,
+      "title": "Configured Scale Headroom Slots",
+      "type": "integer"
+    },
+    "data_residency": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Data Residency"
+    },
+    "draining": {
+      "title": "Draining",
+      "type": "boolean"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "environment": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Environment"
+    },
+    "estimated_cost_microusd_per_slot_hour": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Estimated Cost Microusd Per Slot Hour"
+    },
+    "executable_free_slots": {
+      "minimum": 0,
+      "title": "Executable Free Slots",
+      "type": "integer"
+    },
+    "healthy": {
+      "title": "Healthy",
+      "type": "boolean"
+    },
+    "logical_pool_id": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Logical Pool Id",
+      "type": "string"
+    },
+    "observed_active_slots": {
+      "minimum": 0,
+      "title": "Observed Active Slots",
+      "type": "integer"
+    },
+    "observed_occupied_slots": {
+      "minimum": 0,
+      "title": "Observed Occupied Slots",
+      "type": "integer"
+    },
+    "observed_pending_slots": {
+      "minimum": 0,
+      "title": "Observed Pending Slots",
+      "type": "integer"
+    },
+    "operator_weight": {
+      "maximum": 1000,
+      "minimum": -1000,
+      "title": "Operator Weight",
+      "type": "integer"
+    },
+    "region": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Region"
+    },
+    "schema_version": {
+      "const": "loom.pool-capacity.v1",
+      "default": "loom.pool-capacity.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "logical_pool_id",
+    "adapter_kind",
+    "environment",
+    "region",
+    "data_residency",
+    "configured_ceiling_slots",
+    "configured_scale_headroom_slots",
+    "observed_active_slots",
+    "observed_occupied_slots",
+    "observed_pending_slots",
+    "assigned_queued_slots",
+    "executable_free_slots",
+    "capacity_evidence_kind",
+    "capacity_observed_at",
+    "capacity_fresh_until",
+    "capacity_is_fresh",
+    "capacity_freshness_seconds",
+    "aggregate_executable_eligible",
+    "enabled",
+    "healthy",
+    "draining",
+    "budget_eligible",
+    "operator_weight",
+    "blockers"
+  ],
+  "title": "PoolCapacityV1",
+  "type": "object"
+}
