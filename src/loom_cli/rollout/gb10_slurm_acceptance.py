@@ -118,7 +118,7 @@ def validate_gb10_slurm_acceptance(
         and expires_at.tzinfo is not None
         and expires_at.utcoffset() is not None
         and generated_at <= current_time < expires_at
-        and 0 < (expires_at - generated_at).total_seconds() <= 3600
+        and 0 < (expires_at - generated_at).total_seconds() <= 1800
     )
     if (
         set(value) != _EXPECTED_FIELDS

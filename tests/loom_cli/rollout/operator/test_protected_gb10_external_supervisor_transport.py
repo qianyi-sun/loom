@@ -409,6 +409,26 @@ def test_capacity_validator_normalizes_unhashable_expected_nodes(tmp_path: Path)
         )
 
 
+def test_capacity_validator_rejects_evidence_lifetime_over_thirty_minutes(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    generated_at = datetime(2026, 8, 27, 16, tzinfo=UTC)
+    acceptance["generated_at"] = generated_at.isoformat()
+    acceptance["expires_at"] = (generated_at + timedelta(minutes=30, seconds=1)).isoformat()
+
+    with pytest.raises(ValueError, match="acceptance evidence"):
+        remote.validate_gb10_slurm_acceptance(
+            acceptance,
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            profile_sha256="c" * 64,
+            nodes=FULL_GB10_HOSTS,
+            now=generated_at + timedelta(seconds=1),
+        )
+
+
 def test_remote_transport_rejects_non_controller_artifact_before_ssh(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path, execution_host="TRT-EAI-OLDLAB-1")
     run = _Run(remote._encode_helper_response("reconcile_compensations"))

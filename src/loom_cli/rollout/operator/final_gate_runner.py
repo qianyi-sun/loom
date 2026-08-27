@@ -146,6 +146,7 @@ class FinalGateRunner:
 
         report = authority.execute(
             now=execution_time,
+            clock=self.now,
             prior_executions=prior,
             durable_prior_executions=durable,
             on_execution=publish,

@@ -760,14 +760,16 @@ must agree before the terminal record can be published.
 ### Tier 4: justified final-only checks
 
 Only protected apply, observed live convergence, post-apply attestation drift,
-and bounded final live-route smoke/browser acceptance remain. Protected apply,
-the live smoke, and authenticated browser acceptance are the only checks
-classified as protected staging mutation. The smoke submits bounded live work;
-the browser acceptance creates and revokes its bounded admin session and writes
-the corresponding audit event. Neither may be represented as a read-only
-verify operation. Earlier tiers do not weaken these final gates; they ensure
-the final gate is not the first consumer of a token, host prerequisite,
-migration, image, task, or browser contract.
+candidate-bound live Slurm capacity acceptance, and bounded final
+live-route smoke/browser acceptance remain. Protected apply, capacity, live
+smoke, and authenticated browser acceptance are the four checks classified as
+protected staging mutation. Capacity submits real allocations through the
+fixed Slurm authority; smoke submits bounded live work; browser acceptance
+creates and revokes its bounded admin session and writes the corresponding
+audit event. None may be represented as a read-only verify operation. Earlier
+tiers do not weaken these final gates; they ensure the final gate is not the
+first consumer of a token, host prerequisite, migration, image, task, or
+browser contract.
 
 Immediately before the protected chain, the service worker reloads the
 digest-addressed attestation and rebuilds the shared Tier 0 registry from the
@@ -794,13 +796,21 @@ evidence without repeating mutation, while any partial, ambiguous, or drifted
 state still fails closed.
 
 An attested worker may not use the 18-step compatibility driver. The production
-worker composition always injects the six-check `FinalGateRunner`;
+worker composition always injects the seven-check `FinalGateRunner`;
 an unavailable composition fails with
 `final.protected-apply.runner-unavailable@final-only`, while a missing or
 invalid installed helper fails its fixed command boundary without invoking a
 protected action. These fail-closed transitions prevent an installation without
-the complete six-check composition from rebuilding images, rerendering
+the complete seven-check composition from rebuilding images, rerendering
 manifests, or rediscovering an early predicate after backup.
+
+The final DAG order is exact:
+`final.protected-apply`, `final.convergence`, `final.drift`,
+`final.capacity`, `final.smoke`, `final.browser`, then `final.summary`.
+`final.capacity` is the added fourth member of the protected-staging mutation
+set and occupies the fourth position in this chain, after the
+apply/convergence/drift boundary and immediately before smoke. No action map
+may omit, reorder, or parallelize this chain.
 
 Before those actions can run, `FinalGatePlan` joins the driver envelope, the
 digest-addressed attestation, and the build-once preflight artifact publication
@@ -837,7 +847,7 @@ immutable passing `artifacts.publish` execution in the request's Tier 0–3
 rehearsal. Its implementation and evidence hashes must match the attestation,
 and every image/manifest/migration/production-defaults artifact digest must
 match the digest-addressed publication.
-Only then does it publish the plan and construct the complete six-action map
+Only then does it publish the plan and construct the complete seven-action map
 around the fixed installed helper. Directory scanning, newest-artifact
 selection, ambient argv and partial action maps are not accepted.
 
@@ -933,6 +943,48 @@ live baseline and backup eligibility are not repeated after mutation.
 The service keeps the exact process-local preflight plan in final admission and
 routes `final.drift` directly to that shared validator after convergence; the
 installed generic helper cannot substitute a second implementation.
+
+`final.capacity` then sends only the typed `accept_capacity` request through
+the forced SSH broker to the root-owned installed GB10 acceptance authority on
+`gx10-01c7`. The authority is fixed to cluster `trt-gb10`, partition/account/QoS
+`loom-staging`, service identity `loom-rollout` UID 995/GID 2007, and nodes
+`trt-gb10-1` through `trt-gb10-15`; node 16 is never eligible. The broker's
+sanitized `PATH` is authoritative, while the authority names system
+executables by absolute path. Capacity never fetches, builds, publishes, or
+imports candidate runtime code.
+
+Before any trusted registry probe or CA snapshot, the controller and every
+allocation run the same bounded no-follow verifier over the complete
+image-tagged worker checkout and mode-`0600` env file. It rejects Git common
+directory, worktree config, graft, alternate-object and index/tree
+redirection; ignored or untracked physical entries; and content, mode,
+owner/group, link, or replacement drift. The env parser accepts only unique
+shell-style keys, requires the complete candidate/pool/concurrency/service
+contract and non-empty secrets without recording their values, and binds the
+full-file SHA-256. Checkout/index/tree hashes plus root, target, `.git`, and env
+device/inode identities are carried into each allocation and must match before
+the trusted snapshot is used.
+
+The allocation probe prints a fixed start marker before doing node work. A
+busy deferral is valid only when that marker is absent, the node readback is
+actually allocated or mixed, Slurm reports the fixed busy condition, and one
+structured job-specific accounting row proves the named allocation remained
+unstarted. A started probe that later emits a busy phrase is a capacity
+failure. Timeouts, SIGTERM, and SIGINT kill and reap the active process group;
+authority unwind cancels only the exact current Slurm job ID and requires an
+empty scheduler readback before returning a normalized failure.
+
+Canonical acceptance evidence lasts at most 30 minutes. Every non-durable
+dependent must recheck it against a live clock when that consumer starts, and
+`final.summary` rechecks every predecessor at seal time, so evidence that
+expires before smoke or summary cannot authorize either action. The authority
+first publishes canonical JSON at
+`/var/lib/loom-gb10-slurm-authority/evidence/<canonical-evidence-sha256>.json`
+with no-replace,
+idempotent collision checks and file/directory fsyncs, then atomically replaces
+`current.json` and fsyncs `STATE_ROOT`. The local `final.capacity` execution
+stores that same canonical evidence digest, making the immutable authority path
+derivable without trusting the mutable pointer.
 
 ## Immutable attestation
 

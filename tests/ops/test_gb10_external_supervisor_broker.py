@@ -5,8 +5,10 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -244,6 +246,115 @@ def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
         "schema_version": 1,
         "status": "ok",
     }
+
+
+def test_broker_sanitized_environment_resolves_authority_system_executables() -> None:
+    script = f"""
+import importlib.util
+import json
+
+path = {str(REPO_ROOT / "scripts/ops/gb10_slurm_acceptance_authority.py")!r}
+spec = importlib.util.spec_from_file_location("gb10_acceptance_composition", path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+runuser = authority._run(authority._service_command("/usr/bin/true"), check=False)
+srun = authority._run([authority.SRUN, "--version"])
+print(json.dumps({{"runuser": runuser.returncode, "srun": srun.returncode}}))
+"""
+
+    result = broker._run([sys.executable, "-c", script], timeout=30)
+
+    assert json.loads(result.stdout) == {"runuser": 1, "srun": 0}
+
+
+def test_broker_timeout_kills_and_reaps_the_authority_process_group(tmp_path: Path) -> None:
+    orphan_marker = tmp_path / "escaped-authority-child"
+    child = (
+        "import pathlib,sys,time; time.sleep(1.2); pathlib.Path(sys.argv[1]).write_text('escaped')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]]); "
+        "time.sleep(5)"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(broker.BrokerError, match="failed safely"):
+        broker._run(
+            [sys.executable, "-c", parent, str(orphan_marker)],
+            timeout=1,
+        )
+    assert time.monotonic() - started < 2
+    time.sleep(0.4)
+    assert not orphan_marker.exists()
+
+
+def test_broker_termination_kills_and_reaps_the_authority_process_group(
+    tmp_path: Path,
+) -> None:
+    started_marker = tmp_path / "authority-started"
+    orphan_marker = tmp_path / "escaped-authority-child"
+    script = r"""
+import importlib.util
+import pathlib
+import sys
+
+broker_path, started_path, orphan_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("signal_broker", broker_path)
+assert spec is not None and spec.loader is not None
+broker = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = broker
+spec.loader.exec_module(broker)
+broker._install_signal_handlers()
+child = (
+    "import pathlib,sys,time; time.sleep(0.4); "
+    "pathlib.Path(sys.argv[1]).write_text('escaped')"
+)
+parent = (
+    "import pathlib,subprocess,sys,time; "
+    "pathlib.Path(sys.argv[1]).write_text('started'); "
+    f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[2]]); "
+    "time.sleep(30)"
+)
+try:
+    broker._run([sys.executable, "-c", parent, started_path, orphan_path], timeout=30)
+except broker.BrokerError as exc:
+    if "interrupted safely" not in str(exc):
+        raise
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(BROKER_PATH),
+            str(started_marker),
+            str(orphan_marker),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while (
+            not started_marker.exists() and process.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert started_marker.exists(), process.communicate(timeout=1)
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 42, (stdout, stderr)
+    time.sleep(0.5)
+    assert not orphan_marker.exists()
 
 
 def test_broker_main_dispatches_capacity_without_candidate_runtime(

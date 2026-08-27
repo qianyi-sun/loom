@@ -637,6 +637,39 @@ def test_final_dag_refuses_drifted_prior_execution() -> None:
         )
 
 
+def test_dag_rechecks_dependency_freshness_at_consumer_worker_start() -> None:
+    dependency = _check("final.capacity", freshness_ttl_seconds=1)
+    prior = PreflightDag((dependency,)).run(_context(), now=lambda: NOW)[0]
+    consumer_calls: list[str] = []
+    consumer = RegisteredCheck(
+        spec=_spec("final.smoke", dependencies=("final.capacity",)),
+        implementation_version="v1",
+        operations={
+            CheckOperation.PROBE: lambda _context: (
+                consumer_calls.append("smoke")
+                or CheckProbe(passed=True, evidence={"status.value": "ready"})
+            )
+        },
+    )
+    times = iter(
+        (
+            NOW,
+            NOW,
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=1),
+        )
+    )
+
+    with pytest.raises(ValueError, match="dependency execution expired before dependent execution"):
+        PreflightDag((dependency, consumer)).run(
+            _context(),
+            now=lambda: next(times, NOW + timedelta(seconds=1)),
+            prior_executions={prior.check_id: prior},
+        )
+
+    assert consumer_calls == []
+
+
 def test_input_fingerprint_rejects_raw_secret_fields() -> None:
     spec = CheckSpec(
         check_id="token.metadata",

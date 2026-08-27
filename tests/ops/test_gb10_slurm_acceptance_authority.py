@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from tests.ops.test_staging_rollout_shared_repo_consumer import _checkout, _normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY = ROOT / "scripts/ops/gb10_slurm_acceptance_authority.py"
@@ -66,6 +68,22 @@ def _trusted_test_registry_probe(authority: ModuleType) -> bytes:
     return f"print({encoded!r})\n".encode()
 
 
+def _canonical_worker_env(authority: ModuleType, *, image_tag: str) -> bytes:
+    values = {
+        "IMAGE_TAG": image_tag,
+        "ENV_CONFIG_VERSION": image_tag,
+        "LOOM_IMAGE_TAG": image_tag,
+        "LOOM_WORKER_ENV_CONFIG_VERSION": image_tag,
+        "LOOM_WORKER_POOL_NAME": "gb10",
+        "LOOM_WORKER_MAX_CONCURRENT": "10",
+        "LOOM_WORKER_TOKEN": "secret-token",
+        "LOOM_WORKER_MINIO_ACCESS_KEY": "secret-access",
+        "LOOM_WORKER_MINIO_SECRET_KEY": "secret-key",
+        **authority.PRIVATE_WORKER_SERVICE_ENV["gb10"],
+    }
+    return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+
+
 def _execute_embedded_node_probe(
     authority: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -76,23 +94,72 @@ def _execute_embedded_node_probe(
     trusted_probe: bytes,
     trusted_ca: bytes,
     replace_snapshot_before_execution: bool = False,
+    mutate_worker_input: str | None = None,
 ) -> list[list[str]]:
-    candidate_sha = "a" * 40
-    candidate_tree = "b" * 40
     node = "trt-gb10-1"
-    repo = tmp_path / "worker-repo"
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+    _root, repo, _initial_sha = _checkout(tmp_path)
     probe_path = repo / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH
     ca_path = repo / authority.TRIAL_CACHE_CA_RELATIVE_PATH
     probe_path.parent.mkdir(parents=True)
     ca_path.parent.mkdir(parents=True)
     probe_path.write_bytes(service_probe)
     ca_path.write_bytes(service_ca)
-    env_file = tmp_path / "worker.env"
-    env_file.write_text(
-        f"LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO={authority.TRIAL_CACHE_REGISTRY_REPO}\n",
-        encoding="utf-8",
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "add", "."],
+        check=True,
+        capture_output=True,
     )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "--quiet",
+            "-m",
+            "probe assets",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    candidate_sha = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    candidate_tree = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / ".git/config").write_bytes(
+        authority._WORKER_VERIFIER_NAMESPACE["WORKER_CANONICAL_GIT_CONFIG"]
+    )
+    _normalize(repo)
+    image_tag = f"staging-{candidate_sha[:7]}"
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag=image_tag))
     env_file.chmod(0o600)
+    worker_inputs = authority._verify_worker_inputs(
+        repo_dir=repo,
+        env_file=env_file,
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+        requested_concurrency=10,
+    )
+    if mutate_worker_input == "checkout":
+        (repo / "README.md").write_text("allocation-time drift\n", encoding="utf-8")
+        (repo / "README.md").chmod(0o640)
+    elif mutate_worker_input == "environment":
+        env_file.write_bytes(env_file.read_bytes() + b"EXTRA_DRIFT=1\n")
     executed: list[list[str]] = []
     real_run = subprocess.run
 
@@ -101,12 +168,6 @@ def _execute_embedded_node_probe(
             return node + "\n"
         if argv == ["/usr/bin/id", "-nG"]:
             return "loom-rollout docker\n"
-        if argv[-2:] == ["rev-parse", "HEAD"]:
-            return candidate_sha + "\n"
-        if argv[-2:] == ["rev-parse", "HEAD^{tree}"]:
-            return candidate_tree + "\n"
-        if argv[-3:] == ["status", "--porcelain", "--untracked-files=no"]:
-            return ""
         if argv[:1] == ["/usr/bin/python3"]:
             executed.append(argv)
             snapshot_probe = Path(argv[3] if argv[1] == "-c" else argv[1])
@@ -129,6 +190,8 @@ def _execute_embedded_node_probe(
         raise AssertionError(argv)
 
     def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:1] == ["/usr/bin/git"]:
+            return real_run(argv, **_kwargs)
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setenv("SLURM_JOB_NODELIST", node)
@@ -144,6 +207,14 @@ def _execute_embedded_node_probe(
             str(env_file),
             candidate_sha,
             candidate_tree,
+            image_tag,
+            "10",
+            json.dumps(worker_inputs, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                authority.PRIVATE_WORKER_SERVICE_ENV["gb10"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             authority.TRIAL_CACHE_REGISTRY_REPO,
             authority.TRIAL_CACHE_CA_SHA256,
             authority.TRIAL_CACHE_CANARY_DIGEST,
@@ -227,8 +298,9 @@ allowed_nodes = [
   "trt-gb10-9", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13",
   "trt-gb10-14", "trt-gb10-15",
 ]
-repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/exact"
-env_file = "/shared_work2/loom-staging-rollout/worker-envs/exact.env"
+repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-staging-aaaaaaa.env"
+requested_concurrency = 10
 
 [[gb10_worker_pool_desired_states]]
 pool_name = "gb10"
@@ -287,8 +359,13 @@ active = true
 
     contract = _parse_test_contract(authority, profile, candidate_sha)
 
-    assert contract["repo_dir"] == Path("/shared_work2/loom-staging-rollout/worker-repos/exact")
-    assert contract["env_file"] == Path("/shared_work2/loom-staging-rollout/worker-envs/exact.env")
+    assert contract["repo_dir"] == Path(
+        "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-staging-aaaaaaa"
+    )
+    assert contract["env_file"] == Path(
+        "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-staging-aaaaaaa.env"
+    )
+    assert contract["requested_concurrency"] == 10
 
 
 def test_candidate_contract_rejects_retired_worker_service_endpoint(
@@ -415,19 +492,101 @@ def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
         _parse_test_contract(authority, profile, candidate_sha)
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    (
+        ("min_slots = 0", "min_slots = false"),
+        ("target_slots = 0", "target_slots = false"),
+        ("external_runner = true", "external_runner = 1"),
+        ('pools = ["gb10", "oldlab"]', 'pools = "gb10"'),
+    ),
+    ids=("min-slots-bool", "target-slots-bool", "external-runner-int", "pools-string"),
+)
+def test_candidate_contract_rejects_cross_type_scalar_and_list_values(
+    tmp_path: Path,
+    before: str,
+    after: str,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / "staging.toml"
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    assert before in payload
+    profile.write_text(payload.replace(before, after, 1), encoding="utf-8")
+
+    with pytest.raises(authority.AcceptanceError):
+        _parse_test_contract(authority, profile, candidate_sha)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    (
+        (
+            'repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/'
+            'loom-remote-worker-${IMAGE_TAG}"',
+            'repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/exact"',
+        ),
+        (
+            'env_file = "/shared_work2/loom-staging-rollout/worker-envs/'
+            'staging-gb10-worker-${IMAGE_TAG}.env"',
+            'env_file = "/shared_work2/loom-staging-rollout/worker-envs/exact.env"',
+        ),
+        ("requested_concurrency = 10", "requested_concurrency = false"),
+        ("requested_concurrency = 10", "requested_concurrency = 9"),
+        ("requested_concurrency = 10", 'requested_concurrency = "10"'),
+    ),
+    ids=("repo-path", "env-path", "concurrency-bool", "concurrency-value", "concurrency-string"),
+)
+def test_candidate_contract_requires_canonical_worker_paths_and_concurrency(
+    tmp_path: Path,
+    before: str,
+    after: str,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / "staging.toml"
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    assert before in payload
+    profile.write_text(payload.replace(before, after, 1), encoding="utf-8")
+
+    with pytest.raises(authority.AcceptanceError, match="accepted contract"):
+        _parse_test_contract(authority, profile, candidate_sha)
+
+
+@pytest.mark.parametrize(
+    "malformed_row",
+    (
+        "\n[[worker_pool_autoscaler_policies]]\npool_name = 7\n",
+        "\n[[gb10_worker_pool_desired_states]]\npool_name = false\n",
+        '\n[[external_slurm_autoscaler_supervisors]]\npool_name = ["gb10"]\n',
+    ),
+    ids=("policy", "desired-state", "supervisor"),
+)
+def test_candidate_contract_rejects_malformed_nested_rows(
+    tmp_path: Path,
+    malformed_row: str,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / "staging.toml"
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    profile.write_text(payload + malformed_row, encoding="utf-8")
+
+    with pytest.raises(authority.AcceptanceError):
+        _parse_test_contract(authority, profile, candidate_sha)
+
+
 def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> None:
-    source = _authority_source()
-    assert '"runuser", "-u", SERVICE_USER, "--"' in source
-    assert '"srun"' in source
-    assert 'f"--nodelist={node}"' in source
-    assert '"--immediate=15"' in source
-    assert 'f"--job-name={job_name}"' in source
-    assert '"/usr/bin/scancel"' in source
-    assert 'f"--account={SLURM_ACCOUNT}"' in source
-    assert 'f"--qos={SLURM_QOS}"' in source
-    assert 'f"--partition={SLURM_PARTITION}"' in source
-    assert "loom-slurm-job-cgroup-guard.service" in source
-    assert '"docker", "info"' in source
+    authority = _load_authority()
+
+    assert authority._service_command(authority.SRUN) == [
+        "/usr/sbin/runuser",
+        "-u",
+        authority.SERVICE_USER,
+        "--",
+        "/usr/bin/srun",
+    ]
+    assert authority.SRUN == "/usr/bin/srun"
 
 
 def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
@@ -446,10 +605,7 @@ def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
     runtime_probe.write_bytes(trusted_probe.read_bytes())
     runtime_ca.write_bytes(trusted_ca.read_bytes())
     worker_repo = tmp_path / "worker-repo"
-    worker_repo.mkdir(mode=0o750)
     env_file = tmp_path / "worker.env"
-    env_file.write_text("SAFE=value\n", encoding="utf-8")
-    env_file.chmod(0o600)
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path / "candidates")
     monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
     monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
@@ -460,6 +616,12 @@ def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
         return "b" * 40
 
     monkeypatch.setattr(authority, "_git_identity", git_identity)
+    worker_inputs = {"head": candidate_sha, "env_sha256": "d" * 64}
+    monkeypatch.setattr(
+        authority,
+        "_verify_worker_inputs",
+        lambda **_kwargs: worker_inputs,
+    )
 
     def run(
         argv: list[str],
@@ -482,11 +644,17 @@ def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
 
     verified = authority._verify_inputs(
         candidate_sha,
-        {"repo_dir": worker_repo, "env_file": env_file},
+        {
+            "repo_dir": worker_repo,
+            "env_file": env_file,
+            "image_tag": "staging-aaaaaaa",
+            "requested_concurrency": 10,
+        },
     )
     assert verified.candidate_tree == "b" * 40
     assert verified.registry_probe_sha256 == hashlib.sha256(trusted_probe.read_bytes()).hexdigest()
     assert verified.registry_ca_sha256 == authority.TRIAL_CACHE_CA_SHA256
+    assert verified.worker_inputs == worker_inputs
     assert calls == [
         {
             "uid": 0,
@@ -495,14 +663,184 @@ def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
             "sha": candidate_sha,
             "deadline": None,
         },
-        {
-            "uid": os.geteuid(),
-            "gid": os.getegid(),
-            "modes": frozenset({0o750}),
-            "sha": candidate_sha,
-            "deadline": None,
-        },
     ]
+
+
+def test_candidate_inputs_bind_physical_worker_checkout_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    _root, worker_repo, candidate_sha = _checkout(tmp_path / "shared")
+    candidate_tree = subprocess.run(
+        ["/usr/bin/git", "-C", str(worker_repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    runtime_repo = tmp_path / "candidates" / candidate_sha / "repo"
+    runtime_probe = runtime_repo / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH
+    runtime_ca = runtime_repo / authority.TRIAL_CACHE_CA_RELATIVE_PATH
+    runtime_probe.parent.mkdir(parents=True)
+    runtime_ca.parent.mkdir(parents=True)
+    runtime_probe.write_bytes((ROOT / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH).read_bytes())
+    runtime_ca.write_bytes((ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes())
+    image_tag = f"staging-{candidate_sha[:7]}"
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag=image_tag))
+    env_file.chmod(0o600)
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path / "candidates")
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+
+    def git_identity(repo: Path, **_kwargs: object) -> str:
+        assert repo == runtime_repo, "worker checkout must use the physical verifier"
+        return candidate_tree
+
+    monkeypatch.setattr(authority, "_git_identity", git_identity)
+
+    def run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, deadline
+        tree_path = argv[-1].partition(":")[2]
+        payload = (runtime_repo / tree_path).read_bytes()
+        blob = hashlib.sha1(
+            f"blob {len(payload)}\0".encode() + payload,
+            usedforsecurity=False,
+        ).hexdigest()
+        return subprocess.CompletedProcess(argv, 0, stdout=blob + "\n", stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+
+    verified = authority._verify_inputs(
+        candidate_sha,
+        {
+            "repo_dir": worker_repo,
+            "env_file": env_file,
+            "image_tag": image_tag,
+            "requested_concurrency": 10,
+        },
+    )
+
+    assert verified.candidate_tree == candidate_tree
+    assert verified.worker_inputs["head"] == candidate_sha
+    assert verified.worker_inputs["target_inode"] == worker_repo.stat().st_ino
+    assert verified.worker_inputs["env_sha256"] == hashlib.sha256(env_file.read_bytes()).hexdigest()
+
+
+def test_worker_input_verifier_rejects_git_ignored_physical_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    _root, repo, candidate_sha = _checkout(tmp_path)
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag="staging-aaaaaaa"))
+    env_file.chmod(0o600)
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+
+    verified = authority._verify_worker_inputs(
+        repo_dir=repo,
+        env_file=env_file,
+        candidate_sha=candidate_sha,
+        image_tag="staging-aaaaaaa",
+        requested_concurrency=10,
+    )
+
+    assert verified["head"] == candidate_sha
+    assert verified["target_device"] == repo.stat().st_dev
+    assert verified["target_inode"] == repo.stat().st_ino
+    assert verified["env_sha256"] == hashlib.sha256(env_file.read_bytes()).hexdigest()
+
+    exclude = repo / ".git/info/exclude"
+    exclude.write_text("ignored-entry/\n", encoding="utf-8")
+    exclude.chmod(0o640)
+    (repo / "ignored-entry").mkdir(mode=0o750)
+    (repo / "ignored-entry/payload").write_text("ignored\n", encoding="utf-8")
+    (repo / "ignored-entry/payload").chmod(0o640)
+
+    with pytest.raises(authority.AcceptanceError, match="worker input verification"):
+        authority._verify_worker_inputs(
+            repo_dir=repo,
+            env_file=env_file,
+            candidate_sha=candidate_sha,
+            image_tag="staging-aaaaaaa",
+            requested_concurrency=10,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("content", "mode", "hardlink", "commondir"),
+)
+def test_worker_input_verifier_rejects_tree_metadata_and_git_redirection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    authority = _load_authority()
+    _root, repo, candidate_sha = _checkout(tmp_path)
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag="staging-aaaaaaa"))
+    env_file.chmod(0o600)
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+    if mutation == "content":
+        (repo / "other.txt").write_text("drift\n", encoding="utf-8")
+    elif mutation == "mode":
+        (repo / "other.txt").chmod(0o600)
+    elif mutation == "hardlink":
+        outside = tmp_path / "outside"
+        outside.write_text("outside\n", encoding="utf-8")
+        (repo / "other.txt").unlink()
+        os.link(outside, repo / "other.txt")
+        (repo / "other.txt").chmod(0o640)
+    else:
+        (repo / ".git/commondir").write_text("../external.git\n", encoding="utf-8")
+        (repo / ".git/commondir").chmod(0o640)
+
+    with pytest.raises(authority.AcceptanceError, match="worker input verification"):
+        authority._verify_worker_inputs(
+            repo_dir=repo,
+            env_file=env_file,
+            candidate_sha=candidate_sha,
+            image_tag="staging-aaaaaaa",
+            requested_concurrency=10,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"LOOM_WORKER_TOKEN=one\nLOOM_WORKER_TOKEN=two\n",
+        b"LOOM_WORKER_POOL_NAME=oldlab\n",
+        b"malformed-line\n",
+    ),
+    ids=("duplicate", "candidate-drift", "malformed"),
+)
+def test_worker_environment_rejects_noncanonical_or_ambiguous_values(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    authority = _load_authority()
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag="staging-aaaaaaa") + payload)
+    env_file.chmod(0o600)
+
+    with pytest.raises(authority.AcceptanceError, match="worker environment"):
+        authority._verify_worker_environment(
+            env_file,
+            image_tag="staging-aaaaaaa",
+            requested_concurrency=10,
+            uid=os.geteuid(),
+            gid=os.getegid(),
+        )
 
 
 def test_node_probe_executes_only_a_verified_job_private_snapshot(
@@ -587,6 +925,29 @@ def test_node_probe_rechecks_the_job_private_snapshot_at_execution_time(
         )
 
 
+@pytest.mark.parametrize("mutation", ("checkout", "environment"))
+def test_node_probe_rechecks_bound_worker_inputs_before_trusted_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    authority = _load_authority()
+    trusted_probe = _trusted_test_registry_probe(authority)
+    trusted_ca = (ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes()
+
+    with pytest.raises(RuntimeError, match="worker input evidence mismatched"):
+        _execute_embedded_node_probe(
+            authority,
+            monkeypatch,
+            tmp_path,
+            service_probe=trusted_probe,
+            service_ca=trusted_ca,
+            trusted_probe=trusted_probe,
+            trusted_ca=trusted_ca,
+            mutate_worker_input=mutation,
+        )
+
+
 def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
     authority = _load_authority()
     busy = subprocess.CompletedProcess(
@@ -598,19 +959,143 @@ def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
     unrelated = subprocess.CompletedProcess(
         args=["srun"], returncode=1, stdout="", stderr="invalid qos\n"
     )
+    started_busy = subprocess.CompletedProcess(
+        args=["srun"],
+        returncode=1,
+        stdout=authority.ALLOCATION_START_MARKER + "\n",
+        stderr=busy.stderr,
+    )
 
     assert authority._node_is_deferred_busy(
         node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
         result=busy,
+        scheduler_never_started=True,
     )
     assert not authority._node_is_deferred_busy(
         node_config="NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE ",
         result=busy,
+        scheduler_never_started=True,
     )
     assert not authority._node_is_deferred_busy(
         node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
         result=unrelated,
+        scheduler_never_started=True,
     )
+    assert not authority._node_is_deferred_busy(
+        node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
+        result=busy,
+        scheduler_never_started=False,
+    )
+    assert not authority._node_is_deferred_busy(
+        node_config="NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED ",
+        result=started_busy,
+        scheduler_never_started=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    (
+        ("123|loom-job|CANCELLED by 995|Unknown|trt-gb10-1\n", True),
+        ("123|loom-job|RUNNING|2026-08-27T12:00:00|trt-gb10-1\n", False),
+        ("123|other-job|CANCELLED|Unknown|trt-gb10-1\n", False),
+        ("", False),
+    ),
+)
+def test_busy_deferral_requires_structured_never_started_job_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    expected: bool,
+) -> None:
+    authority = _load_authority()
+    commands: list[list[str]] = []
+
+    def run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        assert deadline == 70.0
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+
+    assert (
+        authority._allocation_never_started(
+            "loom-job",
+            node="trt-gb10-1",
+            deadline=70.0,
+        )
+        is expected
+    )
+    assert commands and "/usr/bin/sacct" in commands[0]
+    assert "--name=loom-job" in commands[0]
+    assert "--starttime=now-10minutes" in commands[0]
+
+
+def test_started_allocation_with_busy_phrase_is_a_capacity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1",))
+    commands: list[list[str]] = []
+
+    def run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check, deadline
+        commands.append(argv)
+        if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    "NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED "
+                    "Partitions=gb10,loom-staging "
+                ),
+                stderr="",
+            )
+        if "/usr/bin/srun" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout=authority.ALLOCATION_START_MARKER + "\n",
+                stderr="srun: Requested nodes are busy\n",
+            )
+        if "/usr/bin/squeue" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(authority, "_run", run)
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
+    )
+
+    with pytest.raises(authority.AcceptanceError, match="node allocation failed safely"):
+        authority._probe_nodes(
+            candidate_sha,
+            verified,
+            {
+                "repo_dir": Path("/worker/repo"),
+                "env_file": Path("/worker/env"),
+                "image_tag": "staging-aaaaaaa",
+                "requested_concurrency": 10,
+            },
+        )
+
+    assert not any("/usr/bin/sacct" in command for command in commands)
 
 
 def test_command_deadline_kills_the_whole_slurm_launcher_process_group(
@@ -639,6 +1124,137 @@ def test_command_deadline_kills_the_whole_slurm_launcher_process_group(
     assert not orphan_marker.exists()
 
 
+def test_authority_signal_kills_child_group_and_cleans_only_current_job(
+    tmp_path: Path,
+) -> None:
+    started_marker = tmp_path / "launcher-started"
+    escaped_marker = tmp_path / "escaped-child"
+    cleanup_log = tmp_path / "cleanup.log"
+    script = r"""
+import importlib.util
+import pathlib
+import subprocess
+import sys
+
+authority_path, started_path, escaped_path, cleanup_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("signal_authority", authority_path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+authority.SLURM_NODES = ("trt-gb10-1",)
+real_run = authority._run
+queue_reads = 0
+
+
+def append_log(value):
+    with open(cleanup_path, "a", encoding="utf-8") as stream:
+        stream.write(value + "\n")
+
+
+def run(argv, *, timeout=30, check=True, deadline=None):
+    global queue_reads
+    if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                "NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE "
+                "Partitions=gb10,loom-staging "
+            ),
+            stderr="",
+        )
+    if "/usr/bin/srun" in argv:
+        descendant = (
+            "import pathlib,sys,time; time.sleep(0.4); "
+            "pathlib.Path(sys.argv[1]).write_text('escaped')"
+        )
+        launcher = (
+            "import pathlib,subprocess,sys,time; "
+            "pathlib.Path(sys.argv[1]).write_text('started'); "
+            f"subprocess.Popen([sys.executable, '-c', {descendant!r}, sys.argv[2]]); "
+            "time.sleep(30)"
+        )
+        return real_run(
+            [sys.executable, "-c", launcher, started_path, escaped_path],
+            timeout=timeout,
+            check=check,
+            deadline=deadline,
+        )
+    if "/usr/bin/squeue" in argv:
+        queue_reads += 1
+        append_log("squeue")
+        job_name = next(item.removeprefix("--name=") for item in argv if "--name=" in item)
+        stdout = f"123|{job_name}\n" if queue_reads == 1 else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+    if "/usr/bin/scancel" in argv:
+        append_log("scancel:" + ",".join(argv[argv.index("/usr/bin/scancel") + 1 :]))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+    raise AssertionError(argv)
+
+
+authority._run = run
+authority._install_signal_handlers()
+verified = authority.VerifiedCandidateInputs(
+    candidate_tree="b" * 40,
+    registry_probe_sha256="c" * 64,
+    registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+    worker_inputs={"head": "a" * 40, "env_sha256": "d" * 64},
+)
+try:
+    authority._probe_nodes(
+        "a" * 40,
+        verified,
+        {
+            "repo_dir": pathlib.Path("/worker/repo"),
+            "env_file": pathlib.Path("/worker/env"),
+            "image_tag": "staging-aaaaaaa",
+            "requested_concurrency": 10,
+        },
+    )
+except authority.AcceptanceError as exc:
+    if "interrupted safely" not in str(exc):
+        raise
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(AUTHORITY),
+            str(started_marker),
+            str(escaped_marker),
+            str(cleanup_log),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while (
+            not started_marker.exists() and process.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert started_marker.exists(), process.communicate(timeout=1)
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 42, (stdout, stderr)
+    time.sleep(0.5)
+    assert not escaped_marker.exists()
+    assert cleanup_log.read_text(encoding="utf-8").splitlines() == [
+        "squeue",
+        "scancel:123",
+        "squeue",
+    ]
+
+
 def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,6 +1264,7 @@ def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission
         candidate_tree="b" * 40,
         registry_probe_sha256="c" * 64,
         registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
     )
     monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1", "trt-gb10-2"))
     commands: list[list[str]] = []
@@ -674,7 +1291,7 @@ def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission
                 ),
                 stderr="",
             )
-        if "srun" in argv:
+        if "/usr/bin/srun" in argv:
             assert deadline == 10.0
             raise authority.AcceptanceError("authority overall time budget exhausted safely")
         if "/usr/bin/squeue" in argv:
@@ -694,12 +1311,17 @@ def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission
         authority._probe_nodes(
             candidate_sha,
             verified,
-            {"repo_dir": Path("/worker/repo"), "env_file": Path("/worker/env")},
+            {
+                "repo_dir": Path("/worker/repo"),
+                "env_file": Path("/worker/env"),
+                "image_tag": "staging-aaaaaaa",
+                "requested_concurrency": 10,
+            },
             work_deadline=10.0,
             cleanup_deadline=70.0,
         )
 
-    assert sum("srun" in command for command in commands) == 1
+    assert sum("/usr/bin/srun" in command for command in commands) == 1
     assert sum("/usr/bin/scancel" in command for command in commands) == 1
     assert queue_reads == 2
     assert not any("trt-gb10-2" in command for command in commands)
@@ -736,11 +1358,13 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
             )
         if "/usr/bin/squeue" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if "srun" in argv:
+        if "/usr/bin/srun" in argv:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout=json.dumps(
+                stdout=authority.ALLOCATION_START_MARKER
+                + "\n"
+                + json.dumps(
                     {
                         "candidate_sha": candidate_sha,
                         "node": "trt-gb10-1",
@@ -769,16 +1393,22 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
         candidate_tree="b" * 40,
         registry_probe_sha256="c" * 64,
         registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
     )
     passed, deferred = authority._probe_nodes(
         candidate_sha,
         verified,
-        {"repo_dir": repo, "env_file": env_file},
+        {
+            "repo_dir": repo,
+            "env_file": env_file,
+            "image_tag": "staging-aaaaaaa",
+            "requested_concurrency": 10,
+        },
     )
 
     assert passed == ["trt-gb10-1"]
     assert deferred == []
-    srun = next(command for command in commands if "srun" in command)
+    srun = next(command for command in commands if "/usr/bin/srun" in command)
     assert str(repo / "scripts/ops/staging_trial_cache_registry_node_probe.py") in srun
     assert str(repo / "deploy/worker-pools/trial-cache/staging-ca.crt") in srun
     assert authority.TRIAL_CACHE_REGISTRY_REPO in srun
@@ -786,6 +1416,7 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
     assert authority.TRIAL_CACHE_CANARY_DIGEST in srun
     assert verified.candidate_tree in srun
     assert verified.registry_probe_sha256 in srun
+    assert json.dumps(verified.worker_inputs, sort_keys=True, separators=(",", ":")) in srun
     assert "--partition=loom-staging" in srun
 
 
@@ -841,6 +1472,81 @@ def test_authority_artifact_writer_retries_short_writes(
     assert write_count > 1
 
 
+def test_authority_publishes_digest_addressed_evidence_before_current_and_fsyncs_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "authority-state"
+    artifact_path = state_root / "current.json"
+    monkeypatch.setattr(authority, "STATE_ROOT", state_root)
+    monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
+    real_lstat = Path.lstat
+
+    def trusted_state_root_lstat(path: Path) -> object:
+        metadata = real_lstat(path)
+        if path == state_root:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    real_fsync = os.fsync
+    synced: list[str] = []
+
+    def record_fsync(descriptor: int) -> None:
+        synced.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(authority.os, "fsync", record_fsync)
+    payload = {"kind": "loom_gb10_slurm_acceptance", "result": "pass"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    immutable = state_root / "evidence" / f"{digest}.json"
+
+    published = authority._write_artifact(payload)
+
+    assert published == immutable
+    assert immutable.read_text(encoding="utf-8") == canonical + "\n"
+    assert artifact_path.read_bytes() == immutable.read_bytes()
+    assert synced.index(str(immutable)) < synced.index(str(artifact_path))
+    assert str(immutable.parent) in synced
+    assert str(state_root) in synced
+
+
+def test_authority_artifact_publication_is_idempotent_and_rejects_digest_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "authority-state"
+    artifact_path = state_root / "current.json"
+    monkeypatch.setattr(authority, "STATE_ROOT", state_root)
+    monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
+    real_lstat = Path.lstat
+
+    def trusted_state_root_lstat(path: Path) -> object:
+        metadata = real_lstat(path)
+        if path == state_root:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    payload = {"kind": "loom_gb10_slurm_acceptance", "result": "pass"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    immutable = state_root / "evidence" / f"{digest}.json"
+
+    first = authority._write_artifact(payload)
+    first_inode = immutable.stat().st_ino
+    second = authority._write_artifact(payload)
+
+    assert first == second == immutable
+    assert immutable.stat().st_ino == first_inode
+    immutable.write_text("collision\n", encoding="utf-8")
+    with pytest.raises(authority.AcceptanceError, match="collision"):
+        authority._write_artifact(payload)
+
+
 def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -868,12 +1574,15 @@ def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
             "profile_sha256": "c" * 64,
             "repo_dir": Path("/worker/repo"),
             "env_file": Path("/worker/env"),
+            "image_tag": "staging-aaaaaaa",
+            "requested_concurrency": 10,
         },
     )
     verified = authority.VerifiedCandidateInputs(
         candidate_tree=candidate_tree,
         registry_probe_sha256="d" * 64,
         registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "e" * 64},
     )
     monkeypatch.setattr(
         authority,

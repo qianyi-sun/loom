@@ -18,6 +18,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -26,7 +27,7 @@ import tempfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 CONTROLLER = "gx10-01c7"
 CLUSTER = "trt-gb10"
@@ -57,6 +58,49 @@ _GB10_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 
 class BrokerError(RuntimeError):
     """Secret-free fixed broker failure."""
+
+
+class BrokerInterruptedError(BrokerError):
+    """The broker received a termination signal and is unwinding safely."""
+
+
+_ACTIVE_PROCESS: subprocess.Popen[str] | None = None
+
+
+def _handle_broker_signal(signum: int, _frame: object) -> None:
+    process = _ACTIVE_PROCESS
+    if process is not None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    raise BrokerInterruptedError(
+        f"GB10 external supervisor broker interrupted safely by signal {signum}"
+    )
+
+
+def _install_signal_handlers() -> dict[int, Any]:
+    previous: dict[int, Any] = {}
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous[signum] = signal.signal(signum, _handle_broker_signal)
+    return previous
+
+
+def _restore_signal_handlers(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def _kill_and_reap(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
 
 
 @dataclass(frozen=True, slots=True)
@@ -461,6 +505,7 @@ def _run(
     check: bool = True,
     run_as: tuple[int, int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    global _ACTIVE_PROCESS
     if not argv or any(not item or "\x00" in item for item in argv) or not 1 <= timeout <= 1800:
         raise BrokerError("GB10 external supervisor command is invalid")
     env = (
@@ -485,29 +530,52 @@ def _run(
             raise BrokerError("GB10 external supervisor command identity is invalid")
         if (run_uid, run_gid) != (os.geteuid(), os.getegid()):
             privilege_identity = (run_uid, run_gid)
-    if privilege_identity is None:
-        result = subprocess.run(
-            argv,
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
-    else:
-        result = subprocess.run(
-            argv,
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            user=privilege_identity[0],
-            group=privilege_identity[1],
-            extra_groups=(),
-        )
+    process: subprocess.Popen[str] | None = None
+    try:
+        blocked = {signal.SIGTERM, signal.SIGINT}
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+        try:
+            if privilege_identity is None:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                    start_new_session=True,
+                )
+            else:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                    start_new_session=True,
+                    user=privilege_identity[0],
+                    group=privilege_identity[1],
+                    extra_groups=(),
+                )
+            _ACTIVE_PROCESS = process
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            _kill_and_reap(process)
+        raise BrokerError("GB10 external supervisor command failed safely") from None
+    except BaseException:
+        if process is not None:
+            _kill_and_reap(process)
+        raise
+    finally:
+        if _ACTIVE_PROCESS is process:
+            _ACTIVE_PROCESS = None
+    if process is None:
+        raise BrokerError("GB10 external supervisor command failed safely")
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if (
         len(result.stdout.encode()) > _MAX_COMMAND_OUTPUT
         or len(result.stderr.encode()) > _MAX_COMMAND_OUTPUT
@@ -1182,7 +1250,7 @@ def _exec_helper(candidate: Path, payload: bytes) -> NoReturn:
     os.execve(spec.argv[0], spec.argv, spec.environment)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     try:
         if os.geteuid() != 0 or os.getegid() != 0:
@@ -1208,6 +1276,14 @@ def main(argv: list[str] | None = None) -> int:
     except (BrokerError, OSError, KeyError, subprocess.SubprocessError):
         return 1
     return 1  # pragma: no cover - execve never returns
+
+
+def main(argv: list[str] | None = None) -> int:
+    previous = _install_signal_handlers()
+    try:
+        return _main(argv)
+    finally:
+        _restore_signal_handlers(previous)
 
 
 if __name__ == "__main__":
