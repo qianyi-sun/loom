@@ -219,7 +219,8 @@ test "$(sha256sum "$acceptance_plan" | awk '{print $1}')" = "$acceptance_plan_sh
 test "$(sha256sum "$acceptance_result" | awk '{print $1}')" = "$acceptance_result_sha256"
 test "$acceptance_result_sha256" = \
   "$(jq -r .approval.acceptance_result_sha256 "$operational_plan")"
-test "$(sha256sum "$rollback_evidence" | awk '{print $1}')" = \
+rollback_shadow_status_sha256="$(sha256sum "$rollback_evidence" | awk '{print $1}')"
+test "$rollback_shadow_status_sha256" = \
   "$(jq -r .approval.rollback_evidence_sha256 "$operational_plan")"
 test "$(sha256sum "$backup_restore_evidence" | awk '{print $1}')" = \
   "$(jq -r .storage.backup_restore_evidence_sha256 "$operational_plan")"
@@ -274,13 +275,17 @@ test "$(jq -r .shadow_manifest_sha256 "$acceptance_result")" = \
   --acceptance-result-file "$acceptance_result" \
   --acceptance-result-sha256 "$acceptance_result_sha256" \
   --acceptance-manifest-sha256 "$acceptance_manifest_sha256" \
+  --rollback-shadow-status-file "$rollback_evidence" \
   > "$acceptance_verification"
 chmod 0600 "$acceptance_verification"
-jq -e --arg result "$acceptance_result_sha256" '
+jq -e \
+  --arg result "$acceptance_result_sha256" \
+  --arg rollback_shadow_status_sha256 "$rollback_shadow_status_sha256" '
   .schema == "loom-personal-dev-zero-capacity-acceptance-verification-v1" and
   .verified == true and .owner_count == 2 and
   .cross_owner_denial_count == 6 and
-  .acceptance_result_sha256 == $result
+  .acceptance_result_sha256 == $result and
+  .rollback_shadow_status_sha256 == $rollback_shadow_status_sha256
 ' "$acceptance_verification" >/dev/null
 
 "$loom_cli" admin personal-dev-control-plane status \

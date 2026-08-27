@@ -905,6 +905,7 @@ separate reviewed plan.
     chmod 0600 "$rollback_status"
     assert_canonical_json_line "$rollback_status"
     jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "shadow" and .ready == true and .blockers == [] and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$rollback_status" >/dev/null
+    rollback_shadow_status_sha256="$(sha256sum "$rollback_status" | awk '{print $1}')"
     assert_no_dynamic_namespaces
 
 ## 10. Assemble and verify canonical v2 evidence while inert
@@ -953,7 +954,7 @@ failure leaves the system inert and blocks durable launch.
       --arg pre_deploy "$(sha256sum "$pre_deploy_acceptance_status" | awk '{print $1}')" \
       --arg pre_rollback "$(sha256sum "$pre_rollback_acceptance_status" | awk '{print $1}')" \
       --arg release_sha256 "$trusted_release_sha256" \
-      --arg rollback_shadow "$(sha256sum "$rollback_status" | awk '{print $1}')" \
+      --arg rollback_shadow "$rollback_shadow_status_sha256" \
       --arg shadow_manifest_sha256 "$shadow_render_sha256" \
       --slurpfile cross_owner_denials "$denials_jsonl" \
       --slurpfile owner_0_destroyed "$owner_0_destroyed_selected" \
@@ -978,10 +979,19 @@ failure leaves the system inert and blocks durable launch.
       --acceptance-result-file "$acceptance_result" \
       --acceptance-result-sha256 "$acceptance_result_sha256" \
       --acceptance-manifest-sha256 "$acceptance_render_sha256" \
+      --rollback-shadow-status-file "$rollback_status" \
       > "$acceptance_verification"
     chmod 0600 "$acceptance_verification"
     assert_canonical_json_line "$acceptance_verification"
-    jq -e --arg result "$acceptance_result_sha256" '.schema == "loom-personal-dev-zero-capacity-acceptance-verification-v1" and .verified == true and .owner_count == 2 and .cross_owner_denial_count == 6 and .acceptance_result_sha256 == $result' "$acceptance_verification" >/dev/null
+    jq -e \
+      --arg result "$acceptance_result_sha256" \
+      --arg rollback_shadow_status_sha256 "$rollback_shadow_status_sha256" \
+      '.schema == "loom-personal-dev-zero-capacity-acceptance-verification-v1" and
+       .verified == true and .owner_count == 2 and
+       .cross_owner_denial_count == 6 and
+       .acceptance_result_sha256 == $result and
+       .rollback_shadow_status_sha256 == $rollback_shadow_status_sha256' \
+      "$acceptance_verification" >/dev/null
 
 A verified result from this procedure is the required acceptance input to
 [`personal-dev-multi-owner-durable-launch.md`](personal-dev-multi-owner-durable-launch.md).

@@ -39,7 +39,11 @@ from loom.personal_dev_control_plane_status import (
 )
 from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
-from tests.unit.test_personal_dev_acceptance_evidence import _result_plan, _result_value
+from tests.unit.test_personal_dev_acceptance_evidence import (
+    _result_plan,
+    _result_value,
+    _rollback_shadow_status_value,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
@@ -505,6 +509,7 @@ def _verify_acceptance_result_argv(
     result_path: Path,
     result_sha256: str,
     manifest_sha256: str,
+    rollback_shadow_status_path: Path,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
@@ -519,31 +524,72 @@ def _verify_acceptance_result_argv(
         result_sha256,
         "--acceptance-manifest-sha256",
         manifest_sha256,
+        "--rollback-shadow-status-file",
+        str(rollback_shadow_status_path),
     ]
 
 
-def _acceptance_result_files(tmp_path: Path) -> tuple[Path, str, Path, str]:
+def _write_canonical_owner_only(path: Path, value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _rewrite_acceptance_result_rollback_digest(
+    result_path: Path,
+    rollback_sha256: str,
+) -> str:
+    value = json.loads(result_path.read_text(encoding="ascii"))
+    value["status_sha256s"]["rollback_shadow"] = rollback_sha256
+    return _write_canonical_owner_only(result_path, value)
+
+
+def _acceptance_result_files(
+    tmp_path: Path,
+) -> tuple[Path, str, Path, str, Path, str]:
     plan, _v1_plan = _result_plan(tmp_path)
     plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
-    payload = json.dumps(_result_value(plan), sort_keys=True, separators=(",", ":")).encode(
-        "ascii"
-    )
+    rollback_value = _rollback_shadow_status_value()
+    rollback_value["release_sha256"] = plan.release.trusted_release_sha256
+    rollback_path = tmp_path / "rollback-shadow.status.json"
+    rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
+    result_value = _result_value(plan)
+    result_value["status_sha256s"]["rollback_shadow"] = rollback_sha256
     result_path = tmp_path / "acceptance-result.json"
-    result_path.write_bytes(payload)
-    result_path.chmod(0o600)
-    return plan_path, plan.sha256, result_path, hashlib.sha256(payload).hexdigest()
+    result_sha256 = _write_canonical_owner_only(result_path, result_value)
+    return (
+        plan_path,
+        plan.sha256,
+        result_path,
+        result_sha256,
+        rollback_path,
+        rollback_sha256,
+    )
 
 
 def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    plan_path, plan_sha256, result_path, result_sha256 = _acceptance_result_files(tmp_path)
+    (
+        plan_path,
+        plan_sha256,
+        result_path,
+        result_sha256,
+        rollback_path,
+        rollback_sha256,
+    ) = _acceptance_result_files(tmp_path)
     plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
 
     rc = dispatch(
         _verify_acceptance_result_argv(
-            plan_path, plan_sha256, result_path, result_sha256, "a" * 64,
+            plan_path,
+            plan_sha256,
+            result_path,
+            result_sha256,
+            "a" * 64,
+            rollback_path,
         )
     )
 
@@ -561,6 +607,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         "cross_owner_denial_count": 6,
         "owner_count": 2,
         "release_sha256": plan.release.trusted_release_sha256,
+        "rollback_shadow_status_sha256": rollback_sha256,
         "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
         "shadow_manifest_sha256": plan.release.shadow_manifest_sha256,
         "verified": True,
@@ -569,20 +616,40 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
 
 @pytest.mark.parametrize(
     "invalid_input",
-    ["unsafe-plan", "unsafe-result", "v1-plan", "wrong-plan-sha", "wrong-result-sha",
-     "wrong-manifest", "invalid-result"],
+    [
+        "unsafe-plan",
+        "unsafe-result",
+        "unsafe-rollback",
+        "v1-plan",
+        "wrong-plan-sha",
+        "wrong-result-sha",
+        "wrong-manifest",
+        "wrong-rollback-digest",
+        "invalid-rollback",
+        "wrong-rollback-release",
+        "invalid-result",
+    ],
 )
 def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runner(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     invalid_input: str,
 ) -> None:
-    plan_path, plan_sha256, result_path, result_sha256 = _acceptance_result_files(tmp_path)
+    (
+        plan_path,
+        plan_sha256,
+        result_path,
+        result_sha256,
+        rollback_path,
+        _rollback_sha256,
+    ) = _acceptance_result_files(tmp_path)
     manifest_sha256 = "a" * 64
     if invalid_input == "unsafe-plan":
         plan_path.chmod(0o644)
     elif invalid_input == "unsafe-result":
         result_path.chmod(0o644)
+    elif invalid_input == "unsafe-rollback":
+        rollback_path.chmod(0o644)
     elif invalid_input == "v1-plan":
         plan, v1_plan = _result_plan(tmp_path / "v1")
         del plan
@@ -599,6 +666,21 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         result_sha256 = "b" * 64
     elif invalid_input == "wrong-manifest":
         manifest_sha256 = "b" * 64
+    elif invalid_input == "wrong-rollback-digest":
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        value["input_sha256"] = "3" * 64
+        _write_canonical_owner_only(rollback_path, value)
+    elif invalid_input in {"invalid-rollback", "wrong-rollback-release"}:
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        if invalid_input == "invalid-rollback":
+            value["ready"] = False
+        else:
+            value["release_sha256"] = "f" * 64
+        rollback_sha256 = _write_canonical_owner_only(rollback_path, value)
+        result_sha256 = _rewrite_acceptance_result_rollback_digest(
+            result_path,
+            rollback_sha256,
+        )
     else:
         value = json.loads(result_path.read_text(encoding="ascii"))
         value["owners"][0]["initial"]["worker_available"] = True
@@ -616,7 +698,12 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
     ):
         rc = dispatch(
             _verify_acceptance_result_argv(
-                plan_path, plan_sha256, result_path, result_sha256, manifest_sha256,
+                plan_path,
+                plan_sha256,
+                result_path,
+                result_sha256,
+                manifest_sha256,
+                rollback_path,
             )
         )
 
@@ -654,6 +741,28 @@ def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None
             "--acceptance-plan-file",
             "plan.json",
         ])
+
+    assert exc.value.code == 2
+
+
+def test_verify_acceptance_result_requires_rollback_shadow_status_file() -> None:
+    with pytest.raises(SystemExit) as exc:
+        dispatch(
+            [
+                "personal-dev-control-plane",
+                "verify-acceptance-result",
+                "--acceptance-plan-file",
+                "plan.json",
+                "--acceptance-plan-sha256",
+                "1" * 64,
+                "--acceptance-result-file",
+                "result.json",
+                "--acceptance-result-sha256",
+                "2" * 64,
+                "--acceptance-manifest-sha256",
+                "3" * 64,
+            ]
+        )
 
     assert exc.value.code == 2
 

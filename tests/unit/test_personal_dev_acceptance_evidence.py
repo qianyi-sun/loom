@@ -45,6 +45,134 @@ def _write_owner_only(path: Path, value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _rollback_shadow_status_value() -> dict[str, object]:
+    return {
+        "blockers": [],
+        "components": [
+            {"name": "management", "observed": 1, "ready": True},
+            {"name": "personal-workers", "observed": 0, "ready": True},
+        ],
+        "input_sha256": "1" * 64,
+        "manager_ceiling": 0,
+        "mode": "shadow",
+        "ready": True,
+        "release_sha256": "2" * 64,
+        "schema": "loom-personal-dev-control-plane-status-v1",
+        "worker_available": False,
+    }
+
+
+def test_rollback_shadow_status_loads_canonical_zero_capacity_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.status.json"
+    value = _rollback_shadow_status_value()
+    sha256 = _write_owner_only(path, value)
+
+    loaded = acceptance_evidence.load_personal_dev_rollback_shadow_status(
+        path,
+        sha256,
+    )
+
+    assert loaded == value
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    [
+        "wrong-digest",
+        "malformed-json",
+        "duplicate-key",
+        "noncanonical",
+        "unsafe-mode",
+        "status-extra-field",
+        "wrong-schema",
+        "invalid-input-digest",
+        "invalid-release-digest",
+        "non-shadow-mode",
+        "not-ready",
+        "blockers",
+        "nonzero-ceiling",
+        "worker-available",
+        "component-not-ready",
+        "component-extra-field",
+        "duplicate-component",
+        "malformed-component",
+        "empty-components",
+        "missing-personal-workers",
+        "personal-workers-nonzero",
+    ],
+)
+def test_rollback_shadow_status_rejects_untrusted_or_nonzero_capacity_evidence(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    path = tmp_path / "rollback-shadow.status.json"
+    value = _rollback_shadow_status_value()
+
+    if invalid_kind == "status-extra-field":
+        value["unexpected"] = False
+    elif invalid_kind == "wrong-schema":
+        value["schema"] = "loom-personal-dev-control-plane-status-v2"
+    elif invalid_kind == "invalid-input-digest":
+        value["input_sha256"] = None
+    elif invalid_kind == "invalid-release-digest":
+        value["release_sha256"] = "0" * 64
+    elif invalid_kind == "non-shadow-mode":
+        value["mode"] = "operational"
+    elif invalid_kind == "not-ready":
+        value["ready"] = False
+    elif invalid_kind == "blockers":
+        value["blockers"] = ["capacity is not inert"]
+    elif invalid_kind == "nonzero-ceiling":
+        value["manager_ceiling"] = 1
+    elif invalid_kind == "worker-available":
+        value["worker_available"] = True
+    elif invalid_kind == "component-not-ready":
+        value["components"][0]["ready"] = False  # type: ignore[index]
+    elif invalid_kind == "component-extra-field":
+        value["components"][0]["unexpected"] = False  # type: ignore[index]
+    elif invalid_kind == "duplicate-component":
+        value["components"].append(  # type: ignore[union-attr]
+            {"name": "personal-workers", "observed": 0, "ready": True}
+        )
+    elif invalid_kind == "malformed-component":
+        value["components"].append("not-a-component")  # type: ignore[union-attr]
+    elif invalid_kind == "empty-components":
+        value["components"] = []
+    elif invalid_kind == "missing-personal-workers":
+        value["components"] = [value["components"][0]]  # type: ignore[index]
+    elif invalid_kind == "personal-workers-nonzero":
+        value["components"][1]["observed"] = 1  # type: ignore[index]
+
+    sha256 = _write_owner_only(path, value)
+    if invalid_kind == "wrong-digest":
+        sha256 = "f" * 64
+    elif invalid_kind == "malformed-json":
+        path.write_bytes(b"{")
+        sha256 = hashlib.sha256(b"{").hexdigest()
+    elif invalid_kind == "duplicate-key":
+        payload = path.read_bytes().replace(
+            b'"schema":',
+            b'"schema":"loom-personal-dev-control-plane-status-v1","schema":',
+            1,
+        )
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_kind == "noncanonical":
+        payload = path.read_bytes() + b"\n"
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_kind == "unsafe-mode":
+        path.chmod(0o644)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.load_personal_dev_rollback_shadow_status(
+            path,
+            sha256,
+        )
+
+
 def _git(root: Path, *arguments: str) -> str:
     return subprocess.run(
         ["git", *arguments],
@@ -485,14 +613,8 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         "secret-inventory.json",
         json.dumps(secret_inventory, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n",
     )
-    shadow_status = {
-        "blockers": [],
-        "components": [{"name": "personal-workers", "observed": 0}],
-        "manager_ceiling": 0,
-        "mode": "shadow",
-        "ready": True,
-        "worker_available": False,
-    }
+    shadow_status = _rollback_shadow_status_value()
+    shadow_status["release_sha256"] = release_sha256
     status_payload = json.dumps(shadow_status).encode("ascii") + b"\n"
     pre_status = owner_file("pre-status.json", status_payload)
     post_status = owner_file("post-status.json", status_payload)

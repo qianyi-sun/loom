@@ -52,6 +52,13 @@ def _fenced_shell_function(document: str, name: str) -> str:
     return document[start:end]
 
 
+def _shell_command_block(document: str, command: str, output: str) -> str:
+    lines = document.splitlines()
+    start = next(index for index, line in enumerate(lines) if command in line)
+    end = next(index for index, line in enumerate(lines[start:], start=start) if output in line)
+    return textwrap.dedent("\n".join(lines[start : end + 1]))
+
+
 def _sidecar_status(**changes: str) -> bytes:
     fields = {
         "Uid": "1000\t1000\t1000\t1000",
@@ -1177,6 +1184,8 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert 'verify-acceptance-result' in normalized
     assert '--acceptance-result-file "$acceptance_result"' in normalized
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in normalized
+    assert '--rollback-shadow-status-file "$rollback_status"' in normalized
+    assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
 
     for forbidden in (
         "owner_xdg",
@@ -1611,6 +1620,89 @@ def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
     ) == "7c8da975d9eb807ea727d44f57d64afaa9b420724c60015057a2215109247601"
 
 
+@pytest.mark.parametrize(
+    ("relative", "rollback_variable"),
+    [
+        (
+            "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+            "rollback_status",
+        ),
+        (
+            "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+            "rollback_evidence",
+        ),
+    ],
+)
+def test_v2_runbooks_pass_bound_rollback_shadow_to_read_only_verifier(
+    tmp_path: Path,
+    relative: str,
+    rollback_variable: str,
+) -> None:
+    command = _shell_command_block(
+        _read(relative),
+        '"$loom_cli" admin personal-dev-control-plane verify-acceptance-result',
+        '> "$acceptance_verification"',
+    )
+    arguments = tmp_path / "arguments"
+    loom_cli = tmp_path / "loom"
+    loom_cli.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\0\' "$@" > "$ARGUMENTS"\n'
+        "printf '{}\\n'\n",
+        encoding="ascii",
+    )
+    loom_cli.chmod(0o700)
+    plan = tmp_path / "acceptance-plan.json"
+    result_file = tmp_path / "acceptance-result.json"
+    rollback = tmp_path / "rollback-shadow.status.json"
+    verification = tmp_path / "acceptance-verification.json"
+    program = (
+        "set -euo pipefail\n"
+        + f"loom_cli={shlex.quote(str(loom_cli))}\n"
+        + f"acceptance_plan={shlex.quote(str(plan))}\n"
+        + f"acceptance_plan_sha256={'1' * 64}\n"
+        + f"acceptance_result={shlex.quote(str(result_file))}\n"
+        + f"acceptance_result_sha256={'2' * 64}\n"
+        + f"acceptance_manifest_sha256={'3' * 64}\n"
+        + f"acceptance_render_sha256={'3' * 64}\n"
+        + f"{rollback_variable}={shlex.quote(str(rollback))}\n"
+        + f"acceptance_verification={shlex.quote(str(verification))}\n"
+        + command
+        + "\n"
+    )
+    environment = os.environ.copy()
+    environment["ARGUMENTS"] = str(arguments)
+
+    completed = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert arguments.read_bytes().split(b"\0")[:-1] == [
+        b"admin",
+        b"personal-dev-control-plane",
+        b"verify-acceptance-result",
+        b"--acceptance-plan-file",
+        os.fsencode(plan),
+        b"--acceptance-plan-sha256",
+        b"1" * 64,
+        b"--acceptance-result-file",
+        os.fsencode(result_file),
+        b"--acceptance-result-sha256",
+        b"2" * 64,
+        b"--acceptance-manifest-sha256",
+        b"3" * 64,
+        b"--rollback-shadow-status-file",
+        os.fsencode(rollback),
+    ]
+
+
 def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     runbook = _read("docs/runbooks/personal-dev-durable-launch.md")
 
@@ -1671,6 +1763,8 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '--acceptance-result-file "$acceptance_result"' in runbook
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in runbook
     assert '--acceptance-manifest-sha256 "$acceptance_manifest_sha256"' in runbook
+    assert '--rollback-shadow-status-file "$rollback_evidence"' in runbook
+    assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
     assert ".owner_count == 2" in runbook
     assert ".cross_owner_denial_count == 6" in runbook
 

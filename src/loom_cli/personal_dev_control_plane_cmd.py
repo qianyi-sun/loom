@@ -25,6 +25,7 @@ from loom.personal_dev_acceptance_evidence import (
     build_personal_dev_trusted_launcher_profile,
     load_personal_dev_acceptance_result,
     load_personal_dev_backup_restore_evidence,
+    load_personal_dev_rollback_shadow_status,
     validate_personal_dev_policy_evidence,
 )
 from loom.personal_dev_control_plane_config import (
@@ -671,6 +672,12 @@ def _verify_acceptance_result(args: argparse.Namespace) -> int:
             plan=plan,
             expected_acceptance_manifest_sha256=args.acceptance_manifest_sha256,
         )
+        rollback_shadow_status = load_personal_dev_rollback_shadow_status(
+            args.rollback_shadow_status_file,
+            result.status_sha256s.rollback_shadow,
+        )
+        if rollback_shadow_status["release_sha256"] != result.release_sha256:
+            raise ValueError("rollback shadow release binding is invalid")
     except (OSError, TypeError, ValueError):
         sys.stderr.write(_VERIFICATION_ERROR)
         return 2
@@ -682,6 +689,7 @@ def _verify_acceptance_result(args: argparse.Namespace) -> int:
         "cross_owner_denial_count": len(result.cross_owner_denials),
         "owner_count": len(result.owners),
         "release_sha256": result.release_sha256,
+        "rollback_shadow_status_sha256": result.status_sha256s.rollback_shadow,
         "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
         "shadow_manifest_sha256": result.shadow_manifest_sha256,
         "verified": True,
@@ -1083,6 +1091,12 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         "--acceptance-manifest-sha256",
         required=True,
         help="Exact SHA-256 of the acceptance manifest bound by the result.",
+    )
+    verify_acceptance_result.add_argument(
+        "--rollback-shadow-status-file",
+        type=Path,
+        required=True,
+        help="Owner-only canonical rollback-shadow status bound by the result.",
     )
     verify_acceptance_result.set_defaults(handler=_verify_acceptance_result)
 

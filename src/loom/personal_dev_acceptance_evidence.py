@@ -1204,24 +1204,67 @@ def _validate_minio_manifest(value: Any) -> int:
 
 
 def _validate_shadow_status(value: Any) -> None:
+    expected_fields = {
+        "blockers",
+        "components",
+        "input_sha256",
+        "manager_ceiling",
+        "mode",
+        "ready",
+        "release_sha256",
+        "schema",
+        "worker_available",
+    }
     if (
         not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("schema") != "loom-personal-dev-control-plane-status-v1"
         or value.get("mode") != "shadow"
         or value.get("ready") is not True
         or value.get("blockers") != []
+        or not isinstance(value.get("input_sha256"), str)
+        or _DIGEST.fullmatch(value["input_sha256"]) is None
+        or value["input_sha256"] == "0" * 64
+        or not isinstance(value.get("release_sha256"), str)
+        or _DIGEST.fullmatch(value["release_sha256"]) is None
+        or value["release_sha256"] == "0" * 64
         or type(value.get("manager_ceiling")) is not int
         or value.get("manager_ceiling") != 0
         or value.get("worker_available") is not False
         or not isinstance(value.get("components"), list)
-        or not any(
-            isinstance(component, dict)
-            and component.get("name") == "personal-workers"
-            and type(component.get("observed")) is int
-            and component.get("observed") == 0
-            for component in value["components"]
-        )
+        or not value["components"]
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+
+    component_names: list[str] = []
+    personal_worker_count: int | None = None
+    for component in value["components"]:
+        if (
+            not isinstance(component, dict)
+            or set(component) != {"name", "observed", "ready"}
+            or not isinstance(component.get("name"), str)
+            or not component["name"]
+            or type(component.get("observed")) is not int
+            or component["observed"] < 0
+            or component.get("ready") is not True
+        ):
+            raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+        component_names.append(component["name"])
+        if component["name"] == "personal-workers":
+            personal_worker_count = component["observed"]
+    if len(component_names) != len(set(component_names)) or personal_worker_count != 0:
+        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+
+
+def load_personal_dev_rollback_shadow_status(
+    path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Load canonical owner-only evidence for the final inert shadow state."""
+
+    _, value = _load_json(path, expected_sha256)
+    _validate_shadow_status(value)
+    return value
 
 
 def _validate_storage_inventory(
