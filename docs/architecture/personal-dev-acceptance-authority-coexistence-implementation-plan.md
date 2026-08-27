@@ -23,10 +23,12 @@ Git, GitHub protected checks.
 `docs/architecture/personal-dev-acceptance-authority-coexistence-design.md`
 
 **Reconciled protected base:**
-`6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`. This baseline intentionally
-includes #1585's management-ingress NetworkPolicy evidence and #1589's
-sequence-free PostgreSQL backup compatibility. The v2 durable procedure must
-retain the same management-ingress evidence.
+`65dac936a0b0be9898e5cb5ba013811c86f237c6`. This baseline intentionally
+includes #1585's management-ingress NetworkPolicy evidence, #1589's
+sequence-free PostgreSQL backup compatibility, and #1556's Nebius execution
+foundation through schema head `0120`. The v2 durable procedure must retain the
+same management-ingress evidence and remain outside execution/capacity mutation
+authority.
 
 ## Global constraints
 
@@ -120,7 +122,7 @@ retain the same management-ingress evidence.
   concurrent-owner evidence-directory placeholder.
 
   Restore `personal-dev-zero-capacity-acceptance.md` exactly from protected base
-  `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`. Use `apply_patch` for both file
+  `65dac936a0b0be9898e5cb5ba013811c86f237c6`. Use `apply_patch` for both file
   edits. Do not weaken or branch either procedure at runtime.
 
 - [ ] **Step 4: Verify v1 bytes and v2 boundaries**
@@ -219,7 +221,7 @@ retain the same management-ingress evidence.
   byte-identical to the reviewed v2 procedure.
 
   Restore `personal-dev-durable-launch.md` exactly from protected base
-  `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6` using `apply_patch`.
+  `65dac936a0b0be9898e5cb5ba013811c86f237c6` using `apply_patch`.
 
 - [ ] **Step 4: Update indexes, architecture, design, and the original plan**
 
@@ -314,7 +316,7 @@ retain the same management-ingress evidence.
 
 - [ ] **Step 3: Review the complete protected-base diff until clean**
 
-  Review `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6..HEAD` for:
+  Review `65dac936a0b0be9898e5cb5ba013811c86f237c6..HEAD` for:
 
   - any changed byte in either protected sole-owner runbook;
   - a v1-to-v2 reinterpretation or authority-selection flag;

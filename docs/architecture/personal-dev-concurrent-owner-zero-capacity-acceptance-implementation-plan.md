@@ -629,7 +629,7 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
     src scripts tests packages migrations capacity_guard_migrations capacity_migrations
   PYTHONPATH=src:packages/loom-benchmarks:. /home/hongjian/loom/.venv/bin/python -m mypy src
   PYTHONPATH=src:packages/loom-benchmarks:. /home/hongjian/loom/.venv/bin/python -m loom_cli config codegen --check
-  /home/hongjian/loom/.venv/bin/python -m pip check
+  uv pip check --python /home/hongjian/loom/.venv/bin/python
   ```
 
 - [ ] **Step 3: Review until one complete clean pass**

@@ -117,7 +117,7 @@ schema it permits.
 Repository tests must prove:
 
 1. Both existing sole-owner runbooks are byte-identical to protected base
-   `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`.
+   `65dac936a0b0be9898e5cb5ba013811c86f237c6`.
 2. New v2 runbooks contain all two-owner concurrency, cross-owner isolation,
    retained-data recovery, final cleanup, strict result verification, and
    inert-rollback boundaries previously reviewed for #1583.
