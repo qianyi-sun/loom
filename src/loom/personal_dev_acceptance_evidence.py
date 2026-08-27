@@ -716,7 +716,7 @@ def _validate_postgres_state(payload: bytes) -> None:
             not parsed
             or identities != sorted(identities)
             or len(set(identities)) != len(identities)
-            or {record_type for record_type, _, _, _ in parsed} != {"sequence", "table"}
+            or not any(record_type == "table" for record_type, _, _, _ in parsed)
         ):
             raise ValueError
     except (UnicodeError, ValueError):
