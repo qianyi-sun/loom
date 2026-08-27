@@ -61,6 +61,26 @@ def test_staging_activates_both_provisioned_native_builders() -> None:
     assert all(row["env_file"] not in trial_env_files for row in builders.values())
 
 
+def test_staging_gb10_builder_fits_the_slurm_schedulable_node_boundary() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables=_VARIABLES,
+        expected_environment="staging",
+    )
+
+    builder = next(
+        row
+        for row in profile.task_image_builder_policies
+        if row["pool_name"] == "task-image-builder-gb10"
+    )
+
+    # GB10 reserves one of each node's 20 CPUs for Slurm and advertises
+    # CfgTRES=cpu=19,mem=110000M. A larger test-only request is rejected before
+    # the builder autoscaler can reconcile any queued materialization.
+    assert builder["requested_cpus"] == 19
+    assert builder["requested_memory_mib"] == 110_000
+
+
 def test_staging_builder_supervisors_match_native_activation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),

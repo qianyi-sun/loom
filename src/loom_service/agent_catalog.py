@@ -282,12 +282,22 @@ _ADAPTER_REQUIRED_EXECUTABLES: dict[str, tuple[str, ...]] = {
     "mini-swe-agent": ("mini-swe-agent",),
     "opencode": ("opencode",),
     "qwen-cli": ("qwen",),
+    "openhands": ("tmux",),
+    "openhands-sdk": ("tmux",),
 }
 
 
 _ADAPTER_REQUIRED_PYTHON_MODULES: dict[str, tuple[str, ...]] = {
-    "openhands": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
-    "openhands-sdk": ("loom_launcher.openhands_sdk_runner", "openhands.sdk"),
+    "openhands": (
+        "loom_launcher.openhands_sdk_runner",
+        "openhands.sdk",
+        "openhands.tools.terminal",
+    ),
+    "openhands-sdk": (
+        "loom_launcher.openhands_sdk_runner",
+        "openhands.sdk",
+        "openhands.tools.terminal",
+    ),
     "swe-agent": ("sweagent.run.run_single",),
 }
 
@@ -300,8 +310,8 @@ _ADAPTER_REQUIRED_PACKAGES: dict[str, tuple[str, ...]] = {
     "kimi-cli": ("@moonshot-ai/kimi-code",),
     "mini-swe-agent": ("mini-swe-agent",),
     "opencode": ("opencode-ai",),
-    "openhands": ("openhands-sdk",),
-    "openhands-sdk": ("openhands-sdk",),
+    "openhands": ("openhands-sdk", "openhands-tools"),
+    "openhands-sdk": ("openhands-sdk", "openhands-tools"),
     "qwen-cli": ("@qwen-code/qwen-code",),
     "swe-agent": ("git+https://github.com/SWE-agent/SWE-agent",),
 }
