@@ -27,6 +27,7 @@ from loom.personal_dev_acceptance_evidence import (
     load_personal_dev_backup_restore_evidence,
     load_personal_dev_rollback_shadow_status,
     validate_personal_dev_policy_evidence,
+    validate_personal_dev_rollback_shadow_manifest,
 )
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
@@ -676,6 +677,12 @@ def _verify_acceptance_result(args: argparse.Namespace) -> int:
             args.rollback_shadow_status_file,
             result.status_sha256s.rollback_shadow,
         )
+        validate_personal_dev_rollback_shadow_manifest(
+            args.rollback_shadow_manifest_file,
+            result.shadow_manifest_sha256,
+            expected_input_sha256=rollback_shadow_status["input_sha256"],
+            expected_release_sha256=result.release_sha256,
+        )
         if rollback_shadow_status["release_sha256"] != result.release_sha256:
             raise ValueError("rollback shadow release binding is invalid")
     except (OSError, TypeError, ValueError):
@@ -1091,6 +1098,12 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         "--acceptance-manifest-sha256",
         required=True,
         help="Exact SHA-256 of the acceptance manifest bound by the result.",
+    )
+    verify_acceptance_result.add_argument(
+        "--rollback-shadow-manifest-file",
+        type=Path,
+        required=True,
+        help="Owner-only exact rollback shadow manifest bound by the result.",
     )
     verify_acceptance_result.add_argument(
         "--rollback-shadow-status-file",

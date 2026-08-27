@@ -343,13 +343,17 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
     --acceptance-plan-file PATH --acceptance-plan-sha256 DIGEST \
     --acceptance-result-file PATH --acceptance-result-sha256 DIGEST \
     --acceptance-manifest-sha256 DIGEST \
+    --rollback-shadow-manifest-file PATH \
     --rollback-shadow-status-file PATH
   ```
 
-  It requires the result-bound, owner-only canonical rollback status with the
-  exact ordered shadow component inventory, positive shared resource counts,
-  one manager, one shared namespace, one runtime class, and zero personal
-  workers. It emits one canonical record with schema,
+  It requires the result-bound owner-only exact rollback manifest and canonical
+  rollback status. The manifest digest must equal the result, and every
+  top-level resource must bind the status render-input digest and result release
+  through its render annotations. The status has the exact ordered shadow
+  component inventory, positive shared resource counts, one manager, one shared
+  namespace, one runtime class, and zero personal workers. It emits one
+  canonical record with schema,
   plan/result/manifest/release/shadow/rollback-status digests, owner count `2`,
   denial count `6`, and `verified:true`.
 
@@ -366,9 +370,11 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
 
   Assert a valid v2 plan/result emits one canonical stdout record and no stderr.
   Assert partial arguments, unsafe files, v1 plans, wrong SHA-256, wrong
-  acceptance manifest, or semantically invalid result exit 2 before constructing
-  any Kubernetes runner or subprocess. Assert the command parser has no apply,
-  activate, kubeconfig, database, Secret, Slurm, or capacity mutation option.
+  acceptance manifest, wrong rollback-manifest bytes, fully re-digested
+  rollback-status input drift, or semantically invalid result exit 2 before
+  constructing any Kubernetes runner or subprocess. Assert the command parser
+  has no apply, activate, kubeconfig, database, Secret, Slurm, or capacity
+  mutation option.
 
   Add service-command tests proving existing personal stdout is unchanged when
   `--quiet` is absent, quiet success and denied server responses write no
@@ -548,14 +554,16 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   GET. After redeploy require the same subject ID and a different incarnation.
   Build selected snapshots with explicit jq object projections, construct the
   canonical v2 result with `jq -cS`, apply and verify the exact inert shadow, then run
-  `verify-acceptance-result` against the final result digest. A verification
+  `verify-acceptance-result` against the final result digest, the exact retained
+  shadow manifest, and its bound status. A verification
   failure leaves the system inert and blocks durable launch.
 
 - [ ] **Step 5: Update durable/architecture docs and validate extracted shell**
 
   State that the v1 single-owner record retains the #1280 authority but final
   multi-person launch requires v2. Create the multi-owner durable runbook to
-  retain the v2 plan/result and call the verifier before render. Route both
+  retain the v2 plan/result, exact rollback manifest, and rollback status and
+  call the verifier before render. Route both
   architecture documents to all four explicit paths. Extract every fenced Bash
   block from the two new v2 runbooks and run `bash -n` on each non-illustrative
   block. Keep all task/worker/Slurm/capacity mutation strings absent except

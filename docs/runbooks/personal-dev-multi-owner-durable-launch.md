@@ -88,6 +88,7 @@ acceptance_plan_sha256="<reviewed-v2-acceptance-plan-sha256>"
 acceptance_result="<absolute-owner-only-acceptance-result-v2.json>"
 acceptance_result_sha256="<reviewed-v2-acceptance-result-sha256>"
 acceptance_manifest_sha256="<reviewed-acceptance-manifest-sha256>"
+acceptance_rollback_manifest="<absolute-owner-only-acceptance-rollback-shadow-manifest>"
 rollback_evidence="<absolute-owner-only-acceptance-shadow-rollback-evidence>"
 backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
 trusted_launcher_profile="<absolute-owner-only-source-derived-trusted-launcher-profile>"
@@ -205,6 +206,7 @@ for path in \
   "$operational_plan" \
   "$acceptance_plan" \
   "$acceptance_result" \
+  "$acceptance_rollback_manifest" \
   "$rollback_evidence" \
   "$backup_restore_evidence" \
   "$trusted_launcher_profile" \
@@ -219,6 +221,13 @@ test "$(sha256sum "$acceptance_plan" | awk '{print $1}')" = "$acceptance_plan_sh
 test "$(sha256sum "$acceptance_result" | awk '{print $1}')" = "$acceptance_result_sha256"
 test "$acceptance_result_sha256" = \
   "$(jq -r .approval.acceptance_result_sha256 "$operational_plan")"
+acceptance_rollback_manifest_sha256="$(sha256sum "$acceptance_rollback_manifest" | awk '{print $1}')"
+test "$acceptance_rollback_manifest_sha256" = \
+  "$(jq -r .release.shadow_manifest_sha256 "$acceptance_plan")"
+test "$acceptance_rollback_manifest_sha256" = \
+  "$(jq -r .shadow_manifest_sha256 "$acceptance_result")"
+test "$acceptance_rollback_manifest_sha256" = \
+  "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
 rollback_shadow_status_sha256="$(sha256sum "$rollback_evidence" | awk '{print $1}')"
 test "$rollback_shadow_status_sha256" = \
   "$(jq -r .approval.rollback_evidence_sha256 "$operational_plan")"
@@ -260,7 +269,10 @@ strict read-only verifier before any operational render or apply. The
 acceptance runbook's last apply and status must prove the byte-reviewed shadow,
 not an expired or still-active acceptance manifest. The verifier independently
 binds every denial digest to the canonical target GET, PUT, or DELETE HTTP 404
-receipt; nonempty arbitrary stderr is not acceptance evidence.
+receipt; nonempty arbitrary stderr is not acceptance evidence. It also binds
+the retained exact rollback-manifest bytes to the result and requires every
+top-level rendered resource's render-input and trusted-release annotations to
+match the observed rollback status and accepted release.
 
 ```bash
 test "$(jq -r .schema "$acceptance_result")" = \
@@ -275,6 +287,7 @@ test "$(jq -r .shadow_manifest_sha256 "$acceptance_result")" = \
   --acceptance-result-file "$acceptance_result" \
   --acceptance-result-sha256 "$acceptance_result_sha256" \
   --acceptance-manifest-sha256 "$acceptance_manifest_sha256" \
+  --rollback-shadow-manifest-file "$acceptance_rollback_manifest" \
   --rollback-shadow-status-file "$rollback_evidence" \
   > "$acceptance_verification"
 chmod 0600 "$acceptance_verification"

@@ -1184,6 +1184,7 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert 'verify-acceptance-result' in normalized
     assert '--acceptance-result-file "$acceptance_result"' in normalized
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in normalized
+    assert '--rollback-shadow-manifest-file "$shadow_render"' in normalized
     assert '--rollback-shadow-status-file "$rollback_status"' in normalized
     assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
 
@@ -1621,14 +1622,16 @@ def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
 
 
 @pytest.mark.parametrize(
-    ("relative", "rollback_variable"),
+    ("relative", "rollback_manifest_variable", "rollback_status_variable"),
     [
         (
             "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+            "shadow_render",
             "rollback_status",
         ),
         (
             "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+            "acceptance_rollback_manifest",
             "rollback_evidence",
         ),
     ],
@@ -1636,7 +1639,8 @@ def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
 def test_v2_runbooks_pass_bound_rollback_shadow_to_read_only_verifier(
     tmp_path: Path,
     relative: str,
-    rollback_variable: str,
+    rollback_manifest_variable: str,
+    rollback_status_variable: str,
 ) -> None:
     command = _shell_command_block(
         _read(relative),
@@ -1655,6 +1659,7 @@ def test_v2_runbooks_pass_bound_rollback_shadow_to_read_only_verifier(
     loom_cli.chmod(0o700)
     plan = tmp_path / "acceptance-plan.json"
     result_file = tmp_path / "acceptance-result.json"
+    rollback_manifest = tmp_path / "rollback-shadow.yaml"
     rollback = tmp_path / "rollback-shadow.status.json"
     verification = tmp_path / "acceptance-verification.json"
     program = (
@@ -1666,7 +1671,8 @@ def test_v2_runbooks_pass_bound_rollback_shadow_to_read_only_verifier(
         + f"acceptance_result_sha256={'2' * 64}\n"
         + f"acceptance_manifest_sha256={'3' * 64}\n"
         + f"acceptance_render_sha256={'3' * 64}\n"
-        + f"{rollback_variable}={shlex.quote(str(rollback))}\n"
+        + f"{rollback_manifest_variable}={shlex.quote(str(rollback_manifest))}\n"
+        + f"{rollback_status_variable}={shlex.quote(str(rollback))}\n"
         + f"acceptance_verification={shlex.quote(str(verification))}\n"
         + command
         + "\n"
@@ -1698,6 +1704,8 @@ def test_v2_runbooks_pass_bound_rollback_shadow_to_read_only_verifier(
         b"2" * 64,
         b"--acceptance-manifest-sha256",
         b"3" * 64,
+        b"--rollback-shadow-manifest-file",
+        os.fsencode(rollback_manifest),
         b"--rollback-shadow-status-file",
         os.fsencode(rollback),
     ]
@@ -1761,6 +1769,10 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert "personal-dev-concurrent-owner-zero-capacity-acceptance.md" in runbook
     assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
     assert 'acceptance_result="<absolute-owner-only-acceptance-result-v2.json>"' in runbook
+    assert (
+        'acceptance_rollback_manifest="<absolute-owner-only-acceptance-rollback-shadow-manifest>"'
+        in runbook
+    )
     verify = runbook.index("verify-acceptance-result")
     render = runbook.index(" render-operational ")
     assert verify < render
@@ -1769,6 +1781,7 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '--acceptance-result-file "$acceptance_result"' in runbook
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in runbook
     assert '--acceptance-manifest-sha256 "$acceptance_manifest_sha256"' in runbook
+    assert '--rollback-shadow-manifest-file "$acceptance_rollback_manifest"' in runbook
     assert '--rollback-shadow-status-file "$rollback_evidence"' in runbook
     assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
     assert ".owner_count == 2" in runbook

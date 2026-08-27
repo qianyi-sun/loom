@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom.dev_instance import derive_identity
@@ -1271,6 +1272,62 @@ def _validate_shadow_status(value: Any) -> None:
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):  # type: ignore[misc]
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                if key in mapping:
+                    raise ValueError("duplicate YAML mapping key")
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            except TypeError:
+                raise ValueError("unhashable YAML mapping key") from None
+        return mapping
+
+
+def validate_personal_dev_rollback_shadow_manifest(
+    path: Path,
+    expected_sha256: str,
+    *,
+    expected_input_sha256: str,
+    expected_release_sha256: str,
+) -> None:
+    """Bind one exact shadow manifest to its observed render and release digests."""
+
+    try:
+        _validated_digest(expected_sha256)
+        _validated_digest(expected_input_sha256)
+        _validated_digest(expected_release_sha256)
+        payload = _read_owner_only(path)
+        if not hmac.compare_digest(
+            hashlib.sha256(payload).hexdigest(),
+            expected_sha256,
+        ):
+            raise ValueError
+        documents = list(yaml.load_all(payload, Loader=_UniqueKeySafeLoader))
+        if not documents:
+            raise ValueError
+        for document in documents:
+            if not isinstance(document, dict):
+                raise ValueError
+            metadata = document.get("metadata")
+            annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+            if (
+                not isinstance(annotations, dict)
+                or annotations.get("loom.dev/render-input-sha256")
+                != expected_input_sha256
+                or annotations.get("loom.dev/trusted-release-sha256")
+                != expected_release_sha256
+            ):
+                raise ValueError
+    except (OSError, RecursionError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+
+
 def load_personal_dev_rollback_shadow_status(
     path: Path,
     expected_sha256: str,
@@ -1480,4 +1537,5 @@ __all__ = [
     "load_personal_dev_acceptance_result",
     "load_personal_dev_backup_restore_evidence",
     "validate_personal_dev_policy_evidence",
+    "validate_personal_dev_rollback_shadow_manifest",
 ]

@@ -66,6 +66,111 @@ def _rollback_shadow_status_value() -> dict[str, object]:
     }
 
 
+def _rollback_shadow_manifest_payload(
+    *,
+    input_sha256: str,
+    release_sha256: str,
+) -> bytes:
+    return (
+        "apiVersion: v1\n"
+        "kind: Namespace\n"
+        "metadata:\n"
+        "  annotations:\n"
+        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
+        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        "  name: loom-dev\n"
+        "---\n"
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        "  annotations:\n"
+        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
+        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        "  name: loom-personal-dev-management\n"
+        "  namespace: loom-dev\n"
+    ).encode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("expected_input_sha256", "expected_release_sha256"),
+    [
+        ("3" * 64, "2" * 64),
+        ("1" * 64, "3" * 64),
+    ],
+    ids=["status-input-drift", "release-drift"],
+)
+def test_rollback_shadow_manifest_rejects_annotation_binding_drift(
+    tmp_path: Path,
+    expected_input_sha256: str,
+    expected_release_sha256: str,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+            path,
+            hashlib.sha256(payload).hexdigest(),
+            expected_input_sha256=expected_input_sha256,
+            expected_release_sha256=expected_release_sha256,
+        )
+
+
+def test_rollback_shadow_manifest_rejects_duplicate_yaml_bindings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    valid_binding = (
+        '    loom.dev/render-input-sha256: "' + "1" * 64 + '"\n'
+    ).encode("ascii")
+    duplicate_bindings = (
+        '    loom.dev/render-input-sha256: "'
+        + "3" * 64
+        + '"\n    loom.dev/render-input-sha256: "'
+        + "1" * 64
+        + '"\n'
+    ).encode("ascii")
+    payload = payload.replace(valid_binding, duplicate_bindings, 1)
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+            path,
+            hashlib.sha256(payload).hexdigest(),
+            expected_input_sha256="1" * 64,
+            expected_release_sha256="2" * 64,
+        )
+
+
+def test_rollback_shadow_manifest_accepts_exact_status_and_release_bindings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+        path,
+        hashlib.sha256(payload).hexdigest(),
+        expected_input_sha256="1" * 64,
+        expected_release_sha256="2" * 64,
+    )
+
+
 def test_rollback_shadow_status_loads_canonical_zero_capacity_evidence(
     tmp_path: Path,
 ) -> None:

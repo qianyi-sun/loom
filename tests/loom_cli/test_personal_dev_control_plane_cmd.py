@@ -42,6 +42,7 @@ from loom_cli.admin_cmd import dispatch
 from tests.unit.test_personal_dev_acceptance_evidence import (
     _result_plan,
     _result_value,
+    _rollback_shadow_manifest_payload,
     _rollback_shadow_status_value,
 )
 
@@ -509,6 +510,7 @@ def _verify_acceptance_result_argv(
     result_path: Path,
     result_sha256: str,
     manifest_sha256: str,
+    rollback_shadow_manifest_path: Path,
     rollback_shadow_status_path: Path,
 ) -> list[str]:
     return [
@@ -524,6 +526,8 @@ def _verify_acceptance_result_argv(
         result_sha256,
         "--acceptance-manifest-sha256",
         manifest_sha256,
+        "--rollback-shadow-manifest-file",
+        str(rollback_shadow_manifest_path),
         "--rollback-shadow-status-file",
         str(rollback_shadow_status_path),
     ]
@@ -547,10 +551,25 @@ def _rewrite_acceptance_result_rollback_digest(
 
 def _acceptance_result_files(
     tmp_path: Path,
-) -> tuple[Path, str, Path, str, Path, str]:
+) -> tuple[Path, str, Path, str, Path, Path, str]:
     plan, _v1_plan = _result_plan(tmp_path)
     plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
+    rollback_input_sha256 = "1" * 64
+    rollback_manifest_path = tmp_path / "rollback-shadow.yaml"
+    rollback_manifest_payload = _rollback_shadow_manifest_payload(
+        input_sha256=rollback_input_sha256,
+        release_sha256=plan.release.trusted_release_sha256,
+    )
+    rollback_manifest_path.write_bytes(rollback_manifest_payload)
+    rollback_manifest_path.chmod(0o600)
+    plan_value = plan.canonical_value()
+    plan_value["release"]["shadow_manifest_sha256"] = hashlib.sha256(  # type: ignore[index]
+        rollback_manifest_payload
+    ).hexdigest()
+    plan_sha256 = _write_canonical_owner_only(plan_path, plan_value)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
     rollback_value = _rollback_shadow_status_value()
+    rollback_value["input_sha256"] = rollback_input_sha256
     rollback_value["release_sha256"] = plan.release.trusted_release_sha256
     rollback_path = tmp_path / "rollback-shadow.status.json"
     rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
@@ -563,6 +582,7 @@ def _acceptance_result_files(
         plan.sha256,
         result_path,
         result_sha256,
+        rollback_manifest_path,
         rollback_path,
         rollback_sha256,
     )
@@ -577,6 +597,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         plan_sha256,
         result_path,
         result_sha256,
+        rollback_manifest_path,
         rollback_path,
         rollback_sha256,
     ) = _acceptance_result_files(tmp_path)
@@ -589,6 +610,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
             result_path,
             result_sha256,
             "a" * 64,
+            rollback_manifest_path,
             rollback_path,
         )
     )
@@ -619,12 +641,15 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     [
         "unsafe-plan",
         "unsafe-result",
+        "unsafe-rollback-manifest",
         "unsafe-rollback",
         "v1-plan",
         "wrong-plan-sha",
         "wrong-result-sha",
         "wrong-manifest",
+        "wrong-rollback-manifest-digest",
         "wrong-rollback-digest",
+        "rollback-status-input-drift",
         "invalid-rollback",
         "wrong-rollback-release",
         "invalid-result",
@@ -640,6 +665,7 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         plan_sha256,
         result_path,
         result_sha256,
+        rollback_manifest_path,
         rollback_path,
         _rollback_sha256,
     ) = _acceptance_result_files(tmp_path)
@@ -648,6 +674,8 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         plan_path.chmod(0o644)
     elif invalid_input == "unsafe-result":
         result_path.chmod(0o644)
+    elif invalid_input == "unsafe-rollback-manifest":
+        rollback_manifest_path.chmod(0o644)
     elif invalid_input == "unsafe-rollback":
         rollback_path.chmod(0o644)
     elif invalid_input == "v1-plan":
@@ -666,10 +694,20 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         result_sha256 = "b" * 64
     elif invalid_input == "wrong-manifest":
         manifest_sha256 = "b" * 64
+    elif invalid_input == "wrong-rollback-manifest-digest":
+        rollback_manifest_path.write_bytes(rollback_manifest_path.read_bytes() + b"\n")
     elif invalid_input == "wrong-rollback-digest":
         value = json.loads(rollback_path.read_text(encoding="ascii"))
         value["input_sha256"] = "3" * 64
         _write_canonical_owner_only(rollback_path, value)
+    elif invalid_input == "rollback-status-input-drift":
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        value["input_sha256"] = "3" * 64
+        rollback_sha256 = _write_canonical_owner_only(rollback_path, value)
+        result_sha256 = _rewrite_acceptance_result_rollback_digest(
+            result_path,
+            rollback_sha256,
+        )
     elif invalid_input in {"invalid-rollback", "wrong-rollback-release"}:
         value = json.loads(rollback_path.read_text(encoding="ascii"))
         if invalid_input == "invalid-rollback":
@@ -703,6 +741,7 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
                 result_path,
                 result_sha256,
                 manifest_sha256,
+                rollback_manifest_path,
                 rollback_path,
             )
         )
@@ -731,6 +770,7 @@ def test_verify_acceptance_result_parser_has_no_mutation_options() -> None:
     forbidden = {"--apply", "--activate", "--kubeconfig", "--database", "--secret", "--slurm",
                  "--capacity"}
     assert option_names.isdisjoint(forbidden)
+    assert "--rollback-shadow-manifest-file" in option_names
 
 
 def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None:
@@ -745,7 +785,17 @@ def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None
     assert exc.value.code == 2
 
 
-def test_verify_acceptance_result_requires_rollback_shadow_status_file() -> None:
+@pytest.mark.parametrize(
+    ("present_option", "present_value"),
+    [
+        ("--rollback-shadow-manifest-file", "shadow.yaml"),
+        ("--rollback-shadow-status-file", "shadow-status.json"),
+    ],
+)
+def test_verify_acceptance_result_requires_both_rollback_shadow_files(
+    present_option: str,
+    present_value: str,
+) -> None:
     with pytest.raises(SystemExit) as exc:
         dispatch(
             [
@@ -761,6 +811,8 @@ def test_verify_acceptance_result_requires_rollback_shadow_status_file() -> None
                 "2" * 64,
                 "--acceptance-manifest-sha256",
                 "3" * 64,
+                present_option,
+                present_value,
             ]
         )
 

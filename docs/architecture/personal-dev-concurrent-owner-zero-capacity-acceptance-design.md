@@ -188,8 +188,14 @@ plan-bound `status-acceptance` command; `rollback_shadow` is produced by the
 ordinary inert-shadow status command after cleanup and rollback.
 
 The CLI adds a read-only `verify-acceptance-result` command. It loads the exact
-v2 plan and result plus the result-bound rollback-shadow status, validates
-their relationship, and emits one canonical secret-free verification record.
+v2 plan and result, the result-bound owner-only rollback manifest, and the
+result-bound rollback-shadow status. The exact manifest SHA-256 must equal the
+result's shadow-manifest digest. Every top-level rendered resource must bind
+`loom.dev/render-input-sha256` to the status `input_sha256` and
+`loom.dev/trusted-release-sha256` to the result release. This bridges the exact
+reviewed YAML bytes to the observed rollback without conflating the render-input
+and rendered-YAML digest domains. The command emits one canonical secret-free
+verification record.
 The rollback status must contain the canonical ordered shadow components
 (`cluster-resources`, `manager`, `namespaced-resources`, `namespaces`,
 `personal-workers`, and `runtime-class`), with positive resource inventories,

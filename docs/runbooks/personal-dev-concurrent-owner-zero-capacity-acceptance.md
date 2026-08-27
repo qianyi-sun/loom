@@ -915,8 +915,11 @@ shadow status may the canonical result exist. Project every lifecycle snapshot
 to the strict non-secret field set, bind all six already byte-validated
 canonical denial-receipt digests and eight status digests, and verify the final
 digest through the read-only strict v2 loader. The loader independently
-requires the exact operation-specific receipt SHA-256 values. A verification
-failure leaves the system inert and blocks durable launch.
+requires the exact operation-specific receipt SHA-256 values. It hashes the
+exact owner-only rollback manifest and requires every top-level rendered
+resource's render-input and trusted-release annotations to match the observed
+rollback status and accepted result. A verification failure leaves the system
+inert and blocks durable launch.
 
     project_acceptance_snapshot() {
       local source="$1"
@@ -979,6 +982,7 @@ failure leaves the system inert and blocks durable launch.
       --acceptance-result-file "$acceptance_result" \
       --acceptance-result-sha256 "$acceptance_result_sha256" \
       --acceptance-manifest-sha256 "$acceptance_render_sha256" \
+      --rollback-shadow-manifest-file "$shadow_render" \
       --rollback-shadow-status-file "$rollback_status" \
       > "$acceptance_verification"
     chmod 0600 "$acceptance_verification"

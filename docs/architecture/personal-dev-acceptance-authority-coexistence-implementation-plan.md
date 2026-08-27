@@ -181,7 +181,8 @@ retain the same management-ingress evidence.
   `docs/runbooks/personal-dev-multi-owner-durable-launch.md`. It must continue
   proving `verify-acceptance-result` appears before `render-operational`, exact
   owner and denial counts are checked, and the v2 acceptance plan/result and
-  manifest digests are bound.
+  forward-manifest digest, exact rollback-manifest bytes, rollback status, and
+  their digests are bound.
 
   Extend the indexing test to require all four distinct paths in the runbook
   index and architecture:
