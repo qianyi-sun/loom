@@ -66,12 +66,39 @@ def test_installer_creates_only_non_personal_controller_roots() -> None:
     assert "/shared_work2/qianyi" not in source
 
 
-def test_installer_publishes_only_the_forced_controller_broker_authority() -> None:
+def test_installer_couples_acceptance_authority_before_broker_publication() -> None:
     source = _source()
 
     assert "--controller-public-key)" in source
+    assert (
+        'ACCEPTANCE_AUTHORITY_SOURCE="$REPO_ROOT/scripts/ops/'
+        'gb10_slurm_acceptance_authority.py"' in source
+    )
+    assert (
+        'ACCEPTANCE_AUTHORITY_PATH="/usr/local/libexec/'
+        'loom-gb10-slurm-acceptance-authority"' in source
+    )
     assert 'BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"' in source
+    assert 'BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"' in source
+    authority_install = source.index(
+        "install -o root -g root -m 0755 \\\n"
+        '  "$ACCEPTANCE_AUTHORITY_SOURCE" "$ACCEPTANCE_AUTHORITY_PATH"'
+    )
+    authority_readback = source.index(
+        '/usr/bin/python3 "$ACCEPTANCE_AUTHORITY_PATH" --help >/dev/null'
+    )
+    broker_install = source.index('install -o root -g root -m 0755 "$BROKER_SOURCE" "$BROKER_PATH"')
+    assert authority_install < authority_readback < broker_install
+
+
+def test_installer_keeps_one_forced_ssh_and_sudo_authority_surface() -> None:
+    source = _source()
+
+    assert "--controller-public-key)" in source
     assert 'BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"' in source
     assert 'SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"' in source
     assert 'SUDOERS_RULE="qianyi ALL=(root) NOPASSWD:NOSETENV: $BROKER_PATH \\"\\""' in source
     assert '"$BROKER_PATH" --install-authority "$CONTROLLER_PUBLIC_KEY"' in source
+    assert source.count("SUDOERS_RULE=") == 1
+    assert source.count("qianyi ALL=(root)") == 1
+    assert source.count("--install-authority") == 1

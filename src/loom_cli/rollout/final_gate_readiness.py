@@ -1,8 +1,9 @@
 """Single-source final-only rollout gate session.
 
 Final checks keep their protected mutation boundary explicit. Probe/plan never
-mutate; protected convergence, live smoke, and authenticated live browser apply
-operations may report a protected staging mutation under the same rollout epoch.
+mutate; protected apply, live Slurm acceptance, live smoke, and
+authenticated live browser apply operations may report a protected staging
+mutation under the same rollout epoch.
 """
 
 from __future__ import annotations
@@ -20,11 +21,14 @@ FINAL_CHECK_IDS = (
     "final.protected-apply",
     "final.convergence",
     "final.drift",
+    "final.capacity",
     "final.smoke",
     "final.browser",
     "final.summary",
 )
-PROTECTED_MUTATION_CHECK_IDS = frozenset({"final.protected-apply", "final.smoke", "final.browser"})
+PROTECTED_MUTATION_CHECK_IDS = frozenset(
+    {"final.protected-apply", "final.capacity", "final.smoke", "final.browser"}
+)
 FINAL_PREDICATE_IDS = MappingProxyType(
     {
         "final.protected-apply": (
@@ -51,6 +55,7 @@ FINAL_PREDICATE_IDS = MappingProxyType(
             "convergence.gb10-live",
         ),
         "final.drift": ("drift.attestation-live",),
+        "final.capacity": ("capacity.slurm-live",),
         "final.smoke": (
             "smoke.token-authority",
             "smoke.payload-contract",

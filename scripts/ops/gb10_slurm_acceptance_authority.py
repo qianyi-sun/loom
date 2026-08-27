@@ -9,10 +9,12 @@ import json
 import os
 import platform
 import re
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,6 +50,7 @@ TRIAL_CACHE_CANARY_TAG = "transport-canary"
 TRIAL_CACHE_CANARY_DIGEST = (
     "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
 )
+STAGING_PROFILE_RELATIVE_PATH = Path("deploy/environment-state/staging.toml")
 TRIAL_CACHE_CA_RELATIVE_PATH = Path("deploy/worker-pools/trial-cache/staging-ca.crt")
 TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH = Path(
     "scripts/ops/staging_trial_cache_registry_node_probe.py"
@@ -58,10 +61,41 @@ STATE_ROOT = Path("/var/lib/loom-gb10-slurm-authority")
 ARTIFACT_PATH = STATE_ROOT / "current.json"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 JOB_ID_RE = re.compile(r"[1-9][0-9]*")
+# The broker's independent hard timeout is 1200 seconds.  Reserve two minutes
+# outside this authority, and reserve the final minute inside it exclusively
+# for cancelling and verifying the current fixed-name Slurm probe job.
+AUTHORITY_BUDGET_SECONDS = 1080.0
+CLEANUP_RESERVE_SECONDS = 60.0
 
 
 class AcceptanceError(RuntimeError):
     """A secret-safe acceptance failure."""
+
+
+class VerifiedCandidateInputs:
+    """Root-authenticated identities safe to carry into service-owned jobs."""
+
+    __slots__ = ("candidate_tree", "registry_ca_sha256", "registry_probe_sha256")
+
+    def __init__(
+        self,
+        *,
+        candidate_tree: str,
+        registry_probe_sha256: str,
+        registry_ca_sha256: str,
+    ) -> None:
+        self.candidate_tree = candidate_tree
+        self.registry_probe_sha256 = registry_probe_sha256
+        self.registry_ca_sha256 = registry_ca_sha256
+
+
+def _bounded_timeout(timeout: float, deadline: float | None) -> float:
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AcceptanceError("authority overall time budget exhausted safely")
+    return min(timeout, remaining)
 
 
 def _run(
@@ -69,17 +103,30 @@ def _run(
     *,
     timeout: float = 30,
     check: bool = True,
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    effective_timeout = _bounded_timeout(timeout, deadline)
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=timeout,
-        )
+        stdout, stderr = process.communicate(timeout=effective_timeout)
     except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
         raise AcceptanceError(f"command timed out safely: {Path(argv[0]).name}") from exc
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
         raise AcceptanceError(f"command failed safely: {Path(argv[0]).name}")
     return result
@@ -111,12 +158,16 @@ def _one_row(rows: object, *, pool_name: str) -> dict[str, Any]:
     return matches[0]
 
 
-def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
-    profile_path = CANDIDATE_ROOT / candidate_sha / "repo/deploy/environment-state/staging.toml"
+def _parse_contract(
+    *,
+    candidate_sha: str,
+    image_tag: str,
+    profile_path: Path,
+    profile_bytes: bytes,
+) -> dict[str, Any]:
     try:
-        profile_bytes = profile_path.read_bytes()
         raw = tomllib.loads(profile_bytes.decode("utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise AcceptanceError("exact candidate profile is unavailable") from exc
     profile = _replace_release_values(
         raw,
@@ -187,6 +238,36 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
     }
 
 
+def _load_contract(
+    candidate_sha: str,
+    image_tag: str,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
+    runtime_repo = CANDIDATE_ROOT / candidate_sha / "repo"
+    candidate_tree = _git_identity(
+        runtime_repo,
+        uid=0,
+        gid=0,
+        modes=frozenset({0o555, 0o755}),
+        sha=candidate_sha,
+        deadline=deadline,
+    )
+    profile_bytes = _read_trusted_candidate_asset(
+        runtime_repo,
+        candidate_tree=candidate_tree,
+        relative_path=STAGING_PROFILE_RELATIVE_PATH,
+        maximum_bytes=1024 * 1024,
+        deadline=deadline,
+    )
+    return _parse_contract(
+        candidate_sha=candidate_sha,
+        image_tag=image_tag,
+        profile_path=runtime_repo / STAGING_PROFILE_RELATIVE_PATH,
+        profile_bytes=profile_bytes,
+    )
+
+
 def _verify_installed_authority() -> None:
     source = Path(__file__)
     try:
@@ -203,12 +284,12 @@ def _verify_installed_authority() -> None:
         raise AcceptanceError("authority is not the fixed root-installed executable")
 
 
-def _verify_controller() -> None:
+def _verify_controller(*, deadline: float | None = None) -> None:
     if os.geteuid() != 0:
         raise AcceptanceError("GB10 acceptance authority requires root")
     if platform.machine() != "aarch64" or platform.node().split(".", 1)[0] != CONTROLLER_HOST:
         raise AcceptanceError("GB10 acceptance authority is controller-only")
-    config = _run(["/usr/bin/scontrol", "show", "config"]).stdout
+    config = _run(["/usr/bin/scontrol", "show", "config"], deadline=deadline).stdout
     if (
         re.search(rf"^ClusterName\s*=\s*{CLUSTER_NAME}$", config, re.MULTILINE) is None
         or re.search(
@@ -219,14 +300,22 @@ def _verify_controller() -> None:
         is None
     ):
         raise AcceptanceError("local Slurm controller authority does not match GB10")
-    identity = _run(["/usr/bin/id", "-u", SERVICE_USER]).stdout.strip()
-    group = _run(["/usr/bin/id", "-g", SERVICE_USER]).stdout.strip()
-    groups = _run(["/usr/bin/id", "-nG", SERVICE_USER]).stdout.split()
+    identity = _run(["/usr/bin/id", "-u", SERVICE_USER], deadline=deadline).stdout.strip()
+    group = _run(["/usr/bin/id", "-g", SERVICE_USER], deadline=deadline).stdout.strip()
+    groups = _run(["/usr/bin/id", "-nG", SERVICE_USER], deadline=deadline).stdout.split()
     if identity != str(SERVICE_UID) or group != str(SERVICE_GID) or "docker" not in groups:
         raise AcceptanceError("GB10 service identity does not match the fixed contract")
 
 
-def _git_identity(repo: Path, *, uid: int, gid: int, mode: int, sha: str) -> str:
+def _git_identity(
+    repo: Path,
+    *,
+    uid: int,
+    gid: int,
+    modes: frozenset[int],
+    sha: str,
+    deadline: float | None = None,
+) -> str:
     try:
         metadata = repo.lstat()
     except OSError as exc:
@@ -236,42 +325,135 @@ def _git_identity(repo: Path, *, uid: int, gid: int, mode: int, sha: str) -> str
         or not stat.S_ISDIR(metadata.st_mode)
         or metadata.st_uid != uid
         or metadata.st_gid != gid
-        or stat.S_IMODE(metadata.st_mode) != mode
+        or stat.S_IMODE(metadata.st_mode) not in modes
     ):
         raise AcceptanceError("candidate repository metadata is invalid")
     git = ["/usr/bin/git"]
     if uid == SERVICE_UID:
         git = ["runuser", "-u", SERVICE_USER, "--", "/usr/bin/git"]
     git_timeout = 120 if uid == SERVICE_UID else 30
-    head = _run([*git, "-C", str(repo), "rev-parse", "HEAD"], timeout=git_timeout).stdout.strip()
+    head = _run(
+        [*git, "-C", str(repo), "rev-parse", "HEAD"],
+        timeout=git_timeout,
+        deadline=deadline,
+    ).stdout.strip()
     tree = _run(
-        [*git, "-C", str(repo), "rev-parse", "HEAD^{tree}"], timeout=git_timeout
+        [*git, "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        timeout=git_timeout,
+        deadline=deadline,
     ).stdout.strip()
     dirty = _run(
         [*git, "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
         timeout=git_timeout,
+        deadline=deadline,
     ).stdout
     if head != sha or SHA_RE.fullmatch(tree) is None or dirty:
         raise AcceptanceError("candidate repository identity does not match")
     return tree
 
 
-def _verify_inputs(candidate_sha: str, contract: dict[str, Any]) -> str:
+def _read_trusted_candidate_asset(
+    repo: Path,
+    *,
+    candidate_tree: str,
+    relative_path: Path,
+    maximum_bytes: int,
+    deadline: float | None,
+) -> bytes:
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise AcceptanceError("candidate asset path is unsafe")
+    try:
+        repo_metadata = repo.lstat()
+    except OSError as exc:
+        raise AcceptanceError("candidate asset is unavailable") from exc
+    path = repo / relative_path
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AcceptanceError("candidate asset is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != repo_metadata.st_uid
+            or metadata.st_gid != repo_metadata.st_gid
+            or metadata.st_nlink != 1
+            or metadata.st_mode & 0o002
+            or not 0 < metadata.st_size <= maximum_bytes
+        ):
+            raise AcceptanceError("candidate asset metadata is unsafe")
+        payload = bytearray()
+        while len(payload) <= maximum_bytes:
+            chunk = os.read(descriptor, min(65536, maximum_bytes + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) != metadata.st_size:
+            raise AcceptanceError("candidate asset changed during validation")
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise AcceptanceError("candidate asset changed during validation") from exc
+        if (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        ) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ):
+            raise AcceptanceError("candidate asset changed during validation")
+    finally:
+        os.close(descriptor)
+    encoded = bytes(payload)
+    expected_blob = _run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "rev-parse",
+            f"{candidate_tree}:{relative_path.as_posix()}",
+        ],
+        deadline=deadline,
+    ).stdout.strip()
+    actual_blob = hashlib.sha1(
+        f"blob {len(encoded)}\0".encode() + encoded,
+        usedforsecurity=False,
+    ).hexdigest()
+    if SHA_RE.fullmatch(expected_blob) is None or actual_blob != expected_blob:
+        raise AcceptanceError("candidate asset is outside the exact candidate tree")
+    return encoded
+
+
+def _verify_inputs(
+    candidate_sha: str,
+    contract: dict[str, Any],
+    *,
+    deadline: float | None = None,
+) -> VerifiedCandidateInputs:
     runtime_repo = CANDIDATE_ROOT / candidate_sha / "repo"
     candidate_tree = _git_identity(
         runtime_repo,
         uid=0,
         gid=0,
-        mode=0o755,
+        modes=frozenset({0o555, 0o755}),
         sha=candidate_sha,
+        deadline=deadline,
     )
     worker_repo = contract["repo_dir"]
     worker_tree = _git_identity(
         worker_repo,
         uid=SERVICE_UID,
         gid=SERVICE_GID,
-        mode=0o750,
+        modes=frozenset({0o750}),
         sha=candidate_sha,
+        deadline=deadline,
     )
     env_file = contract["env_file"]
     try:
@@ -288,60 +470,261 @@ def _verify_inputs(candidate_sha: str, contract: dict[str, Any]) -> str:
         or worker_tree != candidate_tree
     ):
         raise AcceptanceError("candidate worker inputs are unsafe or divergent")
-    return candidate_tree
+    registry_probe = _read_trusted_candidate_asset(
+        runtime_repo,
+        candidate_tree=candidate_tree,
+        relative_path=TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH,
+        maximum_bytes=256 * 1024,
+        deadline=deadline,
+    )
+    registry_ca = _read_trusted_candidate_asset(
+        runtime_repo,
+        candidate_tree=candidate_tree,
+        relative_path=TRIAL_CACHE_CA_RELATIVE_PATH,
+        maximum_bytes=64 * 1024,
+        deadline=deadline,
+    )
+    registry_ca_sha256 = hashlib.sha256(registry_ca).hexdigest()
+    if registry_ca_sha256 != TRIAL_CACHE_CA_SHA256:
+        raise AcceptanceError("candidate registry CA does not match the fixed contract")
+    return VerifiedCandidateInputs(
+        candidate_tree=candidate_tree,
+        registry_probe_sha256=hashlib.sha256(registry_probe).hexdigest(),
+        registry_ca_sha256=registry_ca_sha256,
+    )
 
 
 _NODE_PROBE = r"""
-import json, os, subprocess, sys
+import hashlib, json, os, re, stat, subprocess, sys, tempfile
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def read_verified(path, expected_sha256, label, maximum_bytes):
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        require(
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid == os.geteuid()
+            and metadata.st_gid == os.getegid()
+            and metadata.st_nlink == 1
+            and not metadata.st_mode & 0o002
+            and 0 < metadata.st_size <= maximum_bytes,
+            f"{label} metadata is unsafe",
+        )
+        payload = bytearray()
+        while len(payload) <= maximum_bytes:
+            chunk = os.read(descriptor, min(65536, maximum_bytes + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        require(len(payload) == metadata.st_size, f"{label} changed during validation")
+        current = os.lstat(path)
+        require(
+            (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+                current.st_ctime_ns,
+            )
+            == (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            ),
+            f"{label} changed during validation",
+        )
+    finally:
+        os.close(descriptor)
+    encoded = bytes(payload)
+    require(
+        hashlib.sha256(encoded).hexdigest() == expected_sha256,
+        f"{label} identity mismatched",
+    )
+    return encoded
+
+
+def snapshot_verified(directory, name, payload):
+    path = os.path.join(directory, name)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o400)
+    try:
+        os.fchmod(descriptor, 0o400)
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return path
+
+
 (
     node,
     repo,
     env_file,
     expected_sha,
+    expected_tree,
     registry_repo,
     ca_sha256,
     canary_digest,
     registry_probe_path,
     registry_ca_path,
+    trusted_probe_sha256,
+    trusted_ca_sha256,
+    service_uid,
+    service_gid,
 ) = sys.argv[1:]
+require(re.fullmatch(r"[0-9a-f]{40}", expected_sha) is not None, "candidate SHA is invalid")
+require(re.fullmatch(r"[0-9a-f]{40}", expected_tree) is not None, "candidate tree is invalid")
+require(
+    re.fullmatch(r"[0-9a-f]{64}", trusted_probe_sha256) is not None,
+    "registry probe identity is invalid",
+)
+require(
+    re.fullmatch(r"[0-9a-f]{64}", trusted_ca_sha256) is not None
+    and trusted_ca_sha256 == ca_sha256,
+    "registry CA identity is invalid",
+)
 actual_node = subprocess.check_output(
     ["/usr/bin/scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]],
     text=True,
+    timeout=15,
 ).strip()
-assert actual_node == node
-assert os.geteuid() == 995 and os.getegid() == 2007
-assert "docker" in subprocess.check_output(["/usr/bin/id", "-nG"], text=True).split()
-assert subprocess.run(
-    ["/usr/bin/systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-).returncode == 0
-assert subprocess.run(
-    ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-).returncode == 0
-assert subprocess.check_output(
-    ["/usr/bin/git", "-C", repo, "rev-parse", "HEAD"], text=True
-).strip() == expected_sha
-assert os.path.isfile(env_file) and os.access(env_file, os.R_OK)
-registry_probe = subprocess.check_output(
-    [
-        "/usr/bin/python3",
-        registry_probe_path,
-        "--env-file",
-        env_file,
-        "--ca-file",
-        registry_ca_path,
-        "--docker-bin",
-        "/usr/bin/docker",
-        "--expected-registry-repo",
-        registry_repo,
-        "--expected-ca-sha256",
-        ca_sha256,
-        "--canary-digest",
-        canary_digest,
-    ],
-    text=True,
+require(actual_node == node, "Slurm allocation node mismatched")
+require(
+    os.geteuid() == int(service_uid) and os.getegid() == int(service_gid),
+    "Slurm allocation service identity mismatched",
 )
+require(
+    "docker" in subprocess.check_output(["/usr/bin/id", "-nG"], text=True, timeout=15).split(),
+    "Slurm allocation Docker group is unavailable",
+)
+require(
+    subprocess.run(
+        ["/usr/bin/systemctl", "is-active", "loom-slurm-job-cgroup-guard.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    ).returncode
+    == 0,
+    "Slurm allocation cgroup guard is unavailable",
+)
+require(
+    subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    ).returncode
+    == 0,
+    "Slurm allocation Docker daemon is unavailable",
+)
+git = ["/usr/bin/git", "-C", repo]
+require(
+    subprocess.check_output([*git, "rev-parse", "HEAD"], text=True, timeout=15).strip()
+    == expected_sha,
+    "worker repository candidate SHA mismatched",
+)
+require(
+    subprocess.check_output([*git, "rev-parse", "HEAD^{tree}"], text=True, timeout=15).strip()
+    == expected_tree,
+    "worker repository candidate tree mismatched",
+)
+require(
+    not subprocess.check_output(
+        [*git, "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+        timeout=15,
+    ),
+    "worker repository is dirty",
+)
+env_metadata = os.lstat(env_file)
+require(
+    stat.S_ISREG(env_metadata.st_mode)
+    and not stat.S_ISLNK(env_metadata.st_mode)
+    and env_metadata.st_uid == os.geteuid()
+    and env_metadata.st_gid == os.getegid()
+    and stat.S_IMODE(env_metadata.st_mode) == 0o600
+    and 0 < env_metadata.st_size <= 1024 * 1024,
+    "worker environment metadata is unsafe",
+)
+probe_bytes = read_verified(
+    registry_probe_path,
+    trusted_probe_sha256,
+    "registry probe",
+    256 * 1024,
+)
+ca_bytes = read_verified(registry_ca_path, trusted_ca_sha256, "registry CA", 64 * 1024)
+with tempfile.TemporaryDirectory(prefix="loom-accept-registry-", dir="/tmp") as snapshot_root:
+    snapshot_metadata = os.lstat(snapshot_root)
+    require(
+        stat.S_ISDIR(snapshot_metadata.st_mode)
+        and snapshot_metadata.st_uid == os.geteuid()
+        and snapshot_metadata.st_gid == os.getegid()
+        and stat.S_IMODE(snapshot_metadata.st_mode) == 0o700,
+        "registry snapshot directory metadata is unsafe",
+    )
+    snapshot_probe = snapshot_verified(snapshot_root, "registry-probe.py", probe_bytes)
+    snapshot_ca = snapshot_verified(snapshot_root, "registry-ca.crt", ca_bytes)
+    snapshot_executor = (
+        "import hashlib,os,stat,sys\n"
+        "path,expected,*arguments=sys.argv[1:]\n"
+        "flags=os.O_RDONLY|getattr(os,'O_CLOEXEC',0)|getattr(os,'O_NOFOLLOW',0)\n"
+        "descriptor=os.open(path,flags)\n"
+        "try:\n"
+        " metadata=os.fstat(descriptor)\n"
+        " if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 "
+        "or not 0 < metadata.st_size <= 262144: raise RuntimeError('snapshot metadata unsafe')\n"
+        " payload=b''\n"
+        " while len(payload) <= 262144:\n"
+        "  chunk=os.read(descriptor,min(65536,262145-len(payload)))\n"
+        "  if not chunk: break\n"
+        "  payload+=chunk\n"
+        "finally:\n"
+        " os.close(descriptor)\n"
+        "if len(payload) != metadata.st_size or hashlib.sha256(payload).hexdigest() != expected: "
+        "raise RuntimeError('snapshot identity mismatched')\n"
+        "sys.argv=[path,*arguments]\n"
+        "exec(compile(payload,path,'exec'),{'__name__':'__main__','__file__':path})\n"
+    )
+    registry_probe = subprocess.check_output(
+        [
+            "/usr/bin/python3",
+            "-c",
+            snapshot_executor,
+            snapshot_probe,
+            trusted_probe_sha256,
+            "--env-file",
+            env_file,
+            "--ca-file",
+            snapshot_ca,
+            "--docker-bin",
+            "/usr/bin/docker",
+            "--expected-registry-repo",
+            registry_repo,
+            "--expected-ca-sha256",
+            ca_sha256,
+            "--canary-digest",
+            canary_digest,
+        ],
+        text=True,
+        timeout=55,
+    )
 print(json.dumps(
     {
         "node": node,
@@ -353,7 +736,7 @@ print(json.dumps(
 """
 
 
-def _cleanup_probe_jobs(job_name: str) -> None:
+def _cleanup_probe_jobs(job_name: str, *, deadline: float | None = None) -> None:
     queue_command = [
         "runuser",
         "-u",
@@ -365,7 +748,7 @@ def _cleanup_probe_jobs(job_name: str) -> None:
         f"--name={job_name}",
         "--format=%A|%j",
     ]
-    queued = _run(queue_command, timeout=10, check=False)
+    queued = _run(queue_command, timeout=10, check=False, deadline=deadline)
     if queued.returncode != 0:
         raise AcceptanceError("could not verify acceptance-probe cleanup")
     job_ids: list[str] = []
@@ -385,8 +768,9 @@ def _cleanup_probe_jobs(job_name: str) -> None:
                 *job_ids,
             ],
             timeout=10,
+            deadline=deadline,
         )
-        readback = _run(queue_command, timeout=10, check=False)
+        readback = _run(queue_command, timeout=10, check=False, deadline=deadline)
         if readback.returncode != 0 or readback.stdout.strip():
             raise AcceptanceError("acceptance-probe cleanup did not converge")
 
@@ -417,17 +801,22 @@ def _node_is_deferred_busy(
 
 def _probe_nodes(
     candidate_sha: str,
+    verified: VerifiedCandidateInputs,
     contract: dict[str, Any],
+    *,
+    work_deadline: float | None = None,
+    cleanup_deadline: float | None = None,
 ) -> tuple[list[str], list[str]]:
     passed: list[str] = []
     deferred_busy: list[str] = []
     for index, node in enumerate(SLURM_NODES, start=1):
-        node_config = _run(["/usr/bin/scontrol", "show", "node", node, "-o"]).stdout
+        node_config = _run(
+            ["/usr/bin/scontrol", "show", "node", node, "-o"],
+            deadline=work_deadline,
+        ).stdout
         partition_pattern = rf"(?:^| )Partitions=[^ ]*\b{re.escape(SLURM_PARTITION)}\b"
         if re.search(partition_pattern, node_config) is None:
-            raise AcceptanceError(
-                f"canonical node is outside {SLURM_PARTITION} partition: {node}"
-            )
+            raise AcceptanceError(f"canonical node is outside {SLURM_PARTITION} partition: {node}")
         job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
         command = [
             "runuser",
@@ -454,16 +843,26 @@ def _probe_nodes(
             str(contract["repo_dir"]),
             str(contract["env_file"]),
             candidate_sha,
+            verified.candidate_tree,
             TRIAL_CACHE_REGISTRY_REPO,
             TRIAL_CACHE_CA_SHA256,
             TRIAL_CACHE_CANARY_DIGEST,
             str(contract["repo_dir"] / TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH),
             str(contract["repo_dir"] / TRIAL_CACHE_CA_RELATIVE_PATH),
+            verified.registry_probe_sha256,
+            verified.registry_ca_sha256,
+            str(SERVICE_UID),
+            str(SERVICE_GID),
         ]
         try:
-            result = _run(command, timeout=60, check=False)
+            result = _run(
+                command,
+                timeout=60,
+                check=False,
+                deadline=work_deadline,
+            )
         finally:
-            _cleanup_probe_jobs(job_name)
+            _cleanup_probe_jobs(job_name, deadline=cleanup_deadline)
         if _node_is_deferred_busy(node_config=node_config, result=result):
             deferred_busy.append(node)
             continue
@@ -504,7 +903,12 @@ def _write_artifact(payload: dict[str, Any]) -> None:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o644)
-        os.write(descriptor, encoded)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise AcceptanceError("authority artifact write failed safely")
+            offset += written
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = -1
@@ -524,23 +928,37 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    started = time.monotonic()
+    cleanup_deadline = started + AUTHORITY_BUDGET_SECONDS
+    work_deadline = cleanup_deadline - CLEANUP_RESERVE_SECONDS
     args = _parser().parse_args()
     if SHA_RE.fullmatch(args.candidate_sha) is None:
         raise AcceptanceError("candidate SHA must be exact")
     if args.image_tag != f"staging-{args.candidate_sha[:7]}":
         raise AcceptanceError("image tag does not match the exact candidate")
     _verify_installed_authority()
-    _verify_controller()
-    contract = _load_contract(args.candidate_sha, args.image_tag)
-    candidate_tree = _verify_inputs(args.candidate_sha, contract)
-    probed_nodes, deferred_busy_nodes = _probe_nodes(args.candidate_sha, contract)
+    _verify_controller(deadline=work_deadline)
+    contract = _load_contract(
+        args.candidate_sha,
+        args.image_tag,
+        deadline=work_deadline,
+    )
+    verified = _verify_inputs(args.candidate_sha, contract, deadline=work_deadline)
+    probed_nodes, deferred_busy_nodes = _probe_nodes(
+        args.candidate_sha,
+        verified,
+        contract,
+        work_deadline=work_deadline,
+        cleanup_deadline=cleanup_deadline,
+    )
+    _bounded_timeout(AUTHORITY_BUDGET_SECONDS, cleanup_deadline)
     generated_at = datetime.now(UTC)
     artifact = {
         "schema_version": 1,
         "kind": "loom_gb10_slurm_acceptance",
         "result": "pass",
         "candidate_sha": args.candidate_sha,
-        "candidate_tree": candidate_tree,
+        "candidate_tree": verified.candidate_tree,
         "profile_sha256": contract["profile_sha256"],
         "cluster_name": CLUSTER_NAME,
         "controller_host": CONTROLLER_HOST,
@@ -565,10 +983,7 @@ def main() -> int:
         "expires_at": (generated_at + timedelta(minutes=30)).isoformat(),
     }
     _write_artifact(artifact)
-    print(
-        f"accepted candidate={args.candidate_sha} "
-        f"probed={len(probed_nodes)} deferred_busy={len(deferred_busy_nodes)}"
-    )
+    print(json.dumps(artifact, sort_keys=True, separators=(",", ":")))
     return 0
 
 

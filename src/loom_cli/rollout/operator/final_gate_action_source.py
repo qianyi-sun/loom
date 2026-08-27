@@ -1,4 +1,4 @@
-"""Resolve exact preflight outputs into six fixed installed final actions."""
+"""Resolve exact preflight outputs into seven fixed installed final actions."""
 
 from __future__ import annotations
 

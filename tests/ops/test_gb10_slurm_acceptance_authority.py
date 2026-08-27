@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -30,6 +34,129 @@ def _load_authority() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _parse_test_contract(
+    authority: ModuleType,
+    profile: Path,
+    candidate_sha: str,
+) -> dict[str, object]:
+    return authority._parse_contract(
+        candidate_sha=candidate_sha,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        profile_path=profile,
+        profile_bytes=profile.read_bytes(),
+    )
+
+
+def _node_probe_registry_payload(authority: ModuleType) -> dict[str, str]:
+    return {
+        "ca_sha256": authority.TRIAL_CACHE_CA_SHA256,
+        "registry_image": (
+            f"{authority.TRIAL_CACHE_REGISTRY_REPO}:{authority.TRIAL_CACHE_CANARY_TAG}"
+        ),
+        "repo_digest": (
+            f"{authority.TRIAL_CACHE_REGISTRY_REPO}@{authority.TRIAL_CACHE_CANARY_DIGEST}"
+        ),
+    }
+
+
+def _trusted_test_registry_probe(authority: ModuleType) -> bytes:
+    encoded = json.dumps(_node_probe_registry_payload(authority), sort_keys=True)
+    return f"print({encoded!r})\n".encode()
+
+
+def _execute_embedded_node_probe(
+    authority: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    service_probe: bytes,
+    service_ca: bytes,
+    trusted_probe: bytes,
+    trusted_ca: bytes,
+    replace_snapshot_before_execution: bool = False,
+) -> list[list[str]]:
+    candidate_sha = "a" * 40
+    candidate_tree = "b" * 40
+    node = "trt-gb10-1"
+    repo = tmp_path / "worker-repo"
+    probe_path = repo / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH
+    ca_path = repo / authority.TRIAL_CACHE_CA_RELATIVE_PATH
+    probe_path.parent.mkdir(parents=True)
+    ca_path.parent.mkdir(parents=True)
+    probe_path.write_bytes(service_probe)
+    ca_path.write_bytes(service_ca)
+    env_file = tmp_path / "worker.env"
+    env_file.write_text(
+        f"LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO={authority.TRIAL_CACHE_REGISTRY_REPO}\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    executed: list[list[str]] = []
+    real_run = subprocess.run
+
+    def check_output(argv: list[str], **kwargs: object) -> str:
+        if argv[:3] == ["/usr/bin/scontrol", "show", "hostnames"]:
+            return node + "\n"
+        if argv == ["/usr/bin/id", "-nG"]:
+            return "loom-rollout docker\n"
+        if argv[-2:] == ["rev-parse", "HEAD"]:
+            return candidate_sha + "\n"
+        if argv[-2:] == ["rev-parse", "HEAD^{tree}"]:
+            return candidate_tree + "\n"
+        if argv[-3:] == ["status", "--porcelain", "--untracked-files=no"]:
+            return ""
+        if argv[:1] == ["/usr/bin/python3"]:
+            executed.append(argv)
+            snapshot_probe = Path(argv[3] if argv[1] == "-c" else argv[1])
+            snapshot_ca = Path(argv[argv.index("--ca-file") + 1])
+            assert snapshot_probe != probe_path
+            assert snapshot_ca != ca_path
+            assert snapshot_probe.read_bytes() == trusted_probe
+            assert snapshot_ca.read_bytes() == trusted_ca
+            if replace_snapshot_before_execution:
+                snapshot_probe.chmod(0o600)
+                snapshot_probe.write_bytes(_trusted_test_registry_probe(authority))
+            result = real_run(
+                argv,
+                capture_output=True,
+                check=True,
+                text=bool(kwargs.get("text")),
+                timeout=kwargs.get("timeout"),
+            )
+            return str(result.stdout)
+        raise AssertionError(argv)
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setenv("SLURM_JOB_NODELIST", node)
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gb10-node-probe",
+            node,
+            str(repo),
+            str(env_file),
+            candidate_sha,
+            candidate_tree,
+            authority.TRIAL_CACHE_REGISTRY_REPO,
+            authority.TRIAL_CACHE_CA_SHA256,
+            authority.TRIAL_CACHE_CANARY_DIGEST,
+            str(probe_path),
+            str(ca_path),
+            hashlib.sha256(trusted_probe).hexdigest(),
+            hashlib.sha256(trusted_ca).hexdigest(),
+            str(os.geteuid()),
+            str(os.getegid()),
+        ],
+    )
+    exec(compile(authority._NODE_PROBE, "<gb10-node-probe>", "exec"), {})
+    return executed
 
 
 def test_authority_compiles_and_installer_parses() -> None:
@@ -158,7 +285,7 @@ active = true
     )
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
-    contract = authority._load_contract(candidate_sha, "staging-aaaaaaa")
+    contract = _parse_test_contract(authority, profile, candidate_sha)
 
     assert contract["repo_dir"] == Path("/shared_work2/loom-staging-rollout/worker-repos/exact")
     assert contract["env_file"] == Path("/shared_work2/loom-staging-rollout/worker-envs/exact.env")
@@ -184,7 +311,7 @@ def test_candidate_contract_rejects_retired_worker_service_endpoint(
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
     with pytest.raises(authority.AcceptanceError, match="prerequisites are incomplete"):
-        authority._load_contract(candidate_sha, "staging-aaaaaaa")
+        _parse_test_contract(authority, profile, candidate_sha)
 
 
 def test_candidate_contract_accepts_exact_manager_witness_bootstrap(
@@ -201,10 +328,32 @@ def test_candidate_contract_accepts_exact_manager_witness_bootstrap(
     )
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
-    contract = authority._load_contract(candidate_sha, "staging-aaaaaaa")
+    contract = _parse_test_contract(authority, profile, candidate_sha)
 
     assert contract["repo_dir"].name == "loom-remote-worker-staging-aaaaaaa"
     assert contract["env_file"].name == "staging-gb10-worker-staging-aaaaaaa.env"
+
+
+def test_candidate_contract_rejects_profile_symlink_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    runtime_repo = tmp_path / candidate_sha / "repo"
+    profile = runtime_repo / "deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    outside_profile = tmp_path / "outside-staging.toml"
+    outside_profile.write_text(
+        Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    profile.symlink_to(outside_profile)
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+    monkeypatch.setattr(authority, "_git_identity", lambda *_args, **_kwargs: "b" * 40)
+
+    with pytest.raises(authority.AcceptanceError, match="candidate asset"):
+        authority._load_contract(candidate_sha, "staging-aaaaaaa")
 
 
 def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bootstrap(
@@ -233,9 +382,7 @@ def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bo
         assert section.count(active) == 1
         section = section.replace(active, "enabled = false\nactive = false", 1)
         payload = prefix + marker + section + next_section + tail
-    prefix, marker, suffix = payload.partition(
-        'name = "task-image-builder-oldlab-staging"'
-    )
+    prefix, marker, suffix = payload.partition('name = "task-image-builder-oldlab-staging"')
     assert marker
     suffix = suffix.replace(
         "enabled = false\nactive = false",
@@ -246,7 +393,7 @@ def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bo
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
     with pytest.raises(authority.AcceptanceError, match="bootstrap supervisors are not inert"):
-        authority._load_contract(candidate_sha, "staging-aaaaaaa")
+        _parse_test_contract(authority, profile, candidate_sha)
 
 
 def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
@@ -265,7 +412,7 @@ def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
     with pytest.raises(authority.AcceptanceError, match="accepted contract"):
-        authority._load_contract(candidate_sha, "staging-aaaaaaa")
+        _parse_test_contract(authority, profile, candidate_sha)
 
 
 def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> None:
@@ -281,6 +428,163 @@ def test_authority_runs_real_service_user_allocations_on_each_exact_node() -> No
     assert 'f"--partition={SLURM_PARTITION}"' in source
     assert "loom-slurm-job-cgroup-guard.service" in source
     assert '"docker", "info"' in source
+
+
+def test_candidate_inputs_accept_hardened_and_legacy_root_runtime_modes_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    runtime_repo = tmp_path / "candidates" / candidate_sha / "repo"
+    trusted_probe = ROOT / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH
+    trusted_ca = ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH
+    runtime_probe = runtime_repo / authority.TRIAL_CACHE_NODE_PROBE_RELATIVE_PATH
+    runtime_ca = runtime_repo / authority.TRIAL_CACHE_CA_RELATIVE_PATH
+    runtime_probe.parent.mkdir(parents=True)
+    runtime_ca.parent.mkdir(parents=True)
+    runtime_probe.write_bytes(trusted_probe.read_bytes())
+    runtime_ca.write_bytes(trusted_ca.read_bytes())
+    worker_repo = tmp_path / "worker-repo"
+    worker_repo.mkdir(mode=0o750)
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("SAFE=value\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path / "candidates")
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+    calls: list[dict[str, object]] = []
+
+    def git_identity(_repo: Path, **kwargs: object) -> str:
+        calls.append(kwargs)
+        return "b" * 40
+
+    monkeypatch.setattr(authority, "_git_identity", git_identity)
+
+    def run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        assert deadline is None
+        tree_path = argv[-1].partition(":")[2]
+        payload = (runtime_repo / tree_path).read_bytes()
+        blob = hashlib.sha1(
+            f"blob {len(payload)}\0".encode() + payload,
+            usedforsecurity=False,
+        ).hexdigest()
+        return subprocess.CompletedProcess(argv, 0, stdout=blob + "\n", stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+
+    verified = authority._verify_inputs(
+        candidate_sha,
+        {"repo_dir": worker_repo, "env_file": env_file},
+    )
+    assert verified.candidate_tree == "b" * 40
+    assert verified.registry_probe_sha256 == hashlib.sha256(trusted_probe.read_bytes()).hexdigest()
+    assert verified.registry_ca_sha256 == authority.TRIAL_CACHE_CA_SHA256
+    assert calls == [
+        {
+            "uid": 0,
+            "gid": 0,
+            "modes": frozenset({0o555, 0o755}),
+            "sha": candidate_sha,
+            "deadline": None,
+        },
+        {
+            "uid": os.geteuid(),
+            "gid": os.getegid(),
+            "modes": frozenset({0o750}),
+            "sha": candidate_sha,
+            "deadline": None,
+        },
+    ]
+
+
+def test_node_probe_executes_only_a_verified_job_private_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    trusted_probe = _trusted_test_registry_probe(authority)
+    trusted_ca = (ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes()
+
+    executed = _execute_embedded_node_probe(
+        authority,
+        monkeypatch,
+        tmp_path,
+        service_probe=trusted_probe,
+        service_ca=trusted_ca,
+        trusted_probe=trusted_probe,
+        trusted_ca=trusted_ca,
+    )
+
+    assert len(executed) == 1
+
+
+def test_node_probe_rejects_replaced_probe_that_can_print_expected_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    trusted_probe = _trusted_test_registry_probe(authority)
+    trusted_ca = (ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes()
+
+    with pytest.raises(RuntimeError, match="registry probe identity"):
+        _execute_embedded_node_probe(
+            authority,
+            monkeypatch,
+            tmp_path,
+            service_probe=b"print the expected JSON without pulling\n",
+            service_ca=trusted_ca,
+            trusted_probe=trusted_probe,
+            trusted_ca=trusted_ca,
+        )
+
+
+def test_node_probe_rejects_replaced_ca_that_can_print_expected_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    trusted_probe = _trusted_test_registry_probe(authority)
+    trusted_ca = (ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes()
+
+    with pytest.raises(RuntimeError, match="registry CA identity"):
+        _execute_embedded_node_probe(
+            authority,
+            monkeypatch,
+            tmp_path,
+            service_probe=trusted_probe,
+            service_ca=b"replacement public CA\n",
+            trusted_probe=trusted_probe,
+            trusted_ca=trusted_ca,
+        )
+
+
+def test_node_probe_rechecks_the_job_private_snapshot_at_execution_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    trusted_probe = _trusted_test_registry_probe(authority) + b"# trusted identity\n"
+    trusted_ca = (ROOT / authority.TRIAL_CACHE_CA_RELATIVE_PATH).read_bytes()
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _execute_embedded_node_probe(
+            authority,
+            monkeypatch,
+            tmp_path,
+            service_probe=trusted_probe,
+            service_ca=trusted_ca,
+            trusted_probe=trusted_probe,
+            trusted_ca=trusted_ca,
+            replace_snapshot_before_execution=True,
+        )
 
 
 def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
@@ -309,6 +613,98 @@ def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
     )
 
 
+def test_command_deadline_kills_the_whole_slurm_launcher_process_group(
+    tmp_path: Path,
+) -> None:
+    authority = _load_authority()
+    orphan_marker = tmp_path / "escaped-child"
+    child = (
+        "import pathlib,sys,time; time.sleep(0.3); pathlib.Path(sys.argv[1]).write_text('escaped')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]]); "
+        "time.sleep(5)"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(authority.AcceptanceError, match="timed out safely"):
+        authority._run(
+            [sys.executable, "-c", parent, str(orphan_marker)],
+            timeout=5,
+            deadline=started + 0.05,
+        )
+    assert time.monotonic() - started < 1
+    time.sleep(0.4)
+    assert not orphan_marker.exists()
+
+
+def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    verified = SimpleNamespace(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+    )
+    monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1", "trt-gb10-2"))
+    commands: list[list[str]] = []
+    queue_reads = 0
+
+    def _run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal queue_reads
+        del timeout, check
+        commands.append(argv)
+        if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
+            assert deadline == 10.0
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    "NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE "
+                    "Partitions=gb10,loom-staging "
+                ),
+                stderr="",
+            )
+        if "srun" in argv:
+            assert deadline == 10.0
+            raise authority.AcceptanceError("authority overall time budget exhausted safely")
+        if "/usr/bin/squeue" in argv:
+            assert deadline == 70.0
+            queue_reads += 1
+            job_name = next(item.removeprefix("--name=") for item in argv if "--name=" in item)
+            stdout = f"123|{job_name}\n" if queue_reads == 1 else ""
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        if "/usr/bin/scancel" in argv:
+            assert deadline == 70.0
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(authority, "_run", _run)
+
+    with pytest.raises(authority.AcceptanceError, match="overall time budget"):
+        authority._probe_nodes(
+            candidate_sha,
+            verified,
+            {"repo_dir": Path("/worker/repo"), "env_file": Path("/worker/env")},
+            work_deadline=10.0,
+            cleanup_deadline=70.0,
+        )
+
+    assert sum("srun" in command for command in commands) == 1
+    assert sum("/usr/bin/scancel" in command for command in commands) == 1
+    assert queue_reads == 2
+    assert not any("trt-gb10-2" in command for command in commands)
+
+
 def test_allocation_probe_requires_candidate_registry_pull_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -324,8 +720,9 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
         *,
         timeout: float = 30,
         check: bool = True,
+        deadline: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del timeout, check
+        del timeout, check, deadline
         commands.append(argv)
         if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
             return subprocess.CompletedProcess(
@@ -368,8 +765,14 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
 
     monkeypatch.setattr(authority, "_run", _run)
 
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+    )
     passed, deferred = authority._probe_nodes(
         candidate_sha,
+        verified,
         {"repo_dir": repo, "env_file": env_file},
     )
 
@@ -381,6 +784,8 @@ def test_allocation_probe_requires_candidate_registry_pull_evidence(
     assert authority.TRIAL_CACHE_REGISTRY_REPO in srun
     assert authority.TRIAL_CACHE_CA_SHA256 in srun
     assert authority.TRIAL_CACHE_CANARY_DIGEST in srun
+    assert verified.candidate_tree in srun
+    assert verified.registry_probe_sha256 in srun
     assert "--partition=loom-staging" in srun
 
 
@@ -399,6 +804,103 @@ def test_authority_binds_candidate_profile_repo_env_and_short_expiry() -> None:
     assert "command timed out safely" in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source
+
+
+def test_authority_artifact_writer_retries_short_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "authority-state"
+    artifact_path = state_root / "current.json"
+    monkeypatch.setattr(authority, "STATE_ROOT", state_root)
+    monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
+    real_lstat = Path.lstat
+
+    def trusted_state_root_lstat(path: Path) -> object:
+        metadata = real_lstat(path)
+        if path == state_root:
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    real_write = os.write
+    write_count = 0
+
+    def short_write(descriptor: int, payload: bytes) -> int:
+        nonlocal write_count
+        write_count += 1
+        return real_write(descriptor, payload[: max(1, len(payload) // 2)])
+
+    monkeypatch.setattr(authority.os, "write", short_write)
+    payload = {"kind": "loom_gb10_slurm_acceptance", "result": "pass"}
+
+    authority._write_artifact(payload)
+
+    assert json.loads(artifact_path.read_text(encoding="utf-8")) == payload
+    assert write_count > 1
+
+
+def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    candidate_tree = "b" * 40
+    written: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        authority,
+        "_parser",
+        lambda: SimpleNamespace(
+            parse_args=lambda: SimpleNamespace(
+                candidate_sha=candidate_sha,
+                image_tag="staging-aaaaaaa",
+            )
+        ),
+    )
+    monkeypatch.setattr(authority, "_verify_installed_authority", lambda: None)
+    monkeypatch.setattr(authority, "_verify_controller", lambda *, deadline: None)
+    monkeypatch.setattr(
+        authority,
+        "_load_contract",
+        lambda _sha, _tag, *, deadline: {
+            "profile_sha256": "c" * 64,
+            "repo_dir": Path("/worker/repo"),
+            "env_file": Path("/worker/env"),
+        },
+    )
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree=candidate_tree,
+        registry_probe_sha256="d" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+    )
+    monkeypatch.setattr(
+        authority,
+        "_verify_inputs",
+        lambda _sha, _contract, *, deadline: verified,
+    )
+    monkeypatch.setattr(
+        authority,
+        "_probe_nodes",
+        lambda _sha, _verified, _contract, *, work_deadline, cleanup_deadline: (
+            list(authority.SLURM_NODES),
+            [],
+        ),
+    )
+    monkeypatch.setattr(authority, "_write_artifact", lambda payload: written.append(payload))
+
+    assert authority.main() == 0
+
+    output = capsys.readouterr().out
+    assert output.endswith("\n")
+    emitted = json.loads(output)
+    assert output == json.dumps(emitted, sort_keys=True, separators=(",", ":")) + "\n"
+    assert written == [emitted]
+    assert emitted["candidate_sha"] == candidate_sha
+    assert emitted["candidate_tree"] == candidate_tree
+    assert emitted["profile_sha256"] == "c" * 64
+    assert emitted["nodes"] == list(authority.SLURM_NODES)
 
 
 def test_installer_publishes_only_root_owned_fixed_authority() -> None:

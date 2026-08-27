@@ -23,6 +23,11 @@ from loom_cli.rollout.external_supervisor_readiness import (
     STAGING_GB10_CONTROLLER_EXECUTION_HOST,
     ExternalSupervisorArtifact,
 )
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.gb10_slurm_acceptance import (
+    GB10SlurmAcceptanceEvidence,
+    validate_gb10_slurm_acceptance,
+)
 
 from .protected_external_supervisor_transport import (
     AtomicUserUnitStore,
@@ -248,6 +253,8 @@ def _encode_helper_request(
     plan_digest: str | None = None,
     attestation_digest: str | None = None,
     transition_digest: str | None = None,
+    profile_sha256: str | None = None,
+    nodes: Sequence[str] | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "candidate_sha": _sha(candidate_sha, label="GB10 controller candidate SHA"),
@@ -256,7 +263,17 @@ def _encode_helper_request(
         "schema_version": 1,
     }
     if operation == "observe":
-        if artifact is None or expected is not None:
+        if artifact is None or any(
+            item is not None
+            for item in (
+                expected,
+                plan_digest,
+                attestation_digest,
+                transition_digest,
+                profile_sha256,
+                nodes,
+            )
+        ):
             raise ValueError("GB10 controller observe request is invalid")
         payload.update(
             {
@@ -267,7 +284,13 @@ def _encode_helper_request(
             }
         )
     elif operation == "apply":
-        if artifact is None or expected is None or predecessor_authority is not None:
+        if (
+            artifact is None
+            or expected is None
+            or predecessor_authority is not None
+            or profile_sha256 is not None
+            or nodes is not None
+        ):
             raise ValueError("GB10 controller apply request is invalid")
         payload.update(
             {
@@ -284,6 +307,26 @@ def _encode_helper_request(
                 ),
             }
         )
+    elif operation == "accept_capacity":
+        if (
+            artifact is not None
+            or predecessor_authority is not None
+            or expected is not None
+            or plan_digest is not None
+            or attestation_digest is not None
+            or transition_digest is not None
+            or nodes is None
+        ):
+            raise ValueError("GB10 controller capacity request is invalid")
+        payload.update(
+            {
+                "nodes": list(nodes),
+                "profile_sha256": _digest(
+                    profile_sha256,
+                    label="GB10 controller profile digest",
+                ),
+            }
+        )
     elif operation != "reconcile_compensations" or any(
         item is not None
         for item in (
@@ -293,6 +336,8 @@ def _encode_helper_request(
             plan_digest,
             attestation_digest,
             transition_digest,
+            profile_sha256,
+            nodes,
         )
     ):
         raise ValueError("GB10 controller helper operation is invalid")
@@ -328,10 +373,15 @@ def _decode_helper_response(payload: str, *, operation: str) -> dict[str, object
     expected = (
         {"observation", "operation", "schema_version", "status"}
         if operation == "observe"
-        else {"operation", "schema_version", "status"}
+        else (
+            {"acceptance", "operation", "schema_version", "status"}
+            if operation == "accept_capacity"
+            else {"operation", "schema_version", "status"}
+        )
     )
     if (
         set(value) != expected
+        or type(value.get("schema_version")) is not int
         or value.get("schema_version") != 1
         or value.get("operation") != operation
         or value.get("status") != "ok"
@@ -348,7 +398,7 @@ def _decode_helper_observation(payload: str) -> ExternalSupervisorLiveObservatio
 
 @dataclass(frozen=True, slots=True)
 class FixedGB10ExternalSupervisorTransport:
-    """Invoke only the three typed supervisor operations through one forced key."""
+    """Invoke only four typed controller operations through one forced key."""
 
     candidate_sha: str
     candidate_tree: str
@@ -411,6 +461,37 @@ class FixedGB10ExternalSupervisorTransport:
         _decode_helper_response(
             self._invoke(request),
             operation="reconcile_compensations",
+        )
+
+    def accept_capacity(
+        self,
+        *,
+        profile_sha256: str,
+        nodes: Sequence[str],
+    ) -> GB10SlurmAcceptanceEvidence:
+        expected_nodes = tuple(nodes)
+        if expected_nodes != FULL_GB10_HOSTS:
+            raise ValueError("GB10 controller capacity request is invalid")
+        request = _encode_helper_request(
+            operation="accept_capacity",
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            profile_sha256=profile_sha256,
+            nodes=expected_nodes,
+        )
+        response = _decode_helper_response(
+            self._invoke(request),
+            operation="accept_capacity",
+        )
+        acceptance = response.get("acceptance")
+        if not isinstance(acceptance, dict):
+            raise ValueError("GB10 Slurm acceptance evidence is invalid")
+        return validate_gb10_slurm_acceptance(
+            acceptance,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            profile_sha256=profile_sha256,
+            nodes=expected_nodes,
         )
 
     def _validate_artifact(self, artifact: ExternalSupervisorArtifact) -> None:

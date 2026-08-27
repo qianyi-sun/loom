@@ -2,8 +2,9 @@
 """Root forced-command broker for the GB10 external autoscaler supervisor.
 
 The broker accepts one canonical JSON envelope on stdin.  It verifies or
-publishes the exact root-owned candidate, then drops to the fixed Slurm service
-identity and execs that candidate's typed helper.  It has no command/path
+publishes the exact root-owned candidate, then either drops to the fixed Slurm
+service identity and execs that candidate's typed supervisor helper or invokes
+the fixed root-installed Slurm acceptance authority.  It has no command/path
 arguments and exposes no arbitrary remote-command surface.
 """
 
@@ -25,7 +26,7 @@ import tempfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 CONTROLLER = "gx10-01c7"
 CLUSTER = "trt-gb10"
@@ -38,6 +39,7 @@ REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 SYSTEM_PYTHON = Path("/usr/bin/python3")
 UV_BINARY = Path("/usr/local/bin/uv")
 SCONTROL = Path("/usr/bin/scontrol")
+ACCEPTANCE_AUTHORITY = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
 INSTALLED_BROKER = Path("/usr/local/libexec/loom-gb10-external-supervisor-broker")
 REMOTE_SSH_USER = "qianyi"
 REMOTE_SSH_HOME = Path("/home/qianyi")
@@ -45,10 +47,12 @@ _AUTHORIZED_KEY_MARKER = "loom-gb10-external-supervisor"
 _LOCK_NAME = ".loom-gb10-external-supervisor-broker.lock"
 _HELPER_MODULE = "loom_cli.rollout.operator.protected_gb10_external_supervisor_transport"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_COMMAND_OUTPUT = 1024 * 1024
 _MAX_TREE_ENTRIES = 300_000
 _MAX_SYMLINK_HOPS = 40
+_GB10_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 
 
 class BrokerError(RuntimeError):
@@ -199,9 +203,7 @@ def _canonical_json(value: object) -> bytes:
     )
 
 
-def parse_request_identity(payload: bytes) -> tuple[str, str]:
-    """Validate the outer typed envelope and return its candidate identity."""
-
+def _parse_request(payload: bytes) -> dict[str, object]:
     if not payload or len(payload) > _MAX_REQUEST_BYTES or not payload.endswith(b"\n"):
         raise BrokerError("GB10 external supervisor request bytes are invalid")
 
@@ -232,9 +234,11 @@ def parse_request_identity(payload: bytes) -> tuple[str, str]:
             "transition_digest",
         },
         "reconcile_compensations": common,
+        "accept_capacity": common | {"nodes", "profile_sha256"},
     }
     if (
-        value.get("schema_version") != 1
+        type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
         or type(operation) is not str
         or operation not in expected
         or set(value) != expected[operation]
@@ -249,7 +253,79 @@ def parse_request_identity(payload: bytes) -> tuple[str, str]:
         or _SHA_RE.fullmatch(candidate_tree) is None
     ):
         raise BrokerError("GB10 external supervisor candidate identity is invalid")
-    return candidate_sha, candidate_tree
+    if operation == "accept_capacity" and (
+        value.get("nodes") != list(_GB10_NODES)
+        or type(value.get("profile_sha256")) is not str
+        or _SHA256_RE.fullmatch(value["profile_sha256"]) is None
+    ):
+        raise BrokerError("GB10 capacity request authority is invalid")
+    return value
+
+
+def parse_request_identity(payload: bytes) -> tuple[str, str]:
+    """Validate the outer typed envelope and return its candidate identity."""
+
+    value = _parse_request(payload)
+    return str(value["candidate_sha"]), str(value["candidate_tree"])
+
+
+def accept_capacity(payload: bytes) -> bytes:
+    """Run only the fixed root-installed acceptance authority for a typed request."""
+
+    request = _parse_request(payload)
+    if request.get("operation") != "accept_capacity":
+        raise BrokerError("GB10 capacity operation is invalid")
+    candidate_sha = str(request["candidate_sha"])
+    candidate_tree = str(request["candidate_tree"])
+    profile_sha256 = str(request["profile_sha256"])
+    nodes = cast(list[str], request["nodes"])
+    _safe_executable(
+        ACCEPTANCE_AUTHORITY,
+        owner_uid=0,
+        owner_gid=0,
+        label="GB10 acceptance authority",
+    )
+    result = _run(
+        [
+            str(ACCEPTANCE_AUTHORITY),
+            "--candidate-sha",
+            candidate_sha,
+            "--image-tag",
+            f"staging-{candidate_sha[:7]}",
+        ],
+        timeout=1200,
+    )
+    artifact_bytes = result.stdout.encode()
+    if (
+        not artifact_bytes
+        or len(artifact_bytes) > _MAX_COMMAND_OUTPUT
+        or not artifact_bytes.endswith(b"\n")
+    ):
+        raise BrokerError("GB10 acceptance authority output is invalid")
+    try:
+        artifact = json.loads(artifact_bytes)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 acceptance authority output is invalid") from exc
+    if (
+        not isinstance(artifact, dict)
+        or _canonical_json(artifact) != artifact_bytes
+        or artifact.get("schema_version") != 1
+        or artifact.get("kind") != "loom_gb10_slurm_acceptance"
+        or artifact.get("result") != "pass"
+        or artifact.get("candidate_sha") != candidate_sha
+        or artifact.get("candidate_tree") != candidate_tree
+        or artifact.get("profile_sha256") != profile_sha256
+        or artifact.get("nodes") != nodes
+    ):
+        raise BrokerError("GB10 acceptance authority evidence drifted")
+    return _canonical_json(
+        {
+            "acceptance": artifact,
+            "operation": "accept_capacity",
+            "schema_version": 1,
+            "status": "ok",
+        }
+    )
 
 
 def _safe_directory(path: Path, *, owner_uid: int, owner_gid: int, label: str) -> None:
@@ -1118,8 +1194,13 @@ def main(argv: list[str] | None = None) -> int:
         if arguments:
             raise BrokerError("GB10 external supervisor broker arguments are invalid")
         payload = sys.stdin.buffer.read(_MAX_REQUEST_BYTES + 1)
-        candidate_sha, candidate_tree = parse_request_identity(payload)
+        request = _parse_request(payload)
         _require_host_authority()
+        if request.get("operation") == "accept_capacity":
+            sys.stdout.buffer.write(accept_capacity(payload))
+            return 0
+        candidate_sha = str(request["candidate_sha"])
+        candidate_tree = str(request["candidate_tree"])
         _safe_executable(UV_BINARY, owner_uid=0, owner_gid=0, label="uv")
         _safe_executable(SYSTEM_PYTHON, owner_uid=0, owner_gid=0, label="system Python")
         candidate = ensure_candidate(CANDIDATES_ROOT, candidate_sha, candidate_tree)

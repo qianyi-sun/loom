@@ -168,6 +168,39 @@ def test_attested_final_gate_applies_once_then_verifies_shared_checks() -> None:
     ]
 
 
+def test_attested_final_gate_capacity_failure_blocks_live_smoke() -> None:
+    calls: list[tuple[str, CheckOperation]] = []
+    actions = dict(_actions(calls))
+
+    def capacity(operation: CheckOperation) -> FinalGateResult:
+        calls.append(("final.capacity", operation))
+        return FinalGateResult(
+            check_id="final.capacity",
+            operation=operation,
+            candidate_sha=CANDIDATE,
+            attestation_digest=ATTESTATION,
+            observed_epoch=7,
+            evidence_digest="9" * 64,
+            protected_mutation=operation is CheckOperation.APPLY,
+            blockers={"slurm": "loom-staging-unavailable"},
+        )
+
+    actions["final.capacity"] = capacity
+    authority = AttestedFinalGateAuthority(
+        attestation=_attestation(),
+        actions=actions,
+        candidate_sha=CANDIDATE,
+        mutation_epoch=7,
+        now=NOW,
+    )
+
+    report = authority.execute(now=NOW)
+
+    assert not report.passed
+    assert ("final.capacity", CheckOperation.APPLY) in calls
+    assert all(check_id != "final.smoke" for check_id, _operation in calls)
+
+
 def test_attested_final_gate_replays_component_journal_after_outer_apply_crash() -> None:
     calls: list[tuple[str, CheckOperation]] = []
     authority = AttestedFinalGateAuthority(

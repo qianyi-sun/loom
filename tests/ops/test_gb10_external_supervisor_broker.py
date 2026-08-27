@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transition import (
     _artifact,
 )
 
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
     _encode_helper_request,
 )
@@ -139,6 +143,211 @@ def test_broker_parses_only_canonical_typed_protocol_identity(tmp_path: Path) ->
         broker.parse_request_identity(
             (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n").encode()
         )
+
+    capacity_request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=FULL_GB10_HOSTS,
+    )
+    assert broker.parse_request_identity(capacity_request.encode()) == (
+        artifact.candidate_sha,
+        artifact.candidate_tree,
+    )
+    non_integer_schema = json.loads(capacity_request)
+    non_integer_schema["schema_version"] = True
+    with pytest.raises(broker.BrokerError, match="fields"):
+        broker.parse_request_identity(
+            (json.dumps(non_integer_schema, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        )
+
+
+def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    generated_at = datetime.now(UTC)
+    acceptance = {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "profile_sha256": "c" * 64,
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": list(FULL_GB10_HOSTS),
+        "node_count": 15,
+        "probed_nodes": list(FULL_GB10_HOSTS),
+        "probed_node_count": 15,
+        "deferred_busy_nodes": [],
+        "trial_cache_registry": {
+            "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
+            "canary_digest": "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
+            "repository": "192.168.50.103:5443/loom-trial-cache",
+        },
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=FULL_GB10_HOSTS,
+    ).encode()
+    checked_paths: list[Path] = []
+    calls: list[tuple[list[str], int]] = []
+
+    def safe_executable(path: Path, **_kwargs: object) -> None:
+        checked_paths.append(path)
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, int(kwargs["timeout"])))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps(acceptance, sort_keys=True, separators=(",", ":")) + "\n",
+            "",
+        )
+
+    monkeypatch.setattr(broker, "_safe_executable", safe_executable)
+    monkeypatch.setattr(broker, "_run", run)
+
+    response = json.loads(broker.accept_capacity(request))
+
+    assert checked_paths == [broker.ACCEPTANCE_AUTHORITY]
+    assert calls == [
+        (
+            [
+                str(broker.ACCEPTANCE_AUTHORITY),
+                "--candidate-sha",
+                artifact.candidate_sha,
+                "--image-tag",
+                "staging-aaaaaaa",
+            ],
+            1200,
+        )
+    ]
+    assert response == {
+        "acceptance": acceptance,
+        "operation": "accept_capacity",
+        "schema_version": 1,
+        "status": "ok",
+    }
+
+
+def test_broker_main_dispatches_capacity_without_candidate_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=FULL_GB10_HOSTS,
+    ).encode()
+    response = b'{"operation":"accept_capacity","schema_version":1,"status":"ok"}\n'
+    output = SimpleNamespace(buffer=io.BytesIO())
+    calls: list[bytes] = []
+    candidate_runtime_calls: list[str] = []
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(
+        broker,
+        "_safe_executable",
+        lambda *_args, **_kwargs: candidate_runtime_calls.append("validate toolchain"),
+    )
+    monkeypatch.setattr(
+        broker,
+        "ensure_candidate",
+        lambda *_args, **_kwargs: (
+            candidate_runtime_calls.append("ensure candidate"),
+            Path("/opt/loom-staging-runner/candidates") / artifact.candidate_sha,
+        )[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "accept_capacity",
+        lambda payload: (calls.append(payload), response)[1],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_exec_helper",
+        lambda *_args: pytest.fail("capacity operation reached candidate helper"),
+    )
+
+    assert broker.main([]) == 0
+    assert calls == [request]
+    assert candidate_runtime_calls == []
+    assert output.buffer.getvalue() == response
+
+
+def test_broker_main_dispatches_non_capacity_through_candidate_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="observe",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        artifact=artifact,
+    ).encode()
+    candidate = Path("/opt/loom-staging-runner/candidates") / artifact.candidate_sha
+    checked_paths: list[Path] = []
+    ensured: list[tuple[Path, str, str]] = []
+    executed: list[tuple[Path, bytes]] = []
+
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(
+        broker,
+        "_safe_executable",
+        lambda path, **_kwargs: checked_paths.append(path),
+    )
+    monkeypatch.setattr(
+        broker,
+        "ensure_candidate",
+        lambda root, sha, tree: (ensured.append((root, sha, tree)), candidate)[1],
+    )
+
+    class HelperExecReachedError(RuntimeError):
+        pass
+
+    def exec_helper(candidate_path: Path, payload: bytes) -> None:
+        executed.append((candidate_path, payload))
+        raise HelperExecReachedError
+
+    monkeypatch.setattr(broker, "_exec_helper", exec_helper)
+    monkeypatch.setattr(
+        broker,
+        "accept_capacity",
+        lambda _payload: pytest.fail("non-capacity operation reached acceptance authority"),
+    )
+
+    with pytest.raises(HelperExecReachedError):
+        broker.main([])
+
+    assert checked_paths == [broker.UV_BINARY, broker.SYSTEM_PYTHON]
+    assert ensured == [(broker.CANDIDATES_ROOT, artifact.candidate_sha, artifact.candidate_tree)]
+    assert executed == [(candidate, request)]
 
 
 def test_forced_key_render_is_idempotent_and_preserves_unrelated_authority() -> None:

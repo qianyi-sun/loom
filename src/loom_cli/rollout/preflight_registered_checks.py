@@ -155,6 +155,7 @@ from loom_cli.rollout.systemd_unit_readiness import (
 
 _CLEAR_EXTERNAL_SUPERVISOR_TRANSITION_DIGEST = hashlib.sha256(b"{}").hexdigest()
 EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS = 3600
+_FINAL_CAPACITY_FRESHNESS_TTL_SECONDS = 20 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -3296,7 +3297,8 @@ def build_final_gate_checks(
         "final.protected-apply": ("rehearsal.cleanup", "manifests.field-ownership"),
         "final.convergence": ("final.protected-apply",),
         "final.drift": ("final.convergence",),
-        "final.smoke": ("final.drift", "rehearsal.api-smoke"),
+        "final.capacity": ("final.drift",),
+        "final.smoke": ("final.capacity", "rehearsal.api-smoke"),
         "final.browser": ("final.smoke", "rehearsal.browser"),
         "final.summary": ("final.browser",),
     }
@@ -3304,6 +3306,7 @@ def build_final_gate_checks(
         "final.protected-apply": "final.protected-apply.failed",
         "final.convergence": "final.convergence.failed",
         "final.drift": "final.attestation-drift",
+        "final.capacity": "final.capacity.failed",
         "final.smoke": "final.smoke.failed",
         "final.browser": "final.browser.failed",
         "final.summary": "final.summary.incomplete",
@@ -3320,6 +3323,10 @@ def build_final_gate_checks(
         "final.drift": (
             "The post-apply observation must bind the attestation to the protected live state "
             "after mutation."
+        ),
+        "final.capacity": (
+            "Only the live GB10 Slurm controller can prove that the exact candidate has "
+            "allocatable protected capacity after convergence."
         ),
         "final.smoke": (
             "The protected route and live data path cannot be proven by an isolated rehearsal "
@@ -3396,7 +3403,11 @@ def build_final_gate_checks(
                         EvidenceField("blockers", "string-map"),
                     ),
                     timeout_seconds=3600,
-                    freshness_ttl_seconds=3600,
+                    freshness_ttl_seconds=(
+                        _FINAL_CAPACITY_FRESHNESS_TTL_SECONDS
+                        if check_id == "final.capacity"
+                        else 3600
+                    ),
                     remediation=f"restore the exact attested {check_id} invariant",
                     secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
                     final_only_justification=justifications[check_id],

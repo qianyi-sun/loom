@@ -28,6 +28,11 @@ from loom_cli.cluster_release_manifest import build_release_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGING_GB10_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
+TRIAL_CACHE_REGISTRY = {
+    "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
+    "canary_digest": "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
+    "repository": "192.168.50.103:5443/loom-trial-cache",
+}
 
 
 class _Spec:
@@ -219,9 +224,7 @@ def _external_gb10_workers(*, enabled: bool) -> dict[str, Any]:
             {
                 "pool_name": "gb10",
                 "target_slots": 0,
-                "host_intents": {
-                    f"trt-gb10-{index}": "stopped" for index in range(1, 16)
-                },
+                "host_intents": {f"trt-gb10-{index}": "stopped" for index in range(1, 16)},
             }
         ]
     return workers
@@ -241,9 +244,7 @@ def _valid_gb10_authority(
         "result": "pass",
         "candidate_sha": manifest["release"]["git_sha"],
         "candidate_tree": "c" * 40,
-        "profile_sha256": manifest["external_workers"]["environment_state_file"][
-            "sha256"
-        ],
+        "profile_sha256": manifest["external_workers"]["environment_state_file"]["sha256"],
         "cluster_name": "trt-gb10",
         "controller_host": "gx10-01c7",
         "service_identity": {
@@ -258,6 +259,7 @@ def _valid_gb10_authority(
         "probed_nodes": nodes[1:],
         "probed_node_count": len(nodes) - 1,
         "deferred_busy_nodes": nodes[:1],
+        "trial_cache_registry": dict(TRIAL_CACHE_REGISTRY),
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
     }
@@ -361,6 +363,7 @@ def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None
             "probed_nodes": partition_nodes[1:],
             "probed_node_count": 14,
             "deferred_busy_nodes": ["trt-gb10-1"],
+            "trial_cache_registry": dict(TRIAL_CACHE_REGISTRY),
             "generated_at": generated_at.isoformat(),
             "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
         },
@@ -391,9 +394,7 @@ def test_committed_staging_manifest_carries_partition_authority_into_release_gat
         authority_artifact=_valid_gb10_authority(manifest),
     )
 
-    assert manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] == (
-        STAGING_GB10_NODES
-    )
+    assert manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] == (STAGING_GB10_NODES)
     assert check is not None
     assert check.outcome == "pass"
     assert check.evidence["authority_verified"] is True
@@ -401,9 +402,7 @@ def test_committed_staging_manifest_carries_partition_authority_into_release_gat
 
 def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
     manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
-    manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = [
-        {"node": "trt-gb10-1"}
-    ] * 15
+    manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = [{"node": "trt-gb10-1"}] * 15
 
     check = _external_slurm_acceptance_check(manifest)
 
@@ -430,6 +429,24 @@ def test_release_gate_rejects_non_integer_authority_counts(
     workers["slurm_pools"][0]["allowed_nodes"] = STAGING_GB10_NODES
     artifact = _valid_gb10_authority(manifest)
     artifact[field] = value
+
+    check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
+
+    assert check is not None
+    assert check.outcome == "fail"
+    assert check.evidence["authority_verified"] is False
+
+
+def test_release_gate_rejects_drifted_trial_cache_acceptance() -> None:
+    manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
+    workers = manifest["external_workers"]
+    workers["environment_state_file"] = {"sha256": "b" * 64}
+    workers["slurm_pools"][0]["allowed_nodes"] = STAGING_GB10_NODES
+    artifact = _valid_gb10_authority(manifest)
+    artifact["trial_cache_registry"] = {
+        **TRIAL_CACHE_REGISTRY,
+        "repository": "registry.invalid/forged",
+    }
 
     check = _external_slurm_acceptance_check(manifest, authority_artifact=artifact)
 
@@ -739,9 +756,7 @@ def _external_workers_manifest_section() -> dict[str, Any]:
                 "env_config_version": "staging-abc123",
                 "source_git_commit": "a" * 40,
                 "target_slots": 150,
-                "host_intents": {
-                    f"trt-gb10-{index}": "active" for index in range(1, 16)
-                },
+                "host_intents": {f"trt-gb10-{index}": "active" for index in range(1, 16)},
             },
         ],
     }

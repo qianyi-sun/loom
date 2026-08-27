@@ -18,6 +18,7 @@ _REQUIRED_PREDECESSORS = frozenset(
         "final.protected-apply",
         "final.convergence",
         "final.drift",
+        "final.capacity",
         "final.smoke",
         "final.browser",
     }

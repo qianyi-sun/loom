@@ -20,6 +20,8 @@ UV_VERSION="0.11.26"
 UV_SHA256="befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e"
 UV_ARCHIVE="uv-aarch64-unknown-linux-gnu.tar.gz"
 UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ARCHIVE"
+ACCEPTANCE_AUTHORITY_SOURCE="$REPO_ROOT/scripts/ops/gb10_slurm_acceptance_authority.py"
+ACCEPTANCE_AUTHORITY_PATH="/usr/local/libexec/loom-gb10-slurm-acceptance-authority"
 BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"
 BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"
 SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"
@@ -44,6 +46,8 @@ done
 if [ -z "$CONTROLLER_PUBLIC_KEY" ] \
   || [[ "$CONTROLLER_PUBLIC_KEY" != /* ]] \
   || [ ! -f "$CONTROLLER_PUBLIC_KEY" ] \
+  || [ ! -f "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
+  || [ -L "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
   || [ ! -f "$BROKER_SOURCE" ]; then
   echo "error: controller broker installation input is unavailable" >&2
   exit 2
@@ -90,6 +94,9 @@ install -o root -g root -m 0755 \
   "$temporary_dir/uv-aarch64-unknown-linux-gnu/uv" /usr/local/bin/uv
 
 install -d -o root -g root -m 0755 /usr/local/libexec /etc/sudoers.d
+install -o root -g root -m 0755 \
+  "$ACCEPTANCE_AUTHORITY_SOURCE" "$ACCEPTANCE_AUTHORITY_PATH"
+/usr/bin/python3 "$ACCEPTANCE_AUTHORITY_PATH" --help >/dev/null
 install -o root -g root -m 0755 "$BROKER_SOURCE" "$BROKER_PATH"
 SUDOERS_RULE="qianyi ALL=(root) NOPASSWD:NOSETENV: $BROKER_PATH \"\""
 printf '%s\n' "$SUDOERS_RULE" >"$temporary_dir/loom-gb10-external-supervisor.sudoers"

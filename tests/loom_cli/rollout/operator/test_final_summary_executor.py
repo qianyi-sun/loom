@@ -21,6 +21,7 @@ _CHECKS = (
     "final.protected-apply",
     "final.convergence",
     "final.drift",
+    "final.capacity",
     "final.smoke",
     "final.browser",
 )
@@ -29,7 +30,7 @@ _CHECKS = (
 def _execution(check_id: str, plan, *, candidate_sha: str | None = None) -> CheckExecution:
     operation = (
         CheckOperation.APPLY
-        if check_id in {"final.protected-apply", "final.smoke", "final.browser"}
+        if check_id in {"final.protected-apply", "final.capacity", "final.smoke", "final.browser"}
         else CheckOperation.VERIFY
     )
     evidence = {
