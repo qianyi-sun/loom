@@ -1,0 +1,13 @@
+bucket = "loom-nebius-terraform-state-REPLACE"
+key    = "nebius/production/eu-west1/terraform.tfstate"
+region = "eu-west1"
+
+endpoints = {
+  s3 = "https://storage.eu-west1.nebius.cloud"
+}
+
+use_lockfile                 = true
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true
+skip_metadata_api_check     = true

@@ -1874,6 +1874,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "locked-environments",
         "lint-and-static",
         "runtime-payload",
+        "nebius-iac",
         "tests-root",
         "tests-packages",
     }
