@@ -920,9 +920,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert "python3 scripts/install_trivy.py" in install["run"]
     assert '--architecture "$architecture"' in install["run"]
     assert "sha256sum --check trivy.sha256" in install["run"]
-    assert upload["with"]["name"] == (
-        "trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-    )
+    assert upload["with"]["name"] == "trivy-binaries-run-${{ github.run_id }}"
+    assert upload["with"]["overwrite"] is True
     assert build["needs"] == [
         "plan",
         "image-route",
