@@ -190,6 +190,24 @@ async def _insert_gb10_pending_policy(
     )
 
 
+async def _insert_gb10_requeue_hold_policy(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    job_id: str = "16647",
+) -> None:
+    await _insert_gb10_pending_policy(session, now=now, job_ids=(job_id,))
+    job = (await session.execute(select(SlurmWorkerJob))).scalar_one()
+    job.slurm_cluster_id = "gb10"
+    job.state = "failed"
+    job.slurm_state = "REQUEUE_HOLD"
+    job.pending_reason = "(launch failure limit exceeded requeued held)"
+    job.started_at = now - timedelta(days=6)
+    job.finished_at = now - timedelta(days=6)
+    policy = (await session.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+    policy.min_slots = 1
+
+
 @pytest.fixture(autouse=True)
 async def _cleanup_db(postgres_url: str) -> Iterator[None]:
     yield
@@ -525,6 +543,137 @@ async def test_reconcile_cancels_pending_job_without_staling_foreign_pools(
         assert jobs[0].slurm_state == "CANCELLED"
         assert jobs[0].pending_reason == "cancelled after autoscaler demand returned to zero"
         assert jobs[0].finished_at == now
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_recovers_and_cancels_requeue_hold_before_replacement(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as session:
+            await _insert_gb10_requeue_hold_policy(session, now=now)
+            await session.execute(
+                insert(SlurmWorkerJob).values(
+                    slurm_cluster_id="gb10",
+                    environment="production",
+                    pool_name="gb10",
+                    nodelist="trt-gb10-13",
+                    requested_cpus=2,
+                    requested_memory_mib=11500,
+                    requested_concurrency=1,
+                    candidate_sha="b" * 40,
+                    job_id="26647",
+                    slurm_state="REQUEUE_HOLD",
+                    state="failed",
+                    redacted_env={},
+                    submitted_at=now - timedelta(days=6),
+                )
+            )
+            await session.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [
+            [
+                SlurmWorkerJobObservation(
+                    job_id="16647",
+                    slurm_state="REQUEUE_HOLD",
+                    pending_reason="(launch failure limit exceeded requeued held)",
+                    observed_at=now,
+                )
+            ],
+            [
+                SlurmWorkerJobObservation(
+                    job_id="16647",
+                    slurm_state="CANCELLED",
+                    pending_reason="Cancelled",
+                    observed_at=now,
+                )
+            ],
+        ]
+        async with session_factory() as session:
+            results = await reconcile_worker_pool_autoscaler_once(
+                session,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
+            )
+            await session.commit()
+
+        assert len(results) == 1
+        assert results[0].action == "cancel_pending"
+        assert results[0].reason == "unrecoverable_slurm_state"
+        assert results[0].desired_slots == 1
+        assert runner.queried_job_ids == [("16647",), ("16647",)]
+        assert runner.cancelled_job_ids == ["16647"]
+        assert runner.pending_cancelled_job_ids == []
+        assert runner.submitted_nodes == []
+
+        async with session_factory() as session:
+            policy = (await session.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            jobs = (
+                (
+                    await session.execute(
+                        select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        job, foreign_job = jobs
+        assert policy.last_decision == "cancel_pending"
+        assert policy.last_decision_reason == "unrecoverable_slurm_state"
+        assert job.state == "cancelled"
+        assert job.slurm_state == "CANCELLED"
+        assert job.pending_reason == "cancelled after unrecoverable Slurm state"
+        assert job.finished_at == now
+        assert foreign_job.job_id == "26647"
+        assert foreign_job.state == "failed"
+        assert foreign_job.slurm_state == "REQUEUE_HOLD"
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_blocks_replacement_when_requeue_hold_refresh_fails(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as session:
+            await _insert_gb10_requeue_hold_policy(session, now=now)
+            await session.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [RuntimeError("squeue unavailable")]
+        async with session_factory() as session:
+            results = await reconcile_worker_pool_autoscaler_once(
+                session,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
+            )
+            await session.commit()
+
+        assert len(results) == 1
+        assert results[0].action == "blocked"
+        assert results[0].reason == "slurm_job_refresh_failed"
+        assert results[0].blocked_reason == "slurm_job_refresh_failed"
+        assert runner.queried_job_ids == [("16647",)]
+        assert runner.cancelled_job_ids == []
+        assert runner.pending_cancelled_job_ids == []
+        assert runner.submitted_nodes == []
+
+        async with session_factory() as session:
+            job = (await session.execute(select(SlurmWorkerJob))).scalar_one()
+        assert job.state == "failed"
+        assert job.slurm_state == "REQUEUE_HOLD"
     finally:
         await engine.dispose()
 

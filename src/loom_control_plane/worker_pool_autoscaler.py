@@ -56,6 +56,8 @@ from loom_control_plane.global_execution_fence import (
 from loom_control_plane.shared_capacity_broker import AutoscalerGrantHandoff
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
+    UNRECOVERABLE_SLURM_STATES,
+    is_unrecoverable_slurm_state,
     normalize_slurm_state,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
@@ -102,6 +104,7 @@ class AutoscalerObservation:
     release_drift_pending_job_ids: tuple[str, ...] = ()
     release_drift_worker_ids_to_drain: tuple[str, ...] = ()
     release_drift_worker_ids_to_release: tuple[str, ...] = ()
+    unrecoverable_job_ids: tuple[str, ...] = ()
 
     @property
     def claimable_free_slots(self) -> int:
@@ -137,6 +140,8 @@ class SlurmScaleUpActuatorResult:
 class SlurmJobRegistryRefreshResult:
     error: str | None = None
     freshly_pending_job_ids: tuple[str, ...] = ()
+    freshly_unrecoverable_job_ids: tuple[str, ...] = ()
+    unrecoverable_job_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -377,6 +382,16 @@ def compute_autoscaler_decision(
             blocked_reason="release_state_drift",
             idle_since_at=None,
             error_message=f"release-state drift in Slurm job(s): {job_ids}",
+        )
+
+    if observation.unrecoverable_job_ids:
+        return _base_decision(
+            action="cancel_pending",
+            reason="unrecoverable_slurm_state",
+            policy=policy,
+            observation=observation,
+            desired_slots=max(policy.min_slots, observation.active_slots),
+            idle_since_at=None,
         )
 
     # A zero global-dev grant is an active revocation, not merely a scale-up
@@ -1395,19 +1410,35 @@ async def _refresh_slurm_job_registry(
 ) -> SlurmJobRegistryRefreshResult:
     if row.actuator != "slurm":
         return SlurmJobRegistryRefreshResult()
+    registry_rows = (
+        await session.execute(
+            select(
+                SlurmWorkerJob.job_id,
+                SlurmWorkerJob.slurm_state,
+            ).where(
+                SlurmWorkerJob.environment == row.environment,
+                SlurmWorkerJob.pool_name == row.pool_name,
+                or_(
+                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                    SlurmWorkerJob.slurm_state.in_(
+                        UNRECOVERABLE_SLURM_STATES,
+                    ),
+                ),
+                SlurmWorkerJob.job_id.is_not(None),
+            )
+        )
+    ).all()
     job_ids = tuple(
         str(job_id)
-        for (job_id,) in (
-            await session.execute(
-                select(SlurmWorkerJob.job_id).where(
-                    SlurmWorkerJob.environment == row.environment,
-                    SlurmWorkerJob.pool_name == row.pool_name,
-                    SlurmWorkerJob.state.in_(ACTIVE_STATES),
-                    SlurmWorkerJob.job_id.is_not(None),
-                ),
-            )
-        ).all()
+        for job_id, _slurm_state in registry_rows
         if job_id is not None
+    )
+    known_unrecoverable_job_ids = tuple(
+        sorted(
+            str(job_id)
+            for job_id, slurm_state in registry_rows
+            if job_id is not None and is_unrecoverable_slurm_state(slurm_state)
+        )
     )
     if not job_ids:
         return SlurmJobRegistryRefreshResult()
@@ -1433,7 +1464,10 @@ async def _refresh_slurm_job_registry(
                 "err": str(exc),
             },
         )
-        return SlurmJobRegistryRefreshResult(error=str(exc))
+        return SlurmJobRegistryRefreshResult(
+            error=str(exc),
+            unrecoverable_job_ids=known_unrecoverable_job_ids,
+        )
     requested_job_ids = set(job_ids)
     freshly_pending_job_ids = tuple(
         sorted(
@@ -1445,8 +1479,20 @@ async def _refresh_slurm_job_registry(
             }
         )
     )
+    freshly_unrecoverable_job_ids = tuple(
+        sorted(
+            {
+                observation.job_id
+                for observation in observations
+                if observation.job_id in requested_job_ids
+                and is_unrecoverable_slurm_state(observation.slurm_state)
+            }
+        )
+    )
     return SlurmJobRegistryRefreshResult(
         freshly_pending_job_ids=freshly_pending_job_ids,
+        freshly_unrecoverable_job_ids=freshly_unrecoverable_job_ids,
+        unrecoverable_job_ids=freshly_unrecoverable_job_ids,
     )
 
 
@@ -2177,11 +2223,12 @@ async def _apply_slurm_cancel_pending(
     *,
     job_ids: tuple[str, ...],
     freshly_pending_job_ids: tuple[str, ...],
+    freshly_unrecoverable_job_ids: tuple[str, ...],
     pending_reason: str,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
 ) -> SlurmPendingCancelActuatorResult:
-    """Conditionally cancel and confirm freshly observed pending jobs."""
+    """Cancel and confirm freshly observed pending or held jobs."""
     try:
         config = _slurm_config_from_policy(row)
     except ValueError as exc:
@@ -2192,14 +2239,29 @@ async def _apply_slurm_cancel_pending(
             blocked_details=blocked_details,
         )
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
-    pending_jobs = (
+    freshly_pending_job_id_set = set(freshly_pending_job_ids)
+    freshly_unrecoverable_job_id_set = set(freshly_unrecoverable_job_ids)
+    freshly_cancellable_job_id_set = (
+        freshly_pending_job_id_set | freshly_unrecoverable_job_id_set
+    )
+    cancellable_jobs = (
         (
             await session.execute(
                 select(SlurmWorkerJob)
                 .where(
                     SlurmWorkerJob.environment == row.environment,
                     SlurmWorkerJob.pool_name == row.pool_name,
-                    SlurmWorkerJob.state == "pending",
+                    or_(
+                        SlurmWorkerJob.state == "pending",
+                        and_(
+                            SlurmWorkerJob.job_id.in_(
+                                tuple(sorted(freshly_unrecoverable_job_id_set)),
+                            ),
+                            SlurmWorkerJob.slurm_state.in_(
+                                UNRECOVERABLE_SLURM_STATES,
+                            ),
+                        ),
+                    ),
                 )
                 .order_by(SlurmWorkerJob.job_id)
                 .with_for_update(),
@@ -2208,22 +2270,43 @@ async def _apply_slurm_cancel_pending(
         .scalars()
         .all()
     )
-    job_by_id = {str(job.job_id): job for job in pending_jobs if job.job_id is not None}
-    freshly_pending_job_id_set = set(freshly_pending_job_ids)
+    job_by_id = {
+        str(job.job_id): job for job in cancellable_jobs if job.job_id is not None
+    }
     unobserved_rows = [
         str(job.job_id or job.id)
-        for job in pending_jobs
-        if job.job_id is None or str(job.job_id) not in freshly_pending_job_id_set
+        for job in cancellable_jobs
+        if job.job_id is None
+        or str(job.job_id) not in freshly_cancellable_job_id_set
     ]
-    missing_registry_ids = [job_id for job_id in freshly_pending_job_ids if job_id not in job_by_id]
+    missing_registry_ids = [
+        job_id
+        for job_id in freshly_cancellable_job_id_set
+        if job_id not in job_by_id
+    ]
     unobserved_target_ids = [
-        job_id for job_id in job_ids if job_id not in freshly_pending_job_id_set
+        job_id for job_id in job_ids if job_id not in freshly_cancellable_job_id_set
     ]
-    if unobserved_rows or missing_registry_ids or unobserved_target_ids:
-        error = "pending Slurm registry does not match fresh pending observations"
+    invalid_unrecoverable_ids = sorted(
+        freshly_unrecoverable_job_id_set - set(job_ids),
+    )
+    if (
+        unobserved_rows
+        or missing_registry_ids
+        or unobserved_target_ids
+        or invalid_unrecoverable_ids
+    ):
+        error = "cancellable Slurm registry does not match fresh observations"
         return SlurmPendingCancelActuatorResult(
             failed_job_ids=tuple(
-                sorted({*unobserved_rows, *missing_registry_ids, *unobserved_target_ids})
+                sorted(
+                    {
+                        *unobserved_rows,
+                        *missing_registry_ids,
+                        *unobserved_target_ids,
+                        *invalid_unrecoverable_ids,
+                    }
+                )
             ),
             error=error,
             blocked_reason="slurm_pending_observation_missing",
@@ -2232,6 +2315,7 @@ async def _apply_slurm_cancel_pending(
                 "unobserved_pending_rows": sorted(unobserved_rows),
                 "missing_registry_job_ids": sorted(missing_registry_ids),
                 "unobserved_target_job_ids": sorted(unobserved_target_ids),
+                "invalid_unrecoverable_job_ids": invalid_unrecoverable_ids,
             },
         )
     cancelled_job_ids: list[str] = []
@@ -2241,14 +2325,22 @@ async def _apply_slurm_cancel_pending(
         if job is None:
             continue
         try:
-            await runner.cancel_pending_job(job_id)
+            if job_id in freshly_unrecoverable_job_id_set:
+                # REQUEUE_HOLD is present in squeue but does not match
+                # scancel --state=PENDING. A fresh exact held-state observation
+                # cannot transition to running without an explicit release, so
+                # the scoped registry ownership checks above make unconditional
+                # cancellation safe here.
+                await runner.cancel_job(job_id)
+            else:
+                await runner.cancel_pending_job(job_id)
             observations = [
                 observation
                 for observation in await runner.query_jobs((job_id,))
                 if observation.job_id == job_id
             ]
             if len(observations) != 1:
-                raise RuntimeError("conditional cancellation state was not observed exactly once")
+                raise RuntimeError("cancellation state was not observed exactly once")
             observation = observations[0]
             state = normalize_slurm_state(observation.slurm_state)
             job.slurm_state = observation.slurm_state
@@ -2266,7 +2358,7 @@ async def _apply_slurm_cancel_pending(
             job.updated_at = now
             if state != "cancelled":
                 raise RuntimeError(
-                    f"conditional cancellation left Slurm job in {state} state",
+                    f"cancellation left Slurm job in {state} state",
                 )
             job.pending_reason = pending_reason
             job.finished_at = now
@@ -2685,6 +2777,8 @@ async def reconcile_worker_pool_autoscaler_once(
         actuator_blocked_reason: str | None = None
         actuator_blocked_details: dict[str, Any] | None = None
         freshly_pending_job_ids: tuple[str, ...] = ()
+        freshly_unrecoverable_job_ids: tuple[str, ...] = ()
+        unrecoverable_job_ids: tuple[str, ...] = ()
         slurm_pending_cancel_attempted = False
         if row.actuator == "slurm":
             refresh_result = await _refresh_slurm_job_registry(
@@ -2695,6 +2789,8 @@ async def reconcile_worker_pool_autoscaler_once(
             )
             actuator_error = refresh_result.error
             freshly_pending_job_ids = refresh_result.freshly_pending_job_ids
+            freshly_unrecoverable_job_ids = refresh_result.freshly_unrecoverable_job_ids
+            unrecoverable_job_ids = refresh_result.unrecoverable_job_ids
             # Prod-pressure reclaim takes precedence over normal scaling: if the
             # CP handler recorded an active drain intent, reclaim (or hold) this
             # tick and skip the scale-up/down decision entirely.
@@ -2729,6 +2825,11 @@ async def reconcile_worker_pool_autoscaler_once(
             now=now,
             freshness_sec=freshness_sec,
         )
+        if unrecoverable_job_ids:
+            observation = replace(
+                observation,
+                unrecoverable_job_ids=unrecoverable_job_ids,
+            )
         decision = compute_autoscaler_decision(
             effective_policy,
             observation,
@@ -2767,8 +2868,14 @@ async def reconcile_worker_pool_autoscaler_once(
                     blocked_details=actuator_blocked_details,
                     error_message=actuator_error,
                 )
-            elif not freshly_pending_job_ids:
-                actuator_error = "pending Slurm capacity has no fresh pending job observation"
+            elif (
+                decision.reason == "unrecoverable_slurm_state"
+                and not freshly_unrecoverable_job_ids
+            ) or (
+                decision.reason != "unrecoverable_slurm_state"
+                and not freshly_pending_job_ids
+            ):
+                actuator_error = "Slurm capacity has no matching fresh job observation"
                 actuator_blocked_reason = "slurm_pending_observation_missing"
                 actuator_blocked_details = {
                     "reason": actuator_blocked_reason,
@@ -2784,21 +2891,27 @@ async def reconcile_worker_pool_autoscaler_once(
                 )
             else:
                 slurm_pending_cancel_attempted = True
-                pending_job_ids_to_cancel = (
-                    observation.release_drift_pending_job_ids
-                    if decision.reason == "release_state_drift"
-                    else freshly_pending_job_ids
-                )
-                pending_reason = (
-                    "cancelled after autoscaler release-state drift"
-                    if decision.reason == "release_state_drift"
-                    else "cancelled after autoscaler demand returned to zero"
+                if decision.reason == "release_state_drift":
+                    pending_job_ids_to_cancel = observation.release_drift_pending_job_ids
+                    pending_reason = "cancelled after autoscaler release-state drift"
+                elif decision.reason == "unrecoverable_slurm_state":
+                    pending_job_ids_to_cancel = observation.unrecoverable_job_ids
+                    pending_reason = "cancelled after unrecoverable Slurm state"
+                else:
+                    pending_job_ids_to_cancel = freshly_pending_job_ids
+                    pending_reason = "cancelled after autoscaler demand returned to zero"
+                target_job_id_set = set(pending_job_ids_to_cancel)
+                unrecoverable_job_ids_to_cancel = tuple(
+                    job_id
+                    for job_id in freshly_unrecoverable_job_ids
+                    if job_id in target_job_id_set
                 )
                 cancel_result = await _apply_slurm_cancel_pending(
                     session,
                     row,
                     job_ids=pending_job_ids_to_cancel,
                     freshly_pending_job_ids=freshly_pending_job_ids,
+                    freshly_unrecoverable_job_ids=(unrecoverable_job_ids_to_cancel),
                     pending_reason=pending_reason,
                     runner=slurm_runner,
                     now=now,
