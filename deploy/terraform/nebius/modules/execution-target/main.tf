@@ -48,11 +48,21 @@ resource "nebius_vpc_v1_pool" "target_private" {
   visibility = "PRIVATE"
   labels     = local.common_labels
 
-  cidrs = [{
-    cidr            = var.network_cidr
-    max_mask_length = 28
-    state           = "AVAILABLE"
-  }]
+  # Managed Kubernetes reserves service_cidr from the control-plane subnet.
+  # The pool must also permit /32 allocations for control-plane and node IPs;
+  # /28 would leave the cluster operation stuck before its first allocation.
+  cidrs = [
+    {
+      cidr            = var.network_cidr
+      max_mask_length = 32
+      state           = "AVAILABLE"
+    },
+    {
+      cidr            = var.service_cidr
+      max_mask_length = 32
+      state           = "AVAILABLE"
+    },
+  ]
 
   depends_on = [terraform_data.contract]
 }
@@ -111,7 +121,6 @@ resource "nebius_iam_v1_group" "node_registry_pull" {
 resource "nebius_iam_v1_group_membership" "node_registry_pull" {
   parent_id = nebius_iam_v1_group.node_registry_pull.id
   member_id = nebius_iam_v1_service_account.node_registry_pull.id
-  name      = "${local.resource_prefix}-node-registry-pull"
   labels    = local.common_labels
 }
 
@@ -119,7 +128,6 @@ resource "nebius_iam_v1_access_permit" "node_registry_pull" {
   parent_id   = nebius_iam_v1_group.node_registry_pull.id
   resource_id = nebius_registry_v1_registry.target.id
   role        = "viewer"
-  name        = "${local.resource_prefix}-registry-viewer"
   labels      = local.common_labels
 }
 

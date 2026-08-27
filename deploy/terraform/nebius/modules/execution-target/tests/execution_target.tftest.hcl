@@ -22,6 +22,20 @@ run "development_private_payg_plan" {
   command = plan
 
   assert {
+    condition = toset([
+      for block in nebius_vpc_v1_pool.target_private.cidrs : block.cidr
+    ]) == toset([var.network_cidr, var.service_cidr])
+    error_message = "The inherited private pool must contain both node/pod and Kubernetes service CIDRs."
+  }
+
+  assert {
+    condition = alltrue([
+      for block in nebius_vpc_v1_pool.target_private.cidrs : block.max_mask_length == 32
+    ])
+    error_message = "The inherited private pool must permit the /32 allocations required by the control plane and nodes."
+  }
+
+  assert {
     condition     = nebius_mk8s_v1_cluster.target.control_plane.endpoints.public_endpoint == null
     error_message = "Development control plane must remain private unless CIDRs are explicit."
   }
