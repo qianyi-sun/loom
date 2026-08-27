@@ -203,6 +203,53 @@ class PersonalDevDeployClient:
             )
         return int(environment["operation_epoch"])
 
+    def _request_apply(
+        self,
+        *,
+        name: str,
+        candidate: Mapping[str, Any],
+        min_slots: int,
+        max_slots: int,
+        expected_operation_epoch: int,
+        idempotency_key: UUID | None = None,
+    ) -> httpx.Response:
+        return self._client.put(
+            f"/api/v1/dev-instances/{name}",
+            json={
+                "candidate_id": str(candidate["id"]),
+                "candidate_sha": candidate["candidate_sha"],
+                "min_slots": min_slots,
+                "max_slots": max_slots,
+                "expected_operation_epoch": expected_operation_epoch,
+                "idempotency_key": str(idempotency_key or uuid4()),
+            },
+        )
+
+    def apply_expected_hidden_denial(
+        self,
+        *,
+        name: str,
+        candidate: Mapping[str, Any],
+        min_slots: int,
+        max_slots: int,
+        expected_operation_epoch: int,
+        idempotency_key: UUID | None = None,
+    ) -> bool:
+        """Return whether the exact target PUT was hidden with HTTP 404.
+
+        The response body is intentionally never parsed or copied into output.
+        """
+
+        response = self._request_apply(
+            name=name,
+            candidate=candidate,
+            min_slots=min_slots,
+            max_slots=max_slots,
+            expected_operation_epoch=expected_operation_epoch,
+            idempotency_key=idempotency_key,
+        )
+        return response.status_code == 404
+
     def apply(
         self,
         *,
@@ -213,16 +260,13 @@ class PersonalDevDeployClient:
         expected_operation_epoch: int,
         idempotency_key: UUID | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        response = self._client.put(
-            f"/api/v1/dev-instances/{name}",
-            json={
-                "candidate_id": str(candidate["id"]),
-                "candidate_sha": candidate["candidate_sha"],
-                "min_slots": min_slots,
-                "max_slots": max_slots,
-                "expected_operation_epoch": expected_operation_epoch,
-                "idempotency_key": str(idempotency_key or uuid4()),
-            },
+        response = self._request_apply(
+            name=name,
+            candidate=candidate,
+            min_slots=min_slots,
+            max_slots=max_slots,
+            expected_operation_epoch=expected_operation_epoch,
+            idempotency_key=idempotency_key,
         )
         body = assert_2xx(response, action=f"apply development environment {name!r}")
         environment = _environment(

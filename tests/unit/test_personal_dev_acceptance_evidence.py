@@ -656,6 +656,11 @@ def test_postgres_state_rejects_incomplete_or_noncanonical_inventory(payload: st
 
 
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_DENIAL_RECEIPT_SHA256S = {
+    "read": "5221aecb79691760f14503ae676f2741375d052ee5e2f02724c179b52a32deba",
+    "update": "e7e5b514f646a59d310af7cdfcdaa57ec1aca3255e6f742c1fda5a83e0356123",
+    "destroy": "da570383210d38d6392b19185ed0d2bddd72a9e8c4f6200733d00c811197e822",
+}
 _RESULT_IDENTITIES = (
     {
         "artifacts_bucket": "loom-dev-owner-a-artifacts",
@@ -839,7 +844,7 @@ def _result_value(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
                     "actor_user_id": str(actor.user_id),
                     "exit_code": 1,
                     "operation": operation,
-                    "stderr_sha256": "f" * 64,
+                    "stderr_sha256": _DENIAL_RECEIPT_SHA256S[operation],
                     "stdout_sha256": _EMPTY_SHA256,
                     "target_after_sha256": "e" * 64,
                     "target_before_sha256": "e" * 64,
@@ -997,6 +1002,12 @@ _RESULT_MUTATIONS = (
     "denial-wrong-exit",
     "denial-nonempty-stdout",
     "denial-empty-stderr",
+    "denial-wrong-phase-receipt",
+    "denial-candidate-receipt",
+    "denial-401-receipt",
+    "denial-403-receipt",
+    "denial-500-receipt",
+    "denial-target-detail",
     "denial-state-change",
     "worker-available",
     "nonzero-minimum",
@@ -1060,6 +1071,30 @@ def _mutate_result(value: dict[str, object], mutation: str) -> None:
         denials[0]["stdout_sha256"] = "1" * 64
     elif mutation == "denial-empty-stderr":
         denials[0]["stderr_sha256"] = _EMPTY_SHA256
+    elif mutation == "denial-wrong-phase-receipt":
+        denials[0]["stderr_sha256"] = (
+            "e7e5b514f646a59d310af7cdfcdaa57ec1aca3255e6f742c1fda5a83e0356123"
+        )
+    elif mutation == "denial-candidate-receipt":
+        denials[0]["stderr_sha256"] = (
+            "1bf777bf8fa65daf05519e35e21c5070000dd44e3ab6c4eb5ab816aaafff1869"
+        )
+    elif mutation == "denial-401-receipt":
+        denials[0]["stderr_sha256"] = (
+            "7f2f198b538da2eb84861d3b8cb11a2a9bf4048e3c7e16653d4d9299825a98db"
+        )
+    elif mutation == "denial-403-receipt":
+        denials[0]["stderr_sha256"] = (
+            "88c06651a7a64419e5ec7b19d615d3a2edecafa3eb04c44e7ace70a32068a3ca"
+        )
+    elif mutation == "denial-500-receipt":
+        denials[0]["stderr_sha256"] = (
+            "e912f9365fee2e45c3965a237fce784c4e910ff5fa618c710d0ff5a80b252194"
+        )
+    elif mutation == "denial-target-detail":
+        denials[0]["stderr_sha256"] = (
+            "04bb25735501a6b19809e2ce2e672a76e222e8ff48b943b75a614bccc883ae52"
+        )
     elif mutation == "denial-state-change":
         denials[0]["target_after_sha256"] = "d" * 64
     elif mutation == "worker-available":

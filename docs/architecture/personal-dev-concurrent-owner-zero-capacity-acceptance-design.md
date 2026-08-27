@@ -54,20 +54,29 @@ and new code cannot silently select one owner from a two-owner plan. Rendering,
 runtime interlock, and status use the plan digest and shared safety fields; they
 do not grant authority based on list position.
 
-## Exact authenticated sessions
+## Exact non-rotating acceptance credentials
 
 The acceptance runbook uses two separate absolute XDG configuration roots.
 Each root and configuration file is owner-only, non-symlink, single-link, and
 byte/inode pinned for the complete window. The two paths and file identities
-must be different.
+must be different. Before any source sealing or lifecycle mutation, each root
+must already contain a distinct, non-rotating, user-owned API bearer token.
+Browser sessions, legacy team tokens, service credentials, administrator
+credentials, and missing identity fields fail this bounded acceptance gate.
+Ordinary personal deployments continue to support both browser sessions and
+user-owned API tokens.
 
 `loom auth whoami` gains `--format json`. JSON output is one sorted,
 newline-terminated, secret-free record containing the server, principal type,
 credential type, user ID, team ID, role, scopes, token prefix, and expiry as
 reported by the server. It never emits the bearer token, session cookie, or
-CSRF value. The runbook requires each session's exact user/team pair to match
-one v2 plan entry and requires `read:own` plus `submit` scopes before any
-source is sealed.
+CSRF value. The runbook requires exact `auth_kind="bearer"`,
+`credential_type="user_owned_api_token"`, the existing bearer projection
+`principal_type="team"` and `role=null`, each token's non-null exact user/team
+pair to match one v2 plan entry, and exact `read:own` plus `submit` scopes
+before any source is sealed. The principal projection deliberately remains
+compatible with the shared whoami API; the plan-bound `user_id` distinguishes
+the user-owned token from a legacy team token.
 
 ## Concurrent lifecycle and isolation proof
 
@@ -85,7 +94,8 @@ cross-owner matrix in both directions:
 - read: `loom dev status` for the other owner's name;
 - update: `loom service up` for the other owner's name using the actor's
   already-ready candidate and explicit expected epoch zero; and
-- destroy: `loom dev destroy` for the other owner's name.
+- destroy: `loom dev destroy` for the other owner's name, fenced by the exact
+  positive operation epoch in the target owner's pinned before-status record.
 
 Every attempt must exit exactly 1 and write no stdout. Before and after each
 attempt, the target owner records canonical JSON status. Those byte streams
@@ -96,9 +106,17 @@ so it does not create an unrelated build merely to test authorization. The
 personal `loom service up` command supplies `--quiet` for this probe; quiet mode
 suppresses its actor-side progress and success summary but never suppresses
 errors, changes HTTP behavior, or applies to local/staging/production targets.
+All three probes use an explicit expected-hidden-denial mode. Only HTTP 404
+from the intended target GET, PUT, or DELETE emits one canonical secret-free
+receipt and exits 1. Candidate lookup, validation or preflight failure,
+credential rejection, server failure, unexpected success, and response detail
+never produce that receipt. The fixed receipt contains only schema,
+`resource_hidden`, target method/phase, and status 404; the target response body
+is discarded.
 
 Owner 0 then destroys normally. Owner 1 destroys with retained data, redeploys
-the same name, and destroys it finally. Redeploy must preserve `subject_id`
+the same name using the exact epoch captured in its destroyed status, and
+destroys it finally. Redeploy must preserve `subject_id`
 while rotating `subject_incarnation`; the existing runbook's assertion that
 `subject_id` rotates contradicts the lifecycle authority and is corrected.
 The incarnation is the generation fence that prevents retired credentials and
@@ -142,8 +160,12 @@ Each denial entry contains `actor_team_id`, `actor_user_id`, `operation`,
 `stdout_sha256`, `stderr_sha256`, `target_before_sha256`, and
 `target_after_sha256`. The six-entry order is owner 0 against owner 1, then
 owner 1 against owner 0, with `read`, `update`, and `destroy` in that order.
-`exit_code` is exactly 1, `stdout_sha256` is the SHA-256 of empty bytes, stderr
-is nonempty, and the target hashes are equal.
+`exit_code` is exactly 1, `stdout_sha256` is the SHA-256 of empty bytes,
+`stderr_sha256` is the exact operation-specific canonical expected-hidden-
+denial receipt digest, and the target hashes are equal. Read binds target GET,
+update binds target PUT, and destroy binds target DELETE. The strict validator
+therefore rejects candidate-stage, wrong-phase, credential, server, successful,
+or detail-bearing stderr evidence even when it is nonempty.
 
 The result's status binding is an object with exact SHA-256 values for
 `pre_deploy`, `after_initial`, `after_updates`, `after_denials`,
@@ -178,8 +200,11 @@ is assembled and verified only after this rollback succeeds.
 ## Testing and rollout
 
 Unit tests cover v1 byte compatibility, every v2 owner/list/quota rejection,
-canonical result validation, lifecycle transitions, denial ordering, equal
-state hashes, and secret-free JSON identity output. CLI tests prove invalid
+canonical result validation, lifecycle transitions, denial ordering, exact
+operation-specific receipt digests, equal state hashes, and secret-free JSON
+identity output. Request-sequence CLI tests prove each accepted receipt comes
+from its intended target request and that explicit fencing bypasses only the
+destroy/redeploy preflight it replaces. CLI tests also prove invalid
 plans and results fail before runner construction. Package-boundary tests parse
 the runbook shell and require two XDG roots, concurrent commands, all six
 denials, exact state comparisons, incarnation rotation, repeated zero-capacity

@@ -420,8 +420,9 @@ After the shadow rehearsal and acceptance interlock are merged, published, and
 deployed, #1280 closes only after this controlled test:
 
 1. Two exact plan owners authenticate through separate pinned owner-only XDG
-   roots, and each secret-free identity record matches its canonical v2 plan
-   entry.
+   roots using existing non-rotating user-owned API bearer tokens, and each
+   secret-free identity record matches its canonical v2 plan entry. Browser,
+   legacy team, service, and administrator credentials fail this bounded gate.
 2. Both owners start distinctly named arbitrary-source deploys before either
    wait, using exact minimum `0` and maximum `2`.
 3. Both owners start independent arbitrary-source updates before either wait;
@@ -430,7 +431,8 @@ deployed, #1280 closes only after this controlled test:
    and namespace identities remain disjoint across owners.
 5. Owner 0 attempts read, update, and destroy against owner 1; then owner 1
    attempts the same three operations against owner 0. Every call exits 1,
-   emits no stdout, and leaves byte-exact target status unchanged.
+   emits no stdout, emits the exact method/phase-bound hidden-resource receipt,
+   and leaves byte-exact target status unchanged.
 6. Application readiness and non-executable demand publication remain ready
    after every denial, while worker availability is false and the manager
    ceiling remains `0`.

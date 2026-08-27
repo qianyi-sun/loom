@@ -608,6 +608,10 @@ def _print_personal_summary(environment: dict[str, object]) -> None:
 
 
 def _up_personal(args: argparse.Namespace) -> int:
+    from loom.personal_dev_expected_denial import (
+        EXPECTED_HIDDEN_DENIAL_ERROR,
+        expected_hidden_denial_receipt,
+    )
     from loom.personal_dev_source import (
         PersonalDevSourceError,
         create_personal_dev_source_snapshot,
@@ -685,6 +689,20 @@ def _up_personal(args: argparse.Namespace) -> int:
                     f"→ applying {args.environment} at expected operation epoch "
                     f"{expected_epoch}"
                 )
+            if args.expected_hidden_denial:
+                if deploy.apply_expected_hidden_denial(
+                    name=name,
+                    candidate=candidate,
+                    min_slots=min_slots,
+                    max_slots=max_slots,
+                    expected_operation_epoch=expected_epoch,
+                ):
+                    sys.stderr.write(
+                        expected_hidden_denial_receipt("update").decode("ascii")
+                    )
+                    return 1
+                sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+                return 2
             environment, operation = deploy.apply(
                 name=name,
                 candidate=candidate,
@@ -707,12 +725,26 @@ def _up_personal(args: argparse.Namespace) -> int:
                 _print_personal_summary(environment)
             return 0
     except NotLoggedInError as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 2
     except (PersonalDevSourceError, PersonalDevDeployError, HttpStatusError) as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 1
+    except (KeyError, TypeError, ValueError):
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
+        raise
     except httpx.RequestError as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: could not reach {server}: {exc}\n")
         return 2
 
@@ -748,7 +780,7 @@ def _personal_options_present(args: argparse.Namespace) -> bool:
             args.timeout,
             args.poll_interval,
         )
-    ) or bool(args.no_wait)
+    ) or bool(args.no_wait or args.expected_hidden_denial)
 
 
 def _local_options_present(args: argparse.Namespace) -> bool:
@@ -778,6 +810,16 @@ def _populate_local_defaults(args: argparse.Namespace) -> None:
 
 
 def _up(args: argparse.Namespace) -> int:
+    if args.expected_hidden_denial and (
+        not args.environment.startswith("dev-")
+        or args.candidate is None
+        or args.expected_operation_epoch is None
+        or not args.quiet
+    ):
+        from loom.personal_dev_expected_denial import EXPECTED_HIDDEN_DENIAL_ERROR
+
+        sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+        return 2
     if args.quiet and not args.environment.startswith("dev-"):
         sys.stderr.write("error: --quiet is only valid for personal dev-<name> deployments\n")
         return 2
@@ -1059,6 +1101,14 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         "--quiet",
         action="store_true",
         help="Suppress personal deployment progress and success output.",
+    )
+    personal_options.add_argument(
+        "--expected-hidden-denial",
+        action="store_true",
+        help=(
+            "With --candidate, an explicit epoch, and --quiet, emit only the "
+            "canonical receipt when the target PUT returns hidden-resource HTTP 404."
+        ),
     )
     personal_options.add_argument(
         "--source-root",

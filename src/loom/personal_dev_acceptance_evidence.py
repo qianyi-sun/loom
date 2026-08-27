@@ -24,6 +24,7 @@ from loom.personal_dev_control_plane_config import (
     PersonalDevOperationalPlan,
     PersonalDevTrustedRelease,
 )
+from loom.personal_dev_expected_denial import expected_hidden_denial_sha256
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _GIT_IDENTITY = re.compile(r"[0-9a-f]{40}")
@@ -649,7 +650,10 @@ def _validate_denial_matrix(
             or denial.operation != operation
             or denial.exit_code != 1
             or not hmac.compare_digest(denial.stdout_sha256, empty_sha256)
-            or hmac.compare_digest(denial.stderr_sha256, empty_sha256)
+            or not hmac.compare_digest(
+                denial.stderr_sha256,
+                expected_hidden_denial_sha256(operation),
+            )
             or not hmac.compare_digest(
                 denial.target_before_sha256,
                 denial.target_after_sha256,

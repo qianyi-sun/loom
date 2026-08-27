@@ -157,7 +157,9 @@ ordered cross-owner denials, concurrent create/update, normal and retained-data
 destroy, retained-name redeploy, final cleanup, and inert rollback. Run the
 strict read-only verifier before any operational render or apply. The
 acceptance runbook's last apply and status must prove the byte-reviewed shadow,
-not an expired or still-active acceptance manifest.
+not an expired or still-active acceptance manifest. The verifier independently
+binds every denial digest to the canonical target GET, PUT, or DELETE HTTP 404
+receipt; nonempty arbitrary stderr is not acceptance evidence.
 
 ```bash
 test "$(jq -r .schema "$acceptance_result")" = \

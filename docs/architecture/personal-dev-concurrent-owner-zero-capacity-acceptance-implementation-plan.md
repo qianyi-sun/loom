@@ -39,6 +39,12 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   distinct nonzero team IDs, sorted by canonical `(team_id, user_id)` text.
 - Never print or retain bearer tokens, session cookies, CSRF values, Secret
   values, private keys, kubeconfig contents, or database credentials.
+- Before source sealing, the bounded v2 run requires two existing non-rotating
+  user-owned API bearer tokens. Their whoami projections must report exact
+  `bearer` / `user_owned_api_token` / `team` / null-role fields plus non-null
+  plan-bound user/team IDs and exact `read:own`, `submit` scopes. Browser
+  sessions and every legacy/service/admin credential fail closed here without
+  changing ordinary personal-deployment auth compatibility.
 - All local plans, results, configuration roots, and detailed logs are
   current-user-owned, non-symlink, single-link, and mode `0600`/`0700` as
   appropriate.
@@ -226,13 +232,17 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   The six denial records are ordered owner0→owner1 then owner1→owner0, each in
   `read`, `update`, `destroy` order. Use exact empty SHA-256
   `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
-  exit code 1, a nonempty stderr digest, and equal nonzero before/after hashes.
+  exit code 1, the hand-derived operation-specific canonical expected-hidden-
+  denial receipt digest, and equal nonzero before/after hashes. The receipt
+  mapping is read/GET/target_read, update/PUT/target_update, and
+  destroy/DELETE/target_destroy, all at HTTP 404.
 
   Assert rejection of unsafe file metadata/races, wrong digest, duplicate JSON,
   noncanonical bytes, v1/single-owner plan, extra/missing fields, owner order or
   identity mismatch, malformed names/UUIDs/digests, wrong manifest/release/plan
   binding, incomplete/duplicate/reordered denial matrix, successful/wrong exit,
-  nonempty stdout, empty stderr, unequal target hashes, worker availability,
+  nonempty stdout, wrong-phase/candidate/401/403/500/detail-bearing stderr,
+  unequal target hashes, worker availability,
   nonzero minimum, wrong maxima, candidate/generation/epoch regression,
   cross-owner identity equality, wrong keep-data semantics, rotated subject ID,
   unrotated incarnation, and missing final destroy.
@@ -304,10 +314,19 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   Quiet mode suppresses actor-side progress and the success summary, never
   suppresses stderr, never changes HTTP/lifecycle behavior, and is rejected
   before action for local, staging, or production targets.
+- Adds `--expected-hidden-denial` to personal read, candidate-backed update,
+  and explicitly fenced destroy probes. Update requires `--candidate`, an
+  explicit expected epoch, and `--quiet`; destroy requires an explicit positive
+  `--expected-operation-epoch`. Only the intended target request's HTTP 404
+  writes the canonical receipt to stderr and returns 1. Every other outcome
+  returns without a receipt and without response detail.
+- Adds an ordinary `loom dev destroy --expected-operation-epoch EPOCH` direct
+  path. Omitting it preserves the existing ownership-filtered GET and retry
+  semantics exactly.
 - JSON emits exactly:
 
   ```json
-  {"auth_kind":"session","credential_type":null,"expires_at":null,"principal_type":"user","role":"owner","scopes":["read:own","submit"],"server":"https://loom.example","team_id":"00000000-0000-0000-0000-000000000002","token_prefix":null,"user_id":"00000000-0000-0000-0000-000000000001"}
+  {"auth_kind":"bearer","credential_type":"user_owned_api_token","expires_at":null,"principal_type":"team","role":null,"scopes":["read:own","submit"],"server":"https://loom.example","team_id":"00000000-0000-0000-0000-000000000002","token_prefix":null,"user_id":"00000000-0000-0000-0000-000000000001"}
   ```
 
   followed by one newline. Values may be null where the server omitted an
@@ -449,7 +468,9 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   Require two initial deploy PIDs and two update PIDs started before waits,
   exact `--min-slots 0`, maxima 2→3 and 2→4, distinct arbitrary v1/v2 source
   roots, six denied-operation calls in exact directions/order, exit status 1,
-  empty stdout checks, `cmp -s` before/after target status after every denial,
+  empty stdout checks, an exact canonical expected-hidden-denial receipt byte
+  comparison before hashing, `cmp -s` before/after target status after every
+  denial,
   an `assert_live_acceptance` call after every denied operation, normal/default
   owner-0 destroy, owner-1 `--keep-data`, retained redeploy, same `subject_id`,
   changed `subject_incarnation`, final destroy, no dynamic namespace, v2 result
@@ -489,9 +510,13 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   ```
 
   The update command uses the actor's own updated `candidate_sha`, `--candidate`,
-  `--expected-operation-epoch 0`, `--min-slots 0`, and `--quiet`; it does not
-  seal or upload another source. Construct the six canonical denial entries
-  from file SHA-256 values only, never stderr contents.
+  `--expected-operation-epoch 0`, `--min-slots 0`, `--quiet`, and
+  `--expected-hidden-denial`; it does not seal or upload another source. The
+  read probe uses the same expected-denial mode. The destroy probe extracts the
+  target's exact positive operation epoch from its pinned before-status and
+  sends direct DELETE with the expected-denial mode. Construct the six
+  canonical denial entries from file SHA-256 values only after comparing stderr
+  byte-for-byte with the operation's literal canonical receipt.
 
 - [ ] **Step 4: Correct retained-name fencing and assemble v2 evidence after rollback**
 
@@ -502,9 +527,11 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   retained_incarnation="$(jq -r .subject_incarnation "$owner_1_updated")"
   ```
 
-  After redeploy require the same subject ID and a different incarnation. Build
-  selected snapshots with explicit jq object projections, construct canonical
-  v2 result with `jq -cS`, apply and verify the exact inert shadow, then run
+  Pass the exact positive operation epoch from the owner-1 destroyed record to
+  retained-name `service up`, so it reaches PUT without an automatic target
+  GET. After redeploy require the same subject ID and a different incarnation.
+  Build selected snapshots with explicit jq object projections, construct the
+  canonical v2 result with `jq -cS`, apply and verify the exact inert shadow, then run
   `verify-acceptance-result` against the final result digest. A verification
   failure leaves the system inert and blocks durable launch.
 

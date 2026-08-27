@@ -46,7 +46,9 @@ closes; an acceptance manifest must not be left running as the development
 service. Schema v1 remains historical single-owner compatibility. Final
 multi-person launch requires the canonical two-owner plan and a verified
 schema-v2 result assembled only after complete cleanup and byte-exact inert
-rollback. After that result exists, the
+rollback. Its bounded proof requires two existing non-rotating user-owned API
+bearer credentials and exact target-request hidden-denial receipts; ordinary
+personal use still supports browser sessions. After that result exists, the
 [durable zero-capacity launch](../runbooks/personal-dev-durable-launch.md) uses
 a separate canonical operational plan. `render-operational` enables the
 personal controller and restricted builder and runs one activation-agent

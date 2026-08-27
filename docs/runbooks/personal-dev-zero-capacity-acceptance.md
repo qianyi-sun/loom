@@ -148,9 +148,12 @@ backup/restore record with
 before continuing. The renderer and status observer rederive both policies and
 semantically validate the completed restore record on every invocation.
 
-The XDG root is the single authenticated acceptance-owner session. Prepare its
-credential through the approved authentication channel before continuing. Do
-not copy the token into another root or acceptance artifact.
+The two XDG roots must already contain distinct, non-rotating user-owned API
+bearer credentials provisioned through the approved authentication channel.
+Browser sessions, legacy team tokens, service/admin credentials, or incomplete
+whoami identity fields cannot enter this bounded proof. Ordinary personal
+deployment remains compatible with browser sessions outside this runbook. Do
+not copy either token into another root or acceptance artifact.
 
 The following helpers reject duplicate/noncanonical JSON and bind every
 owner-only input to stable bytes.
@@ -488,7 +491,7 @@ or unrelated namespace is a stop condition.
     capture_scanner_cache_init_status "$scanner_cache_init_status"
     assert_live_acceptance "$post_acceptance_status"
 
-## 5. Verify two pinned authenticated owner sessions
+## 5. Verify two pinned user-owned bearer credentials
 
 Both XDG roots and both configuration files must be absolute, owner-only,
 non-symlink paths with distinct real paths and distinct device/inode
@@ -539,8 +542,8 @@ checkout and from each other.
     chmod 0600 "$owner_0_whoami" "$owner_1_whoami"
     assert_canonical_json_line "$owner_0_whoami"
     assert_canonical_json_line "$owner_1_whoami"
-    jq -e --arg user "$(jq -r '.acceptance_owners[0].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[0].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_0_whoami" >/dev/null
-    jq -e --arg user "$(jq -r '.acceptance_owners[1].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[1].team_id' "$acceptance_plan")" '.user_id == $user and .team_id == $team and (.scopes | index("read:own") != null) and (.scopes | index("submit") != null) and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_1_whoami" >/dev/null
+    jq -e --arg user "$(jq -r '.acceptance_owners[0].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[0].team_id' "$acceptance_plan")" '.auth_kind == "bearer" and .credential_type == "user_owned_api_token" and .principal_type == "team" and .role == null and .user_id == $user and .team_id == $team and .scopes == ["read:own","submit"] and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_0_whoami" >/dev/null
+    jq -e --arg user "$(jq -r '.acceptance_owners[1].user_id' "$acceptance_plan")" --arg team "$(jq -r '.acceptance_owners[1].team_id' "$acceptance_plan")" '.auth_kind == "bearer" and .credential_type == "user_owned_api_token" and .principal_type == "team" and .role == null and .user_id == $user and .team_id == $team and .scopes == ["read:own","submit"] and (has("token") | not) and (has("session_cookie") | not) and (has("csrf") | not)' "$owner_1_whoami" >/dev/null
     owner_0_principal="$(jq -cS '{user_id,team_id}' "$owner_0_whoami")"
     owner_1_principal="$(jq -cS '{user_id,team_id}' "$owner_1_whoami")"
     test "$owner_0_principal" != "$owner_1_principal"
@@ -638,8 +641,10 @@ The updated environments must have disjoint subject, namespace, database,
 bucket, route, host, and worker-pool identities. Then run read, update, and
 destroy denial probes in exact owner-0-to-owner-1 then owner-1-to-owner-0 order.
 Each target owner captures canonical status before and after the probe. Exact
-exit status 1, empty stdout, nonempty stderr, byte-equal target status, and a
-fresh live acceptance interlock are mandatory after every attempt.
+exit status 1, empty stdout, the operation's exact canonical hidden-resource
+receipt, byte-equal target status, and a fresh live acceptance interlock are
+mandatory after every attempt. Candidate, preflight, credential, server, or
+successful target responses cannot certify a denial.
 
     for field in subject_id subject_incarnation identity.environment identity.namespace identity.database identity.task_bucket identity.trajectories_bucket identity.artifacts_bucket identity.route_host identity.worker_control_plane_host identity.worker_gateway_host identity.route_path identity.worker_pool; do
       test "$(jq -r ".$field" "$owner_0_updated")" != "$(jq -r ".$field" "$owner_1_updated")"
@@ -660,19 +665,26 @@ fresh live acceptance interlock are mandatory after every attempt.
       local after="$prefix.after.json"
       local stdout="$prefix.stdout"
       local stderr="$prefix.stderr"
+      local expected_stderr="$prefix.expected.stderr"
       local interlock_status="$prefix.interlock.json"
+      local expected_receipt
+      local target_epoch
       local rc=0
 
       XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$before"
+      target_epoch="$(jq -er ".operation_epoch | select(type == \"number\" and . > 0)" "$before")"
       case "$operation" in
         read)
-          XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json > "$stdout" 2> "$stderr" || rc=$?
+          expected_receipt='{"error_code":"resource_hidden","http_method":"GET","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_read"}'
+          XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$?
           ;;
         update)
-          XDG_CONFIG_HOME="$actor_xdg" loom service up --environment "dev-$target_name" --candidate "$actor_candidate" --expected-operation-epoch 0 --min-slots 0 --quiet > "$stdout" 2> "$stderr" || rc=$?
+          expected_receipt='{"error_code":"resource_hidden","http_method":"PUT","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_update"}'
+          XDG_CONFIG_HOME="$actor_xdg" loom service up --environment "dev-$target_name" --candidate "$actor_candidate" --expected-operation-epoch 0 --min-slots 0 --quiet --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$?
           ;;
         destroy)
-          XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json > "$stdout" 2> "$stderr" || rc=$?
+          expected_receipt='{"error_code":"resource_hidden","http_method":"DELETE","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_destroy"}'
+          XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json --expected-operation-epoch "$target_epoch" --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$?
           ;;
         *)
           return 2
@@ -680,7 +692,9 @@ fresh live acceptance interlock are mandatory after every attempt.
       esac
       test "$rc" -eq 1
       test ! -s "$stdout"
-      test -s "$stderr"
+      printf '%s\n' "$expected_receipt" > "$expected_stderr"
+      cmp -s "$stderr" "$expected_stderr"
+      rm -f "$expected_stderr"
       XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json > "$after"
       chmod 0600 "$before" "$after" "$stdout" "$stderr"
       assert_canonical_json_line "$before"
@@ -733,10 +747,11 @@ namespaces are absent before rollback.
     chmod 0600 "$owner_0_destroyed" "$owner_1_destroyed"
     jq -e '.status == "deleted" and .keep_data == false' "$owner_0_destroyed" >/dev/null
     jq -e '.status == "deleted" and .keep_data == true' "$owner_1_destroyed" >/dev/null
+    owner_1_redeploy_epoch="$(jq -er ".operation_epoch | select(type == \"number\" and . > 0)" "$owner_1_destroyed")"
     assert_live_acceptance "$post_destroy_acceptance_status"
 
     assert_owner_sessions
-    XDG_CONFIG_HOME="$owner_1_xdg" loom service up --environment "dev-$owner_1_name" --source-root "$owner_1_source_v2" --min-slots 0 --max-slots 2 > "$evidence_dir/owner-1.redeploy.txt" 2>&1
+    XDG_CONFIG_HOME="$owner_1_xdg" loom service up --environment "dev-$owner_1_name" --source-root "$owner_1_source_v2" --expected-operation-epoch "$owner_1_redeploy_epoch" --min-slots 0 --max-slots 2 > "$evidence_dir/owner-1.redeploy.txt" 2>&1
     XDG_CONFIG_HOME="$owner_1_xdg" loom dev status "$owner_1_name" --format json > "$owner_1_redeployed"
     chmod 0600 "$evidence_dir/owner-1.redeploy.txt" "$owner_1_redeployed"
     jq -e --arg subject "$retained_subject_id" --arg incarnation "$retained_incarnation" '.status == "ready" and .subject_id == $subject and .subject_incarnation != $incarnation and .deployment_generation == 1 and .worker_available == false and .min_slots == 0 and .max_slots == 2' "$owner_1_redeployed" >/dev/null
@@ -789,10 +804,11 @@ separate reviewed plan.
 
 Only after normal final cleanup, byte-exact shadow reapply, and successful
 shadow status may the canonical result exist. Project every lifecycle snapshot
-to the strict non-secret field set, bind all six file-digest-only denial
-records and eight status digests, and verify the final digest through the
-read-only strict v2 loader. A verification failure leaves the system inert and
-blocks durable launch.
+to the strict non-secret field set, bind all six already byte-validated
+canonical denial-receipt digests and eight status digests, and verify the final
+digest through the read-only strict v2 loader. The loader independently
+requires the exact operation-specific receipt SHA-256 values. A verification
+failure leaves the system inert and blocks durable launch.
 
     project_acceptance_snapshot() {
       local source="$1"

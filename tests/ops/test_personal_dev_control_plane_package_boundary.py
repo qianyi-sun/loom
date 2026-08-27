@@ -939,6 +939,12 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert 'XDG_CONFIG_HOME="$owner_0_xdg" loom auth whoami --format json' in runbook
     assert 'XDG_CONFIG_HOME="$owner_1_xdg" loom auth whoami --format json' in runbook
     assert runbook.count("loom auth whoami --format json") == 4
+    exact_acceptance_credential = (
+        '.auth_kind == "bearer" and '
+        '.credential_type == "user_owned_api_token" and '
+        '.principal_type == "team" and .role == null'
+    )
+    assert runbook.count(exact_acceptance_credential) == 2
     assert ".acceptance_owners[0].user_id" in runbook
     assert ".acceptance_owners[0].team_id" in runbook
     assert ".acceptance_owners[1].user_id" in runbook
@@ -1008,8 +1014,15 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert '--min-slots 0' in normalized
     assert '--quiet' in normalized
     assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json' in normalized
+    assert normalized.count("--expected-hidden-denial") == 3
+    assert (
+        'target_epoch="$(jq -er ".operation_epoch | '
+        'select(type == \\"number\\" and . > 0)" "$before")"'
+    ) in normalized
+    assert '--expected-operation-epoch "$target_epoch"' in normalized
     assert 'test "$rc" -eq 1' in runbook
     assert 'test ! -s "$stdout"' in runbook
+    assert 'cmp -s "$stderr" "$expected_stderr"' in runbook
     assert 'cmp -s "$before" "$after"' in runbook
     assert 'assert_live_acceptance "$interlock_status"' in runbook
     assert '--arg stdout_sha256 "$(sha256sum "$stdout" | awk \'{print $1}\')"' in runbook
@@ -1035,6 +1048,11 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert 'loom dev destroy "$owner_1_name" --keep-data --format json' in normalized
     assert 'retained_subject_id="$(jq -r .subject_id "$owner_1_updated")"' in runbook
     assert 'retained_incarnation="$(jq -r .subject_incarnation "$owner_1_updated")"' in runbook
+    assert (
+        'owner_1_redeploy_epoch="$(jq -er ".operation_epoch | '
+        'select(type == \\"number\\" and . > 0)" "$owner_1_destroyed")"'
+    ) in normalized
+    assert '--expected-operation-epoch "$owner_1_redeploy_epoch"' in normalized
     assert '.subject_id == $subject' in runbook
     assert '.subject_incarnation != $incarnation' in runbook
     assert 'loom dev destroy "$owner_1_name" --format json' in normalized
@@ -1088,7 +1106,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "scanner_finding_policy_sha256" in runbook
     assert "approved secret channel" in lowered
     assert "exact key inventory" in lowered
-    assert "two pinned authenticated owner sessions" in lowered
+    assert "two pinned user-owned bearer credentials" in lowered
     assert "arbitrary committed, modified, and untracked source" in lowered
     assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
     assert "issue #906" in lowered
