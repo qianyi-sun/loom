@@ -45,6 +45,13 @@ sources, runtime directory, and state directory. Ordinary operators can use
 the client but cannot edit those inputs. Caller identity comes from the OS
 credential boundary, not from an argument or environment variable.
 
+For an installation using the `sealed-cumulative` source mode, the coordinator
+surface is limited to the authenticated OS users `qianyi`, `hongjian`, and
+`devansh`. This covers preflight, start, resume, and the protected maintenance
+operations; operator-group membership alone does not grant that authority.
+Candidate binding, maintenance, approval-digest, and lifecycle checks still
+apply independently.
+
 Request and attempt envelopes are immutable. The service-owned ledger records
 the request ID, authenticated caller, candidate identity, backup binding,
 systemd unit, rollout ID, attempt number, state transitions, cancellation, and

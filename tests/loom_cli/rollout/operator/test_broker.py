@@ -633,7 +633,7 @@ def test_manifest_ownership_rejects_non_coordinator_before_candidate_read(
     deps.lifecycle.maintenance = True
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
         manifest_ownership=_ManifestOwnership(),
     )
     assert (
@@ -750,7 +750,7 @@ def test_lifecycle_capacity_rejects_non_coordinator(tmp_path: Path) -> None:
     service = _LifecycleCapacity(deps.lifecycle)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
         lifecycle_capacity=service,
     )
 
@@ -880,7 +880,7 @@ def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
     service = _BackupRetention(deps.lifecycle)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
         backup_retention=service,
     )
 
@@ -1021,7 +1021,7 @@ def test_preflight_artifact_retention_rejects_unsealed_or_busy_authority(
     if rejection == "non-coordinator":
         dependencies = replace(
             dependencies,
-            authenticate=lambda: CallerIdentity("devansh", 2003),
+            authenticate=lambda: CallerIdentity("outsider", 2999),
         )
     elif rejection == "non-sealed":
         dependencies = replace(dependencies, config=deps.config)
@@ -1123,7 +1123,7 @@ def test_backup_recovery_rejects_non_coordinator(tmp_path: Path) -> None:
     service = _BackupRecovery(deps.lifecycle)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
         backup_recovery=service,
     )
 
@@ -1139,11 +1139,23 @@ def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> N
     )
 
 
-def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
+def test_devansh_can_start_sealed_cumulative_dry_run_without_launch(
     tmp_path: Path,
 ) -> None:
     deps = fakes(tmp_path)
-    rc = broker_main(["start", "--dry-run"], dependencies=deps.dependencies)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
+    )
+
+    rc = broker_main(["start", "--dry-run"], dependencies=dependencies)
     assert rc == 0
     assert deps.candidate.fetch_count == 1
     assert deps.backup.create_count == 0
@@ -1153,7 +1165,9 @@ def test_dry_run_fetches_and_records_preview_without_backup_unit_or_rollout(
     assert deps.store.read_events(REQUEST_ID)[-1].event == "preview"
 
 
-def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path: Path) -> None:
+def test_devansh_can_preflight_sealed_cumulative_candidate_without_request(
+    tmp_path: Path,
+) -> None:
     deps = fakes(tmp_path)
     assessment = _published_assessment(tmp_path)
     expected_candidate = deps.candidate.bind()
@@ -1166,6 +1180,14 @@ def test_preflight_assesses_exact_candidate_without_publishing_request(tmp_path:
 
     dependencies = replace(
         deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        config=replace(
+            deps.config,
+            source_mode="sealed-cumulative",
+            source_commit_sha=SHA,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        ),
         assess_preflight=assess,
         read_mutation_epoch=lambda: 7,
     )
@@ -1220,7 +1242,7 @@ def test_sealed_cumulative_preflight_rejects_non_coordinator_without_side_effect
     deps = fakes(tmp_path)
     dependencies = replace(
         deps.dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
         config=replace(
             deps.config,
             source_mode="sealed-cumulative",
@@ -1303,7 +1325,7 @@ def test_sealed_cumulative_start_rejects_non_coordinator_before_preflight_or_req
     dependencies = replace(deps.dependencies, config=sealed_config)
     dependencies = replace(
         dependencies,
-        authenticate=lambda: CallerIdentity("devansh", 2003),
+        authenticate=lambda: CallerIdentity("outsider", 2999),
     )
 
     assert broker_main(["start", "--dry-run"], dependencies=dependencies) == 1
@@ -1362,7 +1384,9 @@ def test_start_reserves_before_launch_and_returns_detached_request(tmp_path: Pat
     assert SHA in deps.stdout.getvalue()
 
 
-def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Path) -> None:
+def test_devansh_staged_start_publishes_short_lock_detached_checkpoint_job(
+    tmp_path: Path,
+) -> None:
     deps = fakes(tmp_path)
     store = RequestStore(tmp_path / "staged-state")
     initial_rotation = store.read_backup_rotation()
@@ -1436,7 +1460,7 @@ def test_staged_start_publishes_short_lock_detached_checkpoint_job(tmp_path: Pat
             source_tree_sha="b" * 40,
             source_base_sha="c" * 40,
         ),
-        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        authenticate=lambda: CallerIdentity("devansh", 2003),
         store=store,
         lifecycle=StagedLifecycle(),
         bind_candidate=lambda: candidate,
