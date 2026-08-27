@@ -112,19 +112,13 @@ def _render(tmp_path: Path):
     return profile, release, rendered, documents
 
 
-def _no_host_profile(tmp_path: Path, form: str):
-    source = "\n".join(
-        line
-        for line in _PROFILE.read_text(encoding="utf-8").splitlines()
-        if not line.startswith("ingress_controller_source_cidrs = ")
-    ) + "\n"
-    if form == "explicit_empty":
-        source = source.replace(
-            "[network]\n",
-            "[network]\ningress_controller_source_cidrs = []\n",
-            1,
-        )
-    path = tmp_path / f"{form}-profile.toml"
+def _legacy_host_profile(tmp_path: Path):
+    source = _PROFILE.read_text(encoding="utf-8").replace(
+        "[network]\n",
+        '[network]\ningress_controller_source_cidrs = ["192.168.50.14/32"]\n',
+        1,
+    )
+    path = tmp_path / "legacy-host-profile.toml"
     path.write_text(source, encoding="utf-8")
     return load_personal_dev_control_plane_profile(path)
 
@@ -302,7 +296,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "5912bd5f2b024a8179085584852da5d09ebc9551ea4cddd9a18309999513b8a0"
+        "34ca6940da5d9abd2038f117096ec99e57452a7526496fe13992bd2ca4cfbee5"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1178,7 +1172,7 @@ def test_storage_ingress_separates_postgres_and_minio_callers(tmp_path: Path) ->
     assert "loom-personal-dev-migration" not in minio_sources
 
 
-def test_management_ingress_admits_exact_controller_hosts_and_known_pods(
+def test_management_ingress_admits_public_https_port_without_source_identity(
     tmp_path: Path,
 ) -> None:
     _profile, _release, rendered, documents = _render(tmp_path)
@@ -1195,40 +1189,16 @@ def test_management_ingress_admits_exact_controller_hosts_and_known_pods(
         "policyTypes": ["Ingress"],
         "ingress": [
             {
-                "from": [
-                    {"ipBlock": {"cidr": "192.168.50.14/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.15/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.16/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.17/32"}},
-                    {"ipBlock": {"cidr": "192.168.50.103/32"}},
-                    {
-                        "namespaceSelector": {
-                            "matchLabels": {
-                                "kubernetes.io/metadata.name": "ingress-nginx"
-                            }
-                        },
-                        "podSelector": {
-                            "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
-                        },
-                    },
-                    {
-                        "podSelector": {
-                            "matchLabels": {"app": "loom-personal-dev-activation-agent"}
-                        }
-                    },
-                ],
                 "ports": [{"protocol": "TCP", "port": 8090}],
             }
         ],
     }
 
 
-@pytest.mark.parametrize("form", ["omitted", "explicit_empty"])
-def test_management_ingress_without_controller_hosts_preserves_selector_only_policy(
+def test_management_ingress_ignores_legacy_controller_source_profile(
     tmp_path: Path,
-    form: str,
 ) -> None:
-    profile = _no_host_profile(tmp_path, form)
+    profile = _legacy_host_profile(tmp_path)
     _checked_in_profile, release = _inputs(tmp_path)
     rendered = render_shadow_personal_dev_control_plane(profile, release)
     documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
@@ -1239,30 +1209,13 @@ def test_management_ingress_without_controller_hosts_preserves_selector_only_pol
         == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
     )
 
-    assert profile.network.ingress_controller_source_cidrs == ()
+    assert profile.network.ingress_controller_source_cidrs == ("192.168.50.14/32",)
     assert rendered.resource_count == 35
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
         "ingress": [
             {
-                "from": [
-                    {
-                        "namespaceSelector": {
-                            "matchLabels": {
-                                "kubernetes.io/metadata.name": "ingress-nginx"
-                            }
-                        },
-                        "podSelector": {
-                            "matchLabels": {"app.kubernetes.io/name": "ingress-nginx"}
-                        },
-                    },
-                    {
-                        "podSelector": {
-                            "matchLabels": {"app": "loom-personal-dev-activation-agent"}
-                        }
-                    },
-                ],
                 "ports": [{"protocol": "TCP", "port": 8090}],
             }
         ],

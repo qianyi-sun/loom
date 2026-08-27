@@ -565,10 +565,7 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
     postgres_dump = owner_file("postgres.dump", b"exact-postgres-dump")
     source_state = owner_file(
         "postgres.source.tsv",
-        (
-            "sequence\tpublic.example_id_seq\t7\tt\n"
-            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
-        ).encode("ascii"),
+        f"table\tpublic.alembic_version\t1\t{'5' * 64}\n".encode("ascii"),
     )
     restored_state = owner_file("postgres.restored.tsv", source_state.read_bytes())
     manifest_payload = json.dumps(
@@ -752,10 +749,18 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         )
 
 
+def test_postgres_state_accepts_canonical_sequence_and_table_inventory() -> None:
+    payload = (
+        "sequence\tpublic.example_id_seq\t7\tt\n"
+        f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+    )
+
+    acceptance_evidence._validate_postgres_state(payload.encode("ascii"))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        f"table\tpublic.alembic_version\t1\t{'5' * 64}\n",
         "sequence\tpublic.example_id_seq\t7\tt\n",
         (
             f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"

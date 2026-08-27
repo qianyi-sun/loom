@@ -119,7 +119,13 @@ namespace unless Kubernetes requires cluster scope:
   on the profile-pinned TCP 8089 solver port while retaining default-deny
   egress. It does not constrain source identity because cross-node VXLAN and
   host-network ingress paths do not preserve a stable source identity at the
-  destination NetworkPolicy boundary; and
+  destination NetworkPolicy boundary. The management ingress policy uses the
+  same source-independent boundary: it selects only the management Pod, is
+  ingress-only, admits only TCP 8090, and grants no egress. TLS and application
+  authentication/authorization remain the public management boundary. The
+  legacy `ingress_controller_source_cidrs` profile input is accepted only so a
+  preserved rollback profile remains loadable and does not affect rendering;
+  and
 - internal Services plus one operator-configured management API Ingress. No
   shared Control Plane, Gateway, worker, family orchestrator, pipeline
   orchestrator, or web Deployment is rendered.

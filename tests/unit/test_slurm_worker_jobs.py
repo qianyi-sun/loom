@@ -6,6 +6,7 @@ from uuid import uuid4
 from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     _normalize_slurm_state,
+    is_unrecoverable_slurm_state,
     redact_env,
     summarize_jobs,
 )
@@ -34,6 +35,8 @@ def test_redact_env_removes_secret_like_values() -> None:
 def test_normalize_slurm_state_keeps_raw_state_separate() -> None:
     assert _normalize_slurm_state("PENDING") == "pending"
     assert _normalize_slurm_state("CONFIGURING") == "pending"
+    assert _normalize_slurm_state("REQUEUE_HOLD") == "failed"
+    assert is_unrecoverable_slurm_state("REQUEUE_HOLD") is True
     assert _normalize_slurm_state("RUNNING") == "running"
     assert _normalize_slurm_state("COMPLETED") == "completed"
     assert _normalize_slurm_state("CANCELLED by 123") == "cancelled"

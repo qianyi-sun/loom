@@ -228,6 +228,8 @@ class _NetworkInput(_StrictModel):
     public_origin: str
     ingress_class_name: str
     ingress_cluster_issuer: str
+    # Legacy rollback input. Cross-node ingress source identity is not stable
+    # under the installed VXLAN topology, so renderers must not consume it.
     ingress_controller_source_cidrs: list[str] = Field(default_factory=list, max_length=32)
     acme_http01_solver_port: int = Field(default=8089, ge=1, le=65535)
     kubernetes_api_cidr: str

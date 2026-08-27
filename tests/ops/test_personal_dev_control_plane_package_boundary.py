@@ -1717,9 +1717,12 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert runbook.count('"${operational_evidence_args[@]}"') == 3
     assert 'test "$solver_port" = 8089' in runbook
     assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
+    assert "networkpolicy/loom-personal-dev-management-ingress" in runbook
     assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
+    assert '{"app":"loom-personal-dev-management"}' in runbook
     assert '(.spec | has("egress") | not)' in runbook
-    assert '(.spec.ingress[0] | has("from") | not)' in runbook
+    assert runbook.count('(.spec.ingress[0] | has("from") | not)') >= 2
+    assert '.spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]' in runbook
     assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
 
