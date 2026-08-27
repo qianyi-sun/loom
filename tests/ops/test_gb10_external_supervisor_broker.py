@@ -458,8 +458,14 @@ def test_containment_grace_expiry_force_kills_every_cgroup_process(
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            procs.write_text("", encoding="ascii")
-            events.write_text("populated 0\n", encoding="ascii")
+            deadline = time.monotonic() + 1.0
+            while any(_pid_is_live(pid) for pid in (process.pid, child_pid)):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.001)
+            if not any(_pid_is_live(pid) for pid in (process.pid, child_pid)):
+                procs.write_text("", encoding="ascii")
+                events.write_text("populated 0\n", encoding="ascii")
         return subprocess.CompletedProcess(arguments, 0, "", "")
 
     monkeypatch.setattr(broker, "_systemctl", systemctl)
