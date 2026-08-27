@@ -735,7 +735,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or candidate.candidate_sha != requested.candidate_sha
             or candidate.artifact_state != "retained"
         ):
-            raise PersonalDevEnvironmentNotFoundError("personal-dev candidate not found")
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev candidate is invalid for the requested apply",
+            )
         candidate.artifact_gc_unreferenced_at = None
         candidate.updated_at = now
 

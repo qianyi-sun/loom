@@ -10,6 +10,10 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from loom.personal_dev_expected_denial import (
+    EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
+    expected_hidden_denial_phase,
+)
 from loom.personal_dev_source import PersonalDevSourceSnapshotV1
 from loom_cli.server_client import assert_2xx
 
@@ -248,7 +252,11 @@ class PersonalDevDeployClient:
             expected_operation_epoch=expected_operation_epoch,
             idempotency_key=idempotency_key,
         )
-        return response.status_code == 404
+        return (
+            response.status_code == 404
+            and response.headers.get(EXPECTED_HIDDEN_DENIAL_PHASE_HEADER)
+            == expected_hidden_denial_phase("update")
+        )
 
     def apply(
         self,

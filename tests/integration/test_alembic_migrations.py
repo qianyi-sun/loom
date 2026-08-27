@@ -53,7 +53,6 @@ from loom.personal_dev_environment import (
 from loom.personal_dev_environment_store import (
     PersonalDevEnvironmentConflictError,
     PersonalDevEnvironmentEpochFencedError,
-    PersonalDevEnvironmentNotFoundError,
     PersonalDevEnvironmentOperationFencedError,
     SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
@@ -1062,11 +1061,81 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
                 ),
             )
             await session.commit()
-            with pytest.raises(PersonalDevEnvironmentNotFoundError):
+            with pytest.raises(PersonalDevEnvironmentConflictError):
                 await SqlAlchemyPersonalDevEnvironmentAuthority(session).apply(
                     replace(
                         request,
                         owner_user_id=other_owner,
+                        idempotency_key=uuid4(),
+                    ),
+                    access_binding=_PERSONAL_DEV_ACCESS,
+                    now=now,
+                )
+
+        invalid_candidates = (
+            replace(
+                request,
+                candidate_id=uuid4(),
+                idempotency_key=uuid4(),
+            ),
+            replace(
+                request,
+                candidate_sha="9" * 64,
+                idempotency_key=uuid4(),
+            ),
+        )
+        for invalid_request in invalid_candidates:
+            async with sessions() as session:
+                with pytest.raises(PersonalDevEnvironmentConflictError):
+                    await SqlAlchemyPersonalDevEnvironmentAuthority(session).apply(
+                        invalid_request,
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+
+        stale_candidate_id = uuid4()
+        stale_candidate_sha = "8" * 64
+        stale_created_at = now - timedelta(days=365)
+        stale_candidate = PersonalDevCandidateRecord(
+            id=stale_candidate_id,
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_sha=stale_candidate_sha,
+            source_sha256="7" * 64,
+            archive_sha256="6" * 64,
+            build_contract_sha256="5" * 64,
+            source_commit="4" * 40,
+            dirty=False,
+            manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+            object_bucket="artifacts",
+            object_key=(
+                f"personal-dev/sources/{team_id}/{owner_id}/{stale_candidate_sha}/"
+                f"{stale_candidate_id}/{'6' * 64}.tar"
+            ),
+            source_generation_id=stale_candidate_id,
+            archive_size_bytes=10240,
+            status="uploaded",
+            created_at=stale_created_at,
+            updated_at=stale_created_at,
+        )
+        async with sessions() as session:
+            candidate_store = SqlAlchemyPersonalDevCandidateStore(session)
+            await candidate_store.register(stale_candidate)
+            assert await candidate_store.mark_next_artifact_gc(now=now) is True
+            stale_claim = await candidate_store.claim_next_artifact_gc(
+                collector_id="candidate-conflict-test",
+                now=now,
+                retention_seconds=0,
+                lease_seconds=300,
+            )
+            assert stale_claim is not None
+            assert stale_claim.candidate_id == stale_candidate_id
+            with pytest.raises(PersonalDevEnvironmentConflictError):
+                await SqlAlchemyPersonalDevEnvironmentAuthority(session).apply(
+                    replace(
+                        request,
+                        candidate_id=stale_candidate_id,
+                        candidate_sha=stale_candidate_sha,
                         idempotency_key=uuid4(),
                     ),
                     access_binding=_PERSONAL_DEV_ACCESS,

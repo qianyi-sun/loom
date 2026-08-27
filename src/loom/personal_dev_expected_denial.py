@@ -8,12 +8,22 @@ import json
 EXPECTED_HIDDEN_DENIAL_ERROR = (
     "error: expected hidden-resource denial was not observed\n"
 )
+EXPECTED_HIDDEN_DENIAL_PHASE_HEADER = "X-Loom-Personal-Dev-Hidden-Denial-Phase"
 
 _REQUEST_BINDINGS = {
     "read": ("GET", "target_read"),
     "update": ("PUT", "target_update"),
     "destroy": ("DELETE", "target_destroy"),
 }
+
+
+def expected_hidden_denial_phase(operation: str) -> str:
+    """Return the exact server-origin phase marker for one target request."""
+
+    try:
+        return _REQUEST_BINDINGS[operation][1]
+    except KeyError as exc:
+        raise ValueError("expected hidden-denial operation is invalid") from exc
 
 
 def expected_hidden_denial_receipt(operation: str) -> bytes:
@@ -44,6 +54,8 @@ def expected_hidden_denial_sha256(operation: str) -> str:
 
 __all__ = [
     "EXPECTED_HIDDEN_DENIAL_ERROR",
+    "EXPECTED_HIDDEN_DENIAL_PHASE_HEADER",
+    "expected_hidden_denial_phase",
     "expected_hidden_denial_receipt",
     "expected_hidden_denial_sha256",
 ]

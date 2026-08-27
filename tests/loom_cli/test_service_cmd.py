@@ -384,6 +384,9 @@ def test_personal_update_expected_hidden_denial_binds_candidate_then_target_put(
             return httpx.Response(
                 404,
                 json={"detail": "dev-private-target must not escape"},
+                headers={
+                    "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_update",
+                },
             )
         raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
 
@@ -422,6 +425,87 @@ def test_personal_update_expected_hidden_denial_binds_candidate_then_target_put(
     assert rc == 1
     assert captured.out == ""
     assert captured.err == _UPDATE_DENIAL_RECEIPT
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+@pytest.mark.parametrize("phase", [None, "target_read", "target_update "])
+def test_personal_update_expected_hidden_denial_requires_exact_put_404_marker(
+    capsys: pytest.CaptureFixture[str],
+    phase: str | None,
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "00000000-0000-0000-0000-000000000001",
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(
+                404,
+                json={"detail": "candidate disappeared before apply"},
+                headers=(
+                    {}
+                    if phase is None
+                    else {
+                        "X-Loom-Personal-Dev-Hidden-Denial-Phase": phase,
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "0",
+                    "--min-slots",
+                    "0",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "candidate disappeared" not in captured.err
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/v1/personal-dev-candidates"),
         ("PUT", "/api/v1/dev-instances/alice"),
@@ -528,7 +612,7 @@ def test_personal_update_expected_hidden_denial_hides_malformed_candidate_output
     ]
 
 
-@pytest.mark.parametrize("status", [200, 401, 403, 500])
+@pytest.mark.parametrize("status", [200, 401, 403, 409, 500])
 def test_personal_update_expected_hidden_denial_rejects_non_404_target_response(
     capsys: pytest.CaptureFixture[str],
     status: int,

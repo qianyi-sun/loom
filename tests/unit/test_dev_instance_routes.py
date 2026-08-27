@@ -27,6 +27,10 @@ from loom.personal_dev_environment import (
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
+from loom.personal_dev_environment_store import (
+    PersonalDevEnvironmentConflictError,
+    PersonalDevEnvironmentNotFoundError,
+)
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
@@ -533,6 +537,72 @@ async def test_personal_apply_fails_before_mutation_when_builder_is_inert() -> N
         )
 
     assert exc.value.status_code == 503
+
+
+async def test_personal_apply_marks_only_hidden_target_not_found_response() -> None:
+    class _Authority:
+        async def apply(self, requested, *, access_binding, now=None):
+            raise PersonalDevEnvironmentNotFoundError(
+                "personal-dev environment not found",
+            )
+
+    request = _request(_Store(), configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_builder_available = True
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_personal_dev_environment(
+            "alice",
+            PersonalDevEnvironmentApplyPayload(
+                candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=0,
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000011"),
+            ),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_update",
+    }
+
+
+async def test_personal_apply_maps_candidate_conflict_to_unmarked_409() -> None:
+    class _Authority:
+        async def apply(self, requested, *, access_binding, now=None):
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev candidate is invalid for the requested apply",
+            )
+
+    request = _request(_Store(), configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_builder_available = True
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_personal_dev_environment(
+            "alice",
+            PersonalDevEnvironmentApplyPayload(
+                candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=0,
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000011"),
+            ),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.headers is None
 
 
 async def test_personal_destroy_requires_epoch_and_submits_durable_authority() -> None:

@@ -47,6 +47,10 @@ from loom.personal_dev_environment_store import (
     SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
+from loom.personal_dev_expected_denial import (
+    EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
+    expected_hidden_denial_phase,
+)
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
@@ -701,7 +705,15 @@ async def apply_personal_dev_environment(
             access_binding=access_binding_from_context(ctx),
         )
     except PersonalDevEnvironmentNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="personal-dev resource not found") from exc
+        raise HTTPException(
+            status_code=404,
+            detail="personal-dev resource not found",
+            headers={
+                EXPECTED_HIDDEN_DENIAL_PHASE_HEADER: expected_hidden_denial_phase(
+                    "update",
+                ),
+            },
+        ) from exc
     except (
         PersonalDevEnvironmentConflictError,
         PersonalDevEnvironmentEpochFencedError,
