@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
+
+
+def _document_sha256(relative: str) -> str:
+    return hashlib.sha256((_ROOT / relative).read_bytes()).hexdigest()
 
 
 def _sidecar_status(**changes: str) -> bytes:
@@ -893,8 +898,92 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
     assert "personal-dev-management-plane-deployment.md" in architecture
 
 
-def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
+def test_approved_solo_owner_acceptance_runbook_is_byte_preserved() -> None:
+    assert _document_sha256(
+        "docs/runbooks/personal-dev-zero-capacity-acceptance.md"
+    ) == "dc9da9db4a6a54ba7ca0d3eba8ba35b647fb45ad2f56f4dc855f3b1d7d7d6bbf"
+
+
+def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
+    normalized = " ".join(runbook.split())
+
+    assert "set -euo pipefail" in runbook
+    assert "umask 077" in runbook
+    assert "personal-dev-trusted-release-run-<run>-attempt-<attempt>" in runbook
+    assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
+    assert 'repo="$(pwd -P)"' in runbook
+    assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
+    assert 'python_cli="$repo/.venv/bin/python"' in runbook
+    assert 'test -x "$loom_cli"' in runbook
+    assert 'test -x "$python_cli"' in runbook
+    assert (
+        'scanner_cache_lock="$repo/deploy/dev-fleet/personal-dev-scanner-cache-lock.json"'
+    ) in runbook
+    assert "/home/hongjian/loom/.venv" not in runbook
+    assert 'scanner_cache_lock_sha256="$(sha256sum "$scanner_cache_lock"' in runbook
+    assert '$(jq -r .scanner.lock_sha256 "$trusted_release")' in runbook
+    assert '.images.personal_dev_scanner_cache "$trusted_release"' in runbook
+    assert '.release.images.personal_dev_scanner_cache "$acceptance_plan"' in runbook
+    assert '.scanner.cache_identity_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_cache_identity_sha256 "$acceptance_plan"' in runbook
+    assert '.scanner.database_metadata_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_database_metadata_sha256 "$acceptance_plan"' in runbook
+    assert '.scanner.java_database_metadata_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_java_database_metadata_sha256 "$acceptance_plan"' in runbook
+    assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
+    assert 'test "$(stat -c %a "$acceptance_plan")" = 600' in runbook
+    assert 'test "$(stat -c %h "$acceptance_plan")" = 1' in runbook
+    assert 'acceptance_plan_sha256="$(sha256sum "$acceptance_plan"' in runbook
+    assert "personal-dev-control-plane render-acceptance" in normalized
+    assert "personal-dev-control-plane status-acceptance" in normalized
+    assert runbook.count("personal-dev-control-plane status-acceptance") >= 3
+    assert '"application_ready":true' in runbook
+    assert '"capacity_publication_ready":true' in runbook
+    assert '"worker_available":false' in runbook
+    assert '"manager_ceiling":0' in runbook
+
+    assert 'owner_xdg="<absolute-mode-0700-acceptance-owner-xdg-config-root>"' in runbook
+    assert 'primary_name="<owner-primary-personal-name>"' in runbook
+    assert 'retained_name="<owner-retained-personal-name>"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_xdg"' in runbook
+    assert runbook.count("loom auth whoami") == 1
+    assert "primary_deploy_pid=$!" in runbook
+    assert "retained_deploy_pid=$!" in runbook
+    assert 'wait "$primary_deploy_pid"' in runbook
+    assert 'wait "$retained_deploy_pid"' in runbook
+    assert "primary_update_pid=$!" in runbook
+    assert "retained_update_pid=$!" in runbook
+    assert runbook.count("--min-slots 0") >= 5
+    assert '--source-root "$primary_source_v1"' in normalized
+    assert '--source-root "$retained_source_v1"' in normalized
+    assert '--source-root "$primary_source_v2"' in normalized
+    assert '--source-root "$retained_source_v2"' in normalized
+    assert ".acceptance_owner.user_id" in runbook
+    assert ".acceptance_owner.team_id" in runbook
+    assert 'loom dev status "$retained_name"' in normalized
+    assert 'loom dev status "$primary_name"' in normalized
+    assert 'loom dev destroy "$primary_name" --format json' in normalized
+    assert 'loom dev destroy "$retained_name" --keep-data --format json' in normalized
+    assert 'loom service up --environment "dev-$retained_name"' in normalized
+    assert 'jq -e --arg previous "$retained_subject"' in normalized
+    assert ".subject_id != $previous" in runbook
+
+    assert 'shadow_render="$evidence_dir/reviewed-rollback-shadow.yaml"' in runbook
+    assert ".release.shadow_manifest_sha256" in runbook
+    assert 'cmp -s "$shadow_render_recheck" "$shadow_render"' in runbook
+    assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
+    assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
+    assert "--field-manager=loom-personal-dev-control-plane" in normalized
+    assert runbook.count("rollout status deployment/loom-personal-dev-management") >= 2
+    assert "capture_scanner_cache_init_status" in runbook
+    assert runbook.count("personal-dev-scanner-cache-init") >= 2
+
+
+def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
     normalized = " ".join(runbook.split())
 
     assert "set -euo pipefail" in runbook
@@ -1083,6 +1172,87 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert runbook.count("personal-dev-scanner-cache-init") >= 2
 
 
+def test_concurrent_owner_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> (
+    None
+):
+    runbook = _read(
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
+    )
+    lowered = runbook.casefold()
+
+    assert "separately reviewed concurrent-owner certification window" in lowered
+    assert "issue #1280" not in lowered
+    assert "personal-dev-multi-owner-durable-launch.md" in runbook
+
+    for phrase in (
+        "credential or kubeconfig drift",
+        "acceptance window",
+        "runtimeclass or scanner drift",
+        "secret key inventory drift",
+        "migration or storage drift",
+        "manager identity, configuration-epoch regression, execution epoch/state, or",
+        "namespace ownership drift",
+        "personal worker deployment",
+    ):
+        assert phrase in lowered
+    assert "assert_pre_apply_interlocks" in runbook
+    assert "assert_live_acceptance" in runbook
+    assert "assert_rollback_interlocks" in runbook
+    assert "backup_restore_evidence_sha256" in runbook
+    assert "runtime_profile_sha256" in runbook
+    assert "scanner_finding_policy_sha256" in runbook
+    assert "approved secret channel" in lowered
+    assert "exact key inventory" in lowered
+    assert "two pinned user-owned bearer credentials" in lowered
+    assert "arbitrary committed, modified, and untracked source" in lowered
+    assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
+    assert "issue #906" in lowered
+    assert "never delete pvcs" in lowered
+    assert "never delete a namespace directly" in lowered
+    assert "physical capacity remains unchanged" in lowered
+
+    for legacy_input in (
+        "scanner_binary=",
+        "scanner_database=",
+        "scanner_java_database=",
+    ):
+        assert legacy_input not in runbook
+    for legacy_reference in (
+        '"$scanner_binary"',
+        '"$scanner_database"',
+        '"$scanner_java_database"',
+    ):
+        assert legacy_reference not in runbook
+    assert "kubectl cp" not in lowered
+    assert "--download-db-only" not in lowered
+    assert "--download-java-db-only" not in lowered
+    assert "hostpath" not in lowered
+    assert "temporary egress" not in lowered
+
+    assert "loom-dev-shared" not in runbook
+    assert "kubectl create secret" not in lowered
+    assert "--from-literal" not in lowered
+    assert "kubectl delete" not in lowered
+    assert "kubectl scale" not in lowered
+    assert "loom admin capacity-control-plane" not in lowered
+    assert "systemctl" not in lowered
+    for command in ("salloc", "sbatch", "scancel", "scontrol", "sinfo", "squeue"):
+        assert command not in lowered
+
+    forward_diff = runbook.index("acceptance_diff_status=0")
+    forward_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        forward_diff,
+    )
+    assert "assert_pre_apply_interlocks" in runbook[forward_diff:forward_apply]
+    rollback_diff = runbook.index("rollback_diff_status=0")
+    rollback_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        rollback_diff,
+    )
+    assert "assert_rollback_interlocks" in runbook[rollback_diff:rollback_apply]
+
+
 def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
     lowered = runbook.casefold()
@@ -1106,7 +1276,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "scanner_finding_policy_sha256" in runbook
     assert "approved secret channel" in lowered
     assert "exact key inventory" in lowered
-    assert "two pinned user-owned bearer credentials" in lowered
+    assert "single authenticated acceptance-owner session" in lowered
     assert "arbitrary committed, modified, and untracked source" in lowered
     assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
     assert "issue #906" in lowered
