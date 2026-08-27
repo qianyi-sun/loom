@@ -722,7 +722,7 @@ async def test_nebius_budget_reservation_is_race_safe_across_service_leases(
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    now = datetime.now(UTC)
+    now = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
     try:
         async with sessions() as session:
             first_trial_id, target = await _seed_ready_trial(session, now=now)
