@@ -92,7 +92,7 @@ def test_single_node_capacity_inputs_keep_exact_host_path_authority() -> None:
     )
 
 
-def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
+def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_artifact(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -295,6 +295,18 @@ def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
         "loom-staging-artifacts",
         "artifacts",
         "trajectories",
+    )
+    assert captured["composition"]["manifest_image_names"] == frozenset(  # type: ignore[index]
+        {
+            "loom-control-plane",
+            "loom-egress-xds",
+            "loom-family-orchestrator",
+            "loom-llm-gateway",
+            "loom-pipeline-orchestrator",
+            "loom-service",
+            "loom-web",
+            "loom-worker",
+        }
     )
 
 
