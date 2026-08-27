@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Root forced-command broker for the GB10 external autoscaler supervisor.
 
 The broker accepts one canonical JSON envelope on stdin.  It verifies or
@@ -17,6 +17,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -24,7 +25,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, cast
@@ -38,9 +41,18 @@ SERVICE_HOME = Path("/var/lib/loom-rollout")
 CANDIDATES_ROOT = Path("/opt/loom-staging-runner/candidates")
 REMOTE_URL = "https://github.com/qianyi-sun/loom.git"
 SYSTEM_PYTHON = Path("/usr/bin/python3")
+SYSTEMD_RUN = Path("/usr/bin/systemd-run")
+SYSTEMCTL = Path("/usr/bin/systemctl")
+RUNUSER = Path("/usr/sbin/runuser")
+SQUEUE = Path("/usr/bin/squeue")
+SCANCEL = Path("/usr/bin/scancel")
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 UV_BINARY = Path("/usr/local/bin/uv")
 SCONTROL = Path("/usr/bin/scontrol")
 ACCEPTANCE_AUTHORITY = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
+ACCEPTANCE_STATE_ROOT = Path("/run/loom-gb10-slurm-authority")
+ACCEPTANCE_JOB_STATE_ROOT = ACCEPTANCE_STATE_ROOT / "jobs"
+ACCEPTANCE_LOCK_PATH = ACCEPTANCE_STATE_ROOT / "acceptance.lock"
 INSTALLED_BROKER = Path("/usr/local/libexec/loom-gb10-external-supervisor-broker")
 REMOTE_SSH_USER = "qianyi"
 REMOTE_SSH_HOME = Path("/home/qianyi")
@@ -49,6 +61,10 @@ _LOCK_NAME = ".loom-gb10-external-supervisor-broker.lock"
 _HELPER_MODULE = "loom_cli.rollout.operator.protected_gb10_external_supervisor_transport"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_JOB_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_PROBE_JOB_NAME_RE = re.compile(r"^loom-accept-[0-9a-f]{7}-[1-9][0-9]*-([0-9a-f]{24})$")
+_UNIT_NAME_RE = re.compile(r"^loom-gb10-capacity-([0-9a-f]{24})\.service$")
+_STALE_JOB_TEMP_RE = re.compile(r"^\.(?:active-job|broker-job)\.[a-z0-9_]{8}$")
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_COMMAND_OUTPUT = 1024 * 1024
 _MAX_TREE_ENTRIES = 300_000
@@ -56,6 +72,8 @@ _MAX_SYMLINK_HOPS = 40
 # Reserve cleanup inside the caller's hard timeout instead of extending it.
 _TERMINATION_WINDOW_SECONDS = 45.0
 _FORCED_REAP_SECONDS = 2.0
+ROOT_UID = 0
+ROOT_GID = 0
 _GB10_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 
 
@@ -69,10 +87,15 @@ class BrokerInterruptedError(BrokerError):
 
 _ACTIVE_PROCESS: subprocess.Popen[str] | None = None
 _ACTIVE_PROCESS_TERMINATING = False
+_DEFERRED_SIGNAL: int | None = None
+_SIGNALS_DEFERRED = False
 
 
 def _handle_broker_signal(signum: int, _frame: object) -> None:
-    global _ACTIVE_PROCESS_TERMINATING
+    global _ACTIVE_PROCESS_TERMINATING, _DEFERRED_SIGNAL
+    if _SIGNALS_DEFERRED:
+        _DEFERRED_SIGNAL = signum
+        return
     process = _ACTIVE_PROCESS
     if process is not None:
         if _ACTIVE_PROCESS_TERMINATING:
@@ -97,6 +120,26 @@ def _install_signal_handlers() -> dict[int, Any]:
 def _restore_signal_handlers(previous: dict[int, Any]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
+
+
+def _begin_signal_deferral() -> bool:
+    global _SIGNALS_DEFERRED
+    previous = _SIGNALS_DEFERRED
+    _SIGNALS_DEFERRED = True
+    return previous
+
+
+def _finish_signal_deferral(previous: bool) -> None:
+    global _SIGNALS_DEFERRED, _DEFERRED_SIGNAL
+    _SIGNALS_DEFERRED = previous
+    if previous:
+        return
+    signum = _DEFERRED_SIGNAL
+    _DEFERRED_SIGNAL = None
+    if signum is not None:
+        raise BrokerInterruptedError(
+            f"GB10 external supervisor broker interrupted safely by signal {signum}"
+        )
 
 
 def _close_process_pipes(process: subprocess.Popen[str]) -> None:
@@ -368,20 +411,23 @@ def accept_capacity(payload: bytes) -> bytes:
     nodes = cast(list[str], request["nodes"])
     _safe_executable(
         ACCEPTANCE_AUTHORITY,
-        owner_uid=0,
-        owner_gid=0,
+        owner_uid=ROOT_UID,
+        owner_gid=ROOT_GID,
         label="GB10 acceptance authority",
     )
-    result = _run(
-        [
-            str(ACCEPTANCE_AUTHORITY),
-            "--candidate-sha",
-            candidate_sha,
-            "--image-tag",
-            f"staging-{candidate_sha[:7]}",
-        ],
-        timeout=1200,
-    )
+    _safe_executable(SYSTEM_PYTHON, owner_uid=ROOT_UID, owner_gid=ROOT_GID, label="system Python")
+    with _acceptance_lock():
+        _reconcile_stale_job_states(deadline=time.monotonic() + 60.0)
+        unit_name = f"loom-gb10-capacity-{secrets.token_hex(12)}.service"
+        job_state_path = ACCEPTANCE_JOB_STATE_ROOT / f"{unit_name}.json"
+        cgroup_path = CGROUP_ROOT / "system.slice" / unit_name
+        result = _run_contained_authority(
+            candidate_sha=candidate_sha,
+            unit_name=unit_name,
+            job_state_path=job_state_path,
+            cgroup_path=cgroup_path,
+            timeout=1200,
+        )
     artifact_bytes = result.stdout.encode()
     if (
         not artifact_bytes
@@ -425,6 +471,25 @@ def _safe_directory(path: Path, *, owner_uid: int, owner_gid: int, label: str) -
         or stat.S_IMODE(metadata.st_mode) & 0o022
     ):
         raise BrokerError(f"{label} metadata is unsafe")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != owner_uid
+            or opened.st_gid != owner_gid
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise BrokerError(f"{label} metadata is unsafe")
+    finally:
+        os.close(descriptor)
 
 
 def _safe_executable(path: Path, *, owner_uid: int, owner_gid: int, label: str) -> None:
@@ -544,12 +609,12 @@ def _run(
     *,
     cwd: Path | None = None,
     environment: dict[str, str] | None = None,
-    timeout: int = 900,
+    timeout: float = 900,
     check: bool = True,
     run_as: tuple[int, int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     global _ACTIVE_PROCESS, _ACTIVE_PROCESS_TERMINATING
-    if not argv or any(not item or "\x00" in item for item in argv) or not 1 <= timeout <= 1800:
+    if not argv or any(not item or "\x00" in item for item in argv) or not 0 < timeout <= 1800:
         raise BrokerError("GB10 external supervisor command is invalid")
     env = (
         {
@@ -640,6 +705,723 @@ def _run(
     ):
         raise BrokerError("GB10 external supervisor command failed safely")
     return result
+
+
+def _cleanup_environment() -> dict[str, str]:
+    return {
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+def _run_cleanup_command(
+    argv: list[str],
+    *,
+    timeout: float = 30,
+    check: bool = True,
+    deadline: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if not argv or any(not item or "\x00" in item for item in argv):
+        raise BrokerError("GB10 cleanup command is invalid")
+    effective_timeout = timeout
+    if deadline is not None:
+        effective_timeout = min(timeout, deadline - time.monotonic())
+    if effective_timeout <= 0:
+        raise BrokerError("GB10 cleanup time budget exhausted safely")
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+            env=_cleanup_environment(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BrokerError("GB10 cleanup command timed out safely") from exc
+    if (
+        len(result.stdout.encode()) > 64 * 1024
+        or len(result.stderr.encode()) > 64 * 1024
+        or (check and result.returncode != 0)
+    ):
+        raise BrokerError("GB10 cleanup command failed safely")
+    return result
+
+
+def _systemctl(
+    *arguments: str,
+    timeout: float = 30,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return _run_cleanup_command(
+        [str(SYSTEMCTL), *arguments],
+        timeout=timeout,
+        check=check,
+    )
+
+
+def _contained_authority_argv(
+    *,
+    unit_name: str,
+    candidate_sha: str,
+    job_state_path: Path,
+) -> list[str]:
+    if (
+        _UNIT_NAME_RE.fullmatch(unit_name) is None
+        or _SHA_RE.fullmatch(candidate_sha) is None
+        or not job_state_path.is_absolute()
+        or ".." in job_state_path.parts
+    ):
+        raise BrokerError("GB10 acceptance containment identity is invalid")
+    return [
+        str(SYSTEMD_RUN),
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        "--service-type=exec",
+        "--slice=system.slice",
+        f"--unit={unit_name}",
+        "--property=KillMode=control-group",
+        "--property=Delegate=no",
+        "--property=TimeoutStopSec=45s",
+        "--property=RuntimeMaxSec=1140s",
+        "--property=Environment=HOME=/root",
+        "--property=Environment=LANG=C.UTF-8",
+        "--property=Environment=LC_ALL=C.UTF-8",
+        "--property=Environment=PATH=/usr/bin:/bin",
+        "--",
+        str(SYSTEM_PYTHON),
+        str(ACCEPTANCE_AUTHORITY),
+        "--candidate-sha",
+        candidate_sha,
+        "--image-tag",
+        f"staging-{candidate_sha[:7]}",
+        "--job-state-path",
+        str(job_state_path),
+    ]
+
+
+def _validate_root_directory(path: Path, *, mode: int, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise BrokerError(f"{label} metadata is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise BrokerError(f"{label} metadata is unsafe")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != ROOT_UID
+            or opened.st_gid != ROOT_GID
+            or stat.S_IMODE(opened.st_mode) != mode
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise BrokerError(f"{label} metadata is unsafe")
+    finally:
+        os.close(descriptor)
+
+
+def _canonical_job_state(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _read_persisted_job_state(path: Path) -> dict[str, str | int] | None:
+    if not os.path.lexists(path):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BrokerError("GB10 persisted job state is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or not 1 <= metadata.st_size <= 1024
+        ):
+            raise BrokerError("GB10 persisted job state metadata is unsafe")
+        encoded = os.read(descriptor, 1025)
+        current = os.lstat(path)
+        if len(encoded) != metadata.st_size or (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+        ) != (metadata.st_dev, metadata.st_ino, metadata.st_size):
+            raise BrokerError("GB10 persisted job state changed during validation")
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(encoded.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BrokerError("GB10 persisted job state is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or _canonical_job_state(value) != encoded
+        or value.get("schema_version") != 1
+        or type(value.get("schema_version")) is not int
+    ):
+        raise BrokerError("GB10 persisted job state is invalid")
+    fields = set(value)
+    if fields == {"schema_version", "unit_name"}:
+        unit_name = value.get("unit_name")
+        if type(unit_name) is not str or _UNIT_NAME_RE.fullmatch(unit_name) is None:
+            raise BrokerError("GB10 persisted containment state is invalid")
+    elif fields in (
+        {"job_name", "schema_version"},
+        {"job_id", "job_name", "schema_version"},
+    ):
+        job_name = value.get("job_name")
+        job_id = value.get("job_id")
+        if (
+            type(job_name) is not str
+            or _PROBE_JOB_NAME_RE.fullmatch(job_name) is None
+            or (
+                job_id is not None
+                and (type(job_id) is not str or _JOB_ID_RE.fullmatch(job_id) is None)
+            )
+        ):
+            raise BrokerError("GB10 persisted job state is invalid")
+    else:
+        raise BrokerError("GB10 persisted job state fields are invalid")
+    return cast(dict[str, str | int], value)
+
+
+def _write_persisted_job_state(
+    path: Path,
+    *,
+    job_name: str | None = None,
+    job_id: str | None = None,
+    unit_name: str | None = None,
+) -> None:
+    if unit_name is not None:
+        if job_name is not None or job_id is not None or _UNIT_NAME_RE.fullmatch(unit_name) is None:
+            raise BrokerError("GB10 persisted containment identity is invalid")
+        value: dict[str, str | int] = {"schema_version": 1, "unit_name": unit_name}
+    else:
+        if (
+            job_name is None
+            or job_id is None
+            or _PROBE_JOB_NAME_RE.fullmatch(job_name) is None
+            or _JOB_ID_RE.fullmatch(job_id) is None
+        ):
+            raise BrokerError("GB10 persisted job identity is invalid")
+        value = {"job_id": job_id, "job_name": job_name, "schema_version": 1}
+    _validate_root_directory(path.parent, mode=0o700, label="GB10 job state root")
+    encoded = _canonical_job_state(value)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".broker-job.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise BrokerError("GB10 persisted job state write failed safely")
+            offset += written
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != len(encoded)
+        ):
+            raise BrokerError("GB10 persisted job state metadata is unsafe")
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        _fsync_path_directory(path.parent)
+        state = _read_persisted_job_state(path)
+        if state != value:
+            raise BrokerError("GB10 persisted job state readback mismatched")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if os.path.lexists(temporary):
+            temporary.unlink()
+            _fsync_path_directory(path.parent)
+
+
+def _fsync_path_directory(path: Path) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _service_cleanup_command(*argv: str) -> list[str]:
+    return [str(RUNUSER), "-u", SERVICE_USER, "--", *argv]
+
+
+def _parse_unique_job_id(stdout: str, *, job_name: str) -> str | None:
+    rows = [line.strip() for line in stdout.splitlines() if line.strip()]
+    job_ids: list[str] = []
+    for row in rows:
+        job_id, separator, observed_name = row.partition("|")
+        if (
+            not separator
+            or "|" in observed_name
+            or observed_name != job_name
+            or _JOB_ID_RE.fullmatch(job_id) is None
+        ):
+            raise BrokerError("GB10 persisted job lookup is malformed")
+        job_ids.append(job_id)
+    if len(job_ids) > 1:
+        raise BrokerError("GB10 persisted job lookup is ambiguous")
+    return job_ids[0] if job_ids else None
+
+
+def _observe_unique_persisted_job_id(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> str | None:
+    lookup = _run_cleanup_command(
+        _service_cleanup_command(
+            str(SQUEUE),
+            "--noheader",
+            f"--user={SERVICE_USER}",
+            f"--name={job_name}",
+            "--format=%A|%j",
+        ),
+        timeout=10,
+        check=False,
+        deadline=deadline,
+    )
+    if lookup.returncode != 0 or lookup.stderr:
+        raise BrokerError("GB10 persisted job lookup failed safely")
+    return _parse_unique_job_id(lookup.stdout, job_name=job_name)
+
+
+def _observe_quiescent_persisted_job_id(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> str | None:
+    for observation in range(2):
+        job_id = _observe_unique_persisted_job_id(job_name, deadline=deadline)
+        if job_id is not None:
+            return job_id
+        if observation == 0:
+            if deadline is not None and deadline - time.monotonic() <= 0.05:
+                raise BrokerError("GB10 persisted empty job lookup did not become quiescent")
+            time.sleep(0.05)
+    return None
+
+
+def _wait_for_quiescent_persisted_job_empty(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> None:
+    convergence_deadline = time.monotonic() + 10.0
+    if deadline is not None:
+        convergence_deadline = min(convergence_deadline, deadline)
+    empty_observations = 0
+    while True:
+        observed_job_id = _observe_unique_persisted_job_id(
+            job_name,
+            deadline=convergence_deadline,
+        )
+        if observed_job_id is None:
+            empty_observations += 1
+            if empty_observations == 2:
+                return
+        else:
+            empty_observations = 0
+        if convergence_deadline - time.monotonic() <= 0.05:
+            raise BrokerError("GB10 persisted exact job cleanup did not converge")
+        time.sleep(0.05)
+
+
+def _cleanup_persisted_probe_job(
+    path: Path,
+    *,
+    deadline: float | None,
+    expected_unit_name: str | None = None,
+) -> None:
+    previous_deferral = _begin_signal_deferral()
+    failure: BaseException | None = None
+    try:
+        state = _read_persisted_job_state(path)
+        if state is not None:
+            unit_name_value = state.get("unit_name")
+            if type(unit_name_value) is str:
+                if unit_name_value != expected_unit_name:
+                    raise BrokerError("GB10 persisted containment identity mismatched")
+                path.unlink()
+                _fsync_path_directory(path.parent)
+                state = None
+        if state is not None:
+            job_name = cast(str, state["job_name"])
+            if expected_unit_name is not None:
+                unit_match = _UNIT_NAME_RE.fullmatch(expected_unit_name)
+                job_match = _PROBE_JOB_NAME_RE.fullmatch(job_name)
+                if (
+                    unit_match is None
+                    or job_match is None
+                    or unit_match.group(1) != job_match.group(1)
+                ):
+                    raise BrokerError("GB10 persisted job request binding mismatched")
+            job_id_value = state.get("job_id")
+            job_id: str | None = job_id_value if type(job_id_value) is str else None
+            if job_id is None:
+                job_id = _observe_quiescent_persisted_job_id(job_name, deadline=deadline)
+                if job_id is None:
+                    path.unlink()
+                    _fsync_path_directory(path.parent)
+                else:
+                    _write_persisted_job_state(path, job_name=job_name, job_id=job_id)
+            if job_id is not None:
+                cancel_failure: BaseException | None = None
+                try:
+                    _run_cleanup_command(
+                        _service_cleanup_command(str(SCANCEL), job_id),
+                        timeout=10,
+                        check=False,
+                        deadline=deadline,
+                    )
+                except BaseException as exc:
+                    cancel_failure = exc
+                try:
+                    _wait_for_quiescent_persisted_job_empty(
+                        job_name,
+                        deadline=deadline,
+                    )
+                except BaseException as readback_exc:
+                    if cancel_failure is not None:
+                        raise cancel_failure from readback_exc
+                    raise
+                path.unlink()
+                _fsync_path_directory(path.parent)
+    except BaseException as exc:
+        failure = exc
+    finally:
+        try:
+            _finish_signal_deferral(previous_deferral)
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure
+
+
+def _cgroup_is_empty(cgroup_path: Path) -> bool:
+    if not os.path.lexists(cgroup_path):
+        return True
+    metadata = os.lstat(cgroup_path)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise BrokerError("GB10 containment metadata is unsafe")
+    events_path = cgroup_path / "cgroup.events"
+    try:
+        descriptor = os.open(
+            events_path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise BrokerError("GB10 containment evidence is unavailable") from exc
+    try:
+        current = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or current.st_size > 1024 * 1024
+        ):
+            raise BrokerError("GB10 containment evidence is unsafe")
+        encoded = os.read(descriptor, 1024 * 1024 + 1)
+    finally:
+        os.close(descriptor)
+    if len(encoded) > 1024 * 1024:
+        raise BrokerError("GB10 containment evidence is unsafe")
+    try:
+        lines = encoded.decode("ascii").splitlines()
+    except UnicodeError as exc:
+        raise BrokerError("GB10 containment evidence is unsafe") from exc
+    populated: list[str] = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 2:
+            raise BrokerError("GB10 containment evidence is unsafe")
+        if fields[0] == "populated":
+            populated.append(fields[1])
+    if len(populated) != 1 or populated[0] not in {"0", "1"}:
+        raise BrokerError("GB10 containment evidence is unsafe")
+    return populated[0] == "0"
+
+
+def _wait_for_empty_cgroup(cgroup_path: Path, *, timeout: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if _cgroup_is_empty(cgroup_path):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
+def _terminate_and_verify_containment(
+    *,
+    unit_name: str,
+    cgroup_path: Path,
+    job_state_path: Path,
+    graceful_timeout: float = 45.0,
+    forced_timeout: float = 10.0,
+    hard_deadline: float | None = None,
+) -> None:
+    if _UNIT_NAME_RE.fullmatch(unit_name) is None:
+        raise BrokerError("GB10 containment unit identity is invalid")
+    previous_deferral = _begin_signal_deferral()
+    failure: BaseException | None = None
+
+    def remaining() -> float:
+        if hard_deadline is None:
+            return float("inf")
+        return max(0.0, hard_deadline - time.monotonic())
+
+    def available(*, reserve: float = 0.0) -> float:
+        return max(0.0, remaining() - reserve)
+
+    def record(exc: BaseException) -> None:
+        nonlocal failure
+        if failure is None:
+            failure = exc
+
+    populated = True
+    try:
+        populated = not _cgroup_is_empty(cgroup_path)
+    except BaseException as exc:
+        record(exc)
+    if populated:
+        try:
+            timeout = min(10.0, available(reserve=30.0))
+            if timeout <= 0:
+                raise BrokerError("GB10 acceptance containment time budget exhausted")
+            _systemctl(
+                "kill",
+                "--kill-whom=all",
+                "--signal=SIGTERM",
+                unit_name,
+                timeout=timeout,
+            )
+        except BaseException as exc:
+            record(exc)
+        graceful_empty = False
+        try:
+            grace = min(graceful_timeout, available(reserve=50.0))
+            graceful_empty = bool(grace > 0 and _wait_for_empty_cgroup(cgroup_path, timeout=grace))
+        except BaseException as exc:
+            record(exc)
+        if not graceful_empty:
+            try:
+                timeout = min(10.0, available(reserve=40.0))
+                if timeout <= 0:
+                    raise BrokerError("GB10 acceptance containment time budget exhausted")
+                _systemctl(
+                    "kill",
+                    "--kill-whom=all",
+                    "--signal=SIGKILL",
+                    unit_name,
+                    timeout=timeout,
+                )
+            except BaseException as exc:
+                record(exc)
+            try:
+                force = min(forced_timeout, available(reserve=30.0))
+                if not (force > 0 and _wait_for_empty_cgroup(cgroup_path, timeout=force)):
+                    record(BrokerError("GB10 acceptance containment did not become empty"))
+            except BaseException as exc:
+                record(exc)
+    try:
+        if remaining() <= 0:
+            raise BrokerError("GB10 acceptance cleanup time budget exhausted")
+        _cleanup_persisted_probe_job(
+            job_state_path,
+            deadline=hard_deadline,
+            expected_unit_name=unit_name,
+        )
+    except BaseException as exc:
+        record(exc)
+    try:
+        if not _cgroup_is_empty(cgroup_path):
+            raise BrokerError("GB10 acceptance containment remained populated")
+    except BaseException as exc:
+        record(exc)
+    try:
+        _finish_signal_deferral(previous_deferral)
+    except BaseException as exc:
+        record(exc)
+    if failure is not None:
+        raise failure
+
+
+def _run_contained_authority(
+    *,
+    candidate_sha: str,
+    unit_name: str,
+    job_state_path: Path,
+    cgroup_path: Path,
+    timeout: float,
+    graceful_timeout: float = 45.0,
+    forced_timeout: float = 10.0,
+) -> subprocess.CompletedProcess[str]:
+    hard_deadline = time.monotonic() + timeout
+    containment_reserve = min(90.0, timeout / 2)
+    launch_timeout = timeout - containment_reserve
+    result: subprocess.CompletedProcess[str] | None = None
+    failure: BaseException | None = None
+    try:
+        if os.path.lexists(job_state_path):
+            raise BrokerError("GB10 acceptance containment state already exists")
+        _write_persisted_job_state(job_state_path, unit_name=unit_name)
+        result = _run(
+            _contained_authority_argv(
+                unit_name=unit_name,
+                candidate_sha=candidate_sha,
+                job_state_path=job_state_path,
+            ),
+            timeout=launch_timeout,
+        )
+    except BaseException as exc:
+        failure = exc
+    try:
+        _terminate_and_verify_containment(
+            unit_name=unit_name,
+            cgroup_path=cgroup_path,
+            job_state_path=job_state_path,
+            graceful_timeout=graceful_timeout,
+            forced_timeout=forced_timeout,
+            hard_deadline=hard_deadline,
+        )
+    except BaseException as exc:
+        failure = exc
+    if failure is not None:
+        raise failure
+    if result is None:
+        raise BrokerError("GB10 contained authority returned no result")
+    return result
+
+
+def _remove_verified_stale_job_temp(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BrokerError("GB10 stale job temporary metadata is unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 1024
+        ):
+            raise BrokerError("GB10 stale job temporary metadata is unsafe")
+        current = os.lstat(path)
+        if (
+            current.st_dev,
+            current.st_ino,
+            current.st_uid,
+            current.st_gid,
+            current.st_mode,
+            current.st_nlink,
+            current.st_size,
+        ) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_uid,
+            metadata.st_gid,
+            metadata.st_mode,
+            metadata.st_nlink,
+            metadata.st_size,
+        ):
+            raise BrokerError("GB10 stale job temporary metadata changed during validation")
+        path.unlink()
+        _fsync_path_directory(path.parent)
+    finally:
+        os.close(descriptor)
+
+
+def _reconcile_stale_job_states(*, deadline: float | None = None) -> None:
+    _validate_root_directory(
+        ACCEPTANCE_JOB_STATE_ROOT,
+        mode=0o700,
+        label="GB10 acceptance job state root",
+    )
+    for entry in sorted(os.scandir(ACCEPTANCE_JOB_STATE_ROOT), key=lambda item: item.name):
+        if _STALE_JOB_TEMP_RE.fullmatch(entry.name) is not None:
+            _remove_verified_stale_job_temp(Path(entry.path))
+            continue
+        if not entry.name.endswith(".service.json") or "/" in entry.name or "\x00" in entry.name:
+            raise BrokerError("GB10 acceptance job state inventory is invalid")
+        unit_name = entry.name.removesuffix(".json")
+        if _UNIT_NAME_RE.fullmatch(unit_name) is None:
+            raise BrokerError("GB10 acceptance stale unit identity is invalid")
+        _terminate_and_verify_containment(
+            unit_name=unit_name,
+            cgroup_path=CGROUP_ROOT / "system.slice" / unit_name,
+            job_state_path=Path(entry.path),
+            graceful_timeout=min(
+                45.0, max(0.0, (deadline or time.monotonic() + 45) - time.monotonic())
+            ),
+            forced_timeout=10.0,
+            hard_deadline=deadline,
+        )
+
+
+@contextmanager
+def _acceptance_lock() -> Any:
+    _validate_root_directory(
+        ACCEPTANCE_STATE_ROOT,
+        mode=0o700,
+        label="GB10 acceptance runtime root",
+    )
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(ACCEPTANCE_LOCK_PATH, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise BrokerError("GB10 acceptance lock metadata is unsafe")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _git(

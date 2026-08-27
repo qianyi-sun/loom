@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Root-installed, candidate-bound acceptance authority for GB10 Slurm."""
 
 from __future__ import annotations
@@ -59,16 +59,25 @@ CANDIDATE_ROOT = Path("/opt/loom-staging-runner/candidates")
 INSTALLED_PATH = Path("/usr/local/libexec/loom-gb10-slurm-acceptance-authority")
 STATE_ROOT = Path("/var/lib/loom-gb10-slurm-authority")
 ARTIFACT_PATH = STATE_ROOT / "current.json"
+JOB_STATE_ROOT = Path("/run/loom-gb10-slurm-authority/jobs")
+ROOT_UID = 0
+ROOT_GID = 0
 RUNUSER = "/usr/sbin/runuser"
 SRUN = "/usr/bin/srun"
 SACCT = "/usr/bin/sacct"
+SQUEUE = "/usr/bin/squeue"
+SCANCEL = "/usr/bin/scancel"
+SYSTEM_PYTHON = "/usr/bin/python3"
+DOCKER = "/usr/bin/docker"
 ALLOCATION_START_MARKER = "LOOM_GB10_ALLOCATION_STARTED_V1"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 JOB_ID_RE = re.compile(r"[1-9][0-9]*")
-# The broker's independent hard timeout is 1200 seconds.  Reserve two minutes
-# outside this authority, and reserve the final minute inside it exclusively
-# for cancelling and verifying the current fixed-name Slurm probe job.
-AUTHORITY_BUDGET_SECONDS = 1080.0
+JOB_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+JOB_STATE_FILE_RE = re.compile(r"loom-gb10-capacity-([0-9a-f]{24})\.service\.json")
+# The broker's independent hard timeout is 1200 seconds.  This authority gets
+# 1050 seconds, reserving 90 seconds for broker-owned containment and 60 of
+# its own seconds exclusively for exact Slurm cancellation and readback.
+AUTHORITY_BUDGET_SECONDS = 1050.0
 CLEANUP_RESERVE_SECONDS = 60.0
 
 
@@ -885,9 +894,15 @@ class AuthorityInterruptedError(AcceptanceError):
 
 
 _ACTIVE_PROCESS: subprocess.Popen[str] | None = None
+_DEFERRED_SIGNAL: int | None = None
+_SIGNALS_DEFERRED = False
 
 
 def _handle_authority_signal(signum: int, _frame: object) -> None:
+    global _DEFERRED_SIGNAL
+    if _SIGNALS_DEFERRED:
+        _DEFERRED_SIGNAL = signum
+        return
     process = _ACTIVE_PROCESS
     if process is not None:
         try:
@@ -909,6 +924,28 @@ def _install_signal_handlers() -> dict[int, Any]:
 def _restore_signal_handlers(previous: dict[int, Any]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
+
+
+def _raise_deferred_signal() -> None:
+    global _DEFERRED_SIGNAL
+    signum = _DEFERRED_SIGNAL
+    _DEFERRED_SIGNAL = None
+    if signum is not None:
+        raise AuthorityInterruptedError(f"authority interrupted safely by signal {signum}")
+
+
+def _begin_signal_deferral() -> bool:
+    global _SIGNALS_DEFERRED
+    previous = _SIGNALS_DEFERRED
+    _SIGNALS_DEFERRED = True
+    return previous
+
+
+def _finish_signal_deferral(previous: bool) -> None:
+    global _SIGNALS_DEFERRED
+    _SIGNALS_DEFERRED = previous
+    if not previous:
+        _raise_deferred_signal()
 
 
 def _kill_and_reap(process: subprocess.Popen[str]) -> None:
@@ -1055,6 +1092,209 @@ def _run(
     result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
         raise AcceptanceError(f"command failed safely: {Path(argv[0]).name}")
+    return result
+
+
+def _run_job_observer(
+    argv: list[str],
+    *,
+    timeout: float = 30,
+    check: bool = True,
+    deadline: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    effective_timeout = _bounded_timeout(timeout, deadline)
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+            env={
+                "HOME": "/root",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/bin:/bin",
+            },
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AcceptanceError("Slurm job identity observation timed out safely") from exc
+    if (
+        len(result.stdout.encode()) > 64 * 1024
+        or len(result.stderr.encode()) > 64 * 1024
+        or (check and result.returncode != 0)
+    ):
+        raise AcceptanceError("Slurm job identity observation failed safely")
+    return result
+
+
+def _unique_job_query(job_name: str) -> list[str]:
+    if JOB_NAME_RE.fullmatch(job_name) is None:
+        raise AcceptanceError("acceptance-probe job name is invalid")
+    return _service_command(
+        SQUEUE,
+        "--noheader",
+        f"--user={SERVICE_USER}",
+        f"--name={job_name}",
+        "--format=%A|%j",
+    )
+
+
+def _parse_unique_job_id(stdout: str, *, job_name: str) -> str | None:
+    rows = [line.strip() for line in stdout.splitlines() if line.strip()]
+    job_ids: list[str] = []
+    for row in rows:
+        job_id, separator, observed_name = row.partition("|")
+        if (
+            not separator
+            or "|" in observed_name
+            or observed_name != job_name
+            or JOB_ID_RE.fullmatch(job_id) is None
+        ):
+            raise AcceptanceError("acceptance-probe job identity is malformed")
+        job_ids.append(job_id)
+    if len(job_ids) > 1:
+        raise AcceptanceError("acceptance-probe job identity is ambiguous")
+    return job_ids[0] if job_ids else None
+
+
+def _observe_unique_job_id(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> str | None:
+    result = _run_job_observer(
+        _unique_job_query(job_name),
+        timeout=10,
+        check=False,
+        deadline=deadline,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise AcceptanceError("acceptance-probe job identity could not be verified")
+    return _parse_unique_job_id(result.stdout, job_name=job_name)
+
+
+def _observe_quiescent_unique_job_id(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> str | None:
+    for observation in range(2):
+        job_id = _observe_unique_job_id(job_name, deadline=deadline)
+        if job_id is not None:
+            return job_id
+        if observation == 0:
+            if deadline is not None and deadline - time.monotonic() <= 0.05:
+                raise AcceptanceError("acceptance-probe empty lookup did not become quiescent")
+            time.sleep(0.05)
+    return None
+
+
+def _wait_for_quiescent_exact_job_empty(
+    job_name: str,
+    *,
+    deadline: float | None,
+) -> None:
+    convergence_deadline = time.monotonic() + 10.0
+    if deadline is not None:
+        convergence_deadline = min(convergence_deadline, deadline)
+    empty_observations = 0
+    while True:
+        readback = _run(
+            _unique_job_query(job_name),
+            timeout=10,
+            check=False,
+            deadline=convergence_deadline,
+        )
+        if readback.returncode != 0 or readback.stderr:
+            raise AcceptanceError("acceptance-probe exact cleanup readback failed")
+        observed_job_id = _parse_unique_job_id(readback.stdout, job_name=job_name)
+        if observed_job_id is None:
+            empty_observations += 1
+            if empty_observations == 2:
+                return
+        else:
+            empty_observations = 0
+        if convergence_deadline - time.monotonic() <= 0.05:
+            raise AcceptanceError("acceptance-probe exact cleanup did not converge")
+        time.sleep(0.05)
+
+
+def _discover_spawned_job_id(
+    process: subprocess.Popen[str],
+    *,
+    job_name: str,
+    deadline: float | None,
+) -> str | None:
+    discovery_deadline = time.monotonic() + 15.0
+    if deadline is not None:
+        discovery_deadline = min(discovery_deadline, deadline)
+    while True:
+        job_id = _observe_unique_job_id(job_name, deadline=discovery_deadline)
+        if job_id is not None:
+            return job_id
+        returncode = process.poll()
+        if returncode is not None:
+            if returncode != 0:
+                return _observe_quiescent_unique_job_id(job_name, deadline=discovery_deadline)
+            raise AcceptanceError("completed acceptance probe had no exact job identity")
+        if time.monotonic() >= discovery_deadline:
+            raise AcceptanceError("acceptance-probe exact job identity was not observed")
+        time.sleep(0.02)
+
+
+def _run_allocation_launcher(
+    argv: list[str],
+    *,
+    job_name: str,
+    state_path: Path,
+    timeout: float,
+    deadline: float | None,
+) -> subprocess.CompletedProcess[str]:
+    global _ACTIVE_PROCESS
+    effective_timeout = _bounded_timeout(timeout, deadline)
+    launched_at = time.monotonic()
+    process: subprocess.Popen[str] | None = None
+    previous_deferral = _begin_signal_deferral()
+    try:
+        try:
+            _write_active_job_state(state_path, job_name=job_name)
+            process = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            _ACTIVE_PROCESS = process
+            job_id = _discover_spawned_job_id(
+                process,
+                job_name=job_name,
+                deadline=deadline,
+            )
+            if job_id is not None:
+                _write_active_job_state(state_path, job_name=job_name, job_id=job_id)
+        finally:
+            _finish_signal_deferral(previous_deferral)
+        if process is None:
+            raise AcceptanceError("acceptance-probe launcher failed safely")
+        elapsed = time.monotonic() - launched_at
+        stdout, stderr = process.communicate(timeout=max(0.01, effective_timeout - elapsed))
+    except subprocess.TimeoutExpired as exc:
+        if process is not None:
+            _kill_and_reap(process)
+        raise AcceptanceError("acceptance-probe launcher timed out safely") from exc
+    except BaseException:
+        if process is not None:
+            _kill_and_reap(process)
+        raise
+    finally:
+        if _ACTIVE_PROCESS is process:
+            _ACTIVE_PROCESS = None
+    if process is None:
+        raise AcceptanceError("acceptance-probe launcher failed safely")
+    result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    if len(stdout.encode()) > 1024 * 1024 or len(stderr.encode()) > 1024 * 1024:
+        raise AcceptanceError("acceptance-probe launcher output is invalid")
     return result
 
 
@@ -1246,7 +1486,8 @@ def _verify_installed_authority() -> None:
         source != INSTALLED_PATH
         or source.is_symlink()
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != 0
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
         or stat.S_IMODE(metadata.st_mode) != 0o755
     ):
         raise AcceptanceError("authority is not the fixed root-installed executable")
@@ -1587,7 +1828,7 @@ require(
 )
 require(
     subprocess.run(
-        ["docker", "info"],
+        ["/usr/bin/docker", "info"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=15,
@@ -1688,9 +1929,89 @@ print(json.dumps(
 )
 
 
+def _cleanup_exact_probe_job(
+    job_id: str,
+    *,
+    state_path: Path,
+    deadline: float | None,
+) -> None:
+    if JOB_ID_RE.fullmatch(job_id) is None:
+        raise AcceptanceError("acceptance-probe exact job identity is invalid")
+    state = _read_active_job_state(state_path)
+    if state is None or state.get("job_id") != job_id or type(state.get("job_name")) is not str:
+        raise AcceptanceError("acceptance-probe exact job state mismatched")
+    job_name = cast(str, state["job_name"])
+    previous_deferral = _begin_signal_deferral()
+    failure: BaseException | None = None
+    try:
+        cancel_failure: BaseException | None = None
+        try:
+            _run(
+                _service_command(SCANCEL, job_id),
+                timeout=10,
+                check=False,
+                deadline=deadline,
+            )
+        except BaseException as exc:
+            cancel_failure = exc
+        try:
+            _wait_for_quiescent_exact_job_empty(job_name, deadline=deadline)
+        except BaseException as readback_exc:
+            if cancel_failure is not None:
+                raise cancel_failure from readback_exc
+            raise
+        _clear_active_job_state(state_path)
+    except BaseException as exc:
+        failure = exc
+    try:
+        _finish_signal_deferral(previous_deferral)
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    if failure is not None:
+        raise failure
+
+
+def _cleanup_persisted_probe_job(
+    job_name: str,
+    *,
+    state_path: Path,
+    deadline: float | None,
+) -> None:
+    state = _read_active_job_state(state_path)
+    if state is None:
+        return
+    if state.get("job_name") != job_name:
+        raise AcceptanceError("active Slurm job state name mismatched")
+    job_id = state.get("job_id")
+    if type(job_id) is str:
+        _cleanup_exact_probe_job(job_id, state_path=state_path, deadline=deadline)
+        return
+    previous_deferral = _begin_signal_deferral()
+    failure: BaseException | None = None
+    discovered: str | None = None
+    try:
+        discovered = _observe_quiescent_unique_job_id(job_name, deadline=deadline)
+        if discovered is None:
+            _clear_active_job_state(state_path)
+        else:
+            _write_active_job_state(state_path, job_name=job_name, job_id=discovered)
+    except BaseException as exc:
+        failure = exc
+    try:
+        _finish_signal_deferral(previous_deferral)
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+    if failure is not None:
+        raise failure
+    if discovered is not None:
+        _cleanup_exact_probe_job(discovered, state_path=state_path, deadline=deadline)
+
+
 def _cleanup_probe_jobs(job_name: str, *, deadline: float | None = None) -> None:
     queue_command = _service_command(
-        "/usr/bin/squeue",
+        SQUEUE,
         "--noheader",
         f"--user={SERVICE_USER}",
         f"--name={job_name}",
@@ -1710,14 +2031,18 @@ def _cleanup_probe_jobs(job_name: str, *, deadline: float | None = None) -> None
     if job_ids:
         _run(
             _service_command(
-                "/usr/bin/scancel",
+                SCANCEL,
                 job_ids[0],
             ),
             timeout=10,
             deadline=deadline,
         )
         readback = _run(queue_command, timeout=10, check=False, deadline=deadline)
-        if readback.returncode != 0 or readback.stdout.strip():
+        if (
+            readback.returncode != 0
+            or readback.stderr
+            or _parse_unique_job_id(readback.stdout, job_name=job_name) is not None
+        ):
             raise AcceptanceError("acceptance-probe cleanup did not converge")
 
 
@@ -1754,35 +2079,44 @@ def _allocation_never_started(
     node: str,
     deadline: float | None,
 ) -> bool:
-    result = _run(
-        _service_command(
-            SACCT,
-            "--noheader",
-            "--parsable2",
-            "--allocations",
-            f"--user={SERVICE_USER}",
-            f"--name={job_name}",
-            "--starttime=now-10minutes",
-            "--format=JobIDRaw,JobName,State,Start,NodeList",
-        ),
-        timeout=10,
-        check=False,
-        deadline=deadline,
+    accounting_deadline = time.monotonic() + 5.0
+    if deadline is not None:
+        accounting_deadline = min(accounting_deadline, deadline)
+    command = _service_command(
+        SACCT,
+        "--noheader",
+        "--parsable2",
+        "--allocations",
+        f"--user={SERVICE_USER}",
+        f"--name={job_name}",
+        "--starttime=now-10minutes",
+        "--format=JobIDRaw,JobName%128,State,Start,NodeList%128",
     )
-    lines = [line for line in result.stdout.splitlines() if line]
-    if result.returncode != 0 or result.stderr or len(lines) != 1:
-        return False
-    fields = lines[0].split("|")
-    if len(fields) != 5:
-        return False
-    job_id, recorded_name, state, started_at, recorded_node = fields
-    return bool(
-        JOB_ID_RE.fullmatch(job_id) is not None
-        and recorded_name == job_name
-        and state.partition(" ")[0] in {"CANCELLED", "PENDING"}
-        and started_at == "Unknown"
-        and recorded_node == node
-    )
+    while True:
+        result = _run(
+            command,
+            timeout=10,
+            check=False,
+            deadline=accounting_deadline,
+        )
+        lines = [line for line in result.stdout.splitlines() if line]
+        if result.returncode != 0 or result.stderr or len(lines) > 1:
+            return False
+        if lines:
+            fields = [field.strip() for field in lines[0].split("|")]
+            if len(fields) != 5:
+                return False
+            job_id, recorded_name, state, started_at, recorded_node = fields
+            return bool(
+                JOB_ID_RE.fullmatch(job_id) is not None
+                and recorded_name == job_name
+                and state.partition(" ")[0] in {"CANCELLED", "PENDING"}
+                and started_at == "Unknown"
+                and recorded_node == node
+            )
+        if accounting_deadline - time.monotonic() <= 0.05:
+            return False
+        time.sleep(0.05)
 
 
 def _probe_nodes(
@@ -1792,6 +2126,8 @@ def _probe_nodes(
     *,
     work_deadline: float | None = None,
     cleanup_deadline: float | None = None,
+    job_state_path: Path | None = None,
+    request_nonce: str | None = None,
 ) -> tuple[list[str], list[str]]:
     passed: list[str] = []
     deferred_busy: list[str] = []
@@ -1803,7 +2139,12 @@ def _probe_nodes(
         partition_pattern = rf"(?:^| )Partitions=[^ ]*\b{re.escape(SLURM_PARTITION)}\b"
         if re.search(partition_pattern, node_config) is None:
             raise AcceptanceError(f"canonical node is outside {SLURM_PARTITION} partition: {node}")
-        job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
+        if job_state_path is not None:
+            if request_nonce is None or re.fullmatch(r"[0-9a-f]{24}", request_nonce) is None:
+                raise AcceptanceError("acceptance request nonce is invalid")
+            job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{request_nonce}"
+        else:
+            job_name = f"loom-accept-{candidate_sha[:7]}-{index}-{os.getpid()}"
         command = _service_command(
             SRUN,
             "--quiet",
@@ -1845,14 +2186,30 @@ def _probe_nodes(
             str(SERVICE_GID),
         )
         try:
-            result = _run(
-                command,
-                timeout=60,
-                check=False,
-                deadline=work_deadline,
-            )
+            if job_state_path is None:
+                result = _run(
+                    command,
+                    timeout=60,
+                    check=False,
+                    deadline=work_deadline,
+                )
+            else:
+                result = _run_allocation_launcher(
+                    command,
+                    job_name=job_name,
+                    state_path=job_state_path,
+                    timeout=60,
+                    deadline=work_deadline,
+                )
         finally:
-            _cleanup_probe_jobs(job_name, deadline=cleanup_deadline)
+            if job_state_path is None:
+                _cleanup_probe_jobs(job_name, deadline=cleanup_deadline)
+            else:
+                _cleanup_persisted_probe_job(
+                    job_name,
+                    state_path=job_state_path,
+                    deadline=cleanup_deadline,
+                )
         potential_unstarted_busy = bool(
             result.returncode != 0
             and ALLOCATION_START_MARKER not in result.stdout.splitlines()
@@ -1921,6 +2278,177 @@ def _write_all(descriptor: int, encoded: bytes) -> None:
         offset += written
 
 
+def _validate_root_directory(path: Path, *, mode: int, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise AcceptanceError(f"{label} metadata is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
+        or stat.S_IMODE(metadata.st_mode) != mode
+    ):
+        raise AcceptanceError(f"{label} metadata is invalid")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != ROOT_UID
+            or opened.st_gid != ROOT_GID
+            or stat.S_IMODE(opened.st_mode) != mode
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise AcceptanceError(f"{label} metadata is invalid")
+    finally:
+        os.close(descriptor)
+
+
+def _validate_root_file_descriptor(
+    descriptor: int,
+    *,
+    mode: int,
+    label: str,
+    size: int | None = None,
+) -> os.stat_result:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != mode
+        or (size is not None and metadata.st_size != size)
+    ):
+        raise AcceptanceError(f"{label} ownership or metadata is invalid")
+    return metadata
+
+
+def _read_active_job_state(path: Path) -> dict[str, str | int] | None:
+    if not os.path.lexists(path):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AcceptanceError("active Slurm job state is unavailable") from exc
+    try:
+        metadata = _validate_root_file_descriptor(
+            descriptor,
+            mode=0o600,
+            label="active Slurm job state",
+        )
+        if not 1 <= metadata.st_size <= 1024:
+            raise AcceptanceError("active Slurm job state metadata is invalid")
+        encoded = bytearray()
+        while len(encoded) <= 1024:
+            chunk = os.read(descriptor, min(1025 - len(encoded), 1024))
+            if not chunk:
+                break
+            encoded.extend(chunk)
+        current = os.lstat(path)
+        if (current.st_dev, current.st_ino, current.st_size) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+        ) or bytes(encoded) == b"":
+            raise AcceptanceError("active Slurm job state changed during validation")
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(bytes(encoded).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AcceptanceError("active Slurm job state is invalid") from exc
+    if not isinstance(value, dict) or _canonical_job_state(value) != bytes(encoded):
+        raise AcceptanceError("active Slurm job state is invalid")
+    if set(value) not in (
+        {"job_name", "schema_version"},
+        {"job_id", "job_name", "schema_version"},
+    ):
+        raise AcceptanceError("active Slurm job state fields are invalid")
+    job_name = value.get("job_name")
+    job_id = value.get("job_id")
+    if (
+        value.get("schema_version") != 1
+        or type(value.get("schema_version")) is not int
+        or type(job_name) is not str
+        or JOB_NAME_RE.fullmatch(job_name) is None
+        or (job_id is not None and (type(job_id) is not str or JOB_ID_RE.fullmatch(job_id) is None))
+    ):
+        raise AcceptanceError("active Slurm job state fields are invalid")
+    return cast(dict[str, str | int], value)
+
+
+def _canonical_job_state(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _write_active_job_state(
+    path: Path,
+    *,
+    job_name: str,
+    job_id: str | None = None,
+) -> None:
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or JOB_NAME_RE.fullmatch(job_name) is None
+        or (job_id is not None and JOB_ID_RE.fullmatch(job_id) is None)
+    ):
+        raise AcceptanceError("active Slurm job state path or identity is invalid")
+    _validate_root_directory(path.parent, mode=0o700, label="active Slurm job state root")
+    value: dict[str, str | int] = {"job_name": job_name, "schema_version": 1}
+    if job_id is not None:
+        value["job_id"] = job_id
+    encoded = _canonical_job_state(value)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".active-job.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o600,
+            label="temporary active Slurm job state",
+            size=0,
+        )
+        _write_all(descriptor, encoded)
+        os.fsync(descriptor)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o600,
+            label="temporary active Slurm job state",
+            size=len(encoded),
+        )
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+        if _read_active_job_state(path) != value:
+            raise AcceptanceError("active Slurm job state readback mismatched")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if os.path.lexists(temporary):
+            temporary.unlink()
+            _fsync_directory(path.parent)
+
+
+def _clear_active_job_state(path: Path) -> None:
+    if _read_active_job_state(path) is None:
+        return
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
 def _read_published_artifact(path: Path, expected: bytes) -> None:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -1928,6 +2456,8 @@ def _read_published_artifact(path: Path, expected: bytes) -> None:
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
             or metadata.st_nlink != 1
             or stat.S_IMODE(metadata.st_mode) != 0o644
             or metadata.st_size != len(expected)
@@ -1949,14 +2479,7 @@ def _read_published_artifact(path: Path, expected: bytes) -> None:
 def _write_artifact(payload: dict[str, Any]) -> Path:
     state_root_existed = STATE_ROOT.exists()
     STATE_ROOT.mkdir(mode=0o755, parents=True, exist_ok=True)
-    metadata = STATE_ROOT.lstat()
-    if (
-        STATE_ROOT.is_symlink()
-        or metadata.st_uid != 0
-        or metadata.st_gid != 0
-        or stat.S_IMODE(metadata.st_mode) != 0o755
-    ):
-        raise AcceptanceError("authority state root metadata is invalid")
+    _validate_root_directory(STATE_ROOT, mode=0o755, label="authority state root")
     if not state_root_existed:
         _fsync_directory(STATE_ROOT.parent)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -1965,13 +2488,7 @@ def _write_artifact(payload: dict[str, Any]) -> Path:
     evidence_root = STATE_ROOT / "evidence"
     evidence_root_existed = evidence_root.exists()
     evidence_root.mkdir(mode=0o755, exist_ok=True)
-    evidence_metadata = evidence_root.lstat()
-    if (
-        evidence_root.is_symlink()
-        or not stat.S_ISDIR(evidence_metadata.st_mode)
-        or stat.S_IMODE(evidence_metadata.st_mode) != 0o755
-    ):
-        raise AcceptanceError("authority evidence root metadata is invalid")
+    _validate_root_directory(evidence_root, mode=0o755, label="authority evidence root")
     if not evidence_root_existed:
         _fsync_directory(STATE_ROOT)
     immutable = evidence_root / f"{evidence_digest}.json"
@@ -1979,8 +2496,21 @@ def _write_artifact(payload: dict[str, Any]) -> Path:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o644)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o644,
+            label="temporary authority evidence",
+            size=0,
+        )
         _write_all(descriptor, encoded)
         os.fsync(descriptor)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o644,
+            label="temporary authority evidence",
+            size=len(encoded),
+        )
         os.close(descriptor)
         descriptor = -1
         try:
@@ -2003,8 +2533,21 @@ def _write_artifact(payload: dict[str, Any]) -> Path:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o644)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o644,
+            label="temporary current authority evidence",
+            size=0,
+        )
         _write_all(descriptor, encoded)
         os.fsync(descriptor)
+        _validate_root_file_descriptor(
+            descriptor,
+            mode=0o644,
+            label="temporary current authority evidence",
+            size=len(encoded),
+        )
         os.close(descriptor)
         descriptor = -1
         os.replace(temporary, ARTIFACT_PATH)
@@ -2023,7 +2566,20 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--image-tag", required=True)
+    parser.add_argument("--job-state-path", required=True, type=Path)
     return parser
+
+
+def _job_state_request_nonce(path: Path) -> str:
+    match = JOB_STATE_FILE_RE.fullmatch(path.name)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.parent != JOB_STATE_ROOT
+        or match is None
+    ):
+        raise AcceptanceError("active Slurm job state path is invalid")
+    return match.group(1)
 
 
 def _main() -> int:
@@ -2035,6 +2591,7 @@ def _main() -> int:
         raise AcceptanceError("candidate SHA must be exact")
     if args.image_tag != f"staging-{args.candidate_sha[:7]}":
         raise AcceptanceError("image tag does not match the exact candidate")
+    request_nonce = _job_state_request_nonce(args.job_state_path)
     _verify_installed_authority()
     _verify_controller(deadline=work_deadline)
     contract = _load_contract(
@@ -2049,6 +2606,8 @@ def _main() -> int:
         contract,
         work_deadline=work_deadline,
         cleanup_deadline=cleanup_deadline,
+        job_state_path=args.job_state_path,
+        request_nonce=request_nonce,
     )
     _bounded_timeout(AUTHORITY_BUDGET_SECONDS, cleanup_deadline)
     generated_at = datetime.now(UTC)

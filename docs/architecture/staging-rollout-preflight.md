@@ -970,9 +970,22 @@ busy deferral is valid only when that marker is absent, the node readback is
 actually allocated or mixed, Slurm reports the fixed busy condition, and one
 structured job-specific accounting row proves the named allocation remained
 unstarted. A started probe that later emits a busy phrase is a capacity
-failure. Timeouts, SIGTERM, and SIGINT kill and reap the active process group;
-authority unwind cancels only the exact current Slurm job ID and requires an
-empty scheduler readback before returning a normalized failure.
+failure. Each request runs in a nonce-named transient service in
+`system.slice`, with `KillMode=control-group`, a bounded runtime, and a
+root-owned volatile job-state handoff. The same nonce binds every probe job
+name; the authority persists the exact Slurm ID before waiting, and both the
+authority and broker perform interruption-immune exact cancellation plus empty
+job-specific scheduler readback. Scheduler disappearance requires two
+consecutive empty exact-name observations, while recursive cgroup emptiness is
+proved by the unit's unique `cgroup.events` `populated 0` row. A later locked
+request removes only verified root-owned atomic-state temporaries and
+reconciles any strict nonce-bound stale unit/state before launching. Normal,
+timeout, and handled-signal paths apply bounded TERM then KILL as needed and
+prove the request cgroup and nonce-bound Slurm job empty before returning. An
+uncatchable broker death cannot itself perform this cleanup: systemd
+`RuntimeMaxSec` bounds the transient unit, the next locked request reconciles
+its stale unit/state, and the per-probe Slurm time limit is the terminal
+backstop.
 
 Canonical acceptance evidence lasts at most 30 minutes. Every non-durable
 dependent must recheck it against a live clock when that consumer starts, and

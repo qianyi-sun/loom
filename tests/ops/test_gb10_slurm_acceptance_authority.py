@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from tests.ops.test_staging_rollout_shared_repo_consumer import _checkout, _norm
 ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY = ROOT / "scripts/ops/gb10_slurm_acceptance_authority.py"
 INSTALLER = ROOT / "deploy/slurm/install-loom-gb10-acceptance-authority.sh"
+TMPFILES = ROOT / "deploy/slurm/loom-gb10-slurm-authority.tmpfiles"
 
 
 def _authority_source() -> str:
@@ -1037,6 +1039,93 @@ def test_busy_deferral_requires_structured_never_started_job_readback(
     assert "--starttime=now-10minutes" in commands[0]
 
 
+def test_busy_deferral_preserves_padded_full_nonce_bound_job_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    job_name = "loom-accept-abcdef0-1-0123456789abcdef01234567"
+    node = "trt-gb10-1"
+    commands: list[list[str]] = []
+
+    def run(
+        argv: list[str],
+        *,
+        timeout: float = 30,
+        check: bool = True,
+        deadline: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        assert deadline == 70.0
+        commands.append(argv)
+        stdout = f"123|{job_name:<128}|CANCELLED by 995|Unknown|{node:<128}\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+
+    assert authority._allocation_never_started(job_name, node=node, deadline=70.0)
+    assert "--format=JobIDRaw,JobName%128,State,Start,NodeList%128" in commands[0]
+
+
+def test_busy_accounting_polls_empty_until_full_nonce_row_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    job_name = "loom-accept-abcdef0-1-0123456789abcdef01234567"
+    node = "trt-gb10-1"
+    observations = iter(
+        (
+            "",
+            f"123|{job_name:<128}|CANCELLED by 995|Unknown|{node:<128}\n",
+        )
+    )
+    commands: list[list[str]] = []
+    clock = [0.0]
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=next(observations), stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+    monkeypatch.setattr(authority.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        authority.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    assert authority._allocation_never_started(job_name, node=node, deadline=1.0)
+    assert len(commands) == 2
+    assert clock[0] <= 1.0
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        "malformed\n",
+        "123|loom-job|CANCELLED|Unknown|trt-gb10-1\n456|loom-job|CANCELLED|Unknown|trt-gb10-1\n",
+    ),
+)
+def test_busy_accounting_rejects_nonempty_malformed_or_ambiguous_rows_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+) -> None:
+    authority = _load_authority()
+    commands: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(authority, "_run", run)
+
+    assert not authority._allocation_never_started(
+        "loom-job",
+        node="trt-gb10-1",
+        deadline=time.monotonic() + 1.0,
+    )
+    assert len(commands) == 1
+
+
 def test_started_allocation_with_busy_phrase_is_a_capacity_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1124,6 +1213,453 @@ def test_command_deadline_kills_the_whole_slurm_launcher_process_group(
     assert not orphan_marker.exists()
 
 
+def test_exact_job_cleanup_defers_sigterm_through_empty_readback(tmp_path: Path) -> None:
+    job_state = tmp_path / "active-job.json"
+    cleanup_log = tmp_path / "cleanup.log"
+    script = r"""
+import importlib.util
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+
+authority_path, state_path, log_path = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("cleanup_signal_authority", authority_path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+authority.ROOT_UID = os.geteuid()
+authority.ROOT_GID = os.getegid()
+events = []
+
+
+def run(argv, *, timeout=30, check=True, deadline=None):
+    del timeout, check, deadline
+    if "/usr/bin/scancel" in argv:
+        events.append("scancel:123")
+        os.kill(os.getpid(), signal.SIGTERM)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    if "/usr/bin/squeue" in argv:
+        events.append("squeue-empty")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    raise AssertionError(argv)
+
+
+authority._run = run
+authority._install_signal_handlers()
+authority._write_active_job_state(state_path, job_name="loom-test-job", job_id="123")
+try:
+    authority._cleanup_exact_probe_job("123", state_path=state_path, deadline=None)
+except authority.AuthorityInterruptedError:
+    log_path.write_text("\n".join(events) + "\n")
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(AUTHORITY), str(job_state), str(cleanup_log)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert process.returncode == 42, (process.stdout, process.stderr)
+    assert cleanup_log.read_text(encoding="utf-8").splitlines() == [
+        "scancel:123",
+        "squeue-empty",
+        "squeue-empty",
+    ]
+    assert not job_state.exists()
+
+
+def test_exact_job_scancel_timeout_still_requires_empty_readback(tmp_path: Path) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    state_path = state_root / "active-job.json"
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    authority._write_active_job_state(state_path, job_name="loom-cancel-timeout", job_id="123")
+    events: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "/usr/bin/scancel" in argv:
+            events.append("scancel-timeout")
+            raise authority.AcceptanceError("command timed out safely: scancel")
+        if "/usr/bin/squeue" in argv:
+            events.append("squeue-empty")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    authority._run = run
+
+    authority._cleanup_exact_probe_job("123", state_path=state_path, deadline=None)
+
+    assert events == ["scancel-timeout", "squeue-empty", "squeue-empty"]
+    assert not state_path.exists()
+
+
+def test_exact_job_cleanup_polls_until_two_consecutive_empty_reads(tmp_path: Path) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    state_path = state_root / "active-job.json"
+    job_name = "loom-accept-abcdef0-1-0123456789abcdef01234567"
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    authority._write_active_job_state(state_path, job_name=job_name, job_id="123")
+    observations = iter((f"123|{job_name}\n", "", ""))
+    events: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "/usr/bin/scancel" in argv:
+            events.append("scancel-123")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "/usr/bin/squeue" in argv:
+            events.append("squeue")
+            return subprocess.CompletedProcess(argv, 0, next(observations), "")
+        raise AssertionError(argv)
+
+    authority._run = run
+
+    authority._cleanup_exact_probe_job(
+        "123",
+        state_path=state_path,
+        deadline=time.monotonic() + 1.0,
+    )
+
+    assert events == ["scancel-123", "squeue", "squeue", "squeue"]
+    assert not state_path.exists()
+
+
+def test_exact_job_cleanup_fails_when_job_persists_until_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    state_path = state_root / "active-job.json"
+    job_name = "loom-accept-abcdef0-1-0123456789abcdef01234567"
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    authority._write_active_job_state(state_path, job_name=job_name, job_id="123")
+    clock = [0.0]
+    name_queries = 0
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal name_queries
+        if "/usr/bin/scancel" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "/usr/bin/squeue" in argv:
+            name_queries += 1
+            return subprocess.CompletedProcess(argv, 0, f"123|{job_name}\n", "")
+        raise AssertionError(argv)
+
+    authority._run = run
+    monkeypatch.setattr(authority.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        authority.time,
+        "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+
+    with pytest.raises(authority.AcceptanceError, match="did not converge"):
+        authority._cleanup_exact_probe_job("123", state_path=state_path, deadline=0.11)
+
+    assert name_queries >= 2
+    assert clock[0] <= 0.11
+    assert state_path.exists()
+
+
+def test_pre_id_cleanup_waits_for_quiescent_empty_before_exact_cancel(
+    tmp_path: Path,
+) -> None:
+    authority = _load_authority()
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    state_path = state_root / "active-job.json"
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    authority._write_active_job_state(state_path, job_name="loom-late-job")
+    events: list[str] = []
+    name_queries = 0
+
+    def observe(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal name_queries
+        name_queries += 1
+        events.append(f"name-query-{name_queries}")
+        stdout = "" if name_queries == 1 else "123|loom-late-job\n"
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "/usr/bin/scancel" in argv:
+            events.append("scancel-123")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "/usr/bin/squeue" in argv:
+            events.append("exact-readback-empty")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    authority._run_job_observer = observe
+    authority._run = run
+
+    authority._cleanup_persisted_probe_job(
+        "loom-late-job",
+        state_path=state_path,
+        deadline=None,
+    )
+
+    assert events == [
+        "name-query-1",
+        "name-query-2",
+        "scancel-123",
+        "exact-readback-empty",
+        "exact-readback-empty",
+    ]
+    assert not state_path.exists()
+
+
+def test_launcher_persists_exact_id_before_wait_and_termination(tmp_path: Path) -> None:
+    job_state = tmp_path / "active-job.json"
+    launcher_started = tmp_path / "launcher-started"
+    discovery_log = tmp_path / "discovery.log"
+    script = r"""
+import importlib.util
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+authority_path, state_path, started_path, discovery_path = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("launcher_state_authority", authority_path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+authority.ROOT_UID = os.geteuid()
+authority.ROOT_GID = os.getegid()
+authority._install_signal_handlers()
+
+
+def observe(argv, *, timeout=30, check=True, deadline=None):
+    del timeout, check, deadline
+    assert "/usr/bin/squeue" in argv
+    deadline = time.monotonic() + 2
+    while not started_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert started_path.exists()
+    assert json.loads(state_path.read_text()) == {
+        "job_name": "loom-test-job",
+        "schema_version": 1,
+    }
+    discovery_path.write_text("unique-name-query-before-wait\n")
+    return subprocess.CompletedProcess(argv, 0, "123|loom-test-job\n", "")
+
+
+authority._run_job_observer = observe
+launcher = (
+    "import pathlib,sys,time; "
+    "pathlib.Path(sys.argv[1]).write_text('started'); "
+    "time.sleep(30)"
+)
+try:
+    authority._run_allocation_launcher(
+        [sys.executable, "-c", launcher, str(started_path)],
+        job_name="loom-test-job",
+        state_path=state_path,
+        timeout=30,
+        deadline=None,
+    )
+except authority.AuthorityInterruptedError:
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(AUTHORITY),
+            str(job_state),
+            str(launcher_started),
+            str(discovery_log),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while (
+            (not job_state.exists() or not launcher_started.exists() or not discovery_log.exists())
+            and process.poll() is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert job_state.exists() and launcher_started.exists() and discovery_log.exists(), (
+            process.communicate(timeout=1)
+        )
+        assert process.poll() is None
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 42, (stdout, stderr)
+    assert discovery_log.read_text(encoding="utf-8") == "unique-name-query-before-wait\n"
+    assert json.loads(job_state.read_text(encoding="utf-8")) == {
+        "job_id": "123",
+        "job_name": "loom-test-job",
+        "schema_version": 1,
+    }
+    metadata = job_state.stat()
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert (metadata.st_uid, metadata.st_gid) == (os.geteuid(), os.getegid())
+
+
+def test_launcher_preserves_immediate_busy_result_without_exact_job_row(tmp_path: Path) -> None:
+    authority = _load_authority()
+    monkeypatch_state_root = tmp_path / "state"
+    monkeypatch_state_root.mkdir(mode=0o700)
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    authority._run_job_observer = lambda argv, **kwargs: subprocess.CompletedProcess(
+        argv,
+        0,
+        "",
+        "",
+    )
+    result = authority._run_allocation_launcher(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('srun: Requested nodes are busy', file=sys.stderr); sys.exit(1)",
+        ],
+        job_name="loom-test-busy",
+        state_path=monkeypatch_state_root / "active.json",
+        timeout=5,
+        deadline=None,
+    )
+
+    assert result.returncode == 1
+    assert "Requested nodes are busy" in result.stderr
+    assert json.loads((monkeypatch_state_root / "active.json").read_text(encoding="utf-8")) == {
+        "job_name": "loom-test-busy",
+        "schema_version": 1,
+    }
+
+
+def test_probe_job_name_is_bound_to_broker_request_nonce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    request_nonce = "0123456789abcdef01234567"
+    monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1",))
+    launched_names: list[str] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            "NodeName=trt-gb10-1 CPUAlloc=0 AllocMem=0 State=IDLE Partitions=gb10,loom-staging ",
+            "",
+        )
+
+    def launch(
+        argv: list[str],
+        *,
+        job_name: str,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        launched_names.append(job_name)
+        payload = {
+            "candidate_sha": candidate_sha,
+            "node": "trt-gb10-1",
+            "trial_cache_registry": _node_probe_registry_payload(authority),
+        }
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            authority.ALLOCATION_START_MARKER + "\n" + json.dumps(payload) + "\n",
+            "",
+        )
+
+    monkeypatch.setattr(authority, "_run", run)
+    monkeypatch.setattr(authority, "_run_allocation_launcher", launch)
+    monkeypatch.setattr(authority, "_cleanup_persisted_probe_job", lambda *_args, **_kwargs: None)
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
+    )
+
+    passed, deferred = authority._probe_nodes(
+        candidate_sha,
+        verified,
+        {
+            "repo_dir": Path("/worker/repo"),
+            "env_file": Path("/worker/env"),
+            "image_tag": "staging-aaaaaaa",
+            "requested_concurrency": 10,
+        },
+        job_state_path=tmp_path / "active.json",
+        request_nonce=request_nonce,
+    )
+
+    assert passed == ["trt-gb10-1"]
+    assert deferred == []
+    assert launched_names == [f"loom-accept-aaaaaaa-1-{request_nonce}"]
+
+
+def test_authority_fixed_paths_resist_path_interception(tmp_path: Path) -> None:
+    attacker = tmp_path / "bin"
+    attacker.mkdir()
+    marker = tmp_path / "intercepted"
+    for name in ("python3", "docker", "srun", "squeue", "scancel", "runuser"):
+        executable = attacker / name
+        executable.write_text(
+            f"#!/bin/sh\nprintf intercepted > {marker}\nexit 77\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    script = f"""
+import importlib.util
+import json
+path = {str(AUTHORITY)!r}
+spec = importlib.util.spec_from_file_location("fixed_path_authority", path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+result = authority._run([authority.SYSTEM_PYTHON, "-c", "print('fixed')"])
+print(json.dumps({{"docker": authority.DOCKER, "stdout": result.stdout.strip()}}))
+"""
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(tmp_path),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": str(attacker),
+        },
+        timeout=10,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(result.stdout) == {"docker": "/usr/bin/docker", "stdout": "fixed"}
+    assert not marker.exists()
+
+
 def test_authority_signal_kills_child_group_and_cleans_only_current_job(
     tmp_path: Path,
 ) -> None:
@@ -1183,7 +1719,9 @@ def run(argv, *, timeout=30, check=True, deadline=None):
     if "/usr/bin/squeue" in argv:
         queue_reads += 1
         append_log("squeue")
-        job_name = next(item.removeprefix("--name=") for item in argv if "--name=" in item)
+        job_name = next(
+            item.removeprefix("--name=") for item in argv if item.startswith("--name=")
+        )
         stdout = f"123|{job_name}\n" if queue_reads == 1 else ""
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
     if "/usr/bin/scancel" in argv:
@@ -1297,7 +1835,9 @@ def test_overall_timeout_cancels_and_verifies_current_job_before_next_submission
         if "/usr/bin/squeue" in argv:
             assert deadline == 70.0
             queue_reads += 1
-            job_name = next(item.removeprefix("--name=") for item in argv if "--name=" in item)
+            job_name = next(
+                item.removeprefix("--name=") for item in argv if item.startswith("--name=")
+            )
             stdout = f"123|{job_name}\n" if queue_reads == 1 else ""
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
         if "/usr/bin/scancel" in argv:
@@ -1446,15 +1986,8 @@ def test_authority_artifact_writer_retries_short_writes(
     artifact_path = state_root / "current.json"
     monkeypatch.setattr(authority, "STATE_ROOT", state_root)
     monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
-    real_lstat = Path.lstat
-
-    def trusted_state_root_lstat(path: Path) -> object:
-        metadata = real_lstat(path)
-        if path == state_root:
-            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
-        return metadata
-
-    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    monkeypatch.setattr(authority, "ROOT_UID", os.geteuid())
+    monkeypatch.setattr(authority, "ROOT_GID", os.getegid())
     real_write = os.write
     write_count = 0
 
@@ -1472,6 +2005,79 @@ def test_authority_artifact_writer_retries_short_writes(
     assert write_count > 1
 
 
+def test_authority_rejects_real_evidence_directory_ownership_drift(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir(mode=0o755)
+    script = r"""
+import importlib.util
+import os
+import pathlib
+import sys
+
+authority_path, evidence_path = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("ownership_authority", authority_path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+authority.ROOT_UID = os.geteuid() + 1
+authority.ROOT_GID = os.getegid() + 1
+try:
+    authority._validate_root_directory(evidence_path, mode=0o755, label="authority evidence root")
+except authority.AcceptanceError as exc:
+    if "metadata" not in str(exc):
+        raise
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(AUTHORITY), str(evidence_root)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 42, (result.stdout, result.stderr)
+
+
+def test_authority_rejects_real_published_artifact_ownership_drift(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence.json"
+    expected = b'{"kind":"loom_gb10_slurm_acceptance"}\n'
+    artifact.write_bytes(expected)
+    artifact.chmod(0o644)
+    script = r"""
+import importlib.util
+import os
+import pathlib
+import sys
+
+authority_path, artifact_path = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("artifact_ownership_authority", authority_path)
+assert spec is not None and spec.loader is not None
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+authority.ROOT_UID = os.geteuid() + 1
+authority.ROOT_GID = os.getegid() + 1
+try:
+    authority._read_published_artifact(
+        artifact_path,
+        b'{"kind":"loom_gb10_slurm_acceptance"}\n',
+    )
+except authority.AcceptanceError as exc:
+    if "ownership" not in str(exc) and "collision" not in str(exc):
+        raise
+    raise SystemExit(42)
+raise SystemExit(3)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(AUTHORITY), str(artifact)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 42, (result.stdout, result.stderr)
+
+
 def test_authority_publishes_digest_addressed_evidence_before_current_and_fsyncs_dirs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1481,15 +2087,8 @@ def test_authority_publishes_digest_addressed_evidence_before_current_and_fsyncs
     artifact_path = state_root / "current.json"
     monkeypatch.setattr(authority, "STATE_ROOT", state_root)
     monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
-    real_lstat = Path.lstat
-
-    def trusted_state_root_lstat(path: Path) -> object:
-        metadata = real_lstat(path)
-        if path == state_root:
-            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
-        return metadata
-
-    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    monkeypatch.setattr(authority, "ROOT_UID", os.geteuid())
+    monkeypatch.setattr(authority, "ROOT_GID", os.getegid())
     real_fsync = os.fsync
     synced: list[str] = []
 
@@ -1522,15 +2121,8 @@ def test_authority_artifact_publication_is_idempotent_and_rejects_digest_collisi
     artifact_path = state_root / "current.json"
     monkeypatch.setattr(authority, "STATE_ROOT", state_root)
     monkeypatch.setattr(authority, "ARTIFACT_PATH", artifact_path)
-    real_lstat = Path.lstat
-
-    def trusted_state_root_lstat(path: Path) -> object:
-        metadata = real_lstat(path)
-        if path == state_root:
-            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=0, st_gid=0)
-        return metadata
-
-    monkeypatch.setattr(Path, "lstat", trusted_state_root_lstat)
+    monkeypatch.setattr(authority, "ROOT_UID", os.geteuid())
+    monkeypatch.setattr(authority, "ROOT_GID", os.getegid())
     payload = {"kind": "loom_gb10_slurm_acceptance", "result": "pass"}
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()
@@ -1562,6 +2154,10 @@ def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
             parse_args=lambda: SimpleNamespace(
                 candidate_sha=candidate_sha,
                 image_tag="staging-aaaaaaa",
+                job_state_path=(
+                    authority.JOB_STATE_ROOT
+                    / "loom-gb10-capacity-0123456789abcdef01234567.service.json"
+                ),
             )
         ),
     )
@@ -1592,7 +2188,7 @@ def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
     monkeypatch.setattr(
         authority,
         "_probe_nodes",
-        lambda _sha, _verified, _contract, *, work_deadline, cleanup_deadline: (
+        lambda _sha, _verified, _contract, *, work_deadline, cleanup_deadline, job_state_path, request_nonce: (
             list(authority.SLURM_NODES),
             [],
         ),
@@ -1618,6 +2214,19 @@ def test_installer_publishes_only_root_owned_fixed_authority() -> None:
     assert "grep -Eq" not in source
     assert 'INSTALL_PATH="/usr/local/libexec/loom-gb10-slurm-acceptance-authority"' in source
     assert 'STATE_ROOT="/var/lib/loom-gb10-slurm-authority"' in source
+    assert 'RUNTIME_ROOT="/run/loom-gb10-slurm-authority"' in source
+    assert 'TMPFILES_PATH="/etc/tmpfiles.d/loom-gb10-slurm-authority.conf"' in source
     assert "install -o root -g root -m 0755" in source
+    assert "install -o root -g root -m 0644" in source
     assert "install -d -o root -g root -m 0755" in source
+    assert '/usr/bin/systemd-tmpfiles --create "$TMPFILES_PATH"' in source
+    assert '"root:root:700:directory"' in source
     assert "/home/qianyi" not in source
+
+
+def test_acceptance_tmpfiles_provisions_strict_volatile_job_state() -> None:
+    assert TMPFILES.read_text(encoding="utf-8").splitlines() == [
+        "d /run/loom-gb10-slurm-authority 0700 root root -",
+        "d /run/loom-gb10-slurm-authority/jobs 0700 root root -",
+        "f /run/loom-gb10-slurm-authority/acceptance.lock 0600 root root -",
+    ]

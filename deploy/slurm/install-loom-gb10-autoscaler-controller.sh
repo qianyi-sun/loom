@@ -22,6 +22,9 @@ UV_ARCHIVE="uv-aarch64-unknown-linux-gnu.tar.gz"
 UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ARCHIVE"
 ACCEPTANCE_AUTHORITY_SOURCE="$REPO_ROOT/scripts/ops/gb10_slurm_acceptance_authority.py"
 ACCEPTANCE_AUTHORITY_PATH="/usr/local/libexec/loom-gb10-slurm-acceptance-authority"
+ACCEPTANCE_TMPFILES_SOURCE="$REPO_ROOT/deploy/slurm/loom-gb10-slurm-authority.tmpfiles"
+ACCEPTANCE_TMPFILES_PATH="/etc/tmpfiles.d/loom-gb10-slurm-authority.conf"
+ACCEPTANCE_RUNTIME_ROOT="/run/loom-gb10-slurm-authority"
 BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"
 BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"
 SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"
@@ -48,6 +51,8 @@ if [ -z "$CONTROLLER_PUBLIC_KEY" ] \
   || [ ! -f "$CONTROLLER_PUBLIC_KEY" ] \
   || [ ! -f "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
   || [ -L "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
+  || [ ! -f "$ACCEPTANCE_TMPFILES_SOURCE" ] \
+  || [ -L "$ACCEPTANCE_TMPFILES_SOURCE" ] \
   || [ ! -f "$BROKER_SOURCE" ]; then
   echo "error: controller broker installation input is unavailable" >&2
   exit 2
@@ -93,7 +98,19 @@ tar --extract --gzip --file "$temporary_dir/$UV_ARCHIVE" \
 install -o root -g root -m 0755 \
   "$temporary_dir/uv-aarch64-unknown-linux-gnu/uv" /usr/local/bin/uv
 
-install -d -o root -g root -m 0755 /usr/local/libexec /etc/sudoers.d
+install -d -o root -g root -m 0755 /usr/local/libexec /etc/sudoers.d /etc/tmpfiles.d
+install -o root -g root -m 0644 \
+  "$ACCEPTANCE_TMPFILES_SOURCE" "$ACCEPTANCE_TMPFILES_PATH"
+/usr/bin/systemd-tmpfiles --create "$ACCEPTANCE_TMPFILES_PATH"
+if [ "$(stat -c '%U:%G:%a:%F' "$ACCEPTANCE_RUNTIME_ROOT")" \
+    != "root:root:700:directory" ] \
+  || [ "$(stat -c '%U:%G:%a:%F' "$ACCEPTANCE_RUNTIME_ROOT/jobs")" \
+    != "root:root:700:directory" ] \
+  || [ "$(stat -c '%U:%G:%a:%F' "$ACCEPTANCE_RUNTIME_ROOT/acceptance.lock")" \
+    != "root:root:600:regular empty file" ]; then
+  echo "error: GB10 acceptance runtime metadata is unsafe" >&2
+  exit 1
+fi
 install -o root -g root -m 0755 \
   "$ACCEPTANCE_AUTHORITY_SOURCE" "$ACCEPTANCE_AUTHORITY_PATH"
 /usr/bin/python3 "$ACCEPTANCE_AUTHORITY_PATH" --help >/dev/null

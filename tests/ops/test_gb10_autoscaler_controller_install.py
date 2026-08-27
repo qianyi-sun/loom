@@ -78,6 +78,13 @@ def test_installer_couples_acceptance_authority_before_broker_publication() -> N
         'ACCEPTANCE_AUTHORITY_PATH="/usr/local/libexec/'
         'loom-gb10-slurm-acceptance-authority"' in source
     )
+    assert (
+        'ACCEPTANCE_TMPFILES_SOURCE="$REPO_ROOT/deploy/slurm/'
+        'loom-gb10-slurm-authority.tmpfiles"' in source
+    )
+    assert 'ACCEPTANCE_RUNTIME_ROOT="/run/loom-gb10-slurm-authority"' in source
+    assert '/usr/bin/systemd-tmpfiles --create "$ACCEPTANCE_TMPFILES_PATH"' in source
+    assert '"root:root:700:directory"' in source
     assert 'BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"' in source
     assert 'BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"' in source
     authority_install = source.index(
