@@ -9,8 +9,8 @@
 orchestrator service mode uses. No Control Plane, no Worker, no
 Gateway, no Postgres, no MinIO required.
 
-`loom run --backend` remains local driver selection. Docker, Daytona, Modal,
-and fake are not service scheduling identities and do not participate in the
+`loom run --backend` remains local driver selection. Docker, Modal, and fake
+are not service scheduling identities and do not participate in the
 Nebius execution-class/target topology. See
 [Nebius service execution](nebius-service-execution.md) for the service-only
 deprecation boundary.

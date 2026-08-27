@@ -606,7 +606,7 @@ backend keep their domain-specific names.
 | Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
 | `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence; user batches remain forbidden from setting it. | Operator control remains distinct from normal provider-neutral scheduling. |
 | `autoscaler_pool_name`, physical pool policies, slot counts | Legacy-adapter assignment must match the versioned Trial route; configured and fresh capacity are reported separately. | Retained while OLDLAB/GB10 operate, alongside target/Pod evidence for Nebius. |
-| `loom run --backend` | Unchanged local-only driver selection. | Docker, Daytona, Modal, and fake may remain CLI-only and never appear in service admission or capacity. |
+| `loom run --backend` | Unchanged local-only driver selection. | Docker, Modal, and fake may remain CLI-only and never appear in service admission or capacity. |
 
 Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
 specific fields have an owner and telemetry, but their existence is not a
