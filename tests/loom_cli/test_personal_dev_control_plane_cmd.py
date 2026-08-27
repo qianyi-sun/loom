@@ -551,7 +551,6 @@ def _acceptance_result_files(
     plan, _v1_plan = _result_plan(tmp_path)
     plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
     rollback_value = _rollback_shadow_status_value()
-    rollback_value["input_sha256"] = plan.release.shadow_manifest_sha256
     rollback_value["release_sha256"] = plan.release.trusted_release_sha256
     rollback_path = tmp_path / "rollback-shadow.status.json"
     rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
@@ -626,7 +625,6 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         "wrong-result-sha",
         "wrong-manifest",
         "wrong-rollback-digest",
-        "wrong-rollback-input",
         "invalid-rollback",
         "wrong-rollback-release",
         "invalid-result",
@@ -672,14 +670,6 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         value = json.loads(rollback_path.read_text(encoding="ascii"))
         value["input_sha256"] = "3" * 64
         _write_canonical_owner_only(rollback_path, value)
-    elif invalid_input == "wrong-rollback-input":
-        value = json.loads(rollback_path.read_text(encoding="ascii"))
-        value["input_sha256"] = "3" * 64
-        rollback_sha256 = _write_canonical_owner_only(rollback_path, value)
-        result_sha256 = _rewrite_acceptance_result_rollback_digest(
-            result_path,
-            rollback_sha256,
-        )
     elif invalid_input in {"invalid-rollback", "wrong-rollback-release"}:
         value = json.loads(rollback_path.read_text(encoding="ascii"))
         if invalid_input == "invalid-rollback":

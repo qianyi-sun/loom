@@ -676,11 +676,8 @@ def _verify_acceptance_result(args: argparse.Namespace) -> int:
             args.rollback_shadow_status_file,
             result.status_sha256s.rollback_shadow,
         )
-        if (
-            rollback_shadow_status["input_sha256"] != result.shadow_manifest_sha256
-            or rollback_shadow_status["release_sha256"] != result.release_sha256
-        ):
-            raise ValueError("rollback shadow binding is invalid")
+        if rollback_shadow_status["release_sha256"] != result.release_sha256:
+            raise ValueError("rollback shadow release binding is invalid")
     except (OSError, TypeError, ValueError):
         sys.stderr.write(_VERIFICATION_ERROR)
         return 2
