@@ -82,7 +82,22 @@ test -x "$loom_cli"
 test -x "$python_cli"
 
 evidence_dir="<new-absolute-owner-only-durable-launch-evidence-directory>"
-install -d -m 0700 "$evidence_dir"
+prepare_new_evidence_dir() {
+  local path="$1"
+  local parent
+  test "${path#/}" != "$path"
+  parent="$(dirname -- "$path")"
+  test -d "$parent" && test ! -L "$parent"
+  test "$(realpath -e "$parent")" = "$parent"
+  test ! -e "$path" && test ! -L "$path"
+  mkdir -m 0700 -- "$path"
+  test -d "$path" && test ! -L "$path"
+  test "$(realpath -e "$path")" = "$path"
+  test "$(stat -c %u "$path")" = "$(id -u)"
+  test "$(stat -c %a "$path")" = 700
+  test -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)"
+}
+prepare_new_evidence_dir "$evidence_dir"
 operational_render="$evidence_dir/reviewed-operational.yaml"
 operational_render_evidence="$evidence_dir/reviewed-operational.render.json"
 shadow_render="$evidence_dir/reviewed-rollback-shadow.yaml"

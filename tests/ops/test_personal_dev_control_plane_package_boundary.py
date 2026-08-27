@@ -1692,6 +1692,49 @@ def test_multi_owner_launch_smoke_uses_exact_cli_and_reviewed_server(
         assert whoami["server"] == "https://loom-service.dev.yylx.world"
 
 
+def test_multi_owner_launch_requires_a_new_canonical_evidence_directory(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    prepare_function = _fenced_shell_function(runbook, "prepare_new_evidence_dir")
+
+    def prepare(path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash"],
+            input=(
+                "set -euo pipefail\n"
+                "umask 077\n"
+                + prepare_function
+                + "\n"
+                + f"prepare_new_evidence_dir {shlex.quote(str(path))}\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    fresh = tmp_path / "fresh"
+    fresh_result = prepare(fresh)
+    assert fresh_result.returncode == 0, fresh_result.stderr
+    assert fresh.is_dir()
+    assert not fresh.is_symlink()
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o700
+    assert list(fresh.iterdir()) == []
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    nonempty = tmp_path / "nonempty"
+    nonempty.mkdir()
+    (nonempty / "stale.json").write_text("{}\n", encoding="ascii")
+    symlink = tmp_path / "symlink"
+    symlink.symlink_to(existing, target_is_directory=True)
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(existing, target_is_directory=True)
+
+    for unsafe in (existing, nonempty, symlink, symlink_parent / "child"):
+        assert prepare(unsafe).returncode != 0
+
+
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:
     runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
 
