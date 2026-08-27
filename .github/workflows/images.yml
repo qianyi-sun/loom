@@ -349,6 +349,8 @@ jobs:
               and item["image"] not in {
                   "capacity-executor",
                   "capacity-manager",
+                  "execution-actuator",
+                  "execution-runtime",
                   "personal-dev-activation-agent",
                   "personal-dev-builder",
                   "personal-dev-scanner-cache",
@@ -494,7 +496,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
+          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'execution-actuator' || matrix.image == 'execution-runtime' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
           fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:
