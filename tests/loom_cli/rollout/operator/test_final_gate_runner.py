@@ -139,7 +139,7 @@ def test_final_gate_runner_journals_once_and_resumes_without_reapply(tmp_path: P
 
     assert runner(envelope, _admission(attestation)) == 0
     first_calls = list(calls)
-    assert len(first_calls) == 6
+    assert len(first_calls) == len(FINAL_CHECK_IDS)
 
     assert (
         runner(
@@ -412,6 +412,36 @@ def test_final_gate_runner_reruns_expired_repeatable_checks(tmp_path: Path) -> N
     )
     assert [check_id for _, check_id, _ in calls].count("final.protected-apply") == 1
     assert [check_id for _, check_id, _ in calls].count("final.convergence") == 2
+
+
+def test_final_gate_runner_reruns_capacity_after_acceptance_freshness_expires(
+    tmp_path: Path,
+) -> None:
+    runner, attestation, _state_root, state, calls = _resume_runner(
+        tmp_path,
+        blocked=set(),
+    )
+    first = _envelope(attestation)
+
+    assert runner(first, _admission(attestation)) == 0
+    state["now"] = NOW + timedelta(minutes=21)
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    assert (
+        runner(
+            resumed,
+            replace(_admission(attestation), post_apply_resume=True),
+        )
+        == 0
+    )
+    assert [check_id for _, check_id, _ in calls].count("final.capacity") == 2
+    assert [check_id for _, check_id, _ in calls].count("final.smoke") == 1
 
 
 def test_final_gate_runner_carries_newest_successful_historical_evidence(

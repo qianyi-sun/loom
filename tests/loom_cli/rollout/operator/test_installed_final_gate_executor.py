@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import subprocess
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
@@ -9,7 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 import loom_cli.rollout.operator.installed_final_gate_executor as installed_module
-from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from loom_cli.rollout.operator.installed_final_gate_executor import (
     BoundedStagingSmokeTransport,
     InstalledFinalGateExecutor,
@@ -278,6 +282,212 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert environment_state.cp_url == executor.config.cp_url
     assert environment_state.expected_env_template_sha256 == "a" * 64
     assert captured["service_uid"] == os.geteuid()
+
+
+def test_capacity_executor_binds_exact_profile_nodes_and_epoch(tmp_path: Path) -> None:
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)},
+    )
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def accept_capacity(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(evidence_digest="d" * 64)
+
+    capacity = installed_module.FinalCapacityExecutor(transport=_Transport())
+
+    result = capacity("final.capacity", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+    assert result.evidence_digest == "d" * 64
+    assert result.protected_mutation is True
+    assert calls == [
+        {
+            "profile_sha256": plan.supervisor_profile_sha256,
+            "nodes": FULL_GB10_HOSTS,
+        }
+    ]
+
+
+def test_capacity_executor_accepts_published_plan_with_sorted_boot_id_keys(
+    tmp_path: Path,
+) -> None:
+    payload = _plan(tmp_path).to_dict()
+    payload["gb10_boot_ids"] = {node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)}
+    payload["plan_digest"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "plan_digest"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    plan = FinalGatePlan.from_dict(payload)
+    attempt = tmp_path / "requests" / plan.request_id / "attempts" / str(plan.attempt_number)
+    attempt.mkdir(parents=True, mode=0o700)
+    store = FinalGatePlanStore(
+        tmp_path,
+        request_id=plan.request_id,
+        attempt_number=plan.attempt_number,
+    )
+    store.publish(plan)
+    reloaded = store.read()
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def accept_capacity(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(evidence_digest="d" * 64)
+
+    result = installed_module.FinalCapacityExecutor(transport=_Transport())(
+        "final.capacity",
+        CheckOperation.APPLY,
+        reloaded,
+    )
+
+    assert tuple(reloaded.gb10_boot_ids) != FULL_GB10_HOSTS
+    assert result.ready
+    assert calls == [
+        {
+            "profile_sha256": plan.supervisor_profile_sha256,
+            "nodes": FULL_GB10_HOSTS,
+        }
+    ]
+
+
+def test_capacity_executor_normalizes_broker_failure_before_smoke(tmp_path: Path) -> None:
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)},
+    )
+
+    class _Transport:
+        def accept_capacity(self, **_kwargs):
+            raise RuntimeError("secret remote detail")
+
+    result = installed_module.FinalCapacityExecutor(transport=_Transport())(
+        "final.capacity",
+        CheckOperation.APPLY,
+        plan,
+    )
+
+    assert result.blockers == {"capacity": "slurm-acceptance-unavailable"}
+    assert result.protected_mutation is True
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+
+
+def test_capacity_executor_normalizes_ssh_timeout_before_smoke(tmp_path: Path) -> None:
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)},
+    )
+
+    class _Transport:
+        def accept_capacity(self, **_kwargs):
+            raise subprocess.TimeoutExpired(("ssh", "fixed-controller"), 1500)
+
+    result = installed_module.FinalCapacityExecutor(transport=_Transport())(
+        "final.capacity",
+        CheckOperation.APPLY,
+        plan,
+    )
+
+    assert result.blockers == {"capacity": "slurm-acceptance-unavailable"}
+    assert result.protected_mutation is True
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+
+
+@pytest.mark.parametrize("error_type", (OSError, ValueError))
+def test_installed_capacity_normalizes_transport_builder_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    executor = _executor(tmp_path)
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)},
+    )
+
+    def build_transport(**_kwargs):
+        raise error_type("secret identity detail")
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_external_supervisor_transport",
+        build_transport,
+    )
+
+    result = executor("final.capacity", CheckOperation.APPLY, plan)
+
+    assert result.blockers == {"capacity": "slurm-acceptance-unavailable"}
+    assert result.protected_mutation is True
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+
+
+def test_capacity_executor_rejects_noncanonical_node_plan_before_ssh(tmp_path: Path) -> None:
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={
+            **{node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS[:-1])},
+            "trt-gb10-16": "boot-outside-authority",
+        },
+    )
+
+    class _Transport:
+        def accept_capacity(self, **_kwargs):
+            pytest.fail("noncanonical capacity plan reached SSH")
+
+    with pytest.raises(ValueError, match="final capacity operation"):
+        installed_module.FinalCapacityExecutor(transport=_Transport())(
+            "final.capacity",
+            CheckOperation.APPLY,
+            plan,
+        )
+
+
+def test_installed_capacity_dispatch_reuses_candidate_bound_controller_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    plan = _bound_plan(tmp_path)
+    sentinel_transport = object()
+    captured: dict[str, object] = {}
+
+    def build_transport(**kwargs):
+        captured["builder"] = kwargs
+        return sentinel_transport
+
+    class _CapacityExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def __call__(self, actual_check, actual_operation, actual_plan):
+            assert (actual_check, actual_operation, actual_plan) == (
+                "final.capacity",
+                CheckOperation.APPLY,
+                plan,
+            )
+            captured["transport"] = captured["transport_factory"]()
+            return "dispatched"
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_external_supervisor_transport",
+        build_transport,
+    )
+    monkeypatch.setattr(installed_module, "FinalCapacityExecutor", _CapacityExecutor, raising=False)
+
+    assert executor("final.capacity", CheckOperation.APPLY, plan) == "dispatched"
+    assert captured["transport"] is sentinel_transport
+    assert captured["builder"] == {
+        "candidate_sha": plan.candidate_sha,
+        "candidate_tree": plan.candidate_tree,
+        "run": executor._capacity_ssh_run,
+    }
 
 
 def test_installed_supervisor_ssh_runner_forwards_bounded_stdin(

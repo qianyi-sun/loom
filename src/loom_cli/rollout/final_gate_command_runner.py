@@ -22,6 +22,10 @@ _TIMEOUTS = {
     "final.protected-apply": 3600,
     "final.convergence": 1200,
     "final.drift": 300,
+    # The root authority may issue one bounded real allocation on each of the
+    # 15 canonical nodes. Keep the outer helper alive beyond its 1200s broker
+    # deadline so failure evidence can still be normalized.
+    "final.capacity": 1800,
     # The smoke executor owns a 900s terminal wait and each bounded HTTP call
     # may consume another 30s. Preserve enough outer-process time to emit its
     # normalized timeout evidence and close cleanly after the inner deadline.

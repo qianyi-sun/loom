@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
@@ -135,6 +137,55 @@ def _transport(artifact, run: _Run, identity: Path) -> remote.FixedGB10ExternalS
     )
 
 
+def _capacity_artifact(artifact: ExternalSupervisorArtifact) -> dict[str, object]:
+    generated_at = datetime.now(UTC)
+    return {
+        "schema_version": 1,
+        "kind": "loom_gb10_slurm_acceptance",
+        "result": "pass",
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "profile_sha256": "c" * 64,
+        "cluster_name": "trt-gb10",
+        "controller_host": "gx10-01c7",
+        "service_identity": {
+            "user": "loom-rollout",
+            "uid": 995,
+            "gid": 2007,
+            "account": "loom-staging",
+            "qos": "loom-staging",
+        },
+        "nodes": list(FULL_GB10_HOSTS),
+        "node_count": 15,
+        "probed_nodes": list(FULL_GB10_HOSTS[1:]),
+        "probed_node_count": 14,
+        "deferred_busy_nodes": [FULL_GB10_HOSTS[0]],
+        "trial_cache_registry": {
+            "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
+            "canary_digest": "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
+            "repository": "192.168.50.103:5443/loom-trial-cache",
+        },
+        "generated_at": generated_at.isoformat(),
+        "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
+    }
+
+
+def _capacity_response(acceptance: dict[str, object]) -> str:
+    return (
+        json.dumps(
+            {
+                "acceptance": acceptance,
+                "operation": "accept_capacity",
+                "schema_version": 1,
+                "status": "ok",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
 def test_gb10_user_systemd_control_uses_controller_service_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -228,6 +279,155 @@ def test_remote_apply_and_reconcile_expose_only_typed_operations(tmp_path: Path)
         "schema_version": 1,
     }
 
+    with pytest.raises(ValueError, match="observe request"):
+        remote._encode_helper_request(
+            operation="observe",
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            artifact=artifact,
+            profile_sha256="d" * 64,
+        )
+    with pytest.raises(ValueError, match="apply request"):
+        remote._encode_helper_request(
+            operation="apply",
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            artifact=artifact,
+            expected=observation,
+            plan_digest="a" * 64,
+            attestation_digest="b" * 64,
+            transition_digest="c" * 64,
+            nodes=FULL_GB10_HOSTS,
+        )
+
+
+def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    run = _Run(_capacity_response(acceptance))
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    evidence = transport.accept_capacity(
+        profile_sha256="c" * 64,
+        nodes=FULL_GB10_HOSTS,
+    )
+
+    assert dict(evidence.payload) == acceptance
+    request = json.loads(run.calls[0][1])
+    assert request == {
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "nodes": list(FULL_GB10_HOSTS),
+        "operation": "accept_capacity",
+        "profile_sha256": "c" * 64,
+        "schema_version": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("candidate_tree", "d" * 40),
+        ("profile_sha256", "d" * 64),
+        ("nodes", [*FULL_GB10_HOSTS[:-1], "trt-gb10-16"]),
+        (
+            "service_identity",
+            {
+                "user": "qianyi",
+                "uid": 1000,
+                "gid": 1000,
+                "account": "loom-staging",
+                "qos": "loom-staging",
+            },
+        ),
+    ],
+)
+def test_remote_capacity_acceptance_rejects_malformed_or_drifted_evidence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    acceptance[field] = value
+    run = _Run(_capacity_response(acceptance))
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(ValueError, match="acceptance evidence"):
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=FULL_GB10_HOSTS,
+        )
+
+
+def test_remote_capacity_rejects_noncanonical_request_before_ssh(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    run = _Run(_capacity_response(_capacity_artifact(artifact)))
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(ValueError, match="capacity request"):
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=(*FULL_GB10_HOSTS[:-1], "trt-gb10-16"),
+        )
+
+    assert run.calls == []
+
+
+def test_remote_capacity_rejects_non_integer_envelope_schema(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    response = json.loads(_capacity_response(_capacity_artifact(artifact)))
+    response["schema_version"] = True
+    run = _Run(json.dumps(response, sort_keys=True, separators=(",", ":")) + "\n")
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(RuntimeError, match="response drifted"):
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=FULL_GB10_HOSTS,
+        )
+
+
+def test_capacity_validator_normalizes_unhashable_expected_nodes(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    acceptance["nodes"] = [["not-a-node"]]
+    acceptance["node_count"] = 1
+    acceptance["probed_nodes"] = [FULL_GB10_HOSTS[0]]
+    acceptance["probed_node_count"] = 1
+    acceptance["deferred_busy_nodes"] = []
+
+    with pytest.raises(ValueError, match="acceptance evidence"):
+        remote.validate_gb10_slurm_acceptance(
+            acceptance,
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            profile_sha256="c" * 64,
+            nodes=[["not-a-node"]],  # type: ignore[list-item]
+        )
+
+
+def test_capacity_validator_rejects_evidence_lifetime_over_thirty_minutes(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    generated_at = datetime(2026, 8, 27, 16, tzinfo=UTC)
+    acceptance["generated_at"] = generated_at.isoformat()
+    acceptance["expires_at"] = (generated_at + timedelta(minutes=30, seconds=1)).isoformat()
+
+    with pytest.raises(ValueError, match="acceptance evidence"):
+        remote.validate_gb10_slurm_acceptance(
+            acceptance,
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            profile_sha256="c" * 64,
+            nodes=FULL_GB10_HOSTS,
+            now=generated_at + timedelta(seconds=1),
+        )
+
 
 def test_remote_transport_rejects_non_controller_artifact_before_ssh(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path, execution_host="TRT-EAI-OLDLAB-1")
@@ -255,8 +455,7 @@ def test_controller_authority_rejects_non_exact_pool_sets(
 ) -> None:
     artifact = _controller_artifact(tmp_path)
     supervisors = tuple(
-        SimpleNamespace(execution_host="gx10-01c7", pool_name=pool_name)
-        for pool_name in pools
+        SimpleNamespace(execution_host="gx10-01c7", pool_name=pool_name) for pool_name in pools
     )
     invalid = SimpleNamespace(
         candidate_sha=artifact.candidate_sha,

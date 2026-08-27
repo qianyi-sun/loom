@@ -788,6 +788,20 @@ class PreflightDag:
                 raise RuntimeError("preflight DAG made no progress")
             runnable: list[RegisteredCheck] = []
             for check in ready:
+                dependency_time = clock()
+                expired_dependencies = tuple(
+                    dependency
+                    for dependency in check.spec.dependencies
+                    if dependency in results
+                    and results[dependency].passed
+                    and dependency not in freshness_exempt_prior_executions
+                    and results[dependency].expires_at <= dependency_time
+                )
+                if expired_dependencies:
+                    raise ValueError(
+                        "dependency execution expired before dependent execution: "
+                        + ",".join(expired_dependencies)
+                    )
                 blocked_by = tuple(
                     dependency
                     for dependency in check.spec.dependencies
@@ -811,6 +825,8 @@ class PreflightDag:
                 context=context,
                 operations=operations,
                 clock=clock,
+                dependency_executions=results,
+                freshness_exempt_executions=freshness_exempt_prior_executions,
             )
             for check in runnable:
                 result = wave_results[check.spec.check_id]
@@ -828,6 +844,8 @@ class PreflightDag:
         context: CheckContext,
         operations: Mapping[str, CheckOperation],
         clock: Callable[[], datetime],
+        dependency_executions: Mapping[str, CheckExecution],
+        freshness_exempt_executions: frozenset[str],
     ) -> dict[str, CheckExecution]:
         if not runnable:
             return {}
@@ -858,6 +876,8 @@ class PreflightDag:
                         operations[check_id],
                         clock,
                         cancellations[check_id],
+                        dependency_executions,
+                        freshness_exempt_executions,
                     )
             except BaseException:
                 self._cancel_and_quiesce_submitted(
@@ -1029,11 +1049,26 @@ class PreflightDag:
         operation: CheckOperation,
         clock: Callable[[], datetime],
         cancellation: _CheckCancellation,
+        dependency_executions: Mapping[str, CheckExecution],
+        freshness_exempt_executions: frozenset[str],
     ) -> _CheckCompletion:
         cancellation.mark_started()
         started_at = clock()
         cancellable_context = replace(context, _cancellation=cancellation)
         try:
+            expired_dependencies = tuple(
+                dependency
+                for dependency in check.spec.dependencies
+                if dependency in dependency_executions
+                and dependency_executions[dependency].passed
+                and dependency not in freshness_exempt_executions
+                and dependency_executions[dependency].expires_at <= started_at
+            )
+            if expired_dependencies:
+                raise ValueError(
+                    "dependency execution expired before dependent execution: "
+                    + ",".join(expired_dependencies)
+                )
             result = self._run_one(check, cancellable_context, operation, clock)
         except BaseException as exc:
             return _CheckCompletion(
