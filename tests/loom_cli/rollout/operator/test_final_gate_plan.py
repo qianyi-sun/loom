@@ -336,6 +336,7 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
             "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(units),
             "gx10-01c7/live-evidence-digest": "a" * 64,
             "gx10-01c7/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            "gx10-01c7/runtime-state": "ready",
             "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
             **{f"gx10-01c7/unit/{name}": digest for name, digest in units.items()},
             "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
@@ -344,6 +345,7 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
             "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(oldlab_units),
             "TRT-EAI-OLDLAB-1/live-evidence-digest": "f" * 64,
             "TRT-EAI-OLDLAB-1/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            "TRT-EAI-OLDLAB-1/runtime-state": "ready",
             "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
             **{f"TRT-EAI-OLDLAB-1/unit/{name}": digest for name, digest in oldlab_units.items()},
         },
@@ -389,6 +391,7 @@ def _controller_bindings(
             predecessor_pending_transition_digest=predecessors[
                 f"{prefix}pending-transition-digest"
             ],
+            predecessor_runtime_state=predecessors[f"{prefix}runtime-state"],
             unit_directory=predecessors[f"{prefix}unit-directory"],
             target_artifact_digest=artifacts[host],
             target_profile_sha256=systemd["supervisor-profile-sha256"],
@@ -459,6 +462,17 @@ def test_final_gate_plan_preserves_independent_supervisor_controller_authority(
     }
     with pytest.raises(ValueError, match="controller binding set"):
         parse_external_supervisor_controller_bindings(gb10_only)
+
+
+def test_controller_binding_rejects_repairable_noncanonical_predecessor(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    invalid = dict(plan.supervisor_controller_bindings)
+    invalid["gx10-01c7/runtime-state"] = "repairable"
+
+    with pytest.raises(ValueError, match="controller binding is invalid"):
+        parse_external_supervisor_controller_bindings(invalid)
 
 
 def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None:

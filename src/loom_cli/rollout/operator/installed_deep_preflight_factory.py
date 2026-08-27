@@ -76,6 +76,7 @@ from .protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
     canonical_external_supervisor_runtime_ready,
+    canonical_external_supervisor_runtime_repairable,
 )
 from .protected_gb10_external_supervisor_transport import (
     GB10_CONTROLLER_EXECUTION_HOST,
@@ -353,6 +354,7 @@ def _external_supervisor_predecessor_source(
         )
         if canonical is not None:
             runtime_ready = canonical.unit_dir == str(unit_dir)
+            runtime_state = "drifted"
             # Controller observations cover the complete candidate unit set,
             # while the predecessor identity may legitimately predate newly
             # introduced supervisors. Validate the canonical subset exactly
@@ -365,12 +367,26 @@ def _external_supervisor_predecessor_source(
             canonical_services = {
                 name: status for name, status in services.items() if name in canonical_unit_names
             }
-            runtime_ready = runtime_ready and canonical_external_supervisor_runtime_ready(
+            canonical_runtime_ready = canonical_external_supervisor_runtime_ready(
                 canonical,
                 unit_payloads=canonical_units,
                 timer_statuses=canonical_timers,
                 service_statuses=canonical_services,
             )
+            canonical_runtime_repairable = (canonical.candidate_sha, canonical.candidate_tree) != (
+                candidate_sha,
+                candidate_tree,
+            ) and canonical_external_supervisor_runtime_repairable(
+                canonical,
+                unit_payloads=canonical_units,
+                timer_statuses=canonical_timers,
+                service_statuses=canonical_services,
+            )
+            runtime_ready = runtime_ready and (
+                canonical_runtime_ready or canonical_runtime_repairable
+            )
+            if runtime_ready:
+                runtime_state = "repairable" if canonical_runtime_repairable else "ready"
             for name in sorted(set(units) - canonical_unit_names):
                 payload = units[name]
                 if name.endswith(".timer"):
@@ -397,6 +413,8 @@ def _external_supervisor_predecessor_source(
                     )
                 else:
                     runtime_ready = False
+            if not runtime_ready:
+                runtime_state = "drifted"
             pointer_digest = ExternalSupervisorCanonicalPointer.build(canonical).pointer_digest
         else:
             live_unit_sha256 = {
@@ -446,6 +464,7 @@ def _external_supervisor_predecessor_source(
                             and service_status.need_daemon_reload == "no"
                         )
             pointer_digest = ABSENT_PREDECESSOR_DIGEST
+            runtime_state = "ready" if runtime_ready else "drifted"
         return ExternalSupervisorPredecessorSnapshot(
             kind=authority.kind,
             authority_digest=authority.authority_digest,
@@ -456,6 +475,7 @@ def _external_supervisor_predecessor_source(
             transition_clear=not observation.compensation_blockers,
             runtime_ready=runtime_ready,
             pool_identity_digest=pool_identity.evidence_digest,
+            runtime_state=runtime_state,
         )
 
     return source

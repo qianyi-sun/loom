@@ -704,6 +704,7 @@ def test_registered_external_supervisor_predecessor_binds_every_controller() -> 
     controller_bindings = probe.evidence["controller-bindings"]
     assert isinstance(controller_bindings, dict)
     assert controller_bindings["gx10-01c7/authority-digest"] == gb10.authority_digest
+    assert controller_bindings["gx10-01c7/runtime-state"] == "ready"
     assert controller_bindings["TRT-EAI-OLDLAB-1/authority-digest"] == (oldlab.authority_digest)
     assert (
         controller_bindings["TRT-EAI-OLDLAB-1/unit/loom-autoscaler-oldlab-staging.timer"]
