@@ -111,14 +111,6 @@ def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
     return "\n".join(lines).replace("[network]\n", "[network]\n" + entry, 1) + "\n"
 
 
-def _without_ingress_controller_source_cidrs(text: str) -> str:
-    return "\n".join(
-        line
-        for line in text.splitlines()
-        if not line.startswith("ingress_controller_source_cidrs = ")
-    ) + "\n"
-
-
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
@@ -152,13 +144,7 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
     assert profile.network.kubernetes_api_cidr != "0.0.0.0/0"
     assert profile.network.kubernetes_api_port == 443
-    assert profile.network.ingress_controller_source_cidrs == (
-        "192.168.50.14/32",
-        "192.168.50.15/32",
-        "192.168.50.16/32",
-        "192.168.50.17/32",
-        "192.168.50.103/32",
-    )
+    assert profile.network.ingress_controller_source_cidrs == ()
     assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
     assert profile.network.acme_http01_solver_port == 8089
     assert profile.protocol_versions == {
@@ -356,21 +342,20 @@ def test_profile_rejects_missing_and_duplicate_pools(tmp_path: Path) -> None:
         load_personal_dev_control_plane_profile(duplicate)
 
 
-@pytest.mark.parametrize("form", ["omitted", "explicit_empty"])
-def test_profile_accepts_no_ingress_controller_source_cidrs(
+def test_profile_accepts_legacy_ingress_controller_source_for_rollback(
     tmp_path: Path,
-    form: str,
 ) -> None:
-    transform = (
-        _without_ingress_controller_source_cidrs
-        if form == "omitted"
-        else lambda text: _with_ingress_controller_source_cidrs(text, [])
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_ingress_controller_source_cidrs(
+            text,
+            ["192.168.50.14/32"],
+        ),
     )
-    path = _write_profile(tmp_path, transform)
 
     profile = load_personal_dev_control_plane_profile(path)
 
-    assert profile.network.ingress_controller_source_cidrs == ()
+    assert profile.network.ingress_controller_source_cidrs == ("192.168.50.14/32",)
     assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
 
 
