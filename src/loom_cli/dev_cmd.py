@@ -21,6 +21,8 @@ import httpx
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
 from loom.personal_dev_expected_denial import (
     EXPECTED_HIDDEN_DENIAL_ERROR,
+    EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
+    expected_hidden_denial_phase,
     expected_hidden_denial_receipt,
 )
 from loom_cli.server_client import (
@@ -143,7 +145,11 @@ def _write_expected_hidden_denial_result(
     *,
     operation: str,
 ) -> int:
-    if response.status_code == 404:
+    if (
+        response.status_code == 404
+        and response.headers.get(EXPECTED_HIDDEN_DENIAL_PHASE_HEADER)
+        == expected_hidden_denial_phase(operation)
+    ):
         sys.stderr.write(expected_hidden_denial_receipt(operation).decode("ascii"))
         return 1
     sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)

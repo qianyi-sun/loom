@@ -647,9 +647,24 @@ def _personal_authority(
     return cast(PersonalAuthorityFactory, factory)(session)
 
 
-def _visible(record: DevInstanceRecord | None, ctx: AuthContext) -> DevInstanceRecord:
-    if record is None or (not is_admin(ctx) and record.owner_user_id != ctx.user_id):
+def _visible(
+    record: DevInstanceRecord | None,
+    ctx: AuthContext,
+    *,
+    operation: Literal["read", "destroy"],
+) -> DevInstanceRecord:
+    if record is None:
         raise HTTPException(status_code=404, detail="dev instance not found")
+    if not is_admin(ctx) and record.owner_user_id != ctx.user_id:
+        raise HTTPException(
+            status_code=404,
+            detail="dev instance not found",
+            headers={
+                EXPECTED_HIDDEN_DENIAL_PHASE_HEADER: expected_hidden_denial_phase(
+                    operation,
+                ),
+            },
+        )
     return record
 
 
@@ -941,7 +956,11 @@ async def get_dev_instance(
 ) -> DevInstanceResponse:
     session, ctx = sc
     require_scope(ctx, "read:own")
-    record = _visible(await _store(request, session).get(name), ctx)
+    record = _visible(
+        await _store(request, session).get(name),
+        ctx,
+        operation="read",
+    )
     return await _enriched_response(request, record)
 
 
@@ -982,7 +1001,7 @@ async def delete_dev_instance(
         require_scope(ctx, "submit")
         _require_user_identity(ctx)
     store = _store(request, session)
-    visible = _visible(await store.get(name), ctx)
+    visible = _visible(await store.get(name), ctx, operation="destroy")
     if visible.candidate_id is not None:
         if expected_operation_epoch is None or idempotency_key is None:
             raise HTTPException(

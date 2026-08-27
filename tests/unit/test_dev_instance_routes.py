@@ -329,7 +329,7 @@ async def test_create_list_get_destroy_owner_lifecycle() -> None:
     assert response.status_code == 202
 
 
-async def test_cross_owner_detail_is_hidden() -> None:
+async def test_cross_owner_detail_is_hidden_with_exact_read_phase() -> None:
     store = _Store()
     request = _request(store)
     await create_dev_instance(
@@ -344,6 +344,59 @@ async def test_cross_owner_detail_is_hidden() -> None:
             (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_read",
+    }
+
+
+async def test_missing_detail_is_hidden_without_a_denial_phase() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await get_dev_instance(
+            "absent",
+            _request(_Store()),
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers is None
+
+
+async def test_cross_owner_destroy_is_hidden_with_exact_destroy_phase() -> None:
+    store = _Store()
+    request = _request(store)
+    await create_dev_instance(
+        DevInstanceCreateRequest(name="alice"),
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await delete_dev_instance(
+            "alice",
+            request,
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+            Response(),
+            keep_data=False,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_destroy",
+    }
+
+
+async def test_missing_destroy_is_hidden_without_a_denial_phase() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await delete_dev_instance(
+            "absent",
+            _request(_Store()),
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+            Response(),
+            keep_data=False,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers is None
 
 
 async def test_mutation_fails_closed_when_runtime_is_not_configured() -> None:

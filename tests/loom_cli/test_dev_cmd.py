@@ -23,6 +23,7 @@ _DESTROY_DENIAL_RECEIPT = (
     '"schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,'
     '"target_phase":"target_destroy"}\n'
 )
+_DENIAL_PHASE_HEADER = "X-Loom-Personal-Dev-Hidden-Denial-Phase"
 
 
 def _instance(name: str = "alice", status: str = "ready") -> dict[str, Any]:
@@ -208,7 +209,11 @@ def test_status_expected_hidden_denial_emits_only_the_canonical_target_get_recei
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     server.replies.append(
-        httpx.Response(404, json={"detail": "dev-private-target must not escape"})
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers={_DENIAL_PHASE_HEADER: "target_read"},
+        )
     )
 
     assert main(["dev", "status", "alice", "--expected-hidden-denial"]) == 1
@@ -227,7 +232,11 @@ def test_destroy_expected_hidden_denial_sends_delete_first_with_exact_fencing(
 ) -> None:
     idempotency_key = "00000000-0000-0000-0000-000000000099"
     server.replies.append(
-        httpx.Response(404, json={"detail": "dev-private-target must not escape"})
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers={_DENIAL_PHASE_HEADER: "target_destroy"},
+        )
     )
 
     assert (
@@ -282,6 +291,48 @@ def test_expected_hidden_denial_modes_reject_every_non_404_target_response(
 ) -> None:
     server.replies.append(
         httpx.Response(status, json={"detail": "dev-private-target must not escape"})
+    )
+    command = ["dev", "status", "alice", "--expected-hidden-denial"]
+    if operation == "destroy":
+        command = [
+            "dev",
+            "destroy",
+            "alice",
+            "--expected-operation-epoch",
+            "7",
+            "--expected-hidden-denial",
+        ]
+
+    assert main(command) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "dev-private-target" not in captured.err
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("operation", "headers"),
+    [
+        ("read", {}),
+        ("read", {_DENIAL_PHASE_HEADER: "target_destroy"}),
+        ("destroy", {}),
+        ("destroy", {_DENIAL_PHASE_HEADER: "target_read"}),
+    ],
+)
+def test_expected_hidden_denial_modes_reject_unmarked_or_wrong_phase_404(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    headers: dict[str, str],
+) -> None:
+    server.replies.append(
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers=headers,
+        )
     )
     command = ["dev", "status", "alice", "--expected-hidden-denial"]
     if operation == "destroy":
