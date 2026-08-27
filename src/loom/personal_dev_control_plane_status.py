@@ -1326,8 +1326,8 @@ def _personal_worker_inventory(
         raise ValueError("deployment inventory response is invalid")
     deployments = _list_items(
         result,
-        expected_kind="DeploymentList",
-        expected_api_version="apps/v1",
+        expected_kind="List",
+        expected_api_version="v1",
     )
     workers = 0
     for deployment in deployments:
