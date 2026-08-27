@@ -433,6 +433,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
     endpoint = {
         "task-image-builder": "task-image-builder-tokens",
         "task-image-registry-gc": "task-image-registry-gc-tokens",
+        "execution-capacity-collector": "execution-capacity-collector-tokens",
     }.get(kind, "worker-tokens")
     url = f"{args.cp_url.rstrip('/')}/admin/{endpoint}"
     body: dict[str, int] = {}
@@ -477,6 +478,12 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "install it only in the registry-retention controller; "
                 "do not install it on builders or trial workers"
             )
+        elif kind == "execution-capacity-collector":
+            label = "execution capacity collector"
+            next_step = (
+                "install it only as the collector control-plane token; "
+                "do not install it on actuators or trial workers"
+            )
         else:
             label = "worker"
             next_step = (
@@ -501,6 +508,12 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "--format json | jq -r .token \\\n"
                 "    > /secure/staging-task-image-registry-gc.token\n"
             )
+        elif kind == "execution-capacity-collector":
+            install_hint = (
+                "  loom admin tokens worker mint --kind execution-capacity-collector "
+                "--format json | jq -r .token \\\n"
+                "    > /secure/staging-execution-capacity-collector.token\n"
+            )
         else:
             install_hint = (
                 "  loom admin tokens worker mint --format json | jq -r .token \\\n"
@@ -509,7 +522,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
                 "        --dry-run=client -o yaml | kubectl apply -f -\n"
             )
         sys.stdout.write(
-            f"New {('task-image builder' if kind == 'task-image-builder' else 'task-image registry GC' if kind == 'task-image-registry-gc' else 'worker')} "
+            f"New {('task-image builder' if kind == 'task-image-builder' else 'task-image registry GC' if kind == 'task-image-registry-gc' else 'execution capacity collector' if kind == 'execution-capacity-collector' else 'worker')} "
             f"token minted.\n"
             f"  prefix: {data['token_hash_prefix']}\n"
             f"\nThe raw token was NOT printed (terminal scrollback risk).\n"
@@ -998,6 +1011,8 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
     for row in policies:
         error = row.get("last_error") or "-"
         blocked = row.get("last_blocked_reason") or "-"
+        routing_capacity = row.get("routing_capacity")
+        capacity = routing_capacity if isinstance(routing_capacity, dict) else {}
         details = _format_autoscaler_blocked_details(
             row.get("last_blocked_details"),
         )
@@ -1013,9 +1028,300 @@ def _worker_pool_autoscaler_status(args: argparse.Namespace) -> int:
             f"draining={row.get('last_draining_slots') or 0} "
             f"occupied={row.get('last_occupied_slots') or 0} "
             f"queued={row.get('last_queued_slots') or 0} "
+            f"executable_free={capacity.get('executable_free_slots', 0)} "
+            f"scale_headroom={capacity.get('configured_scale_headroom_slots', 0)} "
+            f"capacity={capacity.get('capacity_evidence_kind', 'unavailable')} "
+            f"fresh={capacity.get('capacity_is_fresh', False)} "
             f"decision={row.get('last_decision') or '-'} "
             f"reason={row.get('last_decision_reason') or '-'} "
             f"blocked={blocked}{details_text} error={error}\n",
+        )
+    return 0
+
+
+def _execution_admission_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-admission/status"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    policies = data.get("policies", [])
+    sys.stdout.write("Execution admission ceilings:\n")
+    if not policies:
+        sys.stdout.write("  no admission policies recorded\n")
+        return 0
+    for row in policies:
+        available = row.get("available")
+        sys.stdout.write(
+            f"  {row['scope_kind']}/{row['scope_key']} "
+            f"enabled={row['enabled']} active={row['active_count']} "
+            f"ledger={row.get('ledger_active_count', row['active_count'])} "
+            f"sync={row.get('counter_in_sync', False)} "
+            f"max={row['max_concurrent']} "
+            f"available={available if available is not None else '-'} "
+            f"version={row['version']} reason={row.get('reason') or '-'}\n"
+        )
+    return 0
+
+
+def _execution_finance_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-finance/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution finance:\n")
+    for row in data.get("budget_policies", []):
+        daily_used = row["daily_reserved_microusd"] + row["daily_settled_microusd"]
+        monthly_used = row["monthly_reserved_microusd"] + row["monthly_settled_microusd"]
+        sys.stdout.write(
+            f"  budget {row['scope_kind']}/{row['scope_key']} "
+            f"enabled={row['enabled']} stop={row['emergency_stop']} "
+            f"daily={daily_used}/{row['daily_limit_microusd']} "
+            f"monthly={monthly_used}/{row['monthly_limit_microusd']} "
+            f"sync={row.get('counter_in_sync', False)} "
+            f"version={row['version']}\n"
+        )
+    for row in data.get("cost_reservations", []):
+        sys.stdout.write(
+            f"  reservation {row['id']} pool={row['pool_id']} state={row['state']} "
+            f"estimate={row['estimated_cost_microusd']} "
+            f"actual={row.get('actual_allocated_microusd')}\n"
+        )
+    for row in data.get("node_cost_records", []):
+        sys.stdout.write(
+            f"  node-cost {row['provider_record_id']} target={row['target_id']} "
+            f"billed={row['provider_billed_microusd']} "
+            f"allocated={row['allocated_microusd']} "
+            f"overhead={row['idle_system_fragmentation_microusd']}\n"
+        )
+    if not any(
+        data.get(key) for key in ("budget_policies", "cost_reservations", "node_cost_records")
+    ):
+        sys.stdout.write("  no execution finance records\n")
+    return 0
+
+
+def _execution_provisioning_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-capacity/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution provisioning capacity:\n")
+    targets = data.get("targets", [])
+    if not targets:
+        sys.stdout.write("  no Nebius execution targets\n")
+        return 0
+    for row in targets:
+        observation = row.get("observation") or {}
+        policy = row.get("policy") or {}
+        counts = row.get("authorization_counts") or {}
+        blockers = row.get("blockers") or []
+        sys.stdout.write(
+            f"  {row['target_id']} pool={row['pool_id']} "
+            f"fresh={observation.get('is_fresh', False)} "
+            f"provider={observation.get('provider_capacity_state', 'unknown')} "
+            f"autoscaler={observation.get('autoscaler_state', 'unknown')} "
+            f"nodes={observation.get('provider_used_nodes', '-')}/"
+            f"{observation.get('provider_quota_nodes', '-')} "
+            f"pending={observation.get('pending_jobs', '-')}/"
+            f"{policy.get('max_pending_jobs', '-')} "
+            f"commands={row.get('command_backlog', 0)} "
+            f"authorized={counts.get('authorized', 0)} "
+            f"running={counts.get('running', 0)} "
+            f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+        )
+    return 0
+
+
+def _execution_resource_profile_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-profile/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution resource calibration and forecast:\n")
+    targets = data.get("targets", [])
+    if not targets:
+        sys.stdout.write("  no Nebius execution targets\n")
+        return 0
+    for row in targets:
+        calibration = row.get("calibration") or {}
+        blockers = row.get("blockers") or []
+        sys.stdout.write(
+            f"  {row['target_id']} pool={row['pool_id']} "
+            f"fresh={row.get('forecast_is_fresh', False)} "
+            f"profile={calibration.get('resource_profile', '-')} "
+            f"attempts={calibration.get('trial_attempts', 0)} "
+            f"peak={calibration.get('peak_batch_concurrency', 0)} "
+            f"immediate={row.get('immediate_executable_slots', 0)} "
+            f"scale_headroom={row.get('configured_scale_headroom_slots', 0)} "
+            f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+        )
+    return 0
+
+
+def _execution_resource_profile_calibrate(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-calibrations"
+    payload = {
+        "target_id": args.target_id,
+        "source_pool_id": args.source_pool_id,
+        "source_architecture": args.source_architecture,
+        "resource_profile": args.resource_profile,
+        "candidate_sha": args.candidate_sha,
+        "source_version": args.source_version,
+        "window_started_at": args.window_started_at,
+        "window_stopped_at": args.window_stopped_at,
+    }
+    try:
+        response = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json=payload,
+            timeout=30.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    recommendation = data["recommendation"]
+    blockers = data.get("blockers") or []
+    sys.stdout.write(
+        f"calibration={data['id']} created={data['created']} "
+        f"eligible={data['eligible']} attempts={data['trial_attempts']} "
+        f"tasks={data['distinct_tasks']} peak={data['peak_batch_concurrency']} "
+        f"cpu={recommendation['cpu_millis']}m "
+        f"memory={recommendation['memory_mib']}MiB "
+        f"storage={recommendation['ephemeral_storage_mib']}MiB "
+        f"pids={recommendation['pids']} "
+        f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+    )
+    return 0
+
+
+def _execution_resource_profile_bind(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-profile-bindings/{args.target_id}"
+    try:
+        response = httpx.put(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "calibration_id": args.calibration_id,
+                "enabled": args.enabled,
+                "reason": args.reason,
+            },
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(
+            f"target={data['target_id']} calibration={data['calibration_id']} "
+            f"enabled={data['enabled']} version={data['version']}\n"
         )
     return 0
 
@@ -2117,11 +2423,16 @@ def dispatch(argv: list[str]) -> int:
     )
     p_mint.add_argument(
         "--kind",
-        choices=["trial", "task-image-builder", "task-image-registry-gc"],
+        choices=[
+            "trial",
+            "task-image-builder",
+            "task-image-registry-gc",
+            "execution-capacity-collector",
+        ],
         default="trial",
         help=(
-            "Mint an ordinary trial worker, least-privilege task-image builder, "
-            "or registry-GC token."
+            "Mint an ordinary trial worker or a least-privilege task-image builder, "
+            "registry-GC, or execution-capacity collector token."
         ),
     )
     p_mint.add_argument(
@@ -2276,6 +2587,104 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
+
+    p_admission_status = worker_pools_sub.add_parser(
+        "admission-status",
+        help="Show persisted hybrid execution admission ceilings and active reservations.",
+    )
+    _add_common_args(p_admission_status)
+    p_admission_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_admission_status.set_defaults(handler=_execution_admission_status)
+
+    p_finance_status = worker_pools_sub.add_parser(
+        "finance-status",
+        help="Show paid-execution prices, budgets, reservations, and node-bill attribution.",
+    )
+    _add_common_args(p_finance_status)
+    p_finance_status.add_argument(
+        "--pool-id",
+        default=None,
+        help="Limit finance records to one logical pool.",
+    )
+    p_finance_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_finance_status.set_defaults(handler=_execution_finance_status)
+
+    p_provisioning_status = worker_pools_sub.add_parser(
+        "provisioning-status",
+        help="Show Nebius quota, allocatable, Pending, autoscaler, and create authority.",
+    )
+    _add_common_args(p_provisioning_status)
+    p_provisioning_status.add_argument(
+        "--pool-id",
+        default=None,
+        help="Limit provisioning capacity to one logical pool.",
+    )
+    p_provisioning_status.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    p_provisioning_status.set_defaults(handler=_execution_provisioning_status)
+
+    p_resource_profile = worker_pools_sub.add_parser(
+        "resource-profile",
+        help="Create evidence-gated resource calibrations, bind them, and inspect forecasts.",
+    )
+    resource_profile_sub = p_resource_profile.add_subparsers(
+        dest="resource_profile_op",
+        required=True,
+    )
+    p_resource_profile_status = resource_profile_sub.add_parser(
+        "status",
+        help="Show immutable calibration evidence and non-executable scale forecasts.",
+    )
+    _add_common_args(p_resource_profile_status)
+    p_resource_profile_status.add_argument("--pool-id", default=None)
+    p_resource_profile_status.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_status.set_defaults(handler=_execution_resource_profile_status)
+
+    p_resource_profile_calibrate = resource_profile_sub.add_parser(
+        "calibrate",
+        help="Derive one immutable recommendation from persisted #1503 telemetry.",
+    )
+    _add_common_args(p_resource_profile_calibrate)
+    p_resource_profile_calibrate.add_argument("--target-id", required=True)
+    p_resource_profile_calibrate.add_argument("--source-pool-id", required=True)
+    p_resource_profile_calibrate.add_argument(
+        "--source-architecture", choices=["x86_64", "arm64"], required=True
+    )
+    p_resource_profile_calibrate.add_argument("--resource-profile", required=True)
+    p_resource_profile_calibrate.add_argument("--candidate-sha", required=True)
+    p_resource_profile_calibrate.add_argument("--source-version", required=True)
+    p_resource_profile_calibrate.add_argument("--window-started-at", required=True)
+    p_resource_profile_calibrate.add_argument("--window-stopped-at", required=True)
+    p_resource_profile_calibrate.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_calibrate.set_defaults(handler=_execution_resource_profile_calibrate)
+
+    p_resource_profile_bind = resource_profile_sub.add_parser(
+        "bind",
+        help="Bind an eligible immutable calibration to one Nebius target forecast.",
+    )
+    _add_common_args(p_resource_profile_bind)
+    p_resource_profile_bind.add_argument("--target-id", required=True)
+    p_resource_profile_bind.add_argument("--calibration-id", required=True)
+    p_resource_profile_bind.add_argument(
+        "--enabled", action=argparse.BooleanOptionalAction, default=False
+    )
+    p_resource_profile_bind.add_argument("--reason", default=None)
+    p_resource_profile_bind.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_bind.set_defaults(handler=_execution_resource_profile_bind)
 
     p_env_state = sub.add_parser(
         "environment-state",

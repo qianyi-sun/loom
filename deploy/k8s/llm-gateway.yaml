@@ -28,6 +28,8 @@ spec:
                   name: loom-secrets
                   key: anthropic-api-key
                   optional: true
+            - name: LOOM_GW_ARTIFACTS_BUCKET
+              value: "artifacts"
             - name: LOOM_GW_BIND_HOST
               value: "0.0.0.0"
             - name: LOOM_GW_BIND_PORT
@@ -75,6 +77,20 @@ spec:
               value: "info"
             - name: LOOM_GW_METRICS_PORT
               value: "9101"
+            - name: LOOM_GW_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_GW_MINIO_ENDPOINT
+              value: "http://loom-minio:9000"
+            - name: LOOM_GW_MINIO_REGION
+              value: "us-east-1"
+            - name: LOOM_GW_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
             - name: LOOM_GW_OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -88,6 +104,10 @@ spec:
                 secretKeyRef:
                   name: loom-secrets
                   key: step-jwt-signing-key
+            - name: LOOM_GW_STORAGE_AUTH_KIND
+              value: "static_keys"
+            - name: LOOM_GW_STORAGE_BACKEND
+              value: "minio"
             - name: LOOM_GW_TOGETHER_API_KEY
               valueFrom:
                 secretKeyRef:

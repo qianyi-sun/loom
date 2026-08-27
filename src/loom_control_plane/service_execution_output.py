@@ -1,0 +1,573 @@
+"""Credential-free workload broker and durable Pod-native output commit."""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal, cast
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from loom.auth import mint_step_jwt
+from loom.db.schema import (
+    AdminAuditEvent,
+    Artifact,
+    ArtifactUploadFile,
+    ArtifactUploadSession,
+    ServiceExecutionLease,
+    ServiceExecutionTarget,
+    Trial,
+)
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1, ExecutionRuntimeResultV1
+from loom.pipeline.artifact_commit import (
+    ArtifactCommitService,
+    PartReceiptV1,
+    ServiceExecutionOutputProducerV1,
+    UploadAuthV1,
+    UploadFilePlanV1,
+)
+from loom.pipeline.keys import canonical_digest
+
+_MAX_FILES = 133
+_MAX_TOKEN_TTL_SECONDS = 600
+_RESULT_MAX_BYTES = 1024 * 1024
+
+
+class ServiceExecutionBrokerError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ServiceExecutionPeerV1(_Strict):
+    lease_id: UUID
+    generation: int = Field(gt=0)
+    execution_role: Literal["attempt", "verifier"]
+
+
+class ServiceExecutionTokenRequestV1(ServiceExecutionPeerV1):
+    ttl_seconds: int = Field(default=480, gt=0, le=_MAX_TOKEN_TTL_SECONDS)
+
+
+class ServiceExecutionOutputFileV1(_Strict):
+    relative_path: str = Field(
+        pattern=r"^(?:result\.json|[0-9]{2}-(?:setup|agent|verifier)\.(?:stdout|stderr)|trajectory\.json|usage\.json|diagnostics\.json)$"
+    )
+    media_type: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class ServiceExecutionOutputPrepareV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-output-prepare.v1"]
+    request_id: UUID
+    files: tuple[ServiceExecutionOutputFileV1, ...] = Field(min_length=1, max_length=_MAX_FILES)
+
+    @model_validator(mode="after")
+    def exact_inventory(self) -> ServiceExecutionOutputPrepareV1:
+        paths = [item.relative_path for item in self.files]
+        if paths[0] != "result.json" or len(paths) != len(set(paths)):
+            raise ValueError("service execution output inventory is invalid")
+        if paths != sorted(paths, key=lambda item: (item != "result.json", item.encode())):
+            raise ValueError("service execution output inventory is not canonical")
+        return self
+
+
+class ServiceExecutionOutputCommitV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-output-commit.v1"]
+
+
+class ServiceExecutionFileCompleteV1(ServiceExecutionPeerV1):
+    schema_version: Literal["loom.service-execution-file-complete.v1"]
+    ordered_parts: tuple[PartReceiptV1, ...]
+
+    @field_validator("ordered_parts")
+    @classmethod
+    def contiguous_parts(cls, values: tuple[PartReceiptV1, ...]) -> tuple[PartReceiptV1, ...]:
+        if [item.part_number for item in values] != list(range(1, len(values) + 1)):
+            raise ValueError("service execution output parts are not contiguous")
+        return values
+
+
+def _runtime_plan(lease: ServiceExecutionLease) -> ExecutionRuntimePlanV1:
+    if lease.runtime_contract_json is None or lease.runtime_contract_sha256 is None:
+        raise ServiceExecutionBrokerError("runtime_identity_unavailable")
+    if canonical_digest(lease.runtime_contract_json) != lease.runtime_contract_sha256:
+        raise ServiceExecutionBrokerError("runtime_identity_drift")
+    try:
+        return ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("runtime_identity_invalid") from exc
+
+
+def _validate_runtime_result(
+    lease: ServiceExecutionLease,
+    plan: ExecutionRuntimePlanV1,
+    payload: bytes,
+) -> ExecutionRuntimeResultV1:
+    try:
+        result = ExecutionRuntimeResultV1.model_validate(json.loads(payload))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ServiceExecutionBrokerError("runtime_result_invalid") from exc
+    expected_roles = ["execution", plan.main.role]
+    expected_roles.extend(item.role_name for item in plan.sidecars)
+    if plan.verifier is not None:
+        expected_roles.append("verifier")
+    expected_phases = [*[item.role for item in plan.setup], plan.main.role]
+    if plan.verifier is not None:
+        expected_phases.append(plan.verifier.role)
+    actual_phases = [item.role for item in result.phases]
+    phases_match = actual_phases == expected_phases[: len(actual_phases)]
+    if result.status == "succeeded":
+        phases_match = phases_match and len(actual_phases) == len(expected_phases)
+    if (
+        result.runtime_contract_sha256 != lease.runtime_contract_sha256
+        or result.candidate_sha != plan.candidate_sha
+        or result.task_revision_sha256 != plan.task_revision_sha256
+        or result.command_identity_sha256 != plan.command_identity_sha256
+        or result.execution_role != lease.execution_role
+        or result.execution_class_id != lease.execution_class_id
+        or result.task_image_ref != plan.task_image_ref
+        or result.runtime_image_ref != plan.runtime_image_ref
+        or result.runtime_binary_sha256 != plan.runtime_binary_sha256
+        or list(result.container_roles) != expected_roles
+        or not phases_match
+        or any(
+            stream.bytes_saved > plan.max_log_bytes_per_stream
+            for phase in result.phases
+            for stream in (phase.stdout, phase.stderr)
+        )
+    ):
+        raise ServiceExecutionBrokerError("runtime_result_identity_drift")
+    return result
+
+
+async def authorize_service_execution_peer(
+    session: AsyncSession,
+    *,
+    peer_ip: str,
+    identity: ServiceExecutionPeerV1,
+    now: datetime | None = None,
+    lock: bool = False,
+    purpose: Literal["token", "output"] = "token",
+) -> ServiceExecutionLease:
+    """Bind a direct Gateway peer IP to exactly one current observed Pod."""
+
+    try:
+        normalized_ip = str(ipaddress.ip_address(peer_ip))
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("peer_ip_invalid") from exc
+    statement = select(ServiceExecutionLease).where(
+        ServiceExecutionLease.id == identity.lease_id,
+        ServiceExecutionLease.pod_ip == normalized_ip,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    lease = (await session.execute(statement)).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionBrokerError("workload_identity_not_observed")
+    current_time = now or datetime.now(UTC)
+    resource_identity_matches = (
+        lease.resource_generation == identity.generation
+        and lease.execution_role == identity.execution_role
+        and lease.deleted_at is None
+        and lease.pod_uid is not None
+    )
+    if not resource_identity_matches:
+        raise ServiceExecutionBrokerError("execution_generation_fenced")
+    if purpose == "token" and (
+        lease.generation != identity.generation
+        or lease.revoked_at is not None
+        or lease.observed_state not in {"creating", "running", "finalizing"}
+    ):
+        raise ServiceExecutionBrokerError("execution_generation_fenced")
+    if (
+        purpose == "output"
+        and lease.revoked_at is not None
+        and (
+            lease.cleanup_state != "pending"
+            or lease.cleanup_deadline_at is None
+            or lease.cleanup_deadline_at <= current_time
+        )
+    ):
+        raise ServiceExecutionBrokerError("execution_output_window_closed")
+    target = await session.get(ServiceExecutionTarget, lease.target_id)
+    if purpose == "token" and (
+        target is None
+        or target.desired_state != "active"
+        or target.observed_state != "ready"
+        or target.health_status != "healthy"
+        or target.health_observed_at is None
+        or target.health_observed_at
+        + timedelta(seconds=int(target.spec_json["health_stale_after_seconds"]))
+        <= current_time
+    ):
+        raise ServiceExecutionBrokerError("execution_target_unavailable")
+    return lease
+
+
+async def mint_service_execution_peer_token(
+    session: AsyncSession,
+    *,
+    lease: ServiceExecutionLease,
+    ttl_seconds: int,
+    signing_key: str,
+    now: datetime | None = None,
+) -> tuple[str, datetime, UUID]:
+    current_time = now or datetime.now(UTC)
+    if ttl_seconds > _MAX_TOKEN_TTL_SECONDS:
+        raise ServiceExecutionBrokerError("service_execution_ttl_exceeded")
+    plan = _runtime_plan(lease)
+    trial = await session.get(Trial, lease.trial_id)
+    if trial is None or trial.team_id != lease.team_id:
+        raise ServiceExecutionBrokerError("trial_identity_drift")
+    step_jwt_id = uuid4()
+    token = mint_step_jwt(
+        team_id=lease.team_id,
+        trial_id=lease.trial_id,
+        step_id="agent" if lease.execution_role == "attempt" else "verifier",
+        ttl_sec=ttl_seconds,
+        signing_key=signing_key,
+        provider_connection_id=trial.provider_connection_id,
+        provider_connection_id_bound=True,
+        step_jwt_id=step_jwt_id,
+        service_execution_lease_id=lease.id,
+        service_execution_generation=lease.generation,
+        service_execution_role=cast(Any, lease.execution_role),
+        service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
+        service_execution_candidate_sha=plan.candidate_sha,
+        service_execution_task_revision_sha256=plan.task_revision_sha256,
+        service_execution_command_identity_sha256=plan.command_identity_sha256,
+    )
+    expires_at = current_time + timedelta(seconds=ttl_seconds)
+    session.add(
+        AdminAuditEvent(
+            actor=f"service-execution-pod:{lease.pod_uid}",
+            action="service_execution.step_token.minted",
+            target_type="execution_lease",
+            target_id=str(lease.id),
+            event_metadata={
+                "step_jwt_id": str(step_jwt_id),
+                "trial_id": str(lease.trial_id),
+                "team_id": str(lease.team_id),
+                "generation": lease.generation,
+                "execution_role": lease.execution_role,
+                "runtime_contract_sha256": lease.runtime_contract_sha256,
+                "expires_in_seconds": ttl_seconds,
+                "provider_connection_id": (
+                    str(trial.provider_connection_id) if trial.provider_connection_id else None
+                ),
+                "credential_delivery": "observed_pod_peer",
+            },
+        )
+    )
+    await session.flush()
+    return token, expires_at, step_jwt_id
+
+
+class ServiceExecutionOutputRouteService:
+    def __init__(
+        self,
+        *,
+        service: ArtifactCommitService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self._service = service
+        self._session_factory = session_factory
+
+    @staticmethod
+    def _producer(lease: ServiceExecutionLease) -> ServiceExecutionOutputProducerV1:
+        plan = _runtime_plan(lease)
+        assert lease.runtime_contract_sha256 is not None
+        if lease.resource_generation is None:
+            raise ServiceExecutionBrokerError("runtime_identity_unavailable")
+        return ServiceExecutionOutputProducerV1(
+            commit_kind="service_execution_output",
+            team_id=lease.team_id,
+            service_execution_lease_id=lease.id,
+            service_execution_generation=lease.resource_generation,
+            service_execution_role=cast(Any, lease.execution_role),
+            runtime_contract_sha256=lease.runtime_contract_sha256,
+            candidate_sha=plan.candidate_sha,
+            task_revision_sha256=plan.task_revision_sha256,
+            command_identity_sha256=plan.command_identity_sha256,
+        )
+
+    @staticmethod
+    def _file_plans(
+        lease: ServiceExecutionLease,
+        request: ServiceExecutionOutputPrepareV1,
+    ) -> list[UploadFilePlanV1]:
+        plan = _runtime_plan(lease)
+        total = sum(item.size_bytes for item in request.files)
+        stream_count = sum(
+            item.relative_path.endswith((".stdout", ".stderr")) for item in request.files
+        )
+        if stream_count > 2 * 64 or total > (
+            _RESULT_MAX_BYTES + plan.max_artifact_bytes + 2 * 64 * plan.max_log_bytes_per_stream
+        ):
+            raise ServiceExecutionBrokerError("output_inventory_exceeds_runtime_bounds")
+        artifact_id = uuid4()
+        result: list[UploadFilePlanV1] = []
+        for index, item in enumerate(request.files):
+            maximum = (
+                _RESULT_MAX_BYTES
+                if item.relative_path == "result.json"
+                else plan.max_log_bytes_per_stream
+                if item.relative_path.endswith((".stdout", ".stderr"))
+                else plan.max_artifact_bytes
+            )
+            if item.size_bytes > maximum:
+                raise ServiceExecutionBrokerError("output_file_exceeds_runtime_bounds")
+            result.append(
+                UploadFilePlanV1(
+                    file_index=index,
+                    preallocated_artifact_id=artifact_id,
+                    relative_path=item.relative_path,
+                    artifact_name="runtime_evidence",
+                    artifact_type="loom.execution-runtime-evidence.v1",
+                    producer="service",
+                    media_type=item.media_type,
+                    role="semantic_document" if item.relative_path == "result.json" else "payload",
+                    archive_format="none",
+                    expected_max_bytes=max(1, maximum),
+                    expected_sha256=item.sha256,
+                    expected_size=item.size_bytes,
+                )
+            )
+        return result
+
+    async def prepare(
+        self,
+        *,
+        lease: ServiceExecutionLease,
+        request: ServiceExecutionOutputPrepareV1,
+    ) -> dict[str, Any]:
+        producer = self._producer(lease)
+        request_digest = canonical_digest(request)
+        grant = await self._service.prepare_session(
+            producer=producer,
+            files=self._file_plans(lease, request),
+            idempotency_key=str(request.request_id),
+            request_digest=request_digest,
+        )
+        async with self._session_factory() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            if (
+                current is None
+                or current.resource_generation != lease.resource_generation
+                or current.deleted_at is not None
+                or current.output_commit_state == "unavailable"
+            ):
+                raise ServiceExecutionBrokerError("execution_generation_fenced")
+            if current.output_commit_state == "committed":
+                if current.output_upload_session_id != grant.upload_session_id:
+                    raise ServiceExecutionBrokerError("output_commit_identity_drift")
+            elif current.output_commit_state == "uploading":
+                if current.output_upload_session_id != grant.upload_session_id:
+                    raise ServiceExecutionBrokerError("output_upload_already_active")
+            elif current.output_commit_state != "not_started":
+                raise ServiceExecutionBrokerError("output_commit_unavailable")
+            else:
+                current.output_commit_state = "uploading"
+                current.output_upload_session_id = grant.upload_session_id
+                current.output_generation = current.resource_generation
+                current.updated_at = datetime.now(UTC)
+            await session.commit()
+        return grant.model_dump(mode="json")
+
+    async def assert_session(
+        self, *, lease: ServiceExecutionLease, session_id: UUID
+    ) -> ArtifactUploadSession:
+        async with self._session_factory() as session:
+            upload = await session.get(ArtifactUploadSession, session_id)
+            if (
+                upload is None
+                or upload.commit_kind != "service_execution_output"
+                or upload.service_execution_lease_id != lease.id
+                or upload.service_execution_generation != lease.resource_generation
+                or upload.team_id != lease.team_id
+            ):
+                raise ServiceExecutionBrokerError("output_upload_identity_drift")
+            session.expunge(upload)
+            return upload
+
+    async def session_paths(self, *, lease: ServiceExecutionLease, session_id: UUID) -> list[str]:
+        await self.assert_session(lease=lease, session_id=session_id)
+        async with self._session_factory() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(ArtifactUploadFile.relative_path)
+                        .where(ArtifactUploadFile.session_id == session_id)
+                        .order_by(ArtifactUploadFile.file_index)
+                    )
+                ).scalars()
+            )
+
+    async def put_part(
+        self,
+        *,
+        lease: ServiceExecutionLease,
+        session_id: UUID,
+        file_index: int,
+        part_number: int,
+        content_length: int,
+        content_sha256: str,
+        upload_token: str,
+        body: AsyncIterator[bytes],
+    ) -> dict[str, Any]:
+        await self.assert_session(lease=lease, session_id=session_id)
+        result = await self._service.write_part(
+            session_id=session_id,
+            file_index=file_index,
+            part_number=part_number,
+            content_length=content_length,
+            content_sha256=content_sha256,
+            body=body,
+            auth=UploadAuthV1(upload_token=upload_token),
+        )
+        return result.model_dump(mode="json")
+
+    async def complete_file(
+        self,
+        *,
+        lease: ServiceExecutionLease,
+        session_id: UUID,
+        file_index: int,
+        ordered_parts: tuple[PartReceiptV1, ...],
+        upload_token: str,
+    ) -> dict[str, Any]:
+        await self.assert_session(lease=lease, session_id=session_id)
+        result = await self._service.complete_file(
+            session_id=session_id,
+            file_index=file_index,
+            ordered_parts=list(ordered_parts),
+            auth=UploadAuthV1(upload_token=upload_token),
+        )
+        return result.model_dump(mode="json")
+
+    async def commit(
+        self,
+        *,
+        lease: ServiceExecutionLease,
+        session_id: UUID,
+        upload_token: str,
+    ) -> dict[str, Any]:
+        await self.assert_session(lease=lease, session_id=session_id)
+        auth = UploadAuthV1(upload_token=upload_token)
+        result_payload = await self._service.read_verified_file(
+            session_id=session_id,
+            file_index=0,
+            auth=auth,
+            max_bytes=_RESULT_MAX_BYTES,
+        )
+        runtime_result = _validate_runtime_result(lease, _runtime_plan(lease), result_payload)
+        paths = await self.session_paths(lease=lease, session_id=session_id)
+        required_paths = {
+            "result.json",
+            *(
+                stream.path
+                for phase in runtime_result.phases
+                for stream in (phase.stdout, phase.stderr)
+            ),
+        }
+        optional_paths = {"trajectory.json", "usage.json", "diagnostics.json"}
+        if not required_paths <= set(paths) or set(paths) - required_paths - optional_paths:
+            raise ServiceExecutionBrokerError("runtime_output_inventory_drift")
+        result = await self._service.commit_session(
+            session_id=session_id,
+            auth=auth,
+        )
+        manifest, manifest_sha256, marker_sha256 = await self._service.committed_session_evidence(
+            session_id
+        )
+        if len(manifest.artifacts) != 1:
+            raise ServiceExecutionBrokerError("output_commit_manifest_drift")
+        record = manifest.artifacts[0]
+        async with self._session_factory() as session:
+            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+            upload = await session.get(ArtifactUploadSession, session_id, with_for_update=True)
+            if (
+                current is None
+                or upload is None
+                or current.resource_generation != lease.resource_generation
+                or current.deleted_at is not None
+                or current.output_commit_state == "unavailable"
+                or current.output_upload_session_id != session_id
+                or current.output_generation != lease.resource_generation
+                or upload.state != "committed"
+            ):
+                raise ServiceExecutionBrokerError("execution_generation_fenced")
+            artifact = await session.get(Artifact, record.artifact_id)
+            if artifact is None:
+                session.add(
+                    Artifact(
+                        id=record.artifact_id,
+                        artifact_type=record.artifact_type,
+                        name=record.artifact_name,
+                        team_id=current.team_id,
+                        trial_id=current.trial_id,
+                        producer_kind=None,
+                        control_producer_kind="service_execution",
+                        control_producer_id=current.id,
+                        content_hash=record.content_sha256,
+                        storage={
+                            "session_id": str(session_id),
+                            "files": [item.model_dump(mode="json") for item in record.stored_files],
+                        },
+                        visibility="team",
+                        share_status="pending_scan",
+                        safety_state="verified_internal",
+                        access_class="team_runtime",
+                        artifact_upload_session_id=session_id,
+                        manifest_sha256=record.manifest_sha256,
+                        stored_size_bytes=sum(item.size_bytes for item in record.stored_files),
+                        unpacked_size_bytes=sum(item.size_bytes for item in record.stored_files),
+                        file_count=max(1, len(record.stored_files)),
+                        provenance={
+                            "schema_version": "loom.service-execution-output-provenance.v1",
+                            "lease_id": str(current.id),
+                            "generation": current.resource_generation,
+                            "runtime_contract_sha256": current.runtime_contract_sha256,
+                        },
+                    )
+                )
+            elif (
+                artifact.artifact_upload_session_id != session_id
+                or artifact.manifest_sha256 != record.manifest_sha256
+            ):
+                raise ServiceExecutionBrokerError("output_artifact_identity_drift")
+            current.output_commit_state = "committed"
+            current.output_manifest_sha256 = manifest_sha256
+            current.output_marker_sha256 = marker_sha256
+            current.output_committed_at = datetime.now(UTC)
+            current.updated_at = current.output_committed_at
+            await session.commit()
+        return {
+            **result.model_dump(mode="json"),
+            "manifest_sha256": manifest_sha256,
+            "committed_marker_sha256": marker_sha256,
+        }
+
+
+__all__ = [
+    "ServiceExecutionBrokerError",
+    "ServiceExecutionFileCompleteV1",
+    "ServiceExecutionOutputCommitV1",
+    "ServiceExecutionOutputPrepareV1",
+    "ServiceExecutionOutputRouteService",
+    "ServiceExecutionPeerV1",
+    "ServiceExecutionTokenRequestV1",
+    "authorize_service_execution_peer",
+    "mint_service_execution_peer_token",
+]

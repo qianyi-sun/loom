@@ -349,6 +349,8 @@ jobs:
               and item["image"] not in {
                   "capacity-executor",
                   "capacity-manager",
+                  "execution-actuator",
+                  "execution-runtime",
                   "personal-dev-activation-agent",
                   "personal-dev-builder",
                   "personal-dev-scanner-cache",
@@ -418,9 +420,10 @@ jobs:
       - name: Upload exact verified Trivy binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
           if-no-files-found: error
+          overwrite: true
           retention-days: 1
 
   personal-dev-scanner-cache-assets:
@@ -446,7 +449,7 @@ jobs:
         if: contains(needs.plan.outputs.images, '"image":"personal-dev-scanner-cache"')
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
 
       - name: Materialize digest-pinned scanner-cache assets
@@ -494,7 +497,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
+          (matrix.image == 'capacity-executor' || matrix.image == 'capacity-manager' || matrix.image == 'execution-actuator' || matrix.image == 'execution-runtime' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'personal-dev-scanner-cache' || matrix.image == 'pipeline-core-fixture' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
           fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:
@@ -512,7 +515,7 @@ jobs:
       - name: Download exact verified Trivy binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
 
       - name: Download exact scanner-cache assets
@@ -756,7 +759,7 @@ jobs:
             --artifact-name "$artifact_name" \
             --archive-sha256 "$archive_sha256" \
             --archive-size "$archive_size" \
-            --output "/tmp/${IMAGE_NAME}-${ARCHITECTURE}.json"
+            --output "/tmp/${IMAGE_NAME}-${ARCHITECTURE}-attempt-${RUN_ATTEMPT}.json"
 
       - name: Upload reusable candidate archive
         if: >-
@@ -777,7 +780,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: image-candidate-record-${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
-          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.json
+          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}.json
           if-no-files-found: error
           retention-days: 1
 
@@ -807,7 +810,7 @@ jobs:
       - name: Download exact verified Trivy binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
 
       - name: Build closed Stage 1 candidate without registry authority
@@ -975,7 +978,7 @@ jobs:
       - name: Download candidate archive records
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: image-candidate-record-*-attempt-${{ github.run_attempt }}
+          pattern: image-candidate-record-*-attempt-*
           path: /tmp/loom-image-candidate-records
           merge-multiple: true
 
@@ -1031,7 +1034,7 @@ jobs:
       - name: Download exact verified Trivy binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
 
       - name: Download exact scanner-cache assets
@@ -1851,7 +1854,7 @@ jobs:
       - name: Download exact verified Trivy binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          name: trivy-binaries-run-${{ github.run_id }}
           path: /tmp/loom-trivy-binaries
 
       - name: Require bounded large-image workspace

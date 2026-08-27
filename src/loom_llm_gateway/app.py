@@ -21,8 +21,12 @@ from sqlalchemy.ext.asyncio import (
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
+from loom.trajectory.storage import MinioObjectStore
+from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
+from loom_control_plane.service_execution_output import ServiceExecutionOutputRouteService
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
@@ -39,6 +43,7 @@ from loom_llm_gateway.routes import (
     health,
     messages,
     responses,
+    service_execution,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +116,25 @@ def create_app(settings: GatewaySettings) -> FastAPI:
         # and both /healthz and /drain share one instance.
         ensure_drain_state(app)
         app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        artifact_store = MinioObjectStore(
+            endpoint_url=settings.minio_endpoint,
+            access_key=settings.minio_access_key.get_secret_value(),
+            secret_key=settings.minio_secret_key.get_secret_value(),
+            region=settings.minio_region,
+        )
+        artifact_repository = SqlArtifactCommitRepository(
+            session_factory=app.state.session_factory,
+            store=artifact_store,
+            bucket=settings.artifacts_bucket,
+        )
+        app.state.service_execution_output_service = ServiceExecutionOutputRouteService(
+            service=ArtifactCommitService(
+                store=artifact_store,
+                bucket=settings.artifacts_bucket,
+                repository=artifact_repository,
+            ),
+            session_factory=app.state.session_factory,
+        )
         await retry_startup_dependency(
             lambda: _assert_secret_store_startup(app.state.session_factory),
             operation_name="gateway secret-store startup validation",
@@ -173,6 +197,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(facade_anthropic.router)
     app.include_router(facade_google.router)
     app.include_router(admin.router)
+    app.include_router(service_execution.router)
     # /metrics: prometheus_client ASGI app. Gateway is internal-only
     # per #77 boundary — scrapers reach it via cluster DNS.
     app.mount("/metrics", make_asgi_app())

@@ -69,6 +69,7 @@ ARTIFACT_RECONCILIATION_AGE = Histogram(
 CommitKind: TypeAlias = Literal[
     "final_output",
     "checkpoint",
+    "service_execution_output",
     "input_import",
     "input_materialization",
     "acceptance_evidence",
@@ -76,9 +77,7 @@ CommitKind: TypeAlias = Literal[
 ]
 UploadRole: TypeAlias = Literal["semantic_document", "payload", "payload_archive"]
 ArchiveFormat: TypeAlias = Literal["none", "tar", "tar.zst", "zip"]
-ArtifactName: TypeAlias = Annotated[
-    str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,127}$")
-]
+ArtifactName: TypeAlias = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,127}$")]
 
 
 class ArtifactCommitError(RuntimeError):
@@ -150,6 +149,22 @@ class CheckpointProducerV1(PipelineModel):
     input_lineage_digests: list[Digest] = Field(default_factory=list)
 
 
+class ServiceExecutionOutputProducerV1(PipelineModel):
+    """Immutable producer identity for one Pod-native execution generation."""
+
+    commit_kind: Literal["service_execution_output"]
+    team_id: UUID
+    service_execution_lease_id: UUID
+    service_execution_generation: PositiveSafeInt
+    service_execution_role: Literal["attempt", "verifier"]
+    runtime_contract_sha256: Digest
+    candidate_sha: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40}$")]
+    task_revision_sha256: Digest
+    command_identity_sha256: Digest
+    input_lineage_artifact_ids: list[UUID] = Field(default_factory=list)
+    input_lineage_digests: list[Digest] = Field(default_factory=list)
+
+
 class InputImportProducerV1(PipelineModel):
     commit_kind: Literal["input_import"]
     team_id: UUID
@@ -195,9 +210,9 @@ class ProfileCalibrationEvidenceProducerV1(PipelineModel):
     pipeline_profile_calibration_authorization_id: UUID
     profile_calibration_spec_sha256: Digest
     profile_calibration_result_kind: Literal["certification", "catalog", "terminal"]
-    profile_calibration_scenario_id: Literal[
-        "S01", "S02", "S03", "S04", "S06", "S07", "S08", "S09", "S11"
-    ] | None
+    profile_calibration_scenario_id: (
+        Literal["S01", "S02", "S03", "S04", "S06", "S07", "S08", "S09", "S11"] | None
+    )
     profile_calibration_candidate_identity_sha256: Digest | None
     profile_calibration_run_ordinal: Annotated[int, Field(strict=True, ge=1, le=3)] | None
     profile_calibration_source_pipeline_run_id: UUID | None
@@ -226,6 +241,7 @@ class ProfileCalibrationEvidenceProducerV1(PipelineModel):
 CommitProducerV1: TypeAlias = (
     FinalOutputProducerV1
     | CheckpointProducerV1
+    | ServiceExecutionOutputProducerV1
     | InputImportProducerV1
     | InputMaterializationProducerV1
     | AcceptanceEvidenceProducerV1
@@ -351,9 +367,7 @@ class RootArtifactRecordV1(PipelineModel):
 
 
 class ArtifactCommitManifestV1(PipelineModel):
-    schema_version: Literal["loom.artifact-commit-manifest.v1"] = (
-        "loom.artifact-commit-manifest.v1"
-    )
+    schema_version: Literal["loom.artifact-commit-manifest.v1"] = "loom.artifact-commit-manifest.v1"
     session_id: UUID
     commit_kind: CommitKind
     producer_identity: dict[str, Any]
@@ -367,9 +381,7 @@ class ArtifactCommitManifestV1(PipelineModel):
 class ArtifactCommitMarkerV1(PipelineModel):
     commit_kind: CommitKind
     manifest_sha256: Digest
-    schema_version: Literal["loom.artifact-commit-marker.v1"] = (
-        "loom.artifact-commit-marker.v1"
-    )
+    schema_version: Literal["loom.artifact-commit-marker.v1"] = "loom.artifact-commit-marker.v1"
     session_id: UUID
 
 
@@ -567,6 +579,12 @@ def _producer_prefix(producer: CommitProducerV1) -> str:
             f"{producer.pipeline_stage_run_id}/{producer.attempt_number}/checkpoints/"
             f"{producer.checkpoint_sequence:012d}/"
         )
+    if isinstance(producer, ServiceExecutionOutputProducerV1):
+        return (
+            f"service-executions/{producer.team_id}/"
+            f"{producer.service_execution_lease_id}/"
+            f"{producer.service_execution_generation}/output/"
+        )
     if isinstance(producer, InputImportProducerV1):
         return f"pipeline-input-imports/{producer.team_id}/{producer.pipeline_input_import_id}/"
     if isinstance(producer, InputMaterializationProducerV1):
@@ -616,16 +634,21 @@ def _validate_plan(producer: CommitProducerV1, files: Sequence[UploadFilePlanV1]
     groups: dict[UUID, list[UploadFilePlanV1]] = defaultdict(list)
     for item in files:
         groups[item.preallocated_artifact_id].append(item)
-    if any(sum(item.role == "semantic_document" for item in group) != 1 for group in groups.values()):
+    if any(
+        sum(item.role == "semantic_document" for item in group) != 1 for group in groups.values()
+    ):
         raise ArtifactCommitError("invalid_file_plan")
     if kind == "input_import":
-        if len(groups) != 1 or [(item.relative_path, item.role, item.archive_format) for item in files] != [
+        if len(groups) != 1 or [
+            (item.relative_path, item.role, item.archive_format) for item in files
+        ] != [
             ("payload.tar.zst", "payload_archive", "tar.zst"),
             ("artifact.json", "semantic_document", "none"),
         ]:
             raise ArtifactCommitError("invalid_input_import_plan")
     expected_semantic = {
         "checkpoint": "checkpoint.json",
+        "service_execution_output": "result.json",
         "input_materialization": "artifact.json",
         "acceptance_evidence": "evidence.json",
     }.get(kind)
@@ -634,6 +657,14 @@ def _validate_plan(producer: CommitProducerV1, files: Sequence[UploadFilePlanV1]
         for item in files
     ):
         raise ArtifactCommitError("invalid_semantic_document_path")
+    if kind == "service_execution_output":
+        if (
+            len(groups) != 1
+            or any(item.artifact_name != "runtime_evidence" for item in files)
+            or any(item.artifact_type != "loom.execution-runtime-evidence.v1" for item in files)
+            or any(item.producer != "service" for item in files)
+        ):
+            raise ArtifactCommitError("invalid_service_execution_output_plan")
     if kind == "profile_calibration_evidence":
         assert isinstance(producer, ProfileCalibrationEvidenceProducerV1)
         expected_path = f"{producer.profile_calibration_result_kind}.json"
@@ -741,10 +772,7 @@ class ArtifactCommitService:
             raise ArtifactCommitError("invalid_request_digest")
         identity = canonical_identity(producer)
         total_max = sum(item.expected_max_bytes for item in files)
-        if (
-            isinstance(producer, InputMaterializationProducerV1)
-            and total_max > 268_435_456
-        ):
+        if isinstance(producer, InputMaterializationProducerV1) and total_max > 268_435_456:
             raise ArtifactCommitError("input_materialization_session_limit")
         existing = await self._repository.find_idempotent(identity, idempotency_key)
         if existing is not None:
@@ -954,7 +982,10 @@ class ArtifactCommitService:
             size != expected_size
             or size > plan.expected_max_bytes
             or (plan.expected_size is not None and size != plan.expected_size)
-            or (plan.expected_sha256 is not None and not hmac.compare_digest(digest, plan.expected_sha256))
+            or (
+                plan.expected_sha256 is not None
+                and not hmac.compare_digest(digest, plan.expected_sha256)
+            )
         ):
             raise ArtifactCommitError("object_readback_mismatch")
         file_state.verified = VerifiedFileV1(
@@ -964,7 +995,9 @@ class ArtifactCommitService:
         )
         if all(item.verified is not None for item in session.files):
             session.state = "uploaded"
-            session.actual_total_bytes = sum(item.verified.size_bytes for item in session.files if item.verified)
+            session.actual_total_bytes = sum(
+                item.verified.size_bytes for item in session.files if item.verified
+            )
         session.updated_at = self._now()
         await self._repository.save(session)
         return file_state.verified
@@ -1027,9 +1060,8 @@ class ArtifactCommitService:
         if not payload or len(payload) > plan.expected_max_bytes:
             raise ArtifactCommitError("platform_document_size_invalid")
         if state.verified is not None:
-            if (
-                state.verified.size_bytes != len(payload)
-                or not hmac.compare_digest(state.verified.sha256, payload_digest)
+            if state.verified.size_bytes != len(payload) or not hmac.compare_digest(
+                state.verified.sha256, payload_digest
             ):
                 raise ArtifactCommitError("platform_document_replay_drift")
             return state.verified
@@ -1049,9 +1081,7 @@ class ArtifactCommitService:
             auth=auth,
         )
 
-    async def _put_canonical(
-        self, *, key: str, value: Any, commit_kind: CommitKind
-    ) -> str:
+    async def _put_canonical(self, *, key: str, value: Any, commit_kind: CommitKind) -> str:
         payload = canonical_document(value)
         expected = digest_bytes(payload)
         await self._store.put_object_stream(
@@ -1294,15 +1324,19 @@ class ArtifactCommitService:
         count = 0
         system = ProducerAuthV1(subject_kind="official_service", subject_id=UUID(int=0))
         for session in list(await self._repository.active()):
-            ARTIFACT_RECONCILIATION_AGE.labels(
-                session.producer.commit_kind, session.state
-            ).observe(max(0.0, (self._now() - session.updated_at).total_seconds()))
-            if session.state in {
-                "uploading",
-                "uploaded",
-                "committing",
-                "committed_ready",
-            } and session.updated_at <= cutoff:
+            ARTIFACT_RECONCILIATION_AGE.labels(session.producer.commit_kind, session.state).observe(
+                max(0.0, (self._now() - session.updated_at).total_seconds())
+            )
+            if (
+                session.state
+                in {
+                    "uploading",
+                    "uploaded",
+                    "committing",
+                    "committed_ready",
+                }
+                and session.updated_at <= cutoff
+            ):
                 await self.abort_session(session_id=session.id, auth=system, reason="abandoned")
                 count += 1
         return count
@@ -1509,7 +1543,9 @@ class ArtifactCommitService:
             auth=auth,
         )
         result = await self.commit_authoritative_document(declaration=declaration)
-        await self._profile_calibration_authority.complete_locked(artifact_id=result.artifacts[0].id)
+        await self._profile_calibration_authority.complete_locked(
+            artifact_id=result.artifacts[0].id
+        )
         return result
 
     async def finalize_profile_calibration_catalog(
@@ -1527,7 +1563,9 @@ class ArtifactCommitService:
             auth=auth,
         )
         result = await self.commit_authoritative_document(declaration=declaration)
-        await self._profile_calibration_authority.complete_locked(artifact_id=result.artifacts[0].id)
+        await self._profile_calibration_authority.complete_locked(
+            artifact_id=result.artifacts[0].id
+        )
         return result
 
     async def terminate_profile_calibration(
@@ -1547,7 +1585,9 @@ class ArtifactCommitService:
             auth=auth,
         )
         result = await self.commit_authoritative_document(declaration=declaration)
-        await self._profile_calibration_authority.complete_locked(artifact_id=result.artifacts[0].id)
+        await self._profile_calibration_authority.complete_locked(
+            artifact_id=result.artifacts[0].id
+        )
         return result
 
 

@@ -16,6 +16,8 @@ from loom_cli.cluster_config import validate_container_registry_prefixes
 
 ROLLOUT_IMAGES: tuple[tuple[str, str], ...] = (
     ("loom-control-plane", "deploy/Dockerfile.control-plane"),
+    ("loom-execution-actuator", "deploy/Dockerfile.execution-actuator"),
+    ("loom-execution-runtime", "deploy/Dockerfile.execution-runtime"),
     ("loom-family-orchestrator", "deploy/Dockerfile.family-orchestrator"),
     ("loom-pipeline-orchestrator", "deploy/Dockerfile.pipeline-orchestrator"),
     ("loom-llm-gateway", "deploy/Dockerfile.gateway"),

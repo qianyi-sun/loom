@@ -12,6 +12,16 @@ not make arbitrary uploaded code safe to execute. The supported workload trust
 mode is `internal_trusted`: user TaskSet transforms are disabled, and a
 manifest containing a transform is rejected before its blobs are fetched.
 
+For the accepted Nebius service-execution target, these current Docker and
+network controls are not a hostile-code isolation boundary. Service admission
+requires the `sandboxed_runtime` class described in
+[Nebius service execution](nebius-service-execution.md); a shared-kernel Pod
+fails closed, and #1551 must empirically accept the actual RuntimeClass before
+live workloads are enabled. There is no ordinary-Pod fallback.
+The threat register, workload-identity contract, image admission rules, and
+live acceptance matrix are in
+[Nebius hostile-workload security](nebius-execution-security.md).
+
 ## Container network policies
 
 Drivers expose three task-level policies:

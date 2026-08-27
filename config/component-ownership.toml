@@ -268,6 +268,61 @@ runtime_policy = "conformance"
 rollout_role = "none"
 
 [[components]]
+id = "execution-actuator"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.execution-actuator"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.execution-actuator",
+  "deploy/execution-actuator-requirements.txt",
+  "migrations/**",
+  "src/loom/__init__.py",
+  "src/loom/db/**",
+  "src/loom/execution_contract.py",
+  "src/loom/execution_runtime_contract.py",
+  "src/loom/models/__init__.py",
+  "src/loom/models/healthcheck.py",
+  "src/loom/models/mcp.py",
+  "src/loom/models/networking.py",
+  "src/loom/models/skill.py",
+  "src/loom/models/task.py",
+  "src/loom/models/types.py",
+  "src/loom/pipeline/__init__.py",
+  "src/loom/pipeline/keys.py",
+  "src/loom/startup_retry.py",
+  "src/loom_control_plane/__init__.py",
+  "src/loom_control_plane/metrics.py",
+  "src/loom_control_plane/service_execution.py",
+  "src/loom_execution_actuator/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-execution-actuator"
+runtime_policy = "start"
+rollout_role = "primary"
+
+[[components]]
+id = "execution-runtime"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.execution-runtime"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "cmd/loom-execution-runtime/**",
+  "deploy/Dockerfile.execution-runtime",
+  "go.mod",
+  "go.sum",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-execution-runtime"
+runtime_policy = "start"
+rollout_role = "primary"
+
+[[components]]
 id = "egress-xds"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.egress-xds"
@@ -515,6 +570,17 @@ dockerfile = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/environmen
 build_context = "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world"
 source_paths = ["deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/**"]
 smoke_owner = "gb10-catalog-smoke"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
+id = "execution-runtime-fixture"
+kind = "runtime-payload-image"
+dockerfile = "tests/fixtures/execution_runtime_fixture/Dockerfile"
+build_context = "tests/fixtures/execution_runtime_fixture"
+source_paths = ["tests/fixtures/execution_runtime_fixture/**"]
+smoke_owner = "task-fixture-conformance"
 scan_owner = "runtime-payload-scan"
 attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"

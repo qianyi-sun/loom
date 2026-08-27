@@ -499,7 +499,7 @@ def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
 
     def dockerhub_ref(raw_ref: str) -> str | None:
         ref = raw_ref.split("@", 1)[0]
-        if not ref or ref.startswith(("$", "loom-")):
+        if not ref or ref == "scratch" or ref.startswith(("$", "loom-")):
             return None
         if "/" in ref:
             registry = ref.split("/", 1)[0]

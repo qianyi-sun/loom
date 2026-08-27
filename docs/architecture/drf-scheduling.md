@@ -4,6 +4,13 @@ How service-mode workers pick the next trial to run. CLI mode has no
 scheduler — `loom run` runs whatever you asked for in submission
 order.
 
+This page documents the current reusable-worker claim path. The accepted
+terminal path uses frozen workload requirements, execution classes, durable
+leases, regional targets, and Kubernetes execution units as specified in
+[Nebius service execution](nebius-service-execution.md). During migration,
+legacy `requires_caps`, backend, and pool fields are compatibility evidence;
+they cannot silently satisfy or weaken the versioned admission contract.
+
 ## The model: claim, don't push
 
 Workers **poll** the Control Plane for trials; the Control Plane

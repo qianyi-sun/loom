@@ -115,6 +115,29 @@ WORKER_RECLAIM_TOTAL = Counter(
     "Trials reclaimed by crash detector",
 )
 
+SERVICE_EXECUTION_COMMAND_BACKLOG = Gauge(
+    "loom_service_execution_command_backlog",
+    "Pending or leased durable service execution commands",
+)
+SERVICE_EXECUTION_RECONCILE_LAG_SECONDS = Gauge(
+    "loom_service_execution_reconcile_lag_seconds",
+    "Age of the oldest unacknowledged service execution command",
+)
+SERVICE_EXECUTION_CLEANUP_DEBT = Gauge(
+    "loom_service_execution_cleanup_debt",
+    "Execution leases with pending, in-progress, or blocked cleanup",
+)
+SERVICE_EXECUTION_STALE_GENERATIONS_TOTAL = Counter(
+    "loom_service_execution_stale_generations_total",
+    "Rejected writes from stale or revoked execution generations",
+    labelnames=("surface",),
+)
+SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL = Counter(
+    "loom_service_execution_duplicate_deliveries_total",
+    "Idempotently converged command or event redeliveries",
+    labelnames=("command_type",),
+)
+
 RETRY_EXHAUSTED_TOTAL = Counter(
     "loom_retry_exhausted_total",
     "Trials transitioned to failed because attempt_count >= max_attempts",

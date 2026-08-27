@@ -33,6 +33,7 @@ from loom_llm_gateway import litellm_wrapper
 from loom_llm_gateway.auth import verify_bearer_token
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -178,6 +179,7 @@ async def chat_completions(
                 status_code=403,
                 detail="execution-attempt tokens are not supported by this route",
             )
+        await authorize_trial_execution_dispatch(session, ctx)
 
         # The token/JWT team is authoritative. A caller-supplied body team may
         # provide legacy attribution only for a team-less platform request; it

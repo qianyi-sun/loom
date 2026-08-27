@@ -59,6 +59,11 @@
     "default": "False",
     "required": false
   },
+  "execution_image_admission_public_keys_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{\"schema_version\":1,\"keys\":[]}'",
+    "required": false
+  },
   "family_adapter_call_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",

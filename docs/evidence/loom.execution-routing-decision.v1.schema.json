@@ -1,0 +1,307 @@
+{
+  "$defs": {
+    "CapacityEvidenceKind": {
+      "enum": [
+        "fresh_executable_capacity",
+        "configured_scale_headroom",
+        "unavailable",
+        "preexisting_assignment"
+      ],
+      "title": "CapacityEvidenceKind",
+      "type": "string"
+    },
+    "ExecutionAdapterKind": {
+      "enum": [
+        "legacy_worker_claim",
+        "kubernetes_job"
+      ],
+      "title": "ExecutionAdapterKind",
+      "type": "string"
+    },
+    "ExecutionRouteCandidateV1": {
+      "additionalProperties": false,
+      "description": "One independently evidenced physical-pool candidate.",
+      "properties": {
+        "active_slots": {
+          "minimum": 0,
+          "title": "Active Slots",
+          "type": "integer"
+        },
+        "adapter_kind": {
+          "$ref": "#/$defs/ExecutionAdapterKind"
+        },
+        "assigned_queued_slots": {
+          "minimum": 0,
+          "title": "Assigned Queued Slots",
+          "type": "integer"
+        },
+        "available_slots": {
+          "minimum": 0,
+          "title": "Available Slots",
+          "type": "integer"
+        },
+        "blockers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Blockers",
+          "type": "array"
+        },
+        "budget_eligible": {
+          "default": true,
+          "title": "Budget Eligible",
+          "type": "boolean"
+        },
+        "capacity_evidence_kind": {
+          "$ref": "#/$defs/CapacityEvidenceKind"
+        },
+        "capacity_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capacity Observed At"
+        },
+        "configured_slots": {
+          "minimum": 0,
+          "title": "Configured Slots",
+          "type": "integer"
+        },
+        "data_residency": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z]{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Residency"
+        },
+        "draining": {
+          "title": "Draining",
+          "type": "boolean"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "enum": [
+                "development",
+                "staging",
+                "production"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
+        },
+        "estimated_cost_microusd_per_slot_hour": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Cost Microusd Per Slot Hour"
+        },
+        "execution_class_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execution Class Id"
+        },
+        "healthy": {
+          "title": "Healthy",
+          "type": "boolean"
+        },
+        "logical_pool_id": {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "title": "Logical Pool Id",
+          "type": "string"
+        },
+        "occupied_slots": {
+          "minimum": 0,
+          "title": "Occupied Slots",
+          "type": "integer"
+        },
+        "operator_weight": {
+          "default": 0,
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "Operator Weight",
+          "type": "integer"
+        },
+        "pending_slots": {
+          "minimum": 0,
+          "title": "Pending Slots",
+          "type": "integer"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Id"
+        }
+      },
+      "required": [
+        "logical_pool_id",
+        "adapter_kind",
+        "enabled",
+        "healthy",
+        "draining",
+        "configured_slots",
+        "active_slots",
+        "occupied_slots",
+        "pending_slots",
+        "assigned_queued_slots",
+        "available_slots",
+        "capacity_evidence_kind"
+      ],
+      "title": "ExecutionRouteCandidateV1",
+      "type": "object"
+    },
+    "ExecutionRoutingReason": {
+      "enum": [
+        "fresh_executable_capacity",
+        "configured_scale_headroom",
+        "operator_pin",
+        "preexisting_assignment",
+        "admin_target_binding"
+      ],
+      "title": "ExecutionRoutingReason",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable reason and evidence for one selected physical pool.",
+  "properties": {
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/ExecutionRouteCandidateV1"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "title": "Candidates",
+      "type": "array"
+    },
+    "decided_at": {
+      "format": "date-time",
+      "title": "Decided At",
+      "type": "string"
+    },
+    "generation": {
+      "exclusiveMinimum": 0,
+      "title": "Generation",
+      "type": "integer"
+    },
+    "reason": {
+      "$ref": "#/$defs/ExecutionRoutingReason"
+    },
+    "requirements_sha256": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "title": "Requirements Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "loom.execution-routing-decision.v1",
+      "default": "loom.execution-routing-decision.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "selected_adapter_kind": {
+      "$ref": "#/$defs/ExecutionAdapterKind"
+    },
+    "selected_execution_class_id": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Selected Execution Class Id"
+    },
+    "selected_pool_id": {
+      "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+      "title": "Selected Pool Id",
+      "type": "string"
+    },
+    "selected_target_id": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Selected Target Id"
+    }
+  },
+  "required": [
+    "generation",
+    "requirements_sha256",
+    "selected_pool_id",
+    "selected_adapter_kind",
+    "reason",
+    "decided_at",
+    "candidates"
+  ],
+  "title": "ExecutionRoutingDecisionV1",
+  "type": "object"
+}

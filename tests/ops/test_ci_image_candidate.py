@@ -114,15 +114,43 @@ def test_aggregate_records_fails_closed_on_missing_architecture(tmp_path: Path) 
         aggregate_records(paths[:1], _matrix())
 
 
-def test_aggregate_records_rejects_mixed_run_attempts(tmp_path: Path) -> None:
+def test_aggregate_records_selects_latest_record_per_architecture_across_attempts(
+    tmp_path: Path,
+) -> None:
     paths = _record_files(tmp_path)
     changed = _record("arm64")
     changed["run_attempt"] = 3
     changed["artifact_name"] = "image-candidate-archive-service-arm64-attempt-3"
-    paths[1].write_text(json.dumps(changed), encoding="utf-8")
+    changed["archive_sha256"] = "c" * 64
+    retry_path = tmp_path / "service-arm64-attempt-3.json"
+    retry_path.write_text(json.dumps(changed), encoding="utf-8")
 
-    with pytest.raises(CandidateError, match="one source identity"):
-        aggregate_records(paths, _matrix())
+    index = aggregate_records([*paths, retry_path], _matrix())
+
+    assert index["run_attempt"] == 3
+    assert index["builds"][0]["candidate_artifact"].endswith("attempt-2")
+    assert index["builds"][1]["candidate_artifact"].endswith("attempt-3")
+    assert index["builds"][1]["archive_sha256"] == "c" * 64
+    assert validate_index(
+        index,
+        expected_matrix=_matrix(),
+        repository=REPOSITORY,
+        pull_request=1199,
+        head_sha=HEAD_SHA,
+        base_sha=BASE_SHA,
+        tree_sha=TREE_SHA,
+        run_id=12345,
+        run_attempt=3,
+    ) == index
+
+
+def test_aggregate_records_rejects_duplicate_architecture_attempt(tmp_path: Path) -> None:
+    paths = _record_files(tmp_path)
+    duplicate = tmp_path / "service-amd64-copy.json"
+    duplicate.write_text(json.dumps(_record("amd64")), encoding="utf-8")
+
+    with pytest.raises(CandidateError, match="duplicate image architecture attempts"):
+        aggregate_records([*paths, duplicate], _matrix())
 
 
 def test_record_rejects_artifact_from_another_attempt() -> None:

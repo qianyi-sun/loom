@@ -718,7 +718,7 @@ def _load_clients(
     default StorageClass; `status` ignores it. Kept in the same
     helper so every cluster subcommand uses one auth path."""
     try:
-        from kubernetes import client, config  # type: ignore
+        from kubernetes import client, config
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "the 'kubernetes' package is required for `loom cluster` "

@@ -184,6 +184,114 @@ restore database and object objects coherently, reapply runtime secrets, run
 the current migration Job, and pass health plus representative trial checks
 before traffic resumes.
 
+### Service execution recovery and retention
+
+The `0113` service-execution tables and `0114` immutable runtime contracts are
+part of the ordinary PostgreSQL backup;
+never export or restore them separately from `trials`, lifecycle authorities,
+artifacts, and usage rows. Before a release or recovery, record counts grouped
+by execution target, desired state, observed state, cleanup state, and command
+state. Do not include trial or lease IDs in shared logs.
+
+After restore and before resuming submissions:
+
+1. migrate the restored database to the current schema and confirm it is at
+   Alembic head;
+2. keep every execution target disabled until its independent health probe is
+   fresh;
+3. compare each nonterminal lease with its command outbox and provider
+   inventory by deterministic provider-scope, namespace, Job, and execution
+   unit keys;
+4. redeliver pending or expired command claims with their original
+   idempotency keys; never synthesize a new lease or generation to hide an
+   ambiguous provider action;
+5. quarantine unknown provider objects and mark missing expected objects as a
+   reconciliation error; do not adopt either by name;
+6. require revoked generations to fail Gateway, heartbeat, artifact,
+   trajectory, usage, and result writes before enabling any target.
+
+Retention runs only through the lifecycle GC inventory/approval path after
+object deletion has been verified. Its metadata delete order is
+`execution_leases` first (database cascades command, event, and history rows),
+then resource usage, trial events, LLM calls, artifacts, Trials, and Batches.
+Never delete command/event/history rows independently, and never downgrade
+`0113` while any execution class, target, or lease exists. Never downgrade
+`0114` while a runtime-bound or verifier lease exists. A failed provider
+cleanup remains `pending`, `in_progress`, or `blocked`; it is operational debt,
+not permission to purge its authority record.
+
+#### Kubernetes execution actuator
+
+The checked manifest at `deploy/k8s/nebius-execution-actuator.yaml` is a
+repository contract, not a deployment instruction. It has zero replicas and a
+non-runnable image placeholder. Do not apply or scale it until the separately
+authorized target has all of the following read back from its own APIs:
+
+- the exact `execution_targets` row is enabled and fresh for this environment;
+- the manifest namespace matches that target's immutable `namespace_name`;
+- the pinned actuator image digest has release provenance and scan evidence;
+- the referenced database Secret exists through the environment's secret
+  authority, not through a checked-in Secret;
+- the named sandbox `RuntimeClass` has passed #1551 hostile-workload
+  acceptance; an ordinary-Pod fallback is forbidden;
+- target capacity, NetworkPolicy, registry access, quotas, and cleanup alarms
+  have passed their own gates.
+
+Before a rollout, validate the real Kubernetes API seam locally without any
+Nebius credentials or cloud calls:
+
+```bash
+LOOM_RUN_DISPOSABLE_K3S=1 \
+  pytest -q tests/integration/test_execution_actuator_k3s.py
+```
+
+The test starts a disposable, digest-pinned k3s container and submits a
+suspended Job. It verifies create/get/list/watch/exact-UID delete and destroys
+the cluster on exit. Passing it proves API conformance only, not Nebius runtime
+support or capacity.
+
+For an authorized rollout, first substitute the exact release digest through
+the protected deployment path while retaining `replicas: 0`. Server-side dry
+run the complete render and confirm that it contains only Namespace,
+ServiceAccount, Role, RoleBinding, Deployment, and PodDisruptionBudget kinds.
+Confirm there is no ClusterRole, Secret, Pod exec/log, node, namespace-mutation,
+or wildcard permission. Scale one replica only after the environment approval,
+then require `/readyz` to return 200; it remains 503 until both a database
+command poll and a full Kubernetes reconciliation have succeeded recently.
+Scale additional replicas only after duplicate-delivery and convergence
+metrics remain healthy.
+
+Alert on sustained command age, cleanup debt, stale target health,
+`loom_execution_actuator_kubernetes_api_errors_total`, watch restarts, nonzero orphan
+count, or a zero reconciliation-converged gauge. Pending reason metrics are
+bounded to normalized reasons and never contain lease, trial, Job, namespace,
+or team labels. Interpret failures as follows:
+
+- `unschedulable`, `image_pull_backoff`, `oom_killed`, `evicted`, `node_lost`,
+  and `deadline_exceeded` are persisted observations; do not edit the Job to
+  force success;
+- create timeout or 409 must converge through exact identity readback;
+- delete 404 is converged cleanup, but delete timeout is retried with the same
+  UID precondition;
+- UID/generation/target/unit mismatch is quarantined and dead-lettered; never
+  delete or adopt it by name;
+- an expired watch resourceVersion resets the watch cursor, while periodic
+  full reconciliation remains the repair authority;
+- a missing expected Job is recorded as failure, or as deleted only when the
+  fenced desired state already requests cleanup.
+
+To stop actuator effects during an incident, disable the execution target and
+stop new reservations through the control-plane authority first. Allow current
+command claims to acknowledge or expire, record pending cleanup debt, then
+scale the actuator to zero through the protected deployment path. Scaling down
+is cancellation of reconciliation, not rollback and not proof that Jobs were
+deleted. Recovery uses the same database generations and command idempotency
+keys; never bump a generation, clear an outbox row, or remove a finalizer to
+hide ambiguity. Image rollback may run the previous compatible digest against
+the forward schema; schema downgrade still requires all `0113`/`0114`
+authority rows to be deliberately removed through the protected recovery
+process.
+
 ## Production release
 
 Production is promoted from a pinned `dev` candidate; it is not deployed from

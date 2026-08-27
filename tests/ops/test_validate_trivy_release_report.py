@@ -34,6 +34,7 @@ _PERL_BASE_COMPONENTS = (
     "capacity-manager",
     "control-plane",
     "egress-xds",
+    "execution-actuator",
     "family-orchestrator",
     "llm-gateway",
     "personal-dev-activation-agent",
@@ -44,6 +45,7 @@ _PERL_BASE_COMPONENTS = (
 )
 _EMPTY_COMPONENTS = (
     "behavior-stage1-sim",
+    "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
     "staging-admin-browser-smoke",

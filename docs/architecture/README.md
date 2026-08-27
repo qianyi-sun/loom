@@ -12,6 +12,9 @@ than mixed with current behavior.
   flows.
 - **[Service mode](service-mode.md)** — Control Plane, Worker, LLM Gateway,
   Postgres, object storage, and REST service.
+- **[Nebius service execution](nebius-service-execution.md)** — accepted
+  provider-neutral workload/execution contract, regional target topology,
+  isolation decision, compatibility inventory, and migration authority gates.
 - **[CLI mode](cli-mode.md)** — stateless local execution through
   `Trial.run()`.
 - **[Trajectories and ATIF](trajectory-and-atif.md)** — append-only event
