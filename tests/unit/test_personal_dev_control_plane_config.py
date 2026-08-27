@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,12 +21,8 @@ from loom.personal_dev_control_plane_config import (
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
-_LINEAGE_RENDER_INPUT_SHA256 = (
-    "f260f9de95aa6f38416bf49c561c9c1f1388911e2123ce25a6691529e161239b"
-)
-_LINEAGE_TRUSTED_RELEASE_SHA256 = (
-    "70e01346639855b45ca4d01203ba3d369afa544c8e8b59d7b34b599a305b5760"
-)
+_LINEAGE_RENDER_INPUT_SHA256 = "f260f9de95aa6f38416bf49c561c9c1f1388911e2123ce25a6691529e161239b"
+_LINEAGE_TRUSTED_RELEASE_SHA256 = "70e01346639855b45ca4d01203ba3d369afa544c8e8b59d7b34b599a305b5760"
 
 
 def _scanner() -> dict[str, Any]:
@@ -46,11 +43,12 @@ def _scanner() -> dict[str, Any]:
 
 def _release() -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+            "loom_web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "b" * 64,
             "personal_dev_builder": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "4" * 64
             ),
@@ -114,7 +112,7 @@ def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
-    assert profile.schema_version == 1
+    assert profile.schema_version == 2
     assert profile.namespace == "loom-dev"
     assert profile.personal_namespace_prefix == "loom-dev-"
     assert profile.min_slots_default == 0
@@ -161,14 +159,85 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     )
 
 
+def test_previous_profile_and_release_schemas_remain_loadable_for_rollback(
+    tmp_path: Path,
+) -> None:
+    profile_path = _write_profile(
+        tmp_path,
+        lambda text: re.sub(
+            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
+            "\n",
+            text.replace("schema_version = 2\n", "schema_version = 1\n", 1),
+            count=1,
+        ),
+    )
+    release_value = _release()
+    release_value["schema_version"] = 2
+    del release_value["images"]["loom_web"]
+    release_path, release_sha256 = _write_release(tmp_path, release_value)
+
+    profile = load_personal_dev_control_plane_profile(profile_path)
+    release = load_personal_dev_trusted_release(release_path, release_sha256)
+
+    assert profile.schema_version == 1
+    assert profile.resources.web is None
+    assert release.schema_version == 2
+    assert release.images.loom_web is None
+    assert "web" not in profile.canonical_value()["resources"]
+    assert "loom_web" not in release.canonical_value()["images"]
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_profile_rejects_web_resources_schema_mismatch(
+    tmp_path: Path,
+    schema_version: int,
+) -> None:
+    def mismatch(text: str) -> str:
+        if schema_version == 1:
+            return text.replace("schema_version = 2\n", "schema_version = 1\n", 1)
+        return re.sub(
+            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
+            "\n",
+            text,
+            count=1,
+        )
+
+    path = _write_profile(tmp_path, mismatch)
+
+    with pytest.raises(
+        ValidationError,
+        match="personal-dev web resources do not match profile schema",
+    ):
+        load_personal_dev_control_plane_profile(path)
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "include_web"),
+    [(2, True), (3, False)],
+)
+def test_trusted_release_rejects_web_image_schema_mismatch(
+    tmp_path: Path,
+    schema_version: int,
+    include_web: bool,
+) -> None:
+    release_value = _release()
+    release_value["schema_version"] = schema_version
+    if not include_web:
+        del release_value["images"]["loom_web"]
+    path, digest = _write_release(tmp_path, release_value)
+
+    with pytest.raises(PersonalDevTrustedReleaseError):
+        load_personal_dev_trusted_release(path, digest)
+
+
 def test_profile_accepts_paired_storage_lineage(tmp_path: Path) -> None:
     render_input_sha256 = "a" * 64
     trusted_release_sha256 = "b" * 64
     path = _write_profile(
         tmp_path,
-        lambda text: text.replace(
-            _LINEAGE_RENDER_INPUT_SHA256, render_input_sha256, 1
-        ).replace(_LINEAGE_TRUSTED_RELEASE_SHA256, trusted_release_sha256, 1),
+        lambda text: text.replace(_LINEAGE_RENDER_INPUT_SHA256, render_input_sha256, 1).replace(
+            _LINEAGE_TRUSTED_RELEASE_SHA256, trusted_release_sha256, 1
+        ),
     )
 
     profile = load_personal_dev_control_plane_profile(path)
@@ -190,17 +259,19 @@ def test_profile_rejects_unpaired_storage_lineage(
 ) -> None:
     path = _write_profile(
         tmp_path,
-        lambda text: text.replace(
-            f'lineage_render_input_sha256 = "{_LINEAGE_RENDER_INPUT_SHA256}"\n',
-            "",
-            1,
-        )
-        .replace(
-            f'lineage_trusted_release_sha256 = "{_LINEAGE_TRUSTED_RELEASE_SHA256}"\n',
-            "",
-            1,
-        )
-        .replace("[storage]\n", "[storage]\n" + lineage_entry, 1),
+        lambda text: (
+            text.replace(
+                f'lineage_render_input_sha256 = "{_LINEAGE_RENDER_INPUT_SHA256}"\n',
+                "",
+                1,
+            )
+            .replace(
+                f'lineage_trusted_release_sha256 = "{_LINEAGE_TRUSTED_RELEASE_SHA256}"\n',
+                "",
+                1,
+            )
+            .replace("[storage]\n", "[storage]\n" + lineage_entry, 1)
+        ),
     )
 
     with pytest.raises(ValidationError, match="storage lineage must be completely pinned"):
@@ -229,7 +300,7 @@ def test_profile_rejects_invalid_storage_lineage_digest(
     "transform",
     [
         lambda text: text + "unknown_key = true\n",
-        lambda text: text.replace("schema_version = 1\n", "", 1),
+        lambda text: text.replace("schema_version = 2\n", "", 1),
         lambda text: text.replace('namespace = "loom-dev"', 'namespace = "loom-dev-shared"'),
         lambda text: text.replace(
             'personal_namespace_prefix = "loom-dev-"',
@@ -282,9 +353,7 @@ def test_profile_rejects_invalid_storage_lineage_digest(
             'capacity_manager_pod_label_key = "app.kubernetes.io/name"',
             'capacity_manager_pod_label_key = "/name"',
         ),
-        lambda text: text.replace(
-            "acme_http01_solver_port = 8089", "acme_http01_solver_port = 0"
-        ),
+        lambda text: text.replace("acme_http01_solver_port = 8089", "acme_http01_solver_port = 0"),
         lambda text: text.replace(
             "acme_http01_solver_port = 8089", "acme_http01_solver_port = 8090"
         ),
@@ -606,8 +675,7 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
                 "images": {
                     **value["images"],
                     "personal_dev_scanner_cache": (
-                        "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:"
-                        + "3" * 64
+                        "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "3" * 64
                     ),
                 },
             },
@@ -670,7 +738,7 @@ def test_trusted_release_rejects_scanner_drift(
     [
         _canonical(_release()) + b"\n",
         json.dumps(_release(), indent=2).encode("ascii"),
-        b'{"schema_version":2,"schema_version":2}',
+        b'{"schema_version":3,"schema_version":3}',
         b"not-json",
     ],
 )

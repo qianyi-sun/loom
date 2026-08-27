@@ -52,6 +52,11 @@ _INTERNAL_IMAGES: dict[str, dict[str, str]] = {
         "image_name": "loom-service",
         "dockerfile": "deploy/Dockerfile.service",
     },
+    "web": {
+        "release_key": "loom_web",
+        "image_name": "loom-web",
+        "dockerfile": "deploy/Dockerfile.web",
+    },
     "personal-dev-builder": {
         "release_key": "personal_dev_builder",
         "image_name": "loom-personal-dev-builder",
@@ -243,11 +248,7 @@ def _exact_text(pattern: re.Pattern[str], value: str, label: str) -> str:
 
 
 def _sha256_digest(value: object, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or _HEX64.fullmatch(value) is None
-        or value == "0" * 64
-    ):
+    if not isinstance(value, str) or _HEX64.fullmatch(value) is None or value == "0" * 64:
         raise TrustedReleaseError(f"{label} is invalid")
     return value
 
@@ -270,9 +271,7 @@ def _scanner_source_record(
     return {
         "image": source_image,
         "layer_sha256": source_layer_sha256,
-        "metadata_sha256": _sha256_digest(
-            value.get("metadata_sha256"), f"{label} metadata digest"
-        ),
+        "metadata_sha256": _sha256_digest(value.get("metadata_sha256"), f"{label} metadata digest"),
         "sha256": _sha256_digest(value.get("sha256"), f"{label} digest"),
     }
 
@@ -335,8 +334,7 @@ def _scanner_binding(
         "trivy_version": lock.trivy_version,
     }
     cache_identity_sha256 = hashlib.sha256(
-        b"loom-personal-dev-scanner-cache-v1\0"
-        + _canonical_json(scanner_without_identity)
+        b"loom-personal-dev-scanner-cache-v1\0" + _canonical_json(scanner_without_identity)
     ).hexdigest()
     scanner = {
         **scanner_without_identity,
@@ -452,7 +450,7 @@ def assemble_personal_dev_trusted_release(
     repository_owner_id: str,
     runner_environment: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Validate seven indexes and return canonical release and evidence values."""
+    """Validate eight indexes and return canonical release and evidence values."""
 
     repository = _exact_text(_REPOSITORY, repository, "repository")
     if ref_name not in {"dev", "main"}:
@@ -466,9 +464,7 @@ def assemble_personal_dev_trusted_release(
     if event_name not in {"push", "workflow_dispatch"}:
         raise TrustedReleaseError("release event is invalid")
     repository_id = _exact_text(_NUMERIC_ID, repository_id, "repository id")
-    repository_owner_id = _exact_text(
-        _NUMERIC_ID, repository_owner_id, "repository owner id"
-    )
+    repository_owner_id = _exact_text(_NUMERIC_ID, repository_owner_id, "repository owner id")
     if runner_environment != "github-hosted":
         raise TrustedReleaseError("release runner environment is invalid")
 
@@ -477,9 +473,7 @@ def assemble_personal_dev_trusted_release(
         for component in _INTERNAL_IMAGES
         for architecture in _PLATFORMS
     }
-    manifest_names = {
-        f"{key}.json" for key in (*_INTERNAL_IMAGES, *_EXTERNAL_REPOSITORIES)
-    }
+    manifest_names = {f"{key}.json" for key in (*_INTERNAL_IMAGES, *_EXTERNAL_REPOSITORIES)}
     _require_exact_files(records_dir, record_names, "architecture record directory")
     _require_exact_files(manifests_dir, manifest_names, "manifest directory")
     external_value, _external_bytes = _read_canonical_json(
@@ -566,9 +560,7 @@ def assemble_personal_dev_trusted_release(
             manifests_dir / f"{component}.json", "internal image manifest"
         )
         try:
-            validate_manifest_subjects(
-                manifest_value, architecture_digests=architecture_digests
-            )
+            validate_manifest_subjects(manifest_value, architecture_digests=architecture_digests)
         except EvidenceError as exc:
             raise TrustedReleaseError("internal image manifest is invalid") from exc
         reference = f"{subject_name}@sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
@@ -604,7 +596,7 @@ def assemble_personal_dev_trusted_release(
         raise TrustedReleaseError("trusted image index digests must be distinct")
 
     evidence: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "release": {
             "repository": repository,
             "ref": f"refs/heads/{ref_name}",
@@ -618,7 +610,7 @@ def assemble_personal_dev_trusted_release(
         "scanner": scanner_evidence,
     }
     release: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": source_sha,
         "source_tree": source_tree,
         "images": release_images,
@@ -716,15 +708,11 @@ def main() -> None:
         if arguments.operation == "assemble":
             _write_outputs(arguments.output_dir, release, evidence)
         else:
-            observed_release, release_bytes = _read_json(
-                arguments.release_file, "trusted release"
-            )
+            observed_release, release_bytes = _read_json(arguments.release_file, "trusted release")
             observed_evidence, evidence_bytes = _read_json(
                 arguments.evidence_file, "trusted release evidence"
             )
-            digest_bytes = _read_bounded_file(
-                arguments.sha256_file, "trusted release digest", 65
-            )
+            digest_bytes = _read_bounded_file(arguments.sha256_file, "trusted release digest", 65)
             expected_digest = hashlib.sha256(_canonical_json(release)).hexdigest()
             if (
                 observed_release != release

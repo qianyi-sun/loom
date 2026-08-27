@@ -61,11 +61,12 @@ _SOURCE_SHA, _SOURCE_TREE = _git_identity()
 
 def _release_value() -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+            "loom_web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "b" * 64,
             "personal_dev_builder": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "4" * 64
             ),
@@ -1061,7 +1062,7 @@ def test_status_emits_one_canonical_record_and_readiness_exit_code(
         namespace: str,
     ) -> PersonalDevShadowStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 35
+        assert expected.resource_count == 38
         assert namespace == "loom-dev"
         return status
 
@@ -1125,7 +1126,7 @@ def test_status_acceptance_emits_one_canonical_read_only_record(
         namespace: str,
     ) -> PersonalDevAcceptanceStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 35
+        assert expected.resource_count == 38
         assert plan.sha256 == plan_digest
         assert namespace == "loom-dev"
         return status
@@ -1193,7 +1194,7 @@ def test_status_operational_emits_one_canonical_read_only_record(
         namespace: str,
     ) -> PersonalDevOperationalStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 35
+        assert expected.resource_count == 38
         assert plan.sha256 == plan_digest
         assert namespace == "loom-dev"
         return status

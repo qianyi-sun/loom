@@ -489,17 +489,19 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert 'cmp -s "$previous_shadow_render_tmp" "$previous_shadow_render"' in runbook
     assert "yaml.safe_load_all" in runbook
     assert "render_identity_set" in runbook
-    assert "rollback-current-identities" in runbook
-    assert "rollback-previous-identities" in runbook
+    assert "forward-current-identities" in runbook
+    assert "forward-previous-identities" in runbook
     assert 'kind == "Job" and migration_name.fullmatch(name)' in runbook
     assert "live_identity_set" in runbook
     assert 'test ! -s "$live_identities"' in runbook
     assert "assert_live_identity_delta" in runbook
     assert "loom-personal-dev-acme-http01-ingress" in runbook
     assert "loom-personal-dev-capacity-manager-ingress" in runbook
+    assert "loom-personal-dev-web-ingress" in runbook
     assert 'test ! -s "$live_unexpected_identities"' in runbook
-    assert 'cmp -s "$live_missing_identities" "$allowed_missing_identities"' in runbook
-    assert 'cmp -s "$current_identities_tmp" "$previous_identities_tmp"' in runbook
+    assert 'comm -23 \\\n      "$live_missing_identities" "$allowed_missing_identities"' in runbook
+    assert "remove_forward_only_web_resources_for_rollback" in runbook
+    assert "deployment.apps/loom-personal-dev-web" in runbook
     assert "rollback_diff_status=0" in runbook
     assert "|| rollback_diff_status=$?" in runbook
     assert 'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1' in runbook
@@ -510,13 +512,13 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     ("live_variant", "expected_returncode"),
     [
         ("exact", 0),
-        ("both-reviewed-missing", 0),
-        ("one-reviewed-missing", 1),
+        ("all-reviewed-missing", 0),
+        ("one-reviewed-missing", 0),
         ("unreviewed-missing", 1),
         ("live-only", 1),
     ],
 )
-def test_personal_management_identity_delta_allows_only_the_exact_first_transition(
+def test_personal_management_identity_delta_allows_only_reviewed_missing_subsets(
     tmp_path: Path,
     live_variant: str,
     expected_returncode: int,
@@ -527,12 +529,15 @@ def test_personal_management_identity_delta_allows_only_the_exact_first_transiti
     function_source = runbook[start:end]
     base = '["v1","Service","loom-dev","loom-personal-dev-management"]'
     reviewed = [
+        '["apps/v1","Deployment","loom-dev","loom-personal-dev-web"]',
         '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-acme-http01-ingress"]',
         '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-capacity-manager-ingress"]',
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-web-ingress"]',
+        '["v1","Service","loom-dev","loom-personal-dev-web"]',
     ]
     previous_values = sorted([base, *reviewed])
     live_values = list(previous_values)
-    if live_variant == "both-reviewed-missing":
+    if live_variant == "all-reviewed-missing":
         live_values = [base]
     elif live_variant == "one-reviewed-missing":
         live_values = sorted([base, reviewed[0]])
@@ -553,8 +558,7 @@ def test_personal_management_identity_delta_allows_only_the_exact_first_transiti
         [
             "bash",
             "-c",
-            function_source
-            + '\nassert_live_identity_delta "$1" "$2" "$3" "$4" "$5"',
+            function_source + '\nassert_live_identity_delta "$1" "$2" "$3" "$4" "$5"',
             "identity-delta-test",
             *(str(paths[name]) for name in paths),
         ],
@@ -564,6 +568,81 @@ def test_personal_management_identity_delta_allows_only_the_exact_first_transiti
     )
 
     assert result.returncode == expected_returncode, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("previous_web_identity_count", "expected_returncode", "expected_delete"),
+    [(0, 0, True), (1, 1, False), (2, 1, False), (3, 0, False)],
+)
+def test_personal_management_rollback_removes_only_complete_forward_web_set(
+    tmp_path: Path,
+    previous_web_identity_count: int,
+    expected_returncode: int,
+    expected_delete: bool,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    start = runbook.index("remove_forward_only_web_resources_for_rollback() {")
+    end = runbook.index("\n}\n\nassert_forward_storage_lineage_contract", start) + 2
+    function_source = runbook[start:end]
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    previous = tmp_path / "previous-identities.txt"
+    web_identities = [
+        '["apps/v1","Deployment","loom-dev","loom-personal-dev-web"]',
+        '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-web-ingress"]',
+        '["v1","Service","loom-dev","loom-personal-dev-web"]',
+    ]
+    previous.write_text(
+        "\n".join(web_identities[:previous_web_identity_count]) + "\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    kubectl_log = tmp_path / "kubectl.log"
+    fake_kubectl = fake_bin / "kubectl"
+    fake_kubectl.write_text(
+        '#!/bin/sh\nset -eu\nprintf "%s\\n" "$*" > "$KUBECTL_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_kubectl.chmod(0o755)
+    script = (
+        "set -euo pipefail\n"
+        + function_source
+        + "\n"
+        + 'render_identity_set() { cat "$1"; }\n'
+        + 'evidence_dir="$1"\n'
+        + 'previous_shadow_render="$2"\n'
+        + 'kubeconfig="$3"\n'
+        + "remove_forward_only_web_resources_for_rollback\n"
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "rollback-web-test",
+            str(evidence_dir),
+            str(previous),
+            str(tmp_path / "kubeconfig"),
+        ],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "KUBECTL_LOG": str(kubectl_log),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    assert kubectl_log.exists() is expected_delete
+    if expected_delete:
+        command = kubectl_log.read_text(encoding="utf-8")
+        assert "deployment.apps/loom-personal-dev-web" in command
+        assert "service/loom-personal-dev-web" in command
+        assert "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress" in command
+        assert "--ignore-not-found --wait=true --timeout=300s" in command
 
 
 @pytest.mark.parametrize(
@@ -1077,7 +1156,7 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert '(.spec | has("egress") | not)' in runbook
     assert runbook.count('(.spec.ingress[0] | has("from") | not)') >= 2
     assert '.spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]' in runbook
-    assert '--proto \'=https\' --tlsv1.2' in runbook
+    assert "--proto '=https' --tlsv1.2" in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
 
 

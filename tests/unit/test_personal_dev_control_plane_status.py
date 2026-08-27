@@ -136,11 +136,12 @@ _DEPLOYMENTS = (
 
 def _release_value() -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+            "loom_web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "b" * 64,
             "personal_dev_builder": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "4" * 64
             ),
@@ -365,7 +366,10 @@ def _healthy_fixture(
                 }
             )
             generated.append(_pod_for(item, "0", phase="Running"))
-        elif kind == "Deployment" and name == "loom-personal-dev-management":
+        elif kind == "Deployment" and name in {
+            "loom-personal-dev-management",
+            "loom-personal-dev-web",
+        }:
             item["status"] = {
                 "observedGeneration": 1,
                 "replicas": 1,
@@ -744,9 +748,7 @@ def _with_statefulset_ordinals(
 ) -> RenderedPersonalDevControlPlane:
     documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
     statefulset = next(
-        item
-        for item in documents
-        if _identity(item) == ("StatefulSet", statefulset_name)
+        item for item in documents if _identity(item) == ("StatefulSet", statefulset_name)
     )
     statefulset["spec"]["replicas"] = replicas
     statefulset["spec"]["ordinals"] = {"start": start}
@@ -767,9 +769,7 @@ def _with_extra_statefulset_claim_template(
 ) -> RenderedPersonalDevControlPlane:
     documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
     statefulset = next(
-        item
-        for item in documents
-        if _identity(item) == ("StatefulSet", statefulset_name)
+        item for item in documents if _identity(item) == ("StatefulSet", statefulset_name)
     )
     claim_template = copy.deepcopy(statefulset["spec"]["volumeClaimTemplates"][0])
     claim_template["metadata"]["name"] = claim_name
@@ -837,10 +837,11 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 31, "ready": True},
+            {"name": "namespaced-resources", "observed": 35, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
+            {"name": "web", "observed": 1, "ready": True},
         ],
         "input_sha256": expected.input_sha256,
         "manager_ceiling": 0,
@@ -1356,9 +1357,7 @@ def _exact_builder_namespace() -> dict[str, object]:
         "metadata": {
             "name": name,
             "labels": {
-                "app.kubernetes.io/managed-by": (
-                    "loom-personal-dev-builder-controller"
-                ),
+                "app.kubernetes.io/managed-by": ("loom-personal-dev-builder-controller"),
                 "app.kubernetes.io/part-of": "loom",
                 "kubernetes.io/metadata.name": name,
                 "loom.dev/candidate": "c" * 12,
@@ -1888,10 +1887,11 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 30, "ready": True},
+            {"name": "namespaced-resources", "observed": 34, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
+            {"name": "web", "observed": 1, "ready": True},
         ],
         "input_sha256": expected.input_sha256,
         "manager_ceiling": 0,
@@ -1976,14 +1976,12 @@ def test_status_accepts_installed_lineage_digests_on_generated_stateful_claims(
     generated_claims = [
         item
         for item in _items(runner, _NAMESPACED)
-        if item["kind"] == "PersistentVolumeClaim"
-        and item["metadata"]["name"].startswith("data-")
+        if item["kind"] == "PersistentVolumeClaim" and item["metadata"]["name"].startswith("data-")
     ]
 
     assert len(generated_claims) == 2
     assert all(
-        claim["metadata"]["annotations"]["loom.dev/render-input-sha256"]
-        != expected.input_sha256
+        claim["metadata"]["annotations"]["loom.dev/render-input-sha256"] != expected.input_sha256
         for claim in generated_claims
     )
     assert all(
@@ -2005,8 +2003,7 @@ def test_shadow_status_rejects_plan_digest_on_generated_stateful_claim(
     generated_claim = next(
         item
         for item in _items(runner, _NAMESPACED)
-        if item["kind"] == "PersistentVolumeClaim"
-        and item["metadata"]["name"].startswith("data-")
+        if item["kind"] == "PersistentVolumeClaim" and item["metadata"]["name"].startswith("data-")
     )
     generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = "a" * 32
     generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "a" * 64
@@ -2024,15 +2021,10 @@ def test_acceptance_status_rejects_plan_digest_on_generated_stateful_claim(
     generated_claim = next(
         item
         for item in _items(runner, _NAMESPACED)
-        if item["kind"] == "PersistentVolumeClaim"
-        and item["metadata"]["name"].startswith("data-")
+        if item["kind"] == "PersistentVolumeClaim" and item["metadata"]["name"].startswith("data-")
     )
-    generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = (
-        plan.sha256[:32]
-    )
-    generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = (
-        plan.sha256
-    )
+    generated_claim["metadata"]["labels"]["loom.dev/acceptance-plan-sha256"] = plan.sha256[:32]
+    generated_claim["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = plan.sha256
 
     result = _observe_acceptance(expected, plan, runner)
 
@@ -2062,6 +2054,7 @@ def test_healthy_shadow_accepts_generic_namespace_list_from_kubectl(
         ("shared-object-missing", "resource_inventory_drift"),
         ("statefulset-not-ready", "storage_not_ready"),
         ("deployment-not-ready", "management_not_ready"),
+        ("web-not-ready", "web_not_ready"),
         ("migration-missing", "migration_missing"),
         ("migration-failed", "migration_failed"),
         ("migration-running", "migration_incomplete"),
@@ -2120,6 +2113,13 @@ def test_shadow_status_matrix_reports_stable_sorted_blockers(
             _NAMESPACED,
             "Deployment",
             "loom-personal-dev-management",
+        )["status"]["availableReplicas"] = 0
+    elif mutation == "web-not-ready":
+        _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-web",
         )["status"]["availableReplicas"] = 0
     elif mutation == "migration-missing":
         namespaced[:] = [item for item in namespaced if item["kind"] != "Job"]
@@ -2316,7 +2316,7 @@ def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -
     assert result.ready is True
     assert result.blockers == ()
     components = {component.name: component for component in result.components}
-    assert components["namespaced-resources"].observed == 32
+    assert components["namespaced-resources"].observed == 36
 
 
 @pytest.mark.parametrize(

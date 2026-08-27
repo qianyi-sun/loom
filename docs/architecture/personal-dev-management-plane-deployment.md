@@ -102,6 +102,10 @@ namespace unless Kubernetes requires cluster scope:
   [scanner-cache preparation architecture](personal-dev-scanner-cache-preparation.md);
 - `loom-service` as the management API and lifecycle reconciler, using the
   trusted release's immutable service image;
+- the existing Loom React SPA as `loom-personal-dev-web`, using the trusted
+  release's immutable Web image. The public Ingress sends `/api` to the
+  management Service and `/` to this stateless Web Service, so `/auth/reset`
+  and the other account routes use the single existing frontend and REST API;
 - `loom-personal-dev-activation-agent`, using its separately published immutable
   image and private signing authority;
 - service accounts and least-privilege RBAC for the management service,
@@ -124,9 +128,9 @@ namespace unless Kubernetes requires cluster scope:
   legacy `ingress_controller_source_cidrs` profile input is accepted only so a
   preserved rollback profile remains loadable and does not affect rendering;
   and
-- internal Services plus one operator-configured management API Ingress. No
-  shared Control Plane, Gateway, worker, family orchestrator, pipeline
-  orchestrator, or web Deployment is rendered.
+- internal Services plus one operator-configured public Ingress with the exact
+  `/api` management and `/` Web path split. No shared Control Plane, Gateway,
+  worker, family orchestrator, or pipeline orchestrator is rendered.
 
 The personal builder image is not a long-lived Deployment. The management
 service supplies its exact immutable reference to attempt-scoped Jobs. The
@@ -215,10 +219,11 @@ replacement, or in-place races. Its fixed invariants are:
 The render command requires complete digest references for:
 
 - `loom-service`;
+- `loom-web`, represented by `loom_web` in trusted-release schema 3;
 - `loom-personal-dev-builder`;
 - `loom-personal-dev-activation-agent`;
 - `loom-personal-dev-scanner-cache`, represented by
-  `personal_dev_scanner_cache` in trusted-release schema 2;
+  `personal_dev_scanner_cache` since trusted-release schema 2;
 - PostgreSQL; and
 - MinIO plus the separate MinIO client sidecar used for bounded tenant
   administration.
@@ -229,6 +234,10 @@ trusted release record binds the exact source commit, source tree, per-platform
 members, final multi-architecture digests, checked-in scanner lock, scanner
 binary, database files and metadata, and framed cache identity. Every managed
 workload records the canonical render-input digest and trusted-release digest.
+Schema 3 is the current forward format. The loader retains narrow schema-1
+profile/schema-2 release compatibility only to re-render and verify a preserved
+pre-Web rollback manifest; it never synthesizes a Web image or changes the old
+API-only route.
 The final YAML digest is external evidence because embedding it in the YAML
 itself would be a self-referential hash; the later acceptance plan binds that
 external digest.

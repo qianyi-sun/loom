@@ -59,11 +59,12 @@ def _scanner_value() -> dict[str, str]:
 
 def _release_value() -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+            "loom_web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "b" * 64,
             "personal_dev_builder": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "4" * 64
             ),
@@ -223,9 +224,7 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         release.scanner.java_database_metadata_sha256
     )
     assert plan.quotas.per_owner_aggregate_min_slots == 8
-    assert str(plan.acceptance_owner.user_id) == (
-        "00000000-0000-0000-0000-000000000301"
-    )
+    assert str(plan.acceptance_owner.user_id) == ("00000000-0000-0000-0000-000000000301")
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
     validate_personal_dev_acceptance_plan(

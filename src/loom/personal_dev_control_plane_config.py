@@ -28,6 +28,7 @@ PERSONAL_NAMESPACE_PREFIX = "loom-dev-"
 REQUIRED_POOLS = {"oldlab": "x86_64", "gb10": "arm64"}
 REQUIRED_IMAGE_KEYS = {
     "loom_service",
+    "loom_web",
     "personal_dev_builder",
     "personal_dev_activation_agent",
     "personal_dev_scanner_cache",
@@ -322,7 +323,9 @@ class _NetworkInput(_StrictModel):
             networks.append(network)
         if len({str(network) for network in networks}) != len(networks):
             raise ValueError("ingress controller source CIDRs must be unique")
-        if value != [str(network) for network in sorted(networks, key=lambda item: int(item.network_address))]:
+        if value != [
+            str(network) for network in sorted(networks, key=lambda item: int(item.network_address))
+        ]:
             raise ValueError("ingress controller source CIDRs must be in canonical order")
         return value
 
@@ -406,11 +409,12 @@ class _ResourcesInput(_StrictModel):
     minio: _ResourceEnvelopeInput
     migration: _ResourceEnvelopeInput
     management: _ResourceEnvelopeInput
+    web: _ResourceEnvelopeInput | None = None
     activation: _ResourceEnvelopeInput
 
 
 class _ProfileInput(_StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     namespace: str
     personal_namespace_prefix: str
     min_slots_default: Literal[0]
@@ -464,6 +468,8 @@ class _ProfileInput(_StrictModel):
 
     @model_validator(mode="after")
     def _profile_is_exact_shadow(self) -> _ProfileInput:
+        if (self.schema_version == 2) != (self.resources.web is not None):
+            raise ValueError("personal-dev web resources do not match profile schema")
         observed = {item.pool_id: item.architecture for item in self.pools}
         if len(observed) != len(self.pools) or observed != REQUIRED_POOLS:
             raise ValueError("personal-dev pools must be exactly OLDLAB and GB10")
@@ -478,6 +484,7 @@ class _ProfileInput(_StrictModel):
 
 class _ImagesInput(_StrictModel):
     loom_service: str
+    loom_web: str | None = None
     personal_dev_builder: str
     personal_dev_activation_agent: str
     personal_dev_scanner_cache: str
@@ -489,13 +496,12 @@ class _ImagesInput(_StrictModel):
     def _images_are_exact_and_distinct(self) -> _ImagesInput:
         repositories = {
             "loom_service": "ghcr.io/qianyi-sun/loom-service",
+            "loom_web": "ghcr.io/qianyi-sun/loom-web",
             "personal_dev_builder": "ghcr.io/qianyi-sun/loom-personal-dev-builder",
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent"
             ),
-            "personal_dev_scanner_cache": (
-                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache"
-            ),
+            "personal_dev_scanner_cache": ("ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache"),
             "postgres": "docker.io/library/postgres",
             "minio": "quay.io/minio/minio",
             "minio_client": "quay.io/minio/mc",
@@ -503,6 +509,8 @@ class _ImagesInput(_StrictModel):
         digests: list[str] = []
         for key, repository in repositories.items():
             reference = getattr(self, key)
+            if reference is None:
+                continue
             prefix = f"{repository}@sha256:"
             if not reference.startswith(prefix):
                 raise ValueError("trusted image repository is invalid")
@@ -560,12 +568,18 @@ class _TrustedScannerInput(_StrictModel):
 
 
 class _TrustedReleaseInput(_StrictModel):
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     source_sha: str
     source_tree: str
     images: _ImagesInput
     scanner: _TrustedScannerInput
     release_evidence_sha256: str
+
+    @model_validator(mode="after")
+    def _web_image_matches_schema(self) -> _TrustedReleaseInput:
+        if (self.schema_version == 3) != (self.images.loom_web is not None):
+            raise ValueError("trusted web image does not match release schema")
+        return self
 
     @field_validator("source_sha", "source_tree")
     @classmethod
@@ -949,6 +963,7 @@ class PersonalDevControlPlaneResources:
     minio: ResourceEnvelope
     migration: ResourceEnvelope
     management: ResourceEnvelope
+    web: ResourceEnvelope | None
     activation: ResourceEnvelope
 
 
@@ -992,7 +1007,14 @@ class PersonalDevControlPlaneProfile:
             "protocol_versions": dict(sorted(self.protocol_versions.items())),
             "resources": {
                 name: _dataclass_value(getattr(self.resources, name))
-                for name in ("activation", "management", "migration", "minio", "postgres")
+                for name in (
+                    "activation",
+                    "management",
+                    "migration",
+                    "minio",
+                    "postgres",
+                    *(("web",) if self.resources.web is not None else ()),
+                )
             },
             "schema_version": self.schema_version,
             "storage": _dataclass_value(self.storage),
@@ -1005,6 +1027,7 @@ class PersonalDevControlPlaneProfile:
 @dataclass(frozen=True, slots=True)
 class PersonalDevTrustedImages:
     loom_service: str
+    loom_web: str | None
     personal_dev_builder: str
     personal_dev_activation_agent: str
     personal_dev_scanner_cache: str
@@ -1036,8 +1059,11 @@ class PersonalDevTrustedRelease:
     release_evidence_sha256: str
 
     def canonical_value(self) -> dict[str, Any]:
+        images = _dataclass_value(self.images)
+        if self.images.loom_web is None:
+            images.pop("loom_web")
         return {
-            "images": _dataclass_value(self.images),
+            "images": images,
             "release_evidence_sha256": self.release_evidence_sha256,
             "scanner": _dataclass_value(self.scanner),
             "schema_version": self.schema_version,
@@ -1408,6 +1434,11 @@ def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPla
             minio=_resource_envelope(parsed.resources.minio),
             migration=_resource_envelope(parsed.resources.migration),
             management=_resource_envelope(parsed.resources.management),
+            web=(
+                _resource_envelope(parsed.resources.web)
+                if parsed.resources.web is not None
+                else None
+            ),
             activation=_resource_envelope(parsed.resources.activation),
         ),
         pools=tuple(
@@ -1731,8 +1762,7 @@ def _validate_personal_dev_enabled_plan(
         or plan.builder.scanner_binary_sha256 != release.scanner.binary_sha256
         or plan.builder.scanner_cache_identity_sha256 != release.scanner.cache_identity_sha256
         or plan.builder.scanner_database_sha256 != release.scanner.database_sha256
-        or plan.builder.scanner_database_metadata_sha256
-        != release.scanner.database_metadata_sha256
+        or plan.builder.scanner_database_metadata_sha256 != release.scanner.database_metadata_sha256
         or plan.builder.scanner_java_database_sha256 != release.scanner.java_database_sha256
         or plan.builder.scanner_java_database_metadata_sha256
         != release.scanner.java_database_metadata_sha256

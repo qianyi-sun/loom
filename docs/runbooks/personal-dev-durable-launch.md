@@ -198,12 +198,14 @@ backup/restore, storage-lineage, migration, scanner-cache, RuntimeClass,
 global-manager, source, and kubeconfig interlocks. Do not shorten them to the
 illustrative observations above.
 
-## 3. Prove DNS, TLS, and management ingress before enablement
+## 3. Prove DNS, TLS, Web, and API ingress before enablement
 
-The shadow already renders the management Ingress, so DNS and certificate
-readiness can be established without enabling personal mutation. Record the
-reviewed DNS answers and require the exact cert-manager Certificate and Ingress
-host before the operational apply.
+The shadow already renders the public Web and API Ingress, so DNS, certificate,
+and account-action route readiness can be established without enabling personal
+mutation. Record the reviewed DNS answers and require the exact cert-manager
+Certificate, Web NetworkPolicy, and Ingress path split before the operational
+apply. The Web image is the existing Loom SPA; this package does not implement
+a second account or reset flow.
 
 ```bash
 management_host="$(python3 -c '
@@ -243,11 +245,25 @@ jq -e '
   .spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]
 ' "$evidence_dir/management.network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-web-ingress -o json \
+  > "$evidence_dir/web.network-policy.json"
+jq -e '
+  .spec.podSelector.matchLabels == {"app":"loom-personal-dev-web"} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  (.spec.ingress[0] | has("from") | not) and
+  .spec.ingress == [{ports:[{port:8080,protocol:"TCP"}]}]
+' "$evidence_dir/web.network-policy.json" >/dev/null
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
   .spec.rules == [{host:$host,http:.spec.rules[0].http}] and
-  .spec.tls[0].hosts == [$host]
+  .spec.tls[0].hosts == [$host] and
+  .spec.rules[0].http.paths == [
+    {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
+    {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
+  ]
 ' "$evidence_dir/management.ingress.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   certificate/loom-personal-dev-management-tls -o json \
@@ -257,6 +273,17 @@ jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' \
 curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
   "https://$management_host/api/v1/health" \
   > "$evidence_dir/management.shadow-health.json"
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  "https://$management_host/loom-frontend-config.json" \
+  > "$evidence_dir/management.frontend-config.json"
+jq -e --arg origin "https://$management_host" '
+  .environment == "development" and .routePath == "" and
+  .apiBase == "" and .apiRouteBase == ($origin + "/api")
+' "$evidence_dir/management.frontend-config.json" >/dev/null
+curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  "https://$management_host/auth/reset" \
+  > "$evidence_dir/management.reset-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.reset-spa.html"
 ```
 
 Do not use `--resolve`, `-k`, an alternate CA, or a local port-forward as DNS,
@@ -344,6 +371,8 @@ chmod 0600 "$evidence_dir/operational.server-side-apply.txt"
 
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-activation-agent --timeout=300s
 
@@ -539,6 +568,8 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
 
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
 test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   deployment/loom-personal-dev-activation-agent \
   -o jsonpath='{.spec.replicas}')" = 0

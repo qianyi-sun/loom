@@ -2240,6 +2240,7 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.publish-manifest.result == 'success' &&
       contains(needs.plan.outputs.images, '"image":"service"') &&
+      contains(needs.plan.outputs.images, '"image":"web"') &&
       contains(needs.plan.outputs.images, '"image":"personal-dev-builder"') &&
       contains(needs.plan.outputs.images, '"image":"personal-dev-activation-agent"') &&
       contains(needs.plan.outputs.images, '"image":"personal-dev-scanner-cache"')
@@ -2265,6 +2266,18 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: image-release-record-service-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact web AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-web-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact web ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-web-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: /tmp/loom-personal-dev-release-records
 
       - name: Download exact personal-dev-builder AMD64 architecture evidence
@@ -2309,7 +2322,7 @@ jobs:
           name: personal-dev-scanner-cache-assets-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: /tmp/loom-personal-dev-scanner-cache-assets
 
-      - name: Read back seven immutable image indexes
+      - name: Read back eight immutable image indexes
         shell: bash
         env:
           GHCR_ACTOR: ${{ github.actor }}
@@ -2324,6 +2337,7 @@ jobs:
           owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           for binding in \
             service=loom-service \
+            web=loom-web \
             personal-dev-builder=loom-personal-dev-builder \
             personal-dev-activation-agent=loom-personal-dev-activation-agent \
             personal-dev-scanner-cache=loom-personal-dev-scanner-cache; do
@@ -2468,7 +2482,7 @@ jobs:
             --runner-environment "$RUNNER_ENVIRONMENT" \
             --output-dir /tmp/loom-personal-dev-trusted-release
 
-      - name: Verify four protected Loom manifest attestations
+      - name: Verify five protected Loom manifest attestations
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2478,11 +2492,15 @@ jobs:
           set -euo pipefail
           tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
           evidence=/tmp/loom-personal-dev-trusted-release/trusted-release-evidence.json
-          for component in service personal-dev-builder personal-dev-activation-agent personal-dev-scanner-cache; do
+          for component in service web personal-dev-builder personal-dev-activation-agent personal-dev-scanner-cache; do
             case "$component" in
               service)
                 image_name=loom-service
                 dockerfile=deploy/Dockerfile.service
+                ;;
+              web)
+                image_name=loom-web
+                dockerfile=deploy/Dockerfile.web
                 ;;
               personal-dev-builder)
                 image_name=loom-personal-dev-builder
