@@ -22,6 +22,12 @@ Git, GitHub protected checks.
 **Spec:**
 `docs/architecture/personal-dev-acceptance-authority-coexistence-design.md`
 
+**Reconciled protected base:**
+`6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`. This baseline intentionally
+includes #1585's management-ingress NetworkPolicy evidence and #1589's
+sequence-free PostgreSQL backup compatibility. The v2 durable procedure must
+retain the same management-ingress evidence.
+
 ## Global constraints
 
 - The global executable-new-capacity ceiling remains exactly `0`.
@@ -114,7 +120,7 @@ Git, GitHub protected checks.
   concurrent-owner evidence-directory placeholder.
 
   Restore `personal-dev-zero-capacity-acceptance.md` exactly from protected base
-  `82ac07ea594734d70d31351dab5f8935c8e2d5e9`. Use `apply_patch` for both file
+  `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`. Use `apply_patch` for both file
   edits. Do not weaken or branch either procedure at runtime.
 
 - [ ] **Step 4: Verify v1 bytes and v2 boundaries**
@@ -152,7 +158,7 @@ Git, GitHub protected checks.
 
 - Preserves: `docs/runbooks/personal-dev-durable-launch.md` as the exact
   sole-owner launch procedure with SHA-256
-  `7c8da975d9eb807ea727d44f57d64afaa9b420724c60015057a2215109247601`.
+  `46ca8f8dcc0bdcc6f0a0ab673ad08921bb9e48d5585bbd90f51a07515ec87c8f`.
 - Produces: `docs/runbooks/personal-dev-multi-owner-durable-launch.md`, which
   verifies the schema-v2 plan/result before any operational render or apply.
 - Routes: #1280 to the existing paths and second-owner onboarding to the new
@@ -166,7 +172,7 @@ Git, GitHub protected checks.
   def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
       assert _document_sha256(
           "docs/runbooks/personal-dev-durable-launch.md"
-      ) == "7c8da975d9eb807ea727d44f57d64afaa9b420724c60015057a2215109247601"
+      ) == "46ca8f8dcc0bdcc6f0a0ab673ad08921bb9e48d5585bbd90f51a07515ec87c8f"
   ```
 
   Restore the protected-base durable-launch assertions for the existing path.
@@ -212,7 +218,7 @@ Git, GitHub protected checks.
   byte-identical to the reviewed v2 procedure.
 
   Restore `personal-dev-durable-launch.md` exactly from protected base
-  `82ac07ea594734d70d31351dab5f8935c8e2d5e9` using `apply_patch`.
+  `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6` using `apply_patch`.
 
 - [ ] **Step 4: Update indexes, architecture, design, and the original plan**
 
@@ -307,7 +313,7 @@ Git, GitHub protected checks.
 
 - [ ] **Step 3: Review the complete protected-base diff until clean**
 
-  Review `82ac07ea594734d70d31351dab5f8935c8e2d5e9..HEAD` for:
+  Review `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6..HEAD` for:
 
   - any changed byte in either protected sole-owner runbook;
   - a v1-to-v2 reinterpretation or authority-selection flag;

@@ -1617,7 +1617,7 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
 def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
     assert _document_sha256(
         "docs/runbooks/personal-dev-durable-launch.md"
-    ) == "7c8da975d9eb807ea727d44f57d64afaa9b420724c60015057a2215109247601"
+    ) == "46ca8f8dcc0bdcc6f0a0ab673ad08921bb9e48d5585bbd90f51a07515ec87c8f"
 
 
 @pytest.mark.parametrize(
@@ -1741,9 +1741,12 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert runbook.count('"${operational_evidence_args[@]}"') == 3
     assert 'test "$solver_port" = 8089' in runbook
     assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
+    assert "networkpolicy/loom-personal-dev-management-ingress" in runbook
     assert '{"acme.cert-manager.io/http01-solver":"true"}' in runbook
+    assert '{"app":"loom-personal-dev-management"}' in runbook
     assert '(.spec | has("egress") | not)' in runbook
-    assert '(.spec.ingress[0] | has("from") | not)' in runbook
+    assert runbook.count('(.spec.ingress[0] | has("from") | not)') >= 2
+    assert '.spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]' in runbook
     assert '--proto \'=https\' --tlsv1.2' in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
     assert "schema-v1 single-owner record remains historical compatibility" in runbook

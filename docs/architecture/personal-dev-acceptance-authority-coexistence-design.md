@@ -117,7 +117,7 @@ schema it permits.
 Repository tests must prove:
 
 1. Both existing sole-owner runbooks are byte-identical to protected base
-   `82ac07ea594734d70d31351dab5f8935c8e2d5e9`.
+   `6eb36e77dcd7b5648a68e03ca7eb566b2be56db6`.
 2. New v2 runbooks contain all two-owner concurrency, cross-owner isolation,
    retained-data recovery, final cleanup, strict result verification, and
    inert-rollback boundaries previously reviewed for #1583.
@@ -129,6 +129,12 @@ Repository tests must prove:
 5. The complete protected-base diff contains no worker/task/Slurm authority,
    nonzero capacity transition, Secret-like tracked path, `docs/superpowers`,
    or workflow privilege escalation.
+
+The protected base intentionally includes #1585's explicit
+`loom-personal-dev-management-ingress` NetworkPolicy evidence in the
+sole-owner durable procedure. The multi-owner durable procedure carries the
+same evidence. It also preserves #1589's compatibility with canonical
+table-only PostgreSQL backup inventories.
 
 After local verification and iterative review produce one complete clean pass,
 the corrected exact head must pass `repository-checks`, `images-gate`,
