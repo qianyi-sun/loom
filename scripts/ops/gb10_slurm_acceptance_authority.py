@@ -899,8 +899,10 @@ def _handle_authority_signal(signum: int, _frame: object) -> None:
 
 def _install_signal_handlers() -> dict[int, Any]:
     previous: dict[int, Any] = {}
-    for signum in (signal.SIGTERM, signal.SIGINT):
+    handled = (signal.SIGTERM, signal.SIGINT)
+    for signum in handled:
         previous[signum] = signal.signal(signum, _handle_authority_signal)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, set(handled))
     return previous
 
 

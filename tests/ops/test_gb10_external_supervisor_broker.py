@@ -25,6 +25,7 @@ from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport impo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BROKER_PATH = REPO_ROOT / "scripts/ops/gb10_external_supervisor_broker.py"
+AUTHORITY_PATH = REPO_ROOT / "scripts/ops/gb10_slurm_acceptance_authority.py"
 SPEC = importlib.util.spec_from_file_location("gb10_external_supervisor_broker", BROKER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 broker = importlib.util.module_from_spec(SPEC)
@@ -268,13 +269,101 @@ print(json.dumps({{"runuser": runuser.returncode, "srun": srun.returncode}}))
     assert json.loads(result.stdout) == {"runuser": 1, "srun": 0}
 
 
+def _detached_authority_command(
+    *,
+    authority_started: Path,
+    detached_started: Path,
+    escaped_marker: Path,
+    cleanup_evidence: Path,
+) -> list[str]:
+    detached = (
+        "import pathlib,sys,time; "
+        "pathlib.Path(sys.argv[1]).write_text('started'); "
+        "time.sleep(1.2); pathlib.Path(sys.argv[2]).write_text('escaped')"
+    )
+    authority = f"""
+import importlib.util
+import pathlib
+import subprocess
+import sys
+import time
+
+authority_path = pathlib.Path(sys.argv[1])
+authority_started, detached_started, escaped_marker, cleanup_evidence = map(
+    pathlib.Path, sys.argv[2:]
+)
+spec = importlib.util.spec_from_file_location("nested_acceptance_authority", authority_path)
+if spec is None or spec.loader is None:
+    raise SystemExit(4)
+authority = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority)
+child = subprocess.Popen(
+    [sys.executable, "-c", {detached!r}, str(detached_started), str(escaped_marker)],
+    start_new_session=True,
+)
+authority._ACTIVE_PROCESS = child
+authority._install_signal_handlers()
+deadline = time.monotonic() + 2
+while not detached_started.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not detached_started.exists():
+    raise SystemExit(3)
+authority_started.write_text("started")
+try:
+    time.sleep(30)
+except authority.AuthorityInterruptedError:
+    child.wait(timeout=1)
+finally:
+    authority._ACTIVE_PROCESS = None
+    cleanup_evidence.write_text("scancel_job_id=123\\nsqueue_readback=\\n")
+"""
+    return [
+        sys.executable,
+        "-c",
+        authority,
+        str(AUTHORITY_PATH),
+        str(authority_started),
+        str(detached_started),
+        str(escaped_marker),
+        str(cleanup_evidence),
+    ]
+
+
+def test_broker_timeout_allows_detached_authority_cleanup_before_reaping(
+    tmp_path: Path,
+) -> None:
+    authority_started = tmp_path / "authority-started"
+    detached_started = tmp_path / "detached-started"
+    escaped_marker = tmp_path / "escaped-detached-child"
+    cleanup_evidence = tmp_path / "cleanup-evidence"
+
+    with pytest.raises(broker.BrokerError, match="failed safely"):
+        broker._run(
+            _detached_authority_command(
+                authority_started=authority_started,
+                detached_started=detached_started,
+                escaped_marker=escaped_marker,
+                cleanup_evidence=cleanup_evidence,
+            ),
+            timeout=1,
+        )
+
+    time.sleep(0.5)
+    assert authority_started.exists()
+    assert cleanup_evidence.read_text(encoding="utf-8") == (
+        "scancel_job_id=123\nsqueue_readback=\n"
+    )
+    assert not escaped_marker.exists()
+
+
 def test_broker_timeout_kills_and_reaps_the_authority_process_group(tmp_path: Path) -> None:
     orphan_marker = tmp_path / "escaped-authority-child"
     child = (
         "import pathlib,sys,time; time.sleep(1.2); pathlib.Path(sys.argv[1]).write_text('escaped')"
     )
     parent = (
-        "import subprocess,sys,time; "
+        "import signal,subprocess,sys,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[1]]); "
         "time.sleep(5)"
     )
@@ -290,35 +379,38 @@ def test_broker_timeout_kills_and_reaps_the_authority_process_group(tmp_path: Pa
     assert not orphan_marker.exists()
 
 
+@pytest.mark.parametrize(
+    "broker_signal",
+    (signal.SIGTERM, signal.SIGINT),
+    ids=("sigterm", "sigint"),
+)
 def test_broker_termination_kills_and_reaps_the_authority_process_group(
     tmp_path: Path,
+    broker_signal: signal.Signals,
 ) -> None:
-    started_marker = tmp_path / "authority-started"
-    orphan_marker = tmp_path / "escaped-authority-child"
-    script = r"""
+    authority_started = tmp_path / "authority-started"
+    detached_started = tmp_path / "detached-started"
+    escaped_marker = tmp_path / "escaped-detached-child"
+    cleanup_evidence = tmp_path / "cleanup-evidence"
+    authority_command = _detached_authority_command(
+        authority_started=authority_started,
+        detached_started=detached_started,
+        escaped_marker=escaped_marker,
+        cleanup_evidence=cleanup_evidence,
+    )
+    script = f"""
 import importlib.util
-import pathlib
 import sys
 
-broker_path, started_path, orphan_path = sys.argv[1:]
+broker_path = sys.argv[1]
 spec = importlib.util.spec_from_file_location("signal_broker", broker_path)
 assert spec is not None and spec.loader is not None
 broker = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = broker
 spec.loader.exec_module(broker)
 broker._install_signal_handlers()
-child = (
-    "import pathlib,sys,time; time.sleep(0.4); "
-    "pathlib.Path(sys.argv[1]).write_text('escaped')"
-)
-parent = (
-    "import pathlib,subprocess,sys,time; "
-    "pathlib.Path(sys.argv[1]).write_text('started'); "
-    f"subprocess.Popen([sys.executable, '-c', {child!r}, sys.argv[2]]); "
-    "time.sleep(30)"
-)
 try:
-    broker._run([sys.executable, "-c", parent, started_path, orphan_path], timeout=30)
+    broker._run({authority_command!r}, timeout=30)
 except broker.BrokerError as exc:
     if "interrupted safely" not in str(exc):
         raise
@@ -331,8 +423,6 @@ raise SystemExit(3)
             "-c",
             script,
             str(BROKER_PATH),
-            str(started_marker),
-            str(orphan_marker),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -341,11 +431,13 @@ raise SystemExit(3)
     try:
         deadline = time.monotonic() + 5
         while (
-            not started_marker.exists() and process.poll() is None and time.monotonic() < deadline
+            not authority_started.exists()
+            and process.poll() is None
+            and time.monotonic() < deadline
         ):
             time.sleep(0.01)
-        assert started_marker.exists(), process.communicate(timeout=1)
-        process.send_signal(signal.SIGTERM)
+        assert authority_started.exists(), process.communicate(timeout=1)
+        process.send_signal(broker_signal)
         stdout, stderr = process.communicate(timeout=5)
     finally:
         if process.poll() is None:
@@ -354,7 +446,10 @@ raise SystemExit(3)
 
     assert process.returncode == 42, (stdout, stderr)
     time.sleep(0.5)
-    assert not orphan_marker.exists()
+    assert cleanup_evidence.read_text(encoding="utf-8") == (
+        "scancel_job_id=123\nsqueue_readback=\n"
+    )
+    assert not escaped_marker.exists()
 
 
 def test_broker_main_dispatches_capacity_without_candidate_runtime(

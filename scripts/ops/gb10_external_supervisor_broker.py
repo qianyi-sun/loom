@@ -53,6 +53,9 @@ _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_COMMAND_OUTPUT = 1024 * 1024
 _MAX_TREE_ENTRIES = 300_000
 _MAX_SYMLINK_HOPS = 40
+# Reserve cleanup inside the caller's hard timeout instead of extending it.
+_TERMINATION_WINDOW_SECONDS = 45.0
+_FORCED_REAP_SECONDS = 2.0
 _GB10_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 
 
@@ -65,13 +68,18 @@ class BrokerInterruptedError(BrokerError):
 
 
 _ACTIVE_PROCESS: subprocess.Popen[str] | None = None
+_ACTIVE_PROCESS_TERMINATING = False
 
 
 def _handle_broker_signal(signum: int, _frame: object) -> None:
+    global _ACTIVE_PROCESS_TERMINATING
     process = _ACTIVE_PROCESS
     if process is not None:
+        if _ACTIVE_PROCESS_TERMINATING:
+            return
+        _ACTIVE_PROCESS_TERMINATING = True
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
     raise BrokerInterruptedError(
@@ -91,16 +99,51 @@ def _restore_signal_handlers(previous: dict[int, Any]) -> None:
         signal.signal(signum, handler)
 
 
-def _kill_and_reap(process: subprocess.Popen[str]) -> None:
+def _close_process_pipes(process: subprocess.Popen[str]) -> None:
+    for stream in (process.stdout, process.stderr, process.stdin):
+        if stream is not None and not stream.closed:
+            stream.close()
+
+
+def _terminate_and_reap(
+    process: subprocess.Popen[str],
+    *,
+    timeout: float,
+    signal_already_sent: bool,
+) -> None:
+    global _ACTIVE_PROCESS_TERMINATING
+    _ACTIVE_PROCESS_TERMINATING = True
+    blocked = {signal.SIGTERM, signal.SIGINT}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.communicate()
+        if not signal_already_sent:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        forced_window = min(_FORCED_REAP_SECONDS, timeout / 4)
+        graceful_window = max(0.0, timeout - forced_window)
+        try:
+            process.communicate(timeout=graceful_window)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        retry_window = min(0.1, forced_window / 2)
+        try:
+            process.wait(timeout=max(0.0, forced_window - retry_window))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=retry_window)
+            except subprocess.TimeoutExpired as exc:
+                raise BrokerError("GB10 external supervisor command failed safely") from exc
+    finally:
+        _close_process_pipes(process)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,7 +548,7 @@ def _run(
     check: bool = True,
     run_as: tuple[int, int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    global _ACTIVE_PROCESS
+    global _ACTIVE_PROCESS, _ACTIVE_PROCESS_TERMINATING
     if not argv or any(not item or "\x00" in item for item in argv) or not 1 <= timeout <= 1800:
         raise BrokerError("GB10 external supervisor command is invalid")
     env = (
@@ -531,6 +574,8 @@ def _run(
         if (run_uid, run_gid) != (os.geteuid(), os.getegid()):
             privilege_identity = (run_uid, run_gid)
     process: subprocess.Popen[str] | None = None
+    termination_window = min(_TERMINATION_WINDOW_SECONDS, timeout / 2)
+    execution_timeout = timeout - termination_window
     try:
         blocked = {signal.SIGTERM, signal.SIGINT}
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
@@ -559,20 +604,32 @@ def _run(
                     extra_groups=(),
                 )
             _ACTIVE_PROCESS = process
+            _ACTIVE_PROCESS_TERMINATING = False
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=execution_timeout)
     except subprocess.TimeoutExpired:
         if process is not None:
-            _kill_and_reap(process)
+            _terminate_and_reap(
+                process,
+                timeout=termination_window,
+                signal_already_sent=_ACTIVE_PROCESS_TERMINATING,
+            )
         raise BrokerError("GB10 external supervisor command failed safely") from None
-    except BaseException:
+    except BaseException as exc:
         if process is not None:
-            _kill_and_reap(process)
+            _terminate_and_reap(
+                process,
+                timeout=termination_window,
+                signal_already_sent=(
+                    isinstance(exc, BrokerInterruptedError) and _ACTIVE_PROCESS_TERMINATING
+                ),
+            )
         raise
     finally:
         if _ACTIVE_PROCESS is process:
             _ACTIVE_PROCESS = None
+            _ACTIVE_PROCESS_TERMINATING = False
     if process is None:
         raise BrokerError("GB10 external supervisor command failed safely")
     result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
