@@ -1181,7 +1181,7 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_preserves_stop_and_au
     lowered = runbook.casefold()
 
     assert "separately reviewed concurrent-owner certification window" in lowered
-    assert "issue #1280" not in lowered
+    assert "1280" not in lowered
     assert "personal-dev-multi-owner-durable-launch.md" in runbook
 
     for phrase in (

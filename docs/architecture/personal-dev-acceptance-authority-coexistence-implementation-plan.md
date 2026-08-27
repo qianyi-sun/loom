@@ -108,8 +108,10 @@ Git, GitHub protected checks.
   its title, authority-scoping prose, and cross-runbook links so it identifies
   itself as the separately reviewed concurrent-owner procedure, contains no
   #1280-window authority claim, and points to
-  `personal-dev-multi-owner-durable-launch.md`. Keep every executable Bash block
-  byte-identical to the reviewed v2 procedure.
+  `personal-dev-multi-owner-durable-launch.md`. Keep every executable command
+  and control-flow boundary byte-identical to the reviewed v2 procedure; only
+  replace its #1280 evidence-directory placeholder with an explicit
+  concurrent-owner evidence-directory placeholder.
 
   Restore `personal-dev-zero-capacity-acceptance.md` exactly from protected base
   `82ac07ea594734d70d31351dab5f8935c8e2d5e9`. Use `apply_patch` for both file

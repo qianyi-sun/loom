@@ -54,7 +54,7 @@ exactly the aggregate release, its evidence, and its digest.
     set -euo pipefail
     umask 077
 
-    evidence_dir="<absolute-owner-only-outside-worktree-issue-1280-evidence-directory>"
+    evidence_dir="<absolute-owner-only-outside-worktree-concurrent-owner-evidence-directory>"
     trusted_release_artifact="<absolute-downloaded-personal-dev-trusted-release-run-<run>-attempt-<attempt>>"
     trusted_release="$trusted_release_artifact/trusted-release.json"
     trusted_release_evidence="$trusted_release_artifact/trusted-release-evidence.json"
