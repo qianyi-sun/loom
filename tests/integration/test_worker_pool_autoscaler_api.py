@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
@@ -21,12 +23,14 @@ from loom.db.schema import (
     ExecutionNodeCostRecord,
     ExecutionPriceSnapshot,
     ExecutionProvisioningAuthorization,
+    ExecutionResourceCalibration,
     ExecutionTargetPriceBinding,
     ServiceExecutionClass,
     ServiceExecutionTarget,
     Token,
     WorkerPoolAutoscalerPolicy,
 )
+from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -70,6 +74,7 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     with session_factory() as s:
+        s.execute(text("TRUNCATE TABLE execution_resource_calibrations CASCADE"))
         s.execute(delete(ExecutionProvisioningAuthorization))
         s.execute(delete(ExecutionCapacityObservation))
         s.execute(delete(ExecutionCapacityPolicy))
@@ -97,6 +102,7 @@ def clean_autoscaler_policies(postgres_url: str) -> Iterator[None]:
         yield
     finally:
         with session_factory() as s:
+            s.execute(text("TRUNCATE TABLE execution_resource_calibrations CASCADE"))
             s.execute(delete(ExecutionProvisioningAuthorization))
             s.execute(delete(ExecutionCapacityObservation))
             s.execute(delete(ExecutionCapacityPolicy))
@@ -303,13 +309,14 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
     postgres_url: str,
 ) -> None:
     now = datetime.now(UTC)
+    billing_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     engine = create_engine(postgres_url)
     with sessionmaker(engine)() as session:
         session.add(
             ServiceExecutionClass(
                 id="nebius-finance-api-class",
                 schema_version="loom.execution-class.v1",
-                spec_json={},
+                spec_json=NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json"),
                 spec_sha256="sha256:" + "a" * 64,
                 enabled=True,
             )
@@ -572,6 +579,179 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         assert over_quota_target["observation"]["provider_quota_nodes_headroom"] == 0
         assert "execution_capacity_provider_quota_nodes_exceeded" in over_quota_target["blockers"]
 
+        calibration_payload = {
+            "target_id": "nebius-finance-api",
+            "source_pool_id": "oldlab",
+            "source_architecture": "x86_64",
+            "resource_profile": "legacy-cpu-profile@1",
+            "candidate_sha": "c" * 40,
+            "source_version": "calibration-empty-1",
+            "window_started_at": (now - timedelta(days=15)).isoformat(),
+            "window_stopped_at": (now - timedelta(days=1)).isoformat(),
+        }
+        calibration = client.post(
+            "/admin/execution-resource-calibrations",
+            headers=headers,
+            json=calibration_payload,
+        )
+        assert calibration.status_code == 200, calibration.text
+        assert calibration.json()["created"] is True
+        assert calibration.json()["eligible"] is False
+        assert calibration.json()["trial_attempts"] == 0
+        assert calibration.json()["blockers"] == [
+            "resource_calibration_duration_insufficient",
+            "resource_calibration_high_concurrency_batch_missing",
+            "resource_calibration_trial_attempts_insufficient",
+        ]
+        calibration_replay = client.post(
+            "/admin/execution-resource-calibrations",
+            headers=headers,
+            json=calibration_payload,
+        )
+        assert calibration_replay.status_code == 200, calibration_replay.text
+        assert calibration_replay.json() == {**calibration.json(), "created": False}
+
+        rejected_binding = client.put(
+            "/admin/execution-resource-profile-bindings/nebius-finance-api",
+            headers=headers,
+            json={
+                "calibration_id": calibration.json()["id"],
+                "enabled": True,
+                "reason": "must reject insufficient evidence",
+            },
+        )
+        assert rejected_binding.status_code == 400, rejected_binding.text
+        assert "ineligible" in rejected_binding.json()["detail"]
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            with pytest.raises(DBAPIError, match="requires eligible calibration"):
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO execution_resource_profile_bindings
+                          (target_id, calibration_id, enabled, reason, version)
+                        VALUES (
+                          :target_id, :calibration_id, true,
+                          'direct database bypass attempt', 1
+                        )
+                        """
+                    ),
+                    {
+                        "target_id": "nebius-finance-api",
+                        "calibration_id": calibration.json()["id"],
+                    },
+                )
+            transaction.rollback()
+        disabled_binding = client.put(
+            "/admin/execution-resource-profile-bindings/nebius-finance-api",
+            headers=headers,
+            json={
+                "calibration_id": calibration.json()["id"],
+                "enabled": False,
+                "reason": "retain diagnostic snapshot only",
+            },
+        )
+        assert disabled_binding.status_code == 200, disabled_binding.text
+        assert disabled_binding.json()["enabled"] is False
+
+        profile_status = client.get(
+            "/admin/execution-resource-profile/status",
+            headers=headers,
+            params={"pool_id": "nebius-finance-api-pool"},
+        )
+        assert profile_status.status_code == 200, profile_status.text
+        profile_target = profile_status.json()["targets"][0]
+        assert profile_target["forecast_is_fresh"] is False
+        assert profile_target["observed_fit_slots"] == 0
+        assert profile_target["immediate_executable_slots"] == 0
+        assert profile_target["configured_scale_headroom_slots"] == 0
+        assert profile_target["configured_total_fit_slots"] == 0
+        assert "resource_profile_binding_unavailable" in profile_target["blockers"]
+        assert "resource_forecast_provider_quota_nodes_exhausted" in profile_target["blockers"]
+        assert "resource_calibration_trial_attempts_insufficient" in profile_target["blockers"]
+        assert profile_target["recent_calibrations"][0]["id"] == calibration.json()["id"]
+
+        eligible_calibration_id = uuid4()
+        with sessionmaker(engine)() as session:
+            session.add(
+                ExecutionResourceCalibration(
+                    id=eligible_calibration_id,
+                    target_id="nebius-finance-api",
+                    source_pool_id="oldlab",
+                    source_architecture="x86_64",
+                    resource_profile="measured-cpu-profile@2",
+                    candidate_sha="d" * 40,
+                    source_version="eligible-fixture-1",
+                    window_started_at=now - timedelta(days=15),
+                    window_stopped_at=now - timedelta(days=1),
+                    trial_attempts=1_000,
+                    distinct_tasks=100,
+                    usage_records=1_000,
+                    incomplete_attempts=0,
+                    evidence_duration_seconds=14 * 24 * 60 * 60,
+                    peak_batch_concurrency=100,
+                    throttled_attempts=0,
+                    oom_attempts=0,
+                    memory_limit_attempts=0,
+                    eligible=True,
+                    blockers_json=[],
+                    percentiles_json={},
+                    recommended_cpu_millis=2_000,
+                    recommended_memory_mib=4_096,
+                    recommended_ephemeral_storage_mib=8_192,
+                    recommended_pids=256,
+                    evidence_json={"schema_version": "test-only"},
+                    evidence_sha256="sha256:" + "d" * 64,
+                )
+            )
+            session.commit()
+        recovered_observation = client.post(
+            "/admin/execution-capacity-observations",
+            headers=collector_headers,
+            json={
+                **observation_payload,
+                "source_version": "snapshot-recovered",
+                "observed_at": (now + timedelta(seconds=2)).isoformat(),
+            },
+        )
+        assert recovered_observation.status_code == 200, recovered_observation.text
+        missing_acceptance_reason = client.put(
+            "/admin/execution-resource-profile-bindings/nebius-finance-api",
+            headers=headers,
+            json={
+                "calibration_id": str(eligible_calibration_id),
+                "enabled": True,
+                "reason": None,
+            },
+        )
+        assert missing_acceptance_reason.status_code == 400
+        assert "acceptance reason" in missing_acceptance_reason.json()["detail"]
+        enabled_binding = client.put(
+            "/admin/execution-resource-profile-bindings/nebius-finance-api",
+            headers=headers,
+            json={
+                "calibration_id": str(eligible_calibration_id),
+                "enabled": True,
+                "reason": "eligible fixed-candidate fixture",
+            },
+        )
+        assert enabled_binding.status_code == 200, enabled_binding.text
+        assert enabled_binding.json()["version"] == 2
+        fresh_profile_status = client.get(
+            "/admin/execution-resource-profile/status",
+            headers=headers,
+            params={"pool_id": "nebius-finance-api-pool"},
+        )
+        assert fresh_profile_status.status_code == 200, fresh_profile_status.text
+        fresh_forecast = fresh_profile_status.json()["targets"][0]
+        assert fresh_forecast["forecast_is_fresh"] is True
+        assert fresh_forecast["immediate_executable_slots"] == 21
+        assert fresh_forecast["configured_additional_nodes"] == 19
+        assert fresh_forecast["configured_slots_per_node"] == 32
+        assert fresh_forecast["configured_scale_headroom_slots"] == 608
+        assert fresh_forecast["configured_total_fit_slots"] == 629
+        assert fresh_forecast["blockers"] == []
+
         node_cost = client.post(
             "/admin/execution-node-cost-records",
             headers=headers,
@@ -580,15 +760,15 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
                 "price_snapshot_id": price_id,
                 "provider_record_id": "invoice-line-1",
                 "node_name": "provider-node-private-name",
-                "interval_started_at": "2026-08-26T02:00:00Z",
-                "interval_stopped_at": "2026-08-26T03:00:00Z",
+                "interval_started_at": (billing_day + timedelta(hours=2)).isoformat(),
+                "interval_stopped_at": (billing_day + timedelta(hours=3)).isoformat(),
                 "node_cpu_millis": 64_000,
                 "node_memory_mib": 262_144,
                 "node_ephemeral_storage_mib": 1_048_576,
                 "provider_billed_microusd": 1_000_000,
                 "billing_source": "nebius-invoice-export",
                 "billing_source_version": "invoice-2026-08",
-                "observed_at": "2026-08-26T04:00:00Z",
+                "observed_at": (billing_day + timedelta(hours=4)).isoformat(),
             },
         )
         assert node_cost.status_code == 200, node_cost.text
@@ -605,15 +785,15 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
                 "price_snapshot_id": price_id,
                 "provider_record_id": "invoice-line-cross-day",
                 "node_name": "provider-node-private-name",
-                "interval_started_at": "2026-08-26T23:30:00Z",
-                "interval_stopped_at": "2026-08-27T00:30:00Z",
+                "interval_started_at": (billing_day + timedelta(hours=23, minutes=30)).isoformat(),
+                "interval_stopped_at": (billing_day + timedelta(days=1, minutes=30)).isoformat(),
                 "node_cpu_millis": 64_000,
                 "node_memory_mib": 262_144,
                 "node_ephemeral_storage_mib": 1_048_576,
                 "provider_billed_microusd": 1_000_000,
                 "billing_source": "nebius-invoice-export",
                 "billing_source_version": "invoice-2026-08",
-                "observed_at": "2026-08-27T01:00:00Z",
+                "observed_at": (billing_day + timedelta(days=1, hours=1)).isoformat(),
             },
         )
         assert cross_day.status_code == 400, cross_day.text

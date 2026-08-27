@@ -4527,6 +4527,110 @@ class ExecutionCapacityObservation(Base):
     )
 
 
+class ExecutionResourceCalibration(Base):
+    """Immutable #1503-derived resource recommendation evidence."""
+
+    __tablename__ = "execution_resource_calibrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "target_id",
+            "source_pool_id",
+            "resource_profile",
+            "candidate_sha",
+            "source_version",
+            name="execution_resource_calibrations_source_uidx",
+        ),
+        Index(
+            "execution_resource_calibrations_target_created_idx",
+            "target_id",
+            "created_at",
+            "id",
+        ),
+        UniqueConstraint(
+            "id",
+            "target_id",
+            name="execution_resource_calibrations_id_target_uidx",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    target_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_architecture: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_profile: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    source_version: Mapped[str] = mapped_column(Text, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    window_stopped_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    trial_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    distinct_tasks: Mapped[int] = mapped_column(Integer, nullable=False)
+    usage_records: Mapped[int] = mapped_column(Integer, nullable=False)
+    incomplete_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_duration_seconds: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    peak_batch_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    throttled_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    oom_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    memory_limit_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    blockers_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    percentiles_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    recommended_cpu_millis: Mapped[int] = mapped_column(Integer, nullable=False)
+    recommended_memory_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    recommended_ephemeral_storage_mib: Mapped[int] = mapped_column(Integer, nullable=False)
+    recommended_pids: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExecutionResourceProfileBinding(Base):
+    """Versioned target binding to one accepted immutable calibration."""
+
+    __tablename__ = "execution_resource_profile_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "(reason IS NULL OR length(trim(reason)) BETWEEN 1 AND 500) "
+            "AND (NOT enabled OR reason IS NOT NULL)",
+            name="execution_resource_profile_bindings_reason_check",
+        ),
+        CheckConstraint(
+            "version > 0",
+            name="execution_resource_profile_bindings_version_check",
+        ),
+        ForeignKeyConstraint(
+            ["calibration_id", "target_id"],
+            ["execution_resource_calibrations.id", "execution_resource_calibrations.target_id"],
+            name="execution_resource_profile_bindings_calibration_fk",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    target_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("execution_targets.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    calibration_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class ExecutionProvisioningAuthorization(Base):
     """One durable pre-Kubernetes-create capacity authorization."""
 

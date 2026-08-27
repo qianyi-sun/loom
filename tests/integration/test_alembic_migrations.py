@@ -129,6 +129,8 @@ def test_all_tables_exist(postgres_url: str) -> None:
         "execution_node_cost_allocations",
         "execution_capacity_policies",
         "execution_capacity_observations",
+        "execution_resource_calibrations",
+        "execution_resource_profile_bindings",
         "execution_provisioning_authorizations",
         "tokens",
         "rate_cards",

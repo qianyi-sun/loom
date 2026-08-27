@@ -1193,6 +1193,139 @@ def _execution_provisioning_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _execution_resource_profile_status(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-profile/status"
+    params = {"pool_id": args.pool_id} if args.pool_id else None
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            params=params,
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    sys.stdout.write("Execution resource calibration and forecast:\n")
+    targets = data.get("targets", [])
+    if not targets:
+        sys.stdout.write("  no Nebius execution targets\n")
+        return 0
+    for row in targets:
+        calibration = row.get("calibration") or {}
+        blockers = row.get("blockers") or []
+        sys.stdout.write(
+            f"  {row['target_id']} pool={row['pool_id']} "
+            f"fresh={row.get('forecast_is_fresh', False)} "
+            f"profile={calibration.get('resource_profile', '-')} "
+            f"attempts={calibration.get('trial_attempts', 0)} "
+            f"peak={calibration.get('peak_batch_concurrency', 0)} "
+            f"immediate={row.get('immediate_executable_slots', 0)} "
+            f"scale_headroom={row.get('configured_scale_headroom_slots', 0)} "
+            f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+        )
+    return 0
+
+
+def _execution_resource_profile_calibrate(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-calibrations"
+    payload = {
+        "target_id": args.target_id,
+        "source_pool_id": args.source_pool_id,
+        "source_architecture": args.source_architecture,
+        "resource_profile": args.resource_profile,
+        "candidate_sha": args.candidate_sha,
+        "source_version": args.source_version,
+        "window_started_at": args.window_started_at,
+        "window_stopped_at": args.window_stopped_at,
+    }
+    try:
+        response = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json=payload,
+            timeout=30.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    recommendation = data["recommendation"]
+    blockers = data.get("blockers") or []
+    sys.stdout.write(
+        f"calibration={data['id']} created={data['created']} "
+        f"eligible={data['eligible']} attempts={data['trial_attempts']} "
+        f"tasks={data['distinct_tasks']} peak={data['peak_batch_concurrency']} "
+        f"cpu={recommendation['cpu_millis']}m "
+        f"memory={recommendation['memory_mib']}MiB "
+        f"storage={recommendation['ephemeral_storage_mib']}MiB "
+        f"pids={recommendation['pids']} "
+        f"blockers={','.join(str(item) for item in blockers) or '-'}\n"
+    )
+    return 0
+
+
+def _execution_resource_profile_bind(args: argparse.Namespace) -> int:
+    try:
+        admin_token = _resolve_admin_token(args.admin_token)
+    except ValueError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    url = f"{args.cp_url.rstrip('/')}/admin/execution-resource-profile-bindings/{args.target_id}"
+    try:
+        response = httpx.put(
+            url,
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={
+                "calibration_id": args.calibration_id,
+                "enabled": args.enabled,
+                "reason": args.reason,
+            },
+            timeout=10.0,
+        )
+    except httpx.RequestError as exc:
+        sys.stderr.write(f"error: could not reach CP at {url}: {exc}\n")
+        return 2
+    if response.status_code != 200:
+        sys.stderr.write(f"error: CP returned {response.status_code}: {response.text}\n")
+        return 1
+    data = response.json()
+    if args.format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(
+            f"target={data['target_id']} calibration={data['calibration_id']} "
+            f"enabled={data['enabled']} version={data['version']}\n"
+        )
+    return 0
+
+
 def _format_autoscaler_blocked_details(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
@@ -2503,6 +2636,55 @@ def dispatch(argv: list[str]) -> int:
         help="Output format.",
     )
     p_provisioning_status.set_defaults(handler=_execution_provisioning_status)
+
+    p_resource_profile = worker_pools_sub.add_parser(
+        "resource-profile",
+        help="Create evidence-gated resource calibrations, bind them, and inspect forecasts.",
+    )
+    resource_profile_sub = p_resource_profile.add_subparsers(
+        dest="resource_profile_op",
+        required=True,
+    )
+    p_resource_profile_status = resource_profile_sub.add_parser(
+        "status",
+        help="Show immutable calibration evidence and non-executable scale forecasts.",
+    )
+    _add_common_args(p_resource_profile_status)
+    p_resource_profile_status.add_argument("--pool-id", default=None)
+    p_resource_profile_status.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_status.set_defaults(handler=_execution_resource_profile_status)
+
+    p_resource_profile_calibrate = resource_profile_sub.add_parser(
+        "calibrate",
+        help="Derive one immutable recommendation from persisted #1503 telemetry.",
+    )
+    _add_common_args(p_resource_profile_calibrate)
+    p_resource_profile_calibrate.add_argument("--target-id", required=True)
+    p_resource_profile_calibrate.add_argument("--source-pool-id", required=True)
+    p_resource_profile_calibrate.add_argument(
+        "--source-architecture", choices=["x86_64", "arm64"], required=True
+    )
+    p_resource_profile_calibrate.add_argument("--resource-profile", required=True)
+    p_resource_profile_calibrate.add_argument("--candidate-sha", required=True)
+    p_resource_profile_calibrate.add_argument("--source-version", required=True)
+    p_resource_profile_calibrate.add_argument("--window-started-at", required=True)
+    p_resource_profile_calibrate.add_argument("--window-stopped-at", required=True)
+    p_resource_profile_calibrate.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_calibrate.set_defaults(handler=_execution_resource_profile_calibrate)
+
+    p_resource_profile_bind = resource_profile_sub.add_parser(
+        "bind",
+        help="Bind an eligible immutable calibration to one Nebius target forecast.",
+    )
+    _add_common_args(p_resource_profile_bind)
+    p_resource_profile_bind.add_argument("--target-id", required=True)
+    p_resource_profile_bind.add_argument("--calibration-id", required=True)
+    p_resource_profile_bind.add_argument(
+        "--enabled", action=argparse.BooleanOptionalAction, default=False
+    )
+    p_resource_profile_bind.add_argument("--reason", default=None)
+    p_resource_profile_bind.add_argument("--format", choices=["text", "json"], default="text")
+    p_resource_profile_bind.set_defaults(handler=_execution_resource_profile_bind)
 
     p_env_state = sub.add_parser(
         "environment-state",

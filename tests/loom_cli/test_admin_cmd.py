@@ -1529,6 +1529,160 @@ def test_execution_provisioning_status_distinguishes_capacity_states(
     assert "pending=3/20 commands=2 authorized=1 running=4 blockers=-" in out
 
 
+def test_execution_resource_profile_status_keeps_scale_headroom_non_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _fake_get(url, *, headers, params, timeout):  # type: ignore[no-untyped-def]
+        assert url == "http://cp:8080/admin/execution-resource-profile/status"
+        assert headers["Authorization"] == "Bearer admin-secret"
+        assert params == {"pool_id": "nebius-cpu"}
+        assert timeout == 10.0
+        return _StubResponse(
+            200,
+            json_data={
+                "targets": [
+                    {
+                        "target_id": "nebius-eu",
+                        "pool_id": "nebius-cpu",
+                        "forecast_is_fresh": True,
+                        "calibration": {
+                            "resource_profile": "cpu-measured@2",
+                            "trial_attempts": 1_000,
+                            "peak_batch_concurrency": 150,
+                        },
+                        "immediate_executable_slots": 21,
+                        "configured_scale_headroom_slots": 80,
+                        "blockers": [],
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "resource-profile",
+            "status",
+            "--pool-id",
+            "nebius-cpu",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "profile=cpu-measured@2 attempts=1000 peak=150" in out
+    assert "immediate=21 scale_headroom=80 blockers=-" in out
+
+
+def test_execution_resource_profile_calibrate_and_bind_use_admin_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calibration_id = "11111111-1111-1111-1111-111111111111"
+
+    def _fake_post(url, *, headers, json, timeout):  # type: ignore[no-untyped-def]
+        assert url == "http://cp:8080/admin/execution-resource-calibrations"
+        assert headers["Authorization"] == "Bearer admin-secret"
+        assert json["source_version"] == "fixed-candidate-1"
+        assert json["window_started_at"] == "2026-08-01T00:00:00Z"
+        assert timeout == 30.0
+        return _StubResponse(
+            200,
+            json_data={
+                "id": calibration_id,
+                "created": True,
+                "eligible": True,
+                "trial_attempts": 1_000,
+                "distinct_tasks": 100,
+                "peak_batch_concurrency": 150,
+                "recommendation": {
+                    "cpu_millis": 1_500,
+                    "memory_mib": 4_096,
+                    "ephemeral_storage_mib": 8_192,
+                    "pids": 256,
+                },
+                "blockers": [],
+            },
+        )
+
+    def _fake_put(url, *, headers, json, timeout):  # type: ignore[no-untyped-def]
+        assert url == ("http://cp:8080/admin/execution-resource-profile-bindings/nebius-eu")
+        assert headers["Authorization"] == "Bearer admin-secret"
+        assert json == {
+            "calibration_id": calibration_id,
+            "enabled": True,
+            "reason": "accepted fixed-candidate evidence",
+        }
+        assert timeout == 10.0
+        return _StubResponse(
+            200,
+            json_data={
+                "target_id": "nebius-eu",
+                "calibration_id": calibration_id,
+                "enabled": True,
+                "reason": "accepted fixed-candidate evidence",
+                "version": 1,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setattr(httpx, "put", _fake_put)
+    monkeypatch.setenv("LOOM_ADMIN_TOKEN", "admin-secret")
+    calibrate_rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "resource-profile",
+            "calibrate",
+            "--target-id",
+            "nebius-eu",
+            "--source-pool-id",
+            "oldlab",
+            "--source-architecture",
+            "x86_64",
+            "--resource-profile",
+            "cpu-measured@2",
+            "--candidate-sha",
+            "a" * 40,
+            "--source-version",
+            "fixed-candidate-1",
+            "--window-started-at",
+            "2026-08-01T00:00:00Z",
+            "--window-stopped-at",
+            "2026-08-16T00:00:00Z",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert calibrate_rc == 0
+    assert "eligible=True attempts=1000 tasks=100 peak=150" in capsys.readouterr().out
+
+    bind_rc = main(
+        [
+            "admin",
+            "worker-pools",
+            "resource-profile",
+            "bind",
+            "--target-id",
+            "nebius-eu",
+            "--calibration-id",
+            calibration_id,
+            "--enabled",
+            "--reason",
+            "accepted fixed-candidate evidence",
+            "--cp-url",
+            "http://cp:8080/",
+        ]
+    )
+    assert bind_rc == 0
+    assert "enabled=True version=1" in capsys.readouterr().out
+
+
 # ──────────────────────────────────────────────────────────────────────
 # loom admin environment-state apply/check
 # ──────────────────────────────────────────────────────────────────────

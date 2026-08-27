@@ -40,6 +40,11 @@ from loom_control_plane.execution_finance import (
     upsert_execution_budget_policy,
     upsert_target_price_binding,
 )
+from loom_control_plane.execution_resource_calibration import (
+    create_execution_resource_calibration,
+    fetch_execution_resource_profile_status,
+    upsert_execution_resource_profile_binding,
+)
 from loom_control_plane.gb10_worker_lifecycle import (
     GB10NodeReport,
     UnsafeDesiredEnvError,
@@ -338,6 +343,39 @@ class _ExecutionCapacityObservationPayload(BaseModel):
         if isinstance(value, str):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         return value
+
+
+class _ExecutionResourceCalibrationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    target_id: str = Field(min_length=1, max_length=120)
+    source_pool_id: str = Field(min_length=1, max_length=80)
+    source_architecture: Literal["x86_64", "arm64"]
+    resource_profile: str = Field(min_length=1, max_length=120)
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_version: str = Field(min_length=1, max_length=160)
+    window_started_at: datetime
+    window_stopped_at: datetime
+
+    @field_validator("window_started_at", "window_stopped_at", mode="before")
+    @classmethod
+    def _parse_datetime(cls, value: object) -> object:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+
+class _ExecutionResourceProfileBindingPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    calibration_id: UUID
+    enabled: bool = False
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("calibration_id", mode="before")
+    @classmethod
+    def _parse_uuid(cls, value: object) -> object:
+        return UUID(value) if isinstance(value, str) else value
 
 
 class _TaskImageServiceTokenPayload(BaseModel):
@@ -1347,6 +1385,126 @@ async def get_execution_capacity_status(
     await _require_admin_scope(request, authorization, "admin:worker_pools")
     async with request.app.state.session_factory() as session:
         return await fetch_execution_capacity_status(session, pool_id=pool_id)
+
+
+@router.post("/execution-resource-calibrations")
+async def post_execution_resource_calibration(
+    request: Request,
+    payload: _ExecutionResourceCalibrationPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row, created = await create_execution_resource_calibration(
+                session,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.resource_calibration.recorded",
+                    target_type="execution_resource_calibration",
+                    target_id=str(row.id),
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "created": created,
+                        "target_id": row.target_id,
+                        "source_pool_id": row.source_pool_id,
+                        "resource_profile": row.resource_profile,
+                        "source_version": row.source_version,
+                        "eligible": row.eligible,
+                        "trial_attempts": row.trial_attempts,
+                        "peak_batch_concurrency": row.peak_batch_concurrency,
+                        "evidence_sha256": row.evidence_sha256,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "id": str(row.id),
+                "created": created,
+                "target_id": row.target_id,
+                "source_pool_id": row.source_pool_id,
+                "source_architecture": row.source_architecture,
+                "resource_profile": row.resource_profile,
+                "candidate_sha": row.candidate_sha,
+                "source_version": row.source_version,
+                "trial_attempts": row.trial_attempts,
+                "distinct_tasks": row.distinct_tasks,
+                "usage_records": row.usage_records,
+                "incomplete_attempts": row.incomplete_attempts,
+                "evidence_duration_seconds": row.evidence_duration_seconds,
+                "peak_batch_concurrency": row.peak_batch_concurrency,
+                "throttled_attempts": row.throttled_attempts,
+                "oom_attempts": row.oom_attempts,
+                "memory_limit_attempts": row.memory_limit_attempts,
+                "eligible": row.eligible,
+                "blockers": row.blockers_json,
+                "percentiles": row.percentiles_json,
+                "recommendation": {
+                    "cpu_millis": row.recommended_cpu_millis,
+                    "memory_mib": row.recommended_memory_mib,
+                    "ephemeral_storage_mib": row.recommended_ephemeral_storage_mib,
+                    "pids": row.recommended_pids,
+                },
+                "evidence_sha256": row.evidence_sha256,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/execution-resource-profile-bindings/{target_id}")
+async def put_execution_resource_profile_binding(
+    target_id: str,
+    request: Request,
+    payload: _ExecutionResourceProfileBindingPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            row = await upsert_execution_resource_profile_binding(
+                session,
+                target_id=target_id,
+                **payload.model_dump(),
+            )
+            session.add(
+                AdminAuditEvent(
+                    actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                    action="execution.resource_profile_binding.upserted",
+                    target_type="execution_resource_profile_binding",
+                    target_id=row.target_id,
+                    request_id=request.headers.get("x-request-id"),
+                    event_metadata={
+                        "calibration_id": str(row.calibration_id),
+                        "enabled": row.enabled,
+                        "reason": row.reason,
+                        "version": row.version,
+                    },
+                )
+            )
+            await session.commit()
+            return {
+                "target_id": row.target_id,
+                "calibration_id": str(row.calibration_id),
+                "enabled": row.enabled,
+                "reason": row.reason,
+                "version": row.version,
+            }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/execution-resource-profile/status")
+async def get_execution_resource_profile_status(
+    request: Request,
+    pool_id: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    await _require_admin_scope(request, authorization, "admin:worker_pools")
+    async with request.app.state.session_factory() as session:
+        return await fetch_execution_resource_profile_status(session, pool_id=pool_id)
 
 
 @router.get("/worker-pools/{pool_name}/prod-pressure")

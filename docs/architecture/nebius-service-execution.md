@@ -2,7 +2,8 @@
 
 Status: accepted hybrid target architecture for issue #1548. The
 provider-neutral durable control plane, namespace-scoped Kubernetes Job
-adapter, and read-only capacity collector are implemented but not
+adapter, read-only capacity collector, and evidence-gated resource forecast
+are implemented but not
 traffic-enabled. Infrastructure,
 sandbox-runtime acceptance, live canaries, routing-policy changes, maintenance
 drains, and any future pool retirement remain separately authorized work.
@@ -283,6 +284,57 @@ collector uses the official Nebius Python SDK only for quota `list` and node
 group `get`; it contains no Nebius create, update, delete, or operation-wait
 path.
 
+Resource sizing and capacity forecasts are a fourth independent evidence
+boundary. Migration `0120` adds immutable
+`execution_resource_calibrations` and versioned target bindings. A calibration
+is computed only from persisted #1503 rows for one exact source pool,
+architecture, resource-profile identity, candidate SHA, closed time window,
+and source version. The query is bounded to 200,000 usage records and its exact
+row identities, observation sequences, and update timestamps are reduced to a
+canonical digest; replay with changed evidence under the same source version
+is rejected.
+
+Each trial-attempt conservatively sums cumulative CPU and I/O counters and
+sums per-container memory/PID peaks as upper bounds. CPU utilization is the
+attempt-wide mean from cumulative CPU time divided by the complete observation
+interval. The immutable snapshot records nearest-rank P50/P95/P99/P99.5,
+telemetry completeness, distinct tasks, evidence duration, exact per-batch
+peak overlap, throttling, memory-limit, and OOM counts. Recommendations apply
+explicit margins and rounding. CPU is the greater of the complete persisted
+configured limit and P99.5 mean plus 25%, rounded to 100m, because cumulative
+CPU time cannot prove a safe lower burst ceiling. Memory uses the summed peak
+upper bound plus 20%, rounded to 64 MiB. Ephemeral storage is the greater of
+the immutable Task contract and cumulative-write upper bound plus 25%, rounded
+to 256 MiB, because I/O counters alone cannot prove the base image/input
+footprint. PID sizing uses the summed peak plus 20%, rounded to eight
+processes. These methods and their limitations remain in the evidence payload;
+they are not presented as provider measurements.
+
+An enabled binding is rejected unless the snapshot contains at least 1,000
+complete trial-attempts across at least 14 days, includes one
+batch with at least 100 actually overlapping attempts, and contains no
+incomplete telemetry, CPU throttling, memory-limit, or OOM evidence. The exact
+task-id set is digested into the snapshot, and enabling a binding requires an
+audited non-empty acceptance reason so representativeness remains an explicit
+operator decision rather than an invented task-count threshold. This pins
+the repository gate to #1503 acceptance rather than the historical
+`2 vCPU / 11,500 MiB` division. An ineligible snapshot is still durable and
+operator-visible with exact blockers, but it cannot become the active forecast
+profile and changes no Task, runtime plan, admission limit, routing weight, or
+live target.
+
+`GET /admin/execution-resource-profile/status` and `loom admin worker-pools
+resource-profile status` combine an enabled eligible binding with the latest
+capacity observation. `immediate_executable_slots` is nonzero only with a
+fresh observation, healthy active target, enabled capacity policy, and no
+profile blocker. `configured_scale_headroom_slots` remains a separate fit
+projection over the minimum policy/provider node, CPU, memory, and storage
+headroom; it is never labeled executable capacity. Operators create and bind
+snapshots through the authenticated `execution-resource-calibrations` and
+`execution-resource-profile-bindings` APIs or the matching `calibrate` and
+`bind` CLI commands. Every mutation is audited and none performs a provider,
+Kubernetes, routing, profile, or traffic mutation.
+
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
@@ -307,7 +359,7 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 
 ## Durable execution authority
 
-Migrations `0113` through `0119` persist the complete provider-neutral
+Migrations `0113` through `0120` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
 - immutable `execution_classes` and environment/regional `execution_targets`;
