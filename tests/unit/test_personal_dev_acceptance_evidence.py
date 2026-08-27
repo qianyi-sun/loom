@@ -1245,6 +1245,10 @@ def test_acceptance_result_v2_rejects_unsafe_file_metadata_or_race(
         path = tmp_path / "acceptance-result-symlink.json"
         path.symlink_to(target)
     else:
+        replacement = tmp_path / "acceptance-result-replacement.json"
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        assert replacement.stat().st_ino != path.stat().st_ino
         real_read = acceptance_evidence.os.read
         changed = False
 
@@ -1253,7 +1257,7 @@ def test_acceptance_result_v2_rejects_unsafe_file_metadata_or_race(
             payload = real_read(descriptor, size)
             if not changed:
                 changed = True
-                path.touch()
+                replacement.replace(path)
             return payload
 
         monkeypatch.setattr(acceptance_evidence.os, "read", racing_read)
