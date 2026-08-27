@@ -32,21 +32,23 @@ def _load_sdk_types() -> tuple[type[Any], type[Any], type[Any], type[Any]]:
 
 
 def _load_default_tools(tool_type: type[Any]) -> list[Any]:
+    specs = (
+        ("openhands.tools.terminal", "TerminalTool"),
+        ("openhands.tools.file_editor", "FileEditorTool"),
+        ("openhands.tools.task_tracker", "TaskTrackerTool"),
+    )
     try:
-        from openhands.tools.file_editor import FileEditorTool
-        from openhands.tools.task_tracker import TaskTrackerTool
-        from openhands.tools.terminal import TerminalTool
+        tool_classes = [
+            getattr(importlib.import_module(module), attr)
+            for module, attr in specs
+        ]
     except ImportError as exc:  # pragma: no cover - exercised via main()
         raise RuntimeError(
             "openhands-tools is required for the openhands-sdk adapter; "
             "install openhands-tools at the same version as openhands-sdk"
         ) from exc
 
-    return [
-        tool_type(name=TerminalTool.name),
-        tool_type(name=FileEditorTool.name),
-        tool_type(name=TaskTrackerTool.name),
-    ]
+    return [tool_type(name=tool_class.name) for tool_class in tool_classes]
 
 
 def _json_default(value: object) -> object:
