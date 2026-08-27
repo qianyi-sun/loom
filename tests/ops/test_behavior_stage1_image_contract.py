@@ -283,8 +283,8 @@ def test_stage1_dockerfile_is_single_platform_closed_and_source_locked() -> None
     assert "--from=stage1-sources" in value
     assert "git clone" not in value and "git fetch" not in value
     assert "--require-hashes" in value and "uv sync --frozen" in value
-    assert "autobuild-2026-08-13-17-03" in value
-    assert "b33b9c56b28dbc709a7938e2461d34caefc897a6090ac02da8fc55f82d6d5451" in value
+    assert "autobuild-2026-07-31-14-10" in value
+    assert "f5f0ad52c6ee28a222eb10838c231469a10ad325f84063d3bc0aadf08164b3ec" in value
     assert "/opt/ffmpeg/LICENSE.txt" in value
     assert "/opt/loom/bin/sim-python" in value
     assert "/opt/loom/venv-vla/bin/python" in value
