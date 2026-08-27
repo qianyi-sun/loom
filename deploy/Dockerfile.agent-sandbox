@@ -73,7 +73,6 @@ RUN set -eux; \
     command -v qwen; \
     command -v aider; \
     command -v mini-swe-agent; \
-    python -c 'import importlib; importlib.import_module("openhands.server")'; \
     python -c 'import importlib; importlib.import_module("openhands.sdk")'; \
     python -c 'import importlib; importlib.import_module("openhands.tools.terminal")'; \
     python -c 'import importlib; importlib.import_module("loom_launcher.openhands_sdk_runner")'; \

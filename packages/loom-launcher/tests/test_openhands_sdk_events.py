@@ -15,8 +15,8 @@ def _mapper() -> OpenHandsEventMapper:
 
 def test_action_and_observation_pair_into_tool_use() -> None:
     mapper = _mapper()
-    ActionEvent = type("ActionEvent", (), {})
-    ObservationEvent = type("ObservationEvent", (), {})
+    ActionEvent = type("ActionEvent", (), {})  # noqa: N806
+    ObservationEvent = type("ObservationEvent", (), {})  # noqa: N806
     action = ActionEvent()
     action.tool_call_id = "call-1"
     action.tool_name = "terminal"
@@ -46,7 +46,7 @@ def test_action_and_observation_pair_into_tool_use() -> None:
 
 def test_message_event_becomes_agent_thought() -> None:
     mapper = _mapper()
-    MessageEvent = type("MessageEvent", (), {})
+    MessageEvent = type("MessageEvent", (), {})  # noqa: N806
     event = MessageEvent()
     event.source = "agent"
     event.llm_message = SimpleNamespace(content=[SimpleNamespace(text="planning next step")])
@@ -73,7 +73,7 @@ def test_unknown_event_falls_back_to_agent_thought_json() -> None:
 
 def test_flush_pending_emits_unpaired_actions() -> None:
     mapper = _mapper()
-    ActionEvent = type("ActionEvent", (), {})
+    ActionEvent = type("ActionEvent", (), {})  # noqa: N806
     action = ActionEvent()
     action.tool_call_id = "call-orphan"
     action.tool_name = "file_editor"
