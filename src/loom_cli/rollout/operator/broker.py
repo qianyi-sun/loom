@@ -98,7 +98,7 @@ from .systemd import (
 _MAX_CANCEL_REASON = 500
 _MAX_LOG_BYTES = 8 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian"})
+_SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian", "devansh"})
 _PROTECTED_APPLY_COMPONENTS = frozenset(
     {
         "database-migration",
