@@ -226,16 +226,26 @@ def test_catalog_package_hints_use_verified_install_sources() -> None:
     assert by_name["openhands-sdk"]["runtime_contract"]["required_python_modules"] == [
         "loom_launcher.openhands_sdk_runner",
         "openhands.sdk",
+        "openhands.tools.terminal",
     ]
     assert by_name["openhands-sdk"]["runtime_contract"]["required_packages"] == [
         "openhands-sdk",
+        "openhands-tools",
+    ]
+    assert by_name["openhands-sdk"]["runtime_contract"]["required_executables"] == [
+        "tmux",
     ]
     assert by_name["openhands"]["runtime_contract"]["required_python_modules"] == [
         "loom_launcher.openhands_sdk_runner",
         "openhands.sdk",
+        "openhands.tools.terminal",
     ]
     assert by_name["openhands"]["runtime_contract"]["required_packages"] == [
         "openhands-sdk",
+        "openhands-tools",
+    ]
+    assert by_name["openhands"]["runtime_contract"]["required_executables"] == [
+        "tmux",
     ]
 
 

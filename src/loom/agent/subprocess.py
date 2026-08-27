@@ -249,6 +249,8 @@ class SubprocessAgent:
         env_vars: dict[str, str] = {
             self.adapter.api_key_env: step_token,
             self.adapter.base_url_env: base_url,
+            "LOOM_TRIAL_ID": str(self.trial_id),
+            "LOOM_STEP_ID": step_id,
         }
         for name in _SUBPROCESS_AGENT_ENV_PASSTHROUGH:
             value = os.environ.get(name)

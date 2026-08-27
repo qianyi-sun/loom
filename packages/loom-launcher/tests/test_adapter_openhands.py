@@ -7,6 +7,10 @@ from uuid import uuid4
 
 from loom_launcher import get_adapter
 from loom_launcher.adapter import ModelSpec
+from loom_launcher.adapters._openhands_runtime import (
+    LOOM_LAUNCHER_REF,
+    OPENHANDS_SDK_VERSION,
+)
 
 
 def test_build_invocation_argv() -> None:
@@ -42,9 +46,10 @@ def test_install_script_uses_managed_python312_venv() -> None:
     assert "uv python install 3.12" in adapter.install_script
     assert "uv venv --python 3.12 /opt/loom-agents/openhands-sdk" in adapter.install_script
     assert "/opt/loom-agents/openhands-sdk/bin/python" in adapter.install_script
+    assert f"openhands-tools=={OPENHANDS_SDK_VERSION}" in adapter.install_script
+    assert "tmux" in adapter.install_script
     assert (
-        "git+https://github.com/qianyi-sun/loom.git@"
-        "19dabf78da96f45380eddabbe29d151e231842bb"
+        f"git+https://github.com/qianyi-sun/loom.git@{LOOM_LAUNCHER_REF}"
         "#subdirectory=packages/loom-launcher"
     ) in adapter.install_script
     assert "--break-system-packages" not in adapter.install_script

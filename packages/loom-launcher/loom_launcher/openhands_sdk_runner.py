@@ -15,8 +15,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from loom_launcher.openhands_sdk_events import OpenHandsEventMapper
 
-def _load_sdk_types() -> tuple[type[Any], type[Any], type[Any]]:
+
+def _load_sdk_types() -> tuple[type[Any], type[Any], type[Any], type[Any]]:
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
     try:
         sdk = importlib.import_module("openhands.sdk")
@@ -26,25 +28,31 @@ def _load_sdk_types() -> tuple[type[Any], type[Any], type[Any]]:
             "install the agent sandbox runtime dependencies"
         ) from exc
 
-    return sdk.LLM, sdk.Agent, sdk.Conversation
+    return sdk.LLM, sdk.Agent, sdk.Conversation, sdk.Tool
+
+
+def _load_default_tools(tool_type: type[Any]) -> list[Any]:
+    try:
+        from openhands.tools.file_editor import FileEditorTool
+        from openhands.tools.task_tracker import TaskTrackerTool
+        from openhands.tools.terminal import TerminalTool
+    except ImportError as exc:  # pragma: no cover - exercised via main()
+        raise RuntimeError(
+            "openhands-tools is required for the openhands-sdk adapter; "
+            "install openhands-tools at the same version as openhands-sdk"
+        ) from exc
+
+    return [
+        tool_type(name=TerminalTool.name),
+        tool_type(name=FileEditorTool.name),
+        tool_type(name=TaskTrackerTool.name),
+    ]
 
 
 def _json_default(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
     return repr(value)
-
-
-def _event_payload(event: object) -> dict[str, object]:
-    if hasattr(event, "model_dump"):
-        payload = event.model_dump(mode="json")
-    else:
-        payload = repr(event)
-    return {
-        "kind": "openhands_sdk_event",
-        "event_type": type(event).__name__,
-        "event": payload,
-    }
 
 
 def _emit(payload: dict[str, object]) -> None:
@@ -75,25 +83,36 @@ def main(argv: list[str] | None = None) -> int:
 
     base_url = os.environ.get("LLM_BASE_URL") or None
     try:
-        llm_type, agent_type, conversation_type = _load_sdk_types()
+        llm_type, agent_type, conversation_type, tool_type = _load_sdk_types()
+        tools = _load_default_tools(tool_type)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    _emit({"kind": "status", "message": "openhands-sdk runner started"})
+    mapper = OpenHandsEventMapper()
+
+    def _on_event(event: object) -> None:
+        for payload in mapper.map_event(event):
+            _emit(payload)
+
+    _emit(mapper.map_status("openhands-sdk runner started"))
 
     llm = llm_type(model=args.model, api_key=api_key, base_url=base_url)
-    agent = agent_type(llm=llm)
+    agent = agent_type(llm=llm, tools=tools)
     conversation = conversation_type(
         agent=agent,
-        callbacks=[lambda event: _emit(_event_payload(event))],
+        callbacks=[_on_event],
         workspace=Path(args.workdir),
         max_iteration_per_run=args.max_iterations,
         visualizer=None,
     )
     conversation.send_message(args.task)
     conversation.run()
-    _emit({"kind": "result", "ok": True})
+
+    for payload in mapper.flush_pending():
+        _emit(payload)
+
+    _emit(mapper.map_result(ok=True))
     return 0
 
 

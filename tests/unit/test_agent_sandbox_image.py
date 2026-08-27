@@ -48,7 +48,9 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert "node --version" in dockerfile
     assert "python --version" in dockerfile
     assert 'importlib.import_module("openhands.sdk")' in dockerfile
+    assert 'importlib.import_module("openhands.tools.terminal")' in dockerfile
     assert 'importlib.import_module("loom_launcher.openhands_sdk_runner")' in dockerfile
+    assert "command -v tmux" in dockerfile
     assert "openhands_sdk.run" not in dockerfile
 
 

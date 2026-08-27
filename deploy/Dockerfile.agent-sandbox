@@ -32,7 +32,8 @@ RUN set -eux; \
       git \
       gnupg \
       ripgrep \
-      tini; \
+      tini \
+      tmux; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -74,7 +75,9 @@ RUN set -eux; \
     command -v mini-swe-agent; \
     python -c 'import importlib; importlib.import_module("openhands.server")'; \
     python -c 'import importlib; importlib.import_module("openhands.sdk")'; \
+    python -c 'import importlib; importlib.import_module("openhands.tools.terminal")'; \
     python -c 'import importlib; importlib.import_module("loom_launcher.openhands_sdk_runner")'; \
+    command -v tmux; \
     python -c 'import importlib; importlib.import_module("sweagent.run.run_single")'
 
 ENTRYPOINT ["tini", "--"]

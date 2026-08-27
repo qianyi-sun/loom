@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-OPENHANDS_SDK_VERSION = "1.27.0"
+OPENHANDS_SDK_VERSION = "1.34.0"
 LOOM_LAUNCHER_REF = "19dabf78da96f45380eddabbe29d151e231842bb"
 LOOM_LAUNCHER_REQUIREMENT = "git+https://github.com/qianyi-sun/loom.git@19dabf78da96f45380eddabbe29d151e231842bb#subdirectory=packages/loom-launcher"
 UV_VERSION = "0.11.21"
@@ -12,11 +12,11 @@ OPENHANDS_SDK_PYTHON = "/opt/loom-agents/openhands-sdk/bin/python"
 OPENHANDS_SDK_INSTALL_SCRIPT = f"""\
 set -euo pipefail
 if command -v apk >/dev/null 2>&1; then
-  apk add --no-cache ca-certificates curl git
+  apk add --no-cache ca-certificates curl git tmux
 elif command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git
+  apt-get install -y --no-install-recommends ca-certificates curl git tmux
 else
   echo "no supported package manager (apk/apt-get); cannot install openhands-sdk" >&2
   exit 1
@@ -31,6 +31,7 @@ uv python install 3.12
 uv venv --python 3.12 {OPENHANDS_SDK_VENV}
 uv pip install --python {OPENHANDS_SDK_PYTHON} --no-cache-dir \\
   "openhands-sdk=={OPENHANDS_SDK_VERSION}" \\
+  "openhands-tools=={OPENHANDS_SDK_VERSION}" \\
   "{LOOM_LAUNCHER_REQUIREMENT}"
-{OPENHANDS_SDK_PYTHON} -c "import openhands.sdk"
+{OPENHANDS_SDK_PYTHON} -c "import openhands.sdk; import openhands.tools.terminal; import openhands.tools.file_editor; import openhands.tools.task_tracker"
 """
