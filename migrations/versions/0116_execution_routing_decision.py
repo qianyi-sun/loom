@@ -107,10 +107,7 @@ def _normalize_routing_digests() -> None:
             ],
         }
         connection.execute(
-            text(
-                "UPDATE execution_leases SET routing_decision_sha256=:digest "
-                "WHERE id=:id"
-            ),
+            text("UPDATE execution_leases SET routing_decision_sha256=:digest WHERE id=:id"),
             {"id": row["id"], "digest": _canonical_digest(decision)},
         )
 

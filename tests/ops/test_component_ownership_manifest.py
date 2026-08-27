@@ -331,9 +331,7 @@ runtime_policy = "start"
 
 
 def test_neutral_bundle_checksum_rebuilds_every_consuming_image() -> None:
-    manifest = component_ownership.load_manifest(
-        REPO_ROOT / "config/component-ownership.toml"
-    )
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
     owners = {
         owner.id

@@ -308,64 +308,67 @@ def _artifact_descriptors_from_index(
     trial_safety, trial_redaction = _policy_from_share_status(trial_share_status)
 
     if index_payload.get("trajectory_uri"):
-        descriptors.append(_artifact_descriptor_base(
-            trial,
-            batch,
-            artifact_type="trajectory",
-            name="Trajectory events",
-            content_hash=_content_hash(
-                index_payload.get("trajectory_sha256")
-                or index_payload.get("checksum_sha256")
-            ),
-            storage=_trajectory_storage_from_uri(
-                index_payload.get("trajectory_uri"),
-                trial=trial,
-                expected_bucket=trajectories_bucket,
-                filename="events.jsonl",
-                media_type="application/x-ndjson",
-                size_bytes=index_payload.get("trajectory_size_bytes", 0),
-                version_id=_required_object_version_id(
-                    index_payload,
-                    key="trajectory_version_id",
-                    field="events.jsonl version_id",
+        descriptors.append(
+            _artifact_descriptor_base(
+                trial,
+                batch,
+                artifact_type="trajectory",
+                name="Trajectory events",
+                content_hash=_content_hash(
+                    index_payload.get("trajectory_sha256") or index_payload.get("checksum_sha256")
                 ),
-            ),
-            share_status=trial_share_status,
-            safety_state=trial_safety,
-            redaction_state=trial_redaction,
-            blocked_reason=None,
-            retention_class="release_evidence",
-        ))
+                storage=_trajectory_storage_from_uri(
+                    index_payload.get("trajectory_uri"),
+                    trial=trial,
+                    expected_bucket=trajectories_bucket,
+                    filename="events.jsonl",
+                    media_type="application/x-ndjson",
+                    size_bytes=index_payload.get("trajectory_size_bytes", 0),
+                    version_id=_required_object_version_id(
+                        index_payload,
+                        key="trajectory_version_id",
+                        field="events.jsonl version_id",
+                    ),
+                ),
+                share_status=trial_share_status,
+                safety_state=trial_safety,
+                redaction_state=trial_redaction,
+                blocked_reason=None,
+                retention_class="release_evidence",
+            )
+        )
 
     if index_payload.get("atif_uri"):
-        descriptors.append(_artifact_descriptor_base(
-            trial,
-            batch,
-            artifact_type="atif_projection",
-            name="ATIF projection",
-            content_hash=_content_hash(index_payload.get("atif_sha256")),
-            storage=_trajectory_storage_from_uri(
-                index_payload.get("atif_uri"),
-                trial=trial,
-                expected_bucket=trajectories_bucket,
-                filename="atif.json",
-                media_type="application/json",
-                size_bytes=index_payload.get("atif_size_bytes", 0),
-                version_id=_required_object_version_id(
-                    index_payload,
-                    key="atif_version_id",
-                    field="atif.json version_id",
+        descriptors.append(
+            _artifact_descriptor_base(
+                trial,
+                batch,
+                artifact_type="atif_projection",
+                name="ATIF projection",
+                content_hash=_content_hash(index_payload.get("atif_sha256")),
+                storage=_trajectory_storage_from_uri(
+                    index_payload.get("atif_uri"),
+                    trial=trial,
+                    expected_bucket=trajectories_bucket,
+                    filename="atif.json",
+                    media_type="application/json",
+                    size_bytes=index_payload.get("atif_size_bytes", 0),
+                    version_id=_required_object_version_id(
+                        index_payload,
+                        key="atif_version_id",
+                        field="atif.json version_id",
+                    ),
                 ),
-            ),
-            share_status=trial_share_status,
-            safety_state=trial_safety,
-            redaction_state=trial_redaction,
-            blocked_reason=None,
-            retention_class="release_evidence",
-            metadata={
-                "atif_schema_version": index_payload.get("atif_schema_version"),
-            },
-        ))
+                share_status=trial_share_status,
+                safety_state=trial_safety,
+                redaction_state=trial_redaction,
+                blocked_reason=None,
+                retention_class="release_evidence",
+                metadata={
+                    "atif_schema_version": index_payload.get("atif_schema_version"),
+                },
+            )
+        )
 
     artifacts = index_payload.get("artifacts")
     if isinstance(artifacts, list):

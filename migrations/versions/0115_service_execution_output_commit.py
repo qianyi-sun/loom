@@ -142,7 +142,9 @@ def upgrade() -> None:
                AND pipeline_profile_calibration_authorization_id IS NULL
                AND actor_user_id IS NULL AND stage_result_json IS NULL
                AND stage_result_digest IS NULL AND inventory_digest IS NULL) OR
-              (service_execution_lease_id IS NULL AND (""" + _PRODUCER_SHAPE_V1 + r"""))
+              (service_execution_lease_id IS NULL AND ("""
+        + _PRODUCER_SHAPE_V1
+        + r"""))
             )
           );
         CREATE UNIQUE INDEX artifact_upload_sessions_service_execution_uidx
@@ -235,7 +237,9 @@ def downgrade() -> None:
               'input_materialization','acceptance_evidence','profile_calibration_evidence')
           ),
           ADD CONSTRAINT artifact_upload_sessions_producer_shape_check CHECK (
-        """ + _PRODUCER_SHAPE_V1 + r"""
+        """
+        + _PRODUCER_SHAPE_V1
+        + r"""
           ),
           DROP COLUMN service_execution_command_identity_sha256,
           DROP COLUMN service_execution_task_revision_sha256,

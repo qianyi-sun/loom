@@ -25,12 +25,8 @@ class ExecutionTerminationSummaryV1(BaseModel):
     result_path: str = Field(pattern=r"^result\.json$")
     output_committed: bool
     output_upload_session_id: UUID | None = None
-    output_manifest_sha256: str | None = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
-    output_marker_sha256: str | None = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
+    output_manifest_sha256: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    output_marker_sha256: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _terminal_state_is_consistent(self) -> ExecutionTerminationSummaryV1:

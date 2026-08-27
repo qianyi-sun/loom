@@ -22,9 +22,7 @@ def test_service_execution_output_migration_round_trip(
             item["name"] for item in inspect(engine).get_columns("execution_leases")
         }
         command.upgrade(config, "0115")
-        lease_columns = {
-            item["name"] for item in inspect(engine).get_columns("execution_leases")
-        }
+        lease_columns = {item["name"] for item in inspect(engine).get_columns("execution_leases")}
         upload_columns = {
             item["name"] for item in inspect(engine).get_columns("artifact_upload_sessions")
         }

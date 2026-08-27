@@ -343,9 +343,7 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
         ]
     minio = policies["loom-minio"]
     assert not any(
-        peer.get("namespaceSelector", {})
-        .get("matchLabels", {})
-        .get("kubernetes.io/metadata.name")
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
         == "loom-nebius-staging"
         for rule in minio["spec"]["ingress"]
         for peer in rule["from"]

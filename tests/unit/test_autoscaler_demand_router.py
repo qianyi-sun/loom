@@ -143,9 +143,7 @@ def test_cost_orders_equal_candidates_and_budget_block_cannot_be_overridden() ->
         choose_neutral_pool(
             (
                 states[0],
-                PoolDemandState(
-                    **{**states[1].__dict__, "budget_eligible": False}
-                ),
+                PoolDemandState(**{**states[1].__dict__, "budget_eligible": False}),
             )
         )
         == "gb10"

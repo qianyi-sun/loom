@@ -48,10 +48,15 @@ def _peer(lease_id: UUID, generation: int, role: str) -> ServiceExecutionPeerV1:
 
 
 def _broker_http(exc: ServiceExecutionBrokerError) -> HTTPException:
-    status = 503 if exc.reason in {
-        "workload_identity_not_observed",
-        "execution_target_unavailable",
-    } else 409
+    status = (
+        503
+        if exc.reason
+        in {
+            "workload_identity_not_observed",
+            "execution_target_unavailable",
+        }
+        else 409
+    )
     if exc.reason == "peer_ip_invalid":
         status = 403
     return HTTPException(status_code=status, detail=exc.reason)
@@ -136,9 +141,7 @@ async def prepare_service_execution_output(
         raise _artifact_http(exc) from exc
 
 
-@router.put(
-    "/outputs/{session_id}/files/{file_index}/parts/{part_number}"
-)
+@router.put("/outputs/{session_id}/files/{file_index}/parts/{part_number}")
 async def upload_service_execution_output_part(
     session_id: UUID,
     file_index: int,

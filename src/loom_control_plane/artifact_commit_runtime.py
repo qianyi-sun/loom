@@ -100,9 +100,7 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         "committed_at": state.updated_at if state.state == "committed" else None,
         "aborted_at": state.updated_at if state.state == "aborted" else None,
         "checkpoint_envelope_json": (
-            null()
-            if state.checkpoint_envelope_json is None
-            else state.checkpoint_envelope_json
+            null() if state.checkpoint_envelope_json is None else state.checkpoint_envelope_json
         ),
         "checkpoint_envelope_digest": state.checkpoint_envelope_digest,
         "stage_result_json": null(),
@@ -413,16 +411,10 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                 service_execution_lease_id=cast(UUID, row.service_execution_lease_id),
                 service_execution_generation=cast(int, row.service_execution_generation),
                 service_execution_role=cast(Any, row.service_execution_role),
-                runtime_contract_sha256=cast(
-                    str, row.service_execution_runtime_contract_sha256
-                ),
+                runtime_contract_sha256=cast(str, row.service_execution_runtime_contract_sha256),
                 candidate_sha=cast(str, row.service_execution_candidate_sha),
-                task_revision_sha256=cast(
-                    str, row.service_execution_task_revision_sha256
-                ),
-                command_identity_sha256=cast(
-                    str, row.service_execution_command_identity_sha256
-                ),
+                task_revision_sha256=cast(str, row.service_execution_task_revision_sha256),
+                command_identity_sha256=cast(str, row.service_execution_command_identity_sha256),
             )
         if row.commit_kind == "input_import":
             return InputImportProducerV1(
@@ -720,9 +712,7 @@ class FinalOutputRouteService:
                 or stage.resolved_execution_spec_json is None
             ):
                 raise ArtifactCommitError("completion_identity_drift")
-            node = cast(
-                dict[str, Any], stage.resolved_execution_spec_json.get("container_node")
-            )
+            node = cast(dict[str, Any], stage.resolved_execution_spec_json.get("container_node"))
             fanout = cast(dict[str, Any] | None, node.get("fanout_commit"))
             if fanout is None:
                 return
@@ -771,9 +761,7 @@ class FinalOutputRouteService:
                 name = row.artifact_name
                 if row.producer != "container" or name not in artifact_types_by_output:
                     continue
-                existing = artifact_ids_by_output.setdefault(
-                    name, row.preallocated_artifact_id
-                )
+                existing = artifact_ids_by_output.setdefault(name, row.preallocated_artifact_id)
                 if existing != row.preallocated_artifact_id:
                     raise ArtifactCommitError("committed_output_drift")
             index_declaration = next(
@@ -795,7 +783,10 @@ class FinalOutputRouteService:
             auth=auth,
             max_bytes=index_max_bytes,
         )
-        if canonical_document(PlatformFanoutIndexV1.model_validate_json(index_bytes)) != index_bytes:
+        if (
+            canonical_document(PlatformFanoutIndexV1.model_validate_json(index_bytes))
+            != index_bytes
+        ):
             raise ArtifactCommitError("platform_fanout_index_noncanonical")
         index = PlatformFanoutIndexV1.model_validate_json(index_bytes)
         if len(index.items) > cast(int, fanout["max_items"]):
@@ -1320,9 +1311,7 @@ class ExecutionAttemptCompletionService:
                     or producer_kind_by_id.get(record.artifact_id) != "platform"
                 ):
                     raise ArtifactCommitError("committed_output_drift")
-                committed_bytes["control"] += sum(
-                    item.size_bytes for item in record.stored_files
-                )
+                committed_bytes["control"] += sum(item.size_bytes for item in record.stored_files)
         expected_lineage = [item.artifact_id for item in expected_inputs]
         expected_lineage_digests = [item.manifest_sha256 for item in expected_inputs]
         if (

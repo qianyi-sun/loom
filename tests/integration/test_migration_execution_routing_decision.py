@@ -44,7 +44,7 @@ def test_execution_routing_decision_migration_backfills_and_round_trips(
                     "(id, team_id, task_id, config, requires_caps, state, idempotency_key, "
                     " autoscaler_pool_name, autoscaler_pool_assigned_at) "
                     "VALUES (:id, :team_id, 'route-migration-task', '{}'::jsonb, "
-                    " '{\"backend\":\"docker\",\"cpu_arch\":\"any\"}'::jsonb, "
+                    ' \'{"backend":"docker","cpu_arch":"any"}\'::jsonb, '
                     " 'claimed', 'route-migration-trial', 'oldlab', now())"
                 ),
                 {"id": trial_id, "team_id": team_id},
@@ -117,9 +117,7 @@ def test_execution_routing_decision_migration_backfills_and_round_trips(
             "execution_route_json",
             "execution_route_sha256",
         } <= columns
-        lease_columns = {
-            item["name"] for item in inspect(engine).get_columns("execution_leases")
-        }
+        lease_columns = {item["name"] for item in inspect(engine).get_columns("execution_leases")}
         assert {
             "routing_generation",
             "selected_pool_id",
@@ -139,7 +137,9 @@ def test_execution_routing_decision_migration_backfills_and_round_trips(
                 text("SELECT pg_get_functiondef('append_execution_lease_history()'::regprocedure)")
             )
             mutation_function = connection.scalar(
-                text("SELECT pg_get_functiondef('validate_execution_lease_mutation()'::regprocedure)")
+                text(
+                    "SELECT pg_get_functiondef('validate_execution_lease_mutation()'::regprocedure)"
+                )
             )
             lease_row = connection.execute(
                 text(
@@ -159,9 +159,7 @@ def test_execution_routing_decision_migration_backfills_and_round_trips(
         assert row.execution_route_pool_name == "oldlab"
         assert row.execution_route_sha256.startswith("sha256:")
         decision = ExecutionRoutingDecisionV1.model_validate(row.execution_route_json)
-        assert row.execution_route_sha256 == canonical_digest(
-            decision.model_dump(mode="json")
-        )
+        assert row.execution_route_sha256 == canonical_digest(decision.model_dump(mode="json"))
         assert decision.reason == "preexisting_assignment"
         assert decision.selected_pool_id == "oldlab"
         assert decision.selected_adapter_kind == "kubernetes_job"

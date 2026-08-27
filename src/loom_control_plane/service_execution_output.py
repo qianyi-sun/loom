@@ -190,10 +190,14 @@ async def authorize_service_execution_peer(
         or lease.observed_state not in {"creating", "running", "finalizing"}
     ):
         raise ServiceExecutionBrokerError("execution_generation_fenced")
-    if purpose == "output" and lease.revoked_at is not None and (
-        lease.cleanup_state != "pending"
-        or lease.cleanup_deadline_at is None
-        or lease.cleanup_deadline_at <= current_time
+    if (
+        purpose == "output"
+        and lease.revoked_at is not None
+        and (
+            lease.cleanup_state != "pending"
+            or lease.cleanup_deadline_at is None
+            or lease.cleanup_deadline_at <= current_time
+        )
     ):
         raise ServiceExecutionBrokerError("execution_output_window_closed")
     target = await session.get(ServiceExecutionTarget, lease.target_id)
@@ -305,11 +309,11 @@ class ServiceExecutionOutputRouteService:
     ) -> list[UploadFilePlanV1]:
         plan = _runtime_plan(lease)
         total = sum(item.size_bytes for item in request.files)
-        stream_count = sum(item.relative_path.endswith((".stdout", ".stderr")) for item in request.files)
+        stream_count = sum(
+            item.relative_path.endswith((".stdout", ".stderr")) for item in request.files
+        )
         if stream_count > 2 * 64 or total > (
-            _RESULT_MAX_BYTES
-            + plan.max_artifact_bytes
-            + 2 * 64 * plan.max_log_bytes_per_stream
+            _RESULT_MAX_BYTES + plan.max_artifact_bytes + 2 * 64 * plan.max_log_bytes_per_stream
         ):
             raise ServiceExecutionBrokerError("output_inventory_exceeds_runtime_bounds")
         artifact_id = uuid4()
@@ -484,8 +488,8 @@ class ServiceExecutionOutputRouteService:
             session_id=session_id,
             auth=auth,
         )
-        manifest, manifest_sha256, marker_sha256 = (
-            await self._service.committed_session_evidence(session_id)
+        manifest, manifest_sha256, marker_sha256 = await self._service.committed_session_evidence(
+            session_id
         )
         if len(manifest.artifacts) != 1:
             raise ServiceExecutionBrokerError("output_commit_manifest_drift")

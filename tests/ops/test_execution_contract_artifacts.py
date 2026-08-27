@@ -43,7 +43,8 @@ def test_compatibility_report_is_complete_and_has_named_owners() -> None:
         row["workload_id"]
         for row in rows
         if next(
-            decision for decision in row["pool_dispositions"]
+            decision
+            for decision in row["pool_dispositions"]
             if decision["logical_pool_id"] == "nebius-cpu"
         )["disposition"]
         == "unsupported"
