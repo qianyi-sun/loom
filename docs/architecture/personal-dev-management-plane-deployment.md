@@ -252,13 +252,16 @@ canonical operational plan and its independently supplied SHA-256. The
 operational plan binds the same immutable source, release, storage,
 RuntimeClass, scanner, publisher, registry, activation, quota, principal, and
 global-manager zero-capacity boundaries needed for acceptance. It also binds
-the completed, strictly verified schema-v2 two-owner acceptance result and the
-exact byte-reviewed shadow rollback manifest. The v1 result remains historical
-compatibility and cannot authorize final multi-person launch. The operational
-plan does not contain acceptance owners or an acceptance
-window, and an operator must not simulate durability by choosing a distant
-acceptance expiry. Configuration-epoch advancement is permitted only as the
-same monotonic progress accepted during the bounded test; authority
+the exact byte-reviewed shadow rollback manifest. For the multi-owner durable
+launch route, it binds the completed, strictly verified schema-v2 two-owner
+acceptance result. The preserved #1280 sole-owner/two-environment route instead
+binds its historical schema-v1 result under the separately reviewed sole-owner
+durable-launch procedure. Neither result substitutes for the other: v1 cannot
+authorize final multi-person launch, and v2 does not retroactively authorize
+the #1280 window. The operational plan does not contain acceptance owners or
+an acceptance window, and an operator must not simulate durability by choosing
+a distant acceptance expiry. Configuration-epoch advancement is permitted
+only as the same monotonic progress accepted during the bounded test; authority
 incarnation, execution state and epoch, observer principal, and executable
 ceiling remain exact fail-closed bindings.
 
