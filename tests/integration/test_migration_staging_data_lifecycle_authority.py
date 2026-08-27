@@ -119,6 +119,7 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
         "trial_events",
         "trial_resource_usage",
         "artifacts",
+        "execution_leases",
     }
     assert mutation_tables == {
         "staging_mutation_epochs",
