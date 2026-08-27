@@ -103,11 +103,13 @@ Git, GitHub protected checks.
 
 - [ ] **Step 3: Create the explicit v2 procedure and restore v1 bytes**
 
-  Copy the current reviewed v2 runbook bytes into
+  Copy the current reviewed v2 runbook into
   `personal-dev-concurrent-owner-zero-capacity-acceptance.md`, then change only
-  its title and cross-runbook links so it identifies itself as the
-  concurrent-owner procedure and points to
-  `personal-dev-multi-owner-durable-launch.md`.
+  its title, authority-scoping prose, and cross-runbook links so it identifies
+  itself as the separately reviewed concurrent-owner procedure, contains no
+  #1280-window authority claim, and points to
+  `personal-dev-multi-owner-durable-launch.md`. Keep every executable Bash block
+  byte-identical to the reviewed v2 procedure.
 
   Restore `personal-dev-zero-capacity-acceptance.md` exactly from protected base
   `82ac07ea594734d70d31351dab5f8935c8e2d5e9`. Use `apply_patch` for both file
