@@ -642,10 +642,12 @@ class _ReadyCanonicalExternalSupervisorControl:
         canonical: ExternalSupervisorCanonicalIdentity,
         *,
         loaded_candidate_only_unit: str | None = None,
+        failed_service: str | None = None,
         unit_dir: Path = PROTECTED_USER_UNIT_DIR,
     ) -> None:
         self.canonical = canonical
         self.loaded_candidate_only_unit = loaded_candidate_only_unit
+        self.failed_service = failed_service
         self.unit_dir = unit_dir
 
     def timer_status(self, name: str) -> TimerRuntimeStatus:
@@ -694,6 +696,14 @@ class _ReadyCanonicalExternalSupervisorControl:
                 result="",
                 exec_main_status=None,
                 fragment_path="",
+                need_daemon_reload="no",
+            )
+        if name == self.failed_service:
+            return ServiceRuntimeStatus(
+                load_state="loaded",
+                result="exit-code",
+                exec_main_status=1,
+                fragment_path=str(self.unit_dir / name),
                 need_daemon_reload="no",
             )
         return ServiceRuntimeStatus(
@@ -927,6 +937,8 @@ def _installed_gb10_canonical_snapshot(
     candidate_root: Path,
     *,
     loaded_candidate_only_unit: str | None = None,
+    failed_service: str | None = None,
+    same_candidate: bool = False,
 ) -> tuple[
     ExternalSupervisorPredecessorSnapshot,
     transport_module.ExternalSupervisorLiveObservation,
@@ -945,11 +957,26 @@ def _installed_gb10_canonical_snapshot(
         environment="staging",
         execution_host="gx10-01c7",
     )
-    canonical = _ready_gb10_canonical_identity()
+    canonical = (
+        ExternalSupervisorCanonicalIdentity.build(
+            artifact,
+            plan_digest="c" * 64,
+            attestation_digest="d" * 64,
+            transition_group_id="f" * 32,
+            runtime_evidence_digest=transport_module._expected_activation_runtime_digest(
+                artifact,
+                unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+            ),
+            unit_dir=GB10_CANONICAL_UNIT_DIR,
+        )
+        if same_candidate
+        else _ready_gb10_canonical_identity()
+    )
     store = _CanonicalExternalSupervisorStore(canonical)
     control = _ReadyCanonicalExternalSupervisorControl(
         canonical,
         loaded_candidate_only_unit=loaded_candidate_only_unit,
+        failed_service=failed_service,
         unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
     )
     final_observation = transport_module.FixedExternalSupervisorTransport(
@@ -1175,6 +1202,43 @@ def test_installed_gb10_canonical_predecessor_accepts_absent_candidate_only_unit
     }
     assert snapshot.live_evidence_digest == final_observation.evidence_digest
     assert snapshot.runtime_ready is True
+
+
+def test_installed_gb10_canonical_predecessor_admits_failed_oneshot_repair(
+    secure_candidate_root: Path,
+) -> None:
+    failed_service = "loom-autoscaler-gb10-staging.service"
+    snapshot, final_observation, _canonical = _installed_gb10_canonical_snapshot(
+        secure_candidate_root,
+        failed_service=failed_service,
+    )
+
+    assert final_observation.service_statuses[failed_service].result == "exit-code"
+    assert snapshot.runtime_ready is True
+    assert snapshot.runtime_state == "repairable"
+
+
+def test_installed_gb10_same_candidate_failed_oneshot_remains_blocking(
+    secure_candidate_root: Path,
+) -> None:
+    failed_service = "loom-autoscaler-gb10-staging.service"
+    snapshot, final_observation, canonical = _installed_gb10_canonical_snapshot(
+        secure_candidate_root,
+        failed_service=failed_service,
+        same_candidate=True,
+    )
+
+    assert (
+        canonical.candidate_sha
+        == _installed_predecessor_context(
+            secure_candidate_root,
+            backup_schema_revision="0088",
+            database_schema_revision="0088",
+        ).bindings["candidate.sha"]
+    )
+    assert final_observation.service_statuses[failed_service].result == "exit-code"
+    assert snapshot.runtime_ready is False
+    assert snapshot.runtime_state == "drifted"
 
 
 @pytest.mark.parametrize(

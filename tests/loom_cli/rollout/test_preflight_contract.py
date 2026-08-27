@@ -845,6 +845,7 @@ def _bindings(**overrides: object) -> AttestationBindings:
             "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
             "gx10-01c7/live-evidence-digest": "1" * 64,
             "gx10-01c7/pending-transition-digest": "2" * 64,
+            "gx10-01c7/runtime-state": "ready",
             "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
             "gx10-01c7/transition-digest": "3" * 64,
             **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
@@ -856,6 +857,7 @@ def _bindings(**overrides: object) -> AttestationBindings:
             ),
             "TRT-EAI-OLDLAB-1/live-evidence-digest": "7" * 64,
             "TRT-EAI-OLDLAB-1/pending-transition-digest": "8" * 64,
+            "TRT-EAI-OLDLAB-1/runtime-state": "ready",
             "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
             "TRT-EAI-OLDLAB-1/transition-digest": "9" * 64,
             **{

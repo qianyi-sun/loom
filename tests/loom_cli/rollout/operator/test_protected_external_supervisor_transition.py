@@ -38,6 +38,10 @@ def _artifact(
     supervisor_count: int = 1,
     timer_on_unit_active_sec: int = 30,
     execution_host: str | None = None,
+    candidate_sha: str = "a" * 40,
+    candidate_tree: str = "b" * 40,
+    image_tag: str = "staging-aaaaaaa",
+    include_builder: bool = False,
 ) -> ExternalSupervisorArtifact:
     candidate = tmp_path / "candidate"
     profile = candidate / "deploy/environment-state/staging.toml"
@@ -47,25 +51,28 @@ def _artifact(
     repository = Path(__file__).resolve().parents[4]
     profile.write_text(active_staging_profile_text(), encoding="utf-8")
     shutil.copyfile(repository / "scripts/ops/worker_pool_autoscaler_external_once.py", script)
+    if include_builder:
+        builder_script = candidate / "scripts/ops/task_image_builder_autoscaler_external_once.py"
+        shutil.copyfile(
+            repository / "scripts/ops/task_image_builder_autoscaler_external_once.py",
+            builder_script,
+        )
+        builder_script.chmod(0o700)
     profile_text = profile.read_text(encoding="utf-8")
-    policy_marker = "\n[[task_image_builder_policies]]"
-    policy_end = "\n[[gb10_worker_pool_desired_states]]"
-    before_policies, separator, after_policy_marker = profile_text.partition(policy_marker)
-    assert separator
-    _builder_policies, separator, after_policies = after_policy_marker.partition(
-        policy_end
-    )
-    assert separator
-    profile_text = before_policies + policy_end + after_policies
-    supervisor_marker = (
-        "\n[[external_slurm_autoscaler_supervisors]]\n"
-        'name = "task-image-builder-gb10-staging"'
-    )
-    profile_text, separator, _builder_supervisors = profile_text.partition(
-        supervisor_marker
-    )
-    assert separator
-    profile_text += "\n"
+    if not include_builder:
+        policy_marker = "\n[[task_image_builder_policies]]"
+        policy_end = "\n[[gb10_worker_pool_desired_states]]"
+        before_policies, separator, after_policy_marker = profile_text.partition(policy_marker)
+        assert separator
+        _builder_policies, separator, after_policies = after_policy_marker.partition(policy_end)
+        assert separator
+        profile_text = before_policies + policy_end + after_policies
+        supervisor_marker = (
+            '\n[[external_slurm_autoscaler_supervisors]]\nname = "task-image-builder-gb10-staging"'
+        )
+        profile_text, separator, _builder_supervisors = profile_text.partition(supervisor_marker)
+        assert separator
+        profile_text += "\n"
     if timer_on_unit_active_sec != 30:
         enablement = "enabled = true\nactive = true\n"
         profile_text = profile_text.replace(
@@ -74,7 +81,7 @@ def _artifact(
             1,
         )
     if supervisor_count == 1:
-        if execution_host != "TRT-EAI-OLDLAB-1":
+        if not include_builder and execution_host != "TRT-EAI-OLDLAB-1":
             oldlab_marker = "\n# OLDLAB staging autoscaler supervisor."
             profile_text, separator, _oldlab_profile = profile_text.partition(oldlab_marker)
             assert separator
@@ -90,9 +97,9 @@ def _artifact(
     ):
         return build_external_supervisor_artifact(
             candidate,
-            candidate_sha="a" * 40,
-            candidate_tree="b" * 40,
-            image_tag="staging-aaaaaaa",
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            image_tag=image_tag,
             execution_host=execution_host,
         )
 
@@ -205,11 +212,47 @@ def _target(
     )
 
 
+def _failed_canonical_observation(
+    predecessor_artifact: ExternalSupervisorArtifact,
+    *,
+    result: str = "exit-code",
+    exec_main_status: int | None = 1,
+    timer_unit_file_state: str = "enabled",
+    timer_active_state: str = "active",
+    need_daemon_reload: str = "no",
+) -> transport_module.ExternalSupervisorLiveObservation:
+    predecessor = _target(predecessor_artifact)
+    supervisor = predecessor_artifact.supervisors[0]
+    return transport_module.ExternalSupervisorLiveObservation(
+        unit_payloads={
+            name: payload.encode() for name, payload in predecessor.unit_payloads.items()
+        },
+        timer_statuses={
+            supervisor.timer_name: TimerRuntimeStatus(
+                load_state="loaded",
+                unit_file_state=timer_unit_file_state,
+                active_state=timer_active_state,
+                fragment_path=str(PROTECTED_USER_UNIT_DIR / supervisor.timer_name),
+                need_daemon_reload=need_daemon_reload,
+            )
+        },
+        service_statuses={
+            supervisor.service_name: ServiceRuntimeStatus(
+                load_state="loaded",
+                result=result,
+                exec_main_status=exec_main_status,
+                fragment_path=str(PROTECTED_USER_UNIT_DIR / supervisor.service_name),
+                need_daemon_reload=need_daemon_reload,
+            )
+        },
+        canonical_identity=predecessor,
+    )
+
+
 def test_gb10_canonical_identity_binds_the_controller_service_home(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(tmp_path, execution_host="gx10-01c7")
-
     target = _target(
         artifact,
         unit_dir="/var/lib/loom-rollout/.config/systemd/user",
@@ -251,6 +294,404 @@ def test_gb10_canonical_runtime_proof_uses_the_controller_unit_directory(
             )
         },
     )
+
+
+def test_classifies_exact_failed_canonical_oneshot_as_repairable(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+    observation = _failed_canonical_observation(predecessor_artifact)
+
+    assert classify_external_supervisor_live_state(target_artifact, observation) == "repairable"
+
+
+def test_same_candidate_failed_canonical_oneshot_is_not_repairable(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        timer_on_unit_active_sec=60,
+    )
+
+    assert predecessor_artifact.candidate_sha == target_artifact.candidate_sha
+    assert predecessor_artifact.candidate_tree == target_artifact.candidate_tree
+    assert predecessor_artifact.artifact_digest != target_artifact.artifact_digest
+    assert (
+        classify_external_supervisor_live_state(
+            target_artifact,
+            _failed_canonical_observation(predecessor_artifact),
+        )
+        == "drifted"
+    )
+
+
+@pytest.mark.parametrize(
+    ("timer_unit_file_state", "timer_active_state", "need_daemon_reload"),
+    (
+        ("disabled", "inactive", "no"),
+        ("enabled", "inactive", "no"),
+        ("enabled", "active", "yes"),
+    ),
+)
+def test_failed_canonical_oneshot_requires_a_fresh_active_timer_for_repair(
+    tmp_path: Path,
+    timer_unit_file_state: str,
+    timer_active_state: str,
+    need_daemon_reload: str,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+
+    assert (
+        classify_external_supervisor_live_state(
+            target_artifact,
+            _failed_canonical_observation(
+                predecessor_artifact,
+                timer_unit_file_state=timer_unit_file_state,
+                timer_active_state=timer_active_state,
+                need_daemon_reload=need_daemon_reload,
+            ),
+        )
+        == "drifted"
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "exec_main_status"),
+    (
+        ("", 1),
+        ("success", 1),
+        ("exit-code", None),
+        ("exit-code", 0),
+        ("timeout", 1),
+    ),
+)
+def test_failed_canonical_oneshot_requires_bounded_exit_code_for_repair(
+    tmp_path: Path,
+    result: str,
+    exec_main_status: int | None,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+
+    assert (
+        classify_external_supervisor_live_state(
+            target_artifact,
+            _failed_canonical_observation(
+                predecessor_artifact,
+                result=result,
+                exec_main_status=exec_main_status,
+            ),
+        )
+        == "drifted"
+    )
+
+
+def test_failed_canonical_oneshot_rejects_mixed_predecessor_and_target_bytes(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+    observation = _failed_canonical_observation(predecessor_artifact)
+    supervisor = target_artifact.supervisors[0]
+    mixed_payloads = dict(observation.unit_payloads)
+    mixed_payloads[supervisor.service_name] = supervisor.service_unit.encode()
+    mixed = transport_module.ExternalSupervisorLiveObservation(
+        unit_payloads=mixed_payloads,
+        timer_statuses=observation.timer_statuses,
+        service_statuses=observation.service_statuses,
+        canonical_identity=observation.canonical_identity,
+    )
+
+    assert classify_external_supervisor_live_state(target_artifact, mixed) == "drifted"
+
+
+def test_failed_canonical_oneshot_rejects_loaded_candidate_only_unit(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+        execution_host="gx10-01c7",
+        include_builder=True,
+    )
+    predecessor_observation = _failed_canonical_observation(predecessor_artifact)
+    predecessor = predecessor_observation.canonical_identity
+    assert predecessor is not None
+    candidate_only = next(
+        supervisor
+        for supervisor in target_artifact.supervisors
+        if supervisor.service_name not in predecessor.unit_payloads
+    )
+    unit_payloads = {
+        name: predecessor_observation.unit_payloads.get(name)
+        for supervisor in target_artifact.supervisors
+        for name in (supervisor.service_name, supervisor.timer_name)
+    }
+    timer_statuses = dict(predecessor_observation.timer_statuses)
+    timer_statuses[candidate_only.timer_name] = TimerRuntimeStatus(
+        load_state="not-found",
+        unit_file_state="not-found",
+        active_state="inactive",
+        fragment_path="",
+        need_daemon_reload="no",
+    )
+    service_statuses = dict(predecessor_observation.service_statuses)
+    service_statuses[candidate_only.service_name] = ServiceRuntimeStatus(
+        load_state="not-found",
+        result="",
+        exec_main_status=None,
+        fragment_path="",
+        need_daemon_reload="no",
+    )
+    absent_candidate_only = transport_module.ExternalSupervisorLiveObservation(
+        unit_payloads=unit_payloads,
+        timer_statuses=timer_statuses,
+        service_statuses=service_statuses,
+        canonical_identity=predecessor,
+    )
+    assert (
+        classify_external_supervisor_live_state(target_artifact, absent_candidate_only)
+        == "repairable"
+    )
+
+    unit_payloads[candidate_only.service_name] = candidate_only.service_unit.encode()
+    service_statuses[candidate_only.service_name] = ServiceRuntimeStatus(
+        load_state="loaded",
+        result="success",
+        exec_main_status=0,
+        fragment_path=str(PROTECTED_USER_UNIT_DIR / candidate_only.service_name),
+        need_daemon_reload="no",
+    )
+    loaded_candidate_only = transport_module.ExternalSupervisorLiveObservation(
+        unit_payloads=unit_payloads,
+        timer_statuses=timer_statuses,
+        service_statuses=service_statuses,
+        canonical_identity=predecessor,
+    )
+
+    assert classify_external_supervisor_live_state(target_artifact, loaded_candidate_only) == (
+        "drifted"
+    )
+
+
+def test_fixed_transport_repairs_failed_canonical_oneshot(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+    store = _store(tmp_path)
+    control = _Control(store)
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    transport.apply(
+        predecessor_artifact,
+        transport.observe(predecessor_artifact, _absent_authority()),
+        plan_digest="1" * 64,
+        attestation_digest="2" * 64,
+        transition_digest="3" * 64,
+    )
+    control.result = "exit-code"
+    control.status = 1
+    before = transport.observe(target_artifact)
+    assert classify_external_supervisor_live_state(target_artifact, before) == "repairable"
+
+    transport.apply(
+        target_artifact,
+        before,
+        plan_digest="4" * 64,
+        attestation_digest="5" * 64,
+        transition_digest="6" * 64,
+    )
+
+    assert (
+        classify_external_supervisor_live_state(
+            target_artifact,
+            transport.observe(target_artifact),
+        )
+        == "exact"
+    )
+
+
+def test_failed_repair_restores_the_degraded_canonical_predecessor(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+    store = _store(tmp_path)
+    control = _Control(store)
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    transport.apply(
+        predecessor_artifact,
+        transport.observe(predecessor_artifact, _absent_authority()),
+        plan_digest="1" * 64,
+        attestation_digest="2" * 64,
+        transition_digest="3" * 64,
+    )
+    control.result = "exit-code"
+    control.status = 1
+    before = transport.observe(target_artifact)
+    assert classify_external_supervisor_live_state(target_artifact, before) == "repairable"
+    control.fail_service = True
+
+    with pytest.raises(RuntimeError, match="transition was safely compensated"):
+        transport.apply(
+            target_artifact,
+            before,
+            plan_digest="4" * 64,
+            attestation_digest="5" * 64,
+            transition_digest="6" * 64,
+        )
+
+    restored = transport.observe(target_artifact)
+    assert classify_external_supervisor_live_state(target_artifact, restored) == "repairable"
+    assert store.compensation_blockers() == {}
+
+
+def test_failed_promoted_target_is_not_accepted_as_a_repairable_predecessor(
+    tmp_path: Path,
+) -> None:
+    predecessor_artifact = _artifact(tmp_path / "predecessor")
+    target_artifact = _artifact(
+        tmp_path / "target",
+        candidate_sha="c" * 40,
+        candidate_tree="d" * 40,
+        image_tag="staging-ccccccc",
+    )
+    store = _store(tmp_path)
+    control = _Control(store)
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    predecessor = _target(predecessor_artifact, transition_group_id="a" * 32)
+    _install_units(store, dict(predecessor.unit_payloads))
+    _promote_activation(
+        store,
+        transport,
+        predecessor_artifact,
+        target=predecessor,
+    )
+    target = _target(target_artifact, transition_group_id="b" * 32)
+    authority = ExternalSupervisorPredecessorAuthority(
+        kind="canonical",
+        authority_digest=predecessor.evidence_digest,
+        unit_sha256=predecessor.unit_sha256,
+    )
+    identity = transport._activation_identity(
+        target_artifact,
+        target_artifact.supervisors[0],
+        target=target,
+        predecessor=predecessor,
+        authority=authority,
+        transition_digest="6" * 64,
+    )
+    intent = TimerCompensationEvidence.build(
+        **identity,
+        phase="intent",
+        reason="supervisor-repair",
+    )
+    store.record_compensation(intent)
+    for name, payload in target.unit_payloads.items():
+        store.publish_unit(
+            name,
+            payload.encode(),
+            expected_current=predecessor.unit_payloads[name].encode(),
+        )
+    store.record_compensation(_terminal(intent, phase="activated", reason="timer-active"))
+    store.promote_canonical(target, expected_current=predecessor)
+    control.result = "exit-code"
+    control.status = 1
+    control.fail_service = True
+
+    with pytest.raises(RuntimeError, match="reconciliation failed safely"):
+        transport.reconcile_compensations()
+
+    assert store.read_canonical() == target
+    assert store.compensation_blockers()
+    assert not tuple(store.unit_dir.glob(".loom-external-supervisor-compensation-*-recovered.json"))
+
+
+def test_repair_intent_requires_an_active_canonical_predecessor(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path)
+    store = _store(tmp_path)
+    transport = FixedExternalSupervisorTransport(store=store, control=_Control(store))
+    target = _target(artifact)
+    identity = transport._activation_identity(
+        artifact,
+        artifact.supervisors[0],
+        target=target,
+        predecessor=None,
+        authority=_absent_authority(),
+        transition_digest="6" * 64,
+    )
+
+    with pytest.raises(ValueError, match="compensation evidence is invalid"):
+        TimerCompensationEvidence.build(
+            **identity,
+            phase="intent",
+            reason="supervisor-repair",
+        )
+
+
+def test_repair_intent_requires_a_different_target_candidate(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    store = _store(tmp_path)
+    transport = FixedExternalSupervisorTransport(store=store, control=_Control(store))
+    predecessor = _target(artifact, transition_group_id="a" * 32)
+    target = _target(artifact, transition_group_id="b" * 32)
+    identity = transport._activation_identity(
+        artifact,
+        artifact.supervisors[0],
+        target=target,
+        predecessor=predecessor,
+        authority=ExternalSupervisorPredecessorAuthority(
+            kind="canonical",
+            authority_digest=predecessor.evidence_digest,
+            unit_sha256=predecessor.unit_sha256,
+        ),
+        transition_digest="6" * 64,
+    )
+
+    with pytest.raises(ValueError, match="compensation evidence is invalid"):
+        TimerCompensationEvidence.build(
+            **identity,
+            phase="intent",
+            reason="supervisor-repair",
+        )
 
 
 def _intent(

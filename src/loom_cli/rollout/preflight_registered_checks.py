@@ -199,6 +199,7 @@ class ExternalSupervisorPredecessorSnapshot:
     transition_clear: bool
     runtime_ready: bool
     pool_identity_digest: str
+    runtime_state: str = "ready"
 
     def __post_init__(self) -> None:
         units = dict(self.unit_sha256)
@@ -226,6 +227,8 @@ class ExternalSupervisorPredecessorSnapshot:
             )
             or type(self.transition_clear) is not bool
             or type(self.runtime_ready) is not bool
+            or self.runtime_state not in {"ready", "repairable", "drifted"}
+            or self.runtime_ready != (self.runtime_state in {"ready", "repairable"})
             or (self.authority_digest == EXTERNAL_SUPERVISOR_ABSENT_DIGEST) != absent
             or (
                 self.kind == "legacy-manifest"
@@ -911,6 +914,7 @@ def build_external_supervisor_predecessor_check(
                 f"{host}/live-evidence-digest": snapshot.live_evidence_digest,
                 f"{host}/pending-transition-digest": snapshot.pending_transition_digest,
                 f"{host}/unit-directory": external_supervisor_unit_directory(host),
+                f"{host}/runtime-state": snapshot.runtime_state,
                 **{f"{host}/unit/{name}": digest for name, digest in snapshot.unit_sha256.items()},
             }.items()
         }
@@ -981,7 +985,7 @@ def build_external_supervisor_predecessor_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v5",
+        implementation_version="v6",
         operations={CheckOperation.PROBE: probe},
     )
 

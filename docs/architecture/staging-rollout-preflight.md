@@ -440,6 +440,17 @@ the materialized files, dedicated token scope, registry authorization, and an
 checks does it call reconciliation. The protected supervisor transport starts
 that oneshot, requires its success, and only then enables and starts the timer.
 
+Predecessor admission has one bounded recovery bridge for correcting a broken
+supervisor policy. A canonical predecessor whose exact unit bytes and active,
+enabled, fresh timer are still authoritative may be classified as
+`repairable` when its oneshot has a nonzero `exit-code` result and the target
+Git candidate SHA/tree are different. The transition journal records
+`supervisor-repair`; successful protected apply must produce the normal exact
+runtime proof. If target activation fails, compensation restores the canonical
+predecessor bytes and accepts only that same fail-closed timer/oneshot shape so
+the journal can close. Same-candidate failures, missing or stale timers,
+candidate-only live units, mixed bytes, and every other drift remain blocking.
+
 A failed post-materialization check therefore produces protected rollout
 failure evidence without submitting a builder or enabling periodic scale-up.
 Drain-only reconciliation remains available without live builder credentials,

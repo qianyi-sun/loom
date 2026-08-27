@@ -133,17 +133,14 @@ def _with_disabled_gb10_supervisors(profile_text: str) -> str:
         raise AssertionError("external supervisor prerequisite fixture is not canonical")
     profile_text = profile_text.replace(
         prerequisite_pools,
-        prerequisite_pools
-        + 'retained_inactive_supervisor_pools = ["task-image-builder-gb10"]\n',
+        prerequisite_pools + 'retained_inactive_supervisor_pools = ["task-image-builder-gb10"]\n',
         1,
     )
     for name in ("gb10-staging", "task-image-builder-gb10-staging"):
         prefix, marker, suffix = profile_text.partition(f'name = "{name}"')
         if not marker:
             raise AssertionError(f"missing GB10 supervisor fixture: {name}")
-        section, next_marker, tail = suffix.partition(
-            "\n[[external_slurm_autoscaler_supervisors]]"
-        )
+        section, next_marker, tail = suffix.partition("\n[[external_slurm_autoscaler_supervisors]]")
         active = "enabled = true\nactive = true"
         disabled = "enabled = false\nactive = false"
         if section.count(active) != 1 or section.count(disabled) != 0:
@@ -359,6 +356,7 @@ def _bound_multi_artifacts(tmp_path: Path):
             predecessor_unit_set_digest=legacy.unit_set_digest,
             predecessor_live_evidence_digest=predecessor_live.evidence_digest,
             predecessor_pending_transition_digest=predecessor_live.pending_transition_digest,
+            predecessor_runtime_state="ready",
             unit_directory=external_supervisor_unit_directory(execution_host),
             target_artifact_digest=artifact.artifact_digest,
             target_profile_sha256=artifact.profile_sha256,
@@ -679,6 +677,7 @@ def _bind_primary_controller_to_canonical_predecessor(
         predecessor_unit_set_digest=predecessor_unit_set,
         predecessor_live_evidence_digest=live.evidence_digest,
         predecessor_pending_transition_digest=live.pending_transition_digest,
+        predecessor_runtime_state="ready",
         unit_directory=unit_directory,
         target_artifact_digest=artifact.artifact_digest,
         target_profile_sha256=artifact.profile_sha256,
@@ -923,6 +922,7 @@ def _bound_absent(tmp_path: Path):
             f"{artifact.supervisors[0].execution_host}/pending-transition-digest": (
                 predecessor_live.pending_transition_digest
             ),
+            f"{artifact.supervisors[0].execution_host}/runtime-state": "ready",
             f"{artifact.supervisors[0].execution_host}/unit-directory": (
                 external_supervisor_unit_directory(artifact.supervisors[0].execution_host)
             ),

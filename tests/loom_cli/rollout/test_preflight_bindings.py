@@ -99,9 +99,7 @@ def _executions() -> tuple[CheckExecution, ...]:
                     TASK_IMAGE_BUILDER_SCRIPT_PATH: "8" * 64,
                 },
                 "supervisor-unit-digests": all_target_units,
-                "supervisor-unit-set-digest": external_supervisor_unit_set_digest(
-                    all_target_units
-                ),
+                "supervisor-unit-set-digest": external_supervisor_unit_set_digest(all_target_units),
                 "supervisor-controller-artifact-digests": {
                     "gx10-01c7": "5" * 64,
                     "TRT-EAI-OLDLAB-1": "8" * 64,
@@ -122,9 +120,9 @@ def _executions() -> tuple[CheckExecution, ...]:
         _execution(
             "external-supervisor.predecessor",
             {
-                "authority-kind": "legacy-manifest",
+                "authority-kind": "canonical",
                 "authority-digest": "8" * 64,
-                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "pointer-digest": "c" * 64,
                 "unit-digests": predecessor_units,
                 "unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
                 "live-evidence-digest": "9" * 64,
@@ -132,15 +130,16 @@ def _executions() -> tuple[CheckExecution, ...]:
                 "transition-clear": True,
                 "runtime-ready": True,
                 "controller-bindings": {
-                    "gx10-01c7/authority-kind": "legacy-manifest",
+                    "gx10-01c7/authority-kind": "canonical",
                     "gx10-01c7/authority-digest": "8" * 64,
-                    "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                    "gx10-01c7/pointer-digest": "c" * 64,
                     "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
                         predecessor_units
                     ),
                     "gx10-01c7/live-evidence-digest": "9" * 64,
                     "gx10-01c7/pending-transition-digest": "0" * 64,
                     "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
+                    "gx10-01c7/runtime-state": "repairable",
                     **{
                         f"gx10-01c7/unit/{name}": digest
                         for name, digest in predecessor_units.items()
@@ -154,6 +153,7 @@ def _executions() -> tuple[CheckExecution, ...]:
                     "TRT-EAI-OLDLAB-1/live-evidence-digest": "b" * 64,
                     "TRT-EAI-OLDLAB-1/pending-transition-digest": "0" * 64,
                     "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
+                    "TRT-EAI-OLDLAB-1/runtime-state": "ready",
                     **{
                         f"TRT-EAI-OLDLAB-1/unit/{name}": digest
                         for name, digest in oldlab_predecessor_units.items()
@@ -213,7 +213,7 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     assert bindings.backup_manifest_sha256 == "7" * 64
     assert bindings.backup_component_set_digest == "8" * 64
     assert bindings.object_inventory_root == "9" * 64
-    assert bindings.supervisor_predecessor_kind == "legacy-manifest"
+    assert bindings.supervisor_predecessor_kind == "canonical"
     assert bindings.supervisor_predecessor_unit_set_digest == (
         external_supervisor_unit_set_digest(bindings.supervisor_predecessor_unit_sha256)
     )
@@ -252,14 +252,16 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     )
     assert controller_bindings["gx10-01c7/unit-directory"] == GB10_CANONICAL_UNIT_DIR
     assert controller_bindings["TRT-EAI-OLDLAB-1/unit-directory"] == PROTECTED_CANONICAL_UNIT_DIR
+    assert controller_bindings["gx10-01c7/runtime-state"] == "repairable"
+    assert controller_bindings["TRT-EAI-OLDLAB-1/runtime-state"] == "ready"
     gb10_transition = external_supervisor_transition_digest(
         unit_directory=GB10_CANONICAL_UNIT_DIR,
         candidate_sha=bindings.candidate_sha,
         candidate_tree=bindings.candidate_tree,
         environment=bindings.environment,
-        predecessor_kind="legacy-manifest",
+        predecessor_kind="canonical",
         predecessor_digest="8" * 64,
-        predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        predecessor_pointer_digest="c" * 64,
         predecessor_unit_sha256={
             "loom-autoscaler-gb10-staging.service": "a" * 64,
             "loom-autoscaler-gb10-staging.timer": "b" * 64,
