@@ -518,7 +518,8 @@ pytest, Ruff, mypy, Bash, jq, Kubernetes read-only/status commands.
   ```
 
   The update command uses the actor's own updated `candidate_sha`, `--candidate`,
-  `--expected-operation-epoch 0`, `--min-slots 0`, `--quiet`, and
+  the fixed positive noncreating sentinel `--expected-operation-epoch 1`,
+  `--min-slots 0`, `--quiet`, and
   `--expected-hidden-denial`; it does not seal or upload another source. The
   read probe uses the same expected-denial mode. The destroy probe extracts the
   target's exact positive operation epoch from its pinned before-status and

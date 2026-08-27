@@ -59,6 +59,23 @@ set -euo pipefail
 umask 077
 
 repo="<absolute-clean-detached-loom-checkout>"
+validated_repository_root() {
+  local requested="$1"
+  local current
+  local git_root
+  test "${requested#/}" != "$requested"
+  test -d "$requested" && test ! -L "$requested"
+  test "$(realpath -e -- "$requested")" = "$requested"
+  current="$(pwd -P)"
+  test "$current" = "$requested"
+  git_root="$(git -C "$requested" rev-parse --show-toplevel)"
+  test "${git_root#/}" != "$git_root"
+  test -d "$git_root" && test ! -L "$git_root"
+  test "$(realpath -e -- "$git_root")" = "$git_root"
+  test "$git_root" = "$requested"
+  printf '%s\n' "$git_root"
+}
+repo="$(validated_repository_root "$repo")"
 profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
 loom_cli="$repo/.venv/bin/loom"
 python_cli="$repo/.venv/bin/python"
@@ -82,20 +99,70 @@ test -x "$loom_cli"
 test -x "$python_cli"
 
 evidence_dir="<new-absolute-owner-only-durable-launch-evidence-directory>"
+assert_owner_controlled_evidence_parent() {
+  local directory="$1"
+  local caller
+  local child=""
+  local child_owner
+  local current
+  local mode
+  local owner
+  caller="$(id -u)"
+  test "${directory#/}" != "$directory"
+  test -d "$directory" && test ! -L "$directory"
+  test "$(realpath -e -- "$directory")" = "$directory"
+  test "$(stat -c %u -- "$directory")" = "$caller"
+  mode="$(stat -c %a -- "$directory")"
+  test $((8#$mode & 8#022)) -eq 0
+  current="$directory"
+  while true; do
+    test -d "$current" && test ! -L "$current"
+    test "$(realpath -e -- "$current")" = "$current"
+    owner="$(stat -c %u -- "$current")"
+    if test "$owner" != 0 && test "$owner" != "$caller"; then
+      return 1
+    fi
+    mode="$(stat -c %a -- "$current")"
+    if test $((8#$mode & 8#022)) -ne 0; then
+      test $((8#$mode & 8#1000)) -ne 0
+      test -n "$child"
+      child_owner="$(stat -c %u -- "$child")"
+      if test "$child_owner" != 0 && test "$child_owner" != "$caller"; then
+        return 1
+      fi
+    fi
+    test "$current" = / && break
+    child="$current"
+    current="$(dirname -- "$current")"
+  done
+}
+
 prepare_new_evidence_dir() {
   local path="$1"
   local parent
+  local parent_identity
+  local path_identity
   test "${path#/}" != "$path"
+  test "$(realpath -m -- "$path")" = "$path"
+  case "$path" in
+    "$repo"|"$repo"/*) return 1 ;;
+  esac
   parent="$(dirname -- "$path")"
-  test -d "$parent" && test ! -L "$parent"
-  test "$(realpath -e "$parent")" = "$parent"
+  assert_owner_controlled_evidence_parent "$parent"
+  parent_identity="$(stat -c '%d:%i:%f:%u:%g' -- "$parent")"
   test ! -e "$path" && test ! -L "$path"
+  test "$(stat -c '%d:%i:%f:%u:%g' -- "$parent")" = "$parent_identity"
   mkdir -m 0700 -- "$path"
+  test "$(stat -c '%d:%i:%f:%u:%g' -- "$parent")" = "$parent_identity"
   test -d "$path" && test ! -L "$path"
-  test "$(realpath -e "$path")" = "$path"
-  test "$(stat -c %u "$path")" = "$(id -u)"
-  test "$(stat -c %a "$path")" = 700
+  test "$(realpath -e -- "$path")" = "$path"
+  test "$(stat -c %u -- "$path")" = "$(id -u)"
+  test "$(stat -c %a -- "$path")" = 700
+  path_identity="$(stat -c '%d:%i:%f:%u:%g:%h' -- "$path")"
   test -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)"
+  test "$(stat -c '%d:%i:%f:%u:%g:%h' -- "$path")" = "$path_identity"
+  test "$(stat -c '%d:%i:%f:%u:%g' -- "$parent")" = "$parent_identity"
+  assert_owner_controlled_evidence_parent "$parent"
 }
 prepare_new_evidence_dir "$evidence_dir"
 operational_render="$evidence_dir/reviewed-operational.yaml"

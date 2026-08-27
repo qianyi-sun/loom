@@ -1011,7 +1011,11 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert "umask 077" in runbook
     assert "personal-dev-trusted-release-run-<run>-attempt-<attempt>" in runbook
     assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
-    assert 'repo="$(pwd -P)"' in runbook
+    repo_binding = 'repo="$(validated_repository_root "$(pwd -P)")"'
+    assert repo_binding in runbook
+    assert runbook.index(repo_binding) < runbook.index(
+        'prepare_new_evidence_dir "$evidence_dir"'
+    )
     assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
     assert 'python_cli="$repo/.venv/bin/python"' in runbook
     assert 'test -x "$loom_cli"' in runbook
@@ -1650,6 +1654,11 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert "schema-v1 single-owner record remains historical compatibility" in runbook
     assert "final multi-person launch requires a verified schema-v2 result" in runbook
     assert "separately reviewed multi-owner durable-launch window" in runbook
+    repo_binding = 'repo="$(validated_repository_root "$repo")"'
+    assert repo_binding in runbook
+    assert runbook.index(repo_binding) < runbook.index(
+        'prepare_new_evidence_dir "$evidence_dir"'
+    )
     assert "#1280" not in runbook
     assert "personal-dev-concurrent-owner-zero-capacity-acceptance.md" in runbook
     assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
@@ -1761,21 +1770,39 @@ def test_multi_owner_launch_requires_a_new_canonical_evidence_directory(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    repository_function = _fenced_shell_function(runbook, "validated_repository_root")
+    parent_function = _fenced_shell_function(
+        runbook,
+        "assert_owner_controlled_evidence_parent",
+    )
     prepare_function = _fenced_shell_function(runbook, "prepare_new_evidence_dir")
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
 
-    def prepare(path: Path) -> subprocess.CompletedProcess[str]:
+    def prepare(
+        path: Path,
+        *,
+        cwd: Path = repo,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash"],
             input=(
                 "set -euo pipefail\n"
                 "umask 077\n"
+                + repository_function
+                + "\n"
+                + parent_function
+                + "\n"
                 + prepare_function
                 + "\n"
+                + f"repo={shlex.quote(str(repo))}\n"
+                + 'repo="$(validated_repository_root "$repo")"\n'
                 + f"prepare_new_evidence_dir {shlex.quote(str(path))}\n"
             ),
             text=True,
             capture_output=True,
             check=False,
+            cwd=cwd,
         )
 
     fresh = tmp_path / "fresh"
@@ -1795,9 +1822,37 @@ def test_multi_owner_launch_requires_a_new_canonical_evidence_directory(
     symlink.symlink_to(existing, target_is_directory=True)
     symlink_parent = tmp_path / "symlink-parent"
     symlink_parent.symlink_to(existing, target_is_directory=True)
+    ignored_parent = repo / "ignored"
+    ignored_parent.mkdir()
+    writable_parent = tmp_path / "writable-parent"
+    writable_parent.mkdir()
+    writable_parent.chmod(0o777)
+    writable_ancestor = tmp_path / "writable-ancestor"
+    writable_ancestor.mkdir()
+    writable_ancestor.chmod(0o777)
+    controlled_parent = writable_ancestor / "controlled-parent"
+    controlled_parent.mkdir(mode=0o700)
 
-    for unsafe in (existing, nonempty, symlink, symlink_parent / "child"):
-        assert prepare(unsafe).returncode != 0
+    try:
+        unsafe_paths = (
+            existing,
+            nonempty,
+            symlink,
+            symlink_parent / "child",
+            ignored_parent / "evidence",
+            writable_parent / "child",
+            controlled_parent / "child",
+            tmp_path / "noncanonical-parent" / ".." / "noncanonical",
+            Path("relative-evidence"),
+        )
+        for unsafe in unsafe_paths:
+            assert prepare(unsafe).returncode != 0
+        assert not (ignored_parent / "evidence").exists()
+        assert not (writable_parent / "child").exists()
+        assert not (controlled_parent / "child").exists()
+    finally:
+        writable_parent.chmod(0o700)
+        writable_ancestor.chmod(0o700)
 
 
 def test_concurrent_acceptance_requires_a_new_canonical_outside_evidence_directory(
@@ -1806,25 +1861,41 @@ def test_concurrent_acceptance_requires_a_new_canonical_outside_evidence_directo
     runbook = _read(
         "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
     )
+    repository_function = _indented_shell_function(
+        runbook,
+        "validated_repository_root",
+    )
+    parent_function = _indented_shell_function(
+        runbook,
+        "assert_owner_controlled_evidence_parent",
+    )
     prepare_function = _indented_shell_function(runbook, "prepare_new_evidence_dir")
     repo = tmp_path / "repo"
-    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
 
-    def prepare(path: Path) -> subprocess.CompletedProcess[str]:
+    def prepare(
+        path: Path,
+        *,
+        cwd: Path = repo,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash"],
             input=(
                 "set -euo pipefail\n"
                 "umask 077\n"
-                + f"repo={shlex.quote(str(repo))}\n"
+                + repository_function
+                + "\n"
+                + parent_function
+                + "\n"
                 + prepare_function
                 + "\n"
+                + 'repo="$(validated_repository_root "$(pwd -P)")"\n'
                 + f"prepare_new_evidence_dir {shlex.quote(str(path))}\n"
             ),
             text=True,
             capture_output=True,
             check=False,
-            cwd=tmp_path,
+            cwd=cwd,
         )
 
     fresh = tmp_path / "fresh"
@@ -1847,18 +1918,44 @@ def test_concurrent_acceptance_requires_a_new_canonical_outside_evidence_directo
     real_parent.mkdir()
     symlink_parent = tmp_path / "symlink-parent"
     symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    ignored_parent = repo / "ignored"
+    ignored_parent.mkdir()
+    repo_subdir = repo / "subdir"
+    repo_subdir.mkdir()
+    writable_parent = tmp_path / "writable-parent"
+    writable_parent.mkdir()
+    writable_parent.chmod(0o777)
+    writable_ancestor = tmp_path / "writable-ancestor"
+    writable_ancestor.mkdir()
+    writable_ancestor.chmod(0o777)
+    controlled_parent = writable_ancestor / "controlled-parent"
+    controlled_parent.mkdir(mode=0o700)
 
-    unsafe_paths = (
-        existing,
-        nonempty,
-        leaf_symlink,
-        symlink_parent / "child",
-        repo / "contained",
-        real_parent / ".." / "noncanonical",
-        Path("relative-evidence"),
-    )
-    for unsafe in unsafe_paths:
-        assert prepare(unsafe).returncode != 0
+    try:
+        unsafe_paths = (
+            existing,
+            nonempty,
+            leaf_symlink,
+            symlink_parent / "child",
+            repo / "contained",
+            ignored_parent / "evidence",
+            real_parent / ".." / "noncanonical",
+            writable_parent / "child",
+            controlled_parent / "child",
+            Path("relative-evidence"),
+        )
+        for unsafe in unsafe_paths:
+            assert prepare(unsafe).returncode != 0
+        from_subdir = ignored_parent / "from-subdir"
+        assert prepare(from_subdir, cwd=repo_subdir).returncode != 0
+        assert not from_subdir.exists()
+        assert not (repo / "contained").exists()
+        assert not (ignored_parent / "evidence").exists()
+        assert not (writable_parent / "child").exists()
+        assert not (controlled_parent / "child").exists()
+    finally:
+        writable_parent.chmod(0o700)
+        writable_ancestor.chmod(0o700)
 
 
 def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> None:
