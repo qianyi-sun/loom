@@ -1677,7 +1677,9 @@ cluster = [
 ]
 dev = [
     { name = "hypothesis" },
+    { name = "kubernetes" },
     { name = "mypy" },
+    { name = "nebius" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -1720,6 +1722,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1,<4.0" },
     { name = "jsonschema", specifier = ">=4.21,<5.0" },
     { name = "kubernetes", marker = "extra == 'cluster'", specifier = ">=28.1,<32.0" },
+    { name = "kubernetes", marker = "extra == 'dev'", specifier = ">=28.1,<32.0" },
     { name = "litellm", specifier = ">=1.70,<2.0" },
     { name = "loom-benchmark-terminal-bench-2", marker = "extra == 'rollout'", editable = "packages/loom-benchmark-terminal-bench-2" },
     { name = "loom-benchmarks", marker = "extra == 'rollout'", editable = "packages/loom-benchmarks" },
@@ -1727,6 +1730,7 @@ requires-dist = [
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.66.55,<0.80" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
     { name = "nebius", marker = "extra == 'cluster'", specifier = ">=0.6,<0.7" },
+    { name = "nebius", marker = "extra == 'dev'", specifier = ">=0.6,<0.7" },
     { name = "numpy", specifier = ">=2.0,<3.0" },
     { name = "openai", specifier = ">=1.55,<3.0" },
     { name = "pillow", specifier = ">=12.0,<13.0" },

@@ -227,7 +227,7 @@ class InClusterKubernetesJobApi:
         core_api: Any | None = None,
     ) -> None:
         try:
-            from kubernetes import client, config  # type: ignore[import-untyped]
+            from kubernetes import client, config
         except ModuleNotFoundError as exc:
             raise RuntimeError("install Loom with the cluster extra") from exc
         if any(value is not None for value in (client_module, batch_api, core_api)):

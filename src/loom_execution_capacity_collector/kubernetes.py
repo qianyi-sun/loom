@@ -25,7 +25,7 @@ def _quantity(value: object, *, kind: str, capacity: bool = False) -> int:
     if value is None:
         return 0
     try:
-        from kubernetes.utils.quantity import parse_quantity  # type: ignore[import-untyped]
+        from kubernetes.utils.quantity import parse_quantity
 
         parsed = Decimal(parse_quantity(str(value)))
     except (ArithmeticError, TypeError, ValueError) as exc:
@@ -160,7 +160,7 @@ class InClusterKubernetesCapacityReader:
             raise ValueError("Kubernetes request timeout must be between 1 and 60 seconds")
         if core_api is None:
             try:
-                from kubernetes import client, config  # type: ignore[import-untyped]
+                from kubernetes import client, config
             except ModuleNotFoundError as exc:
                 raise RuntimeError("install Loom with the cluster extra") from exc
             config.load_incluster_config()
