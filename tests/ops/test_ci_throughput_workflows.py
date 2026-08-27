@@ -659,13 +659,15 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 18
+    assert len(matrix) == 20
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "capacity-executor",
         "capacity-manager",
         "control-plane",
         "egress-xds",
+        "execution-actuator",
+        "execution-runtime",
         "family-orchestrator",
         "pipeline-orchestrator",
         "pipeline-core-fixture",
@@ -681,7 +683,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 36
+    assert len(native_matrix) == 40
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -706,6 +708,8 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "service",
         "control-plane",
         "egress-xds",
+        "execution-actuator",
+        "execution-runtime",
         "family-orchestrator",
         "pipeline-orchestrator",
         "pipeline-core-fixture",
