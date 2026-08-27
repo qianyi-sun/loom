@@ -27,6 +27,7 @@ from loom_cli.cluster_workload_trust import (
 )
 from loom_cli.environment_state import staging_gb10_external_activation_blockers
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
+from loom_cli.rollout.gb10_slurm_acceptance import validate_gb10_slurm_acceptance
 
 _Outcome = Literal["pass", "fail"]
 _HF_MIRROR_BOUNDARY_ENVIRONMENTS = frozenset({"staging", "production"})
@@ -42,15 +43,9 @@ _GB10_DESIRED_CONTRACT_FIELDS = (
     "target_slots",
     "host_intents",
 )
-_STAGING_GB10_HOST_INTENTS = {
-    f"trt-gb10-{index}": "active" for index in range(1, 16)
-}
-_STAGING_GB10_RETIRED_HOST_INTENTS = {
-    f"trt-gb10-{index}": "stopped" for index in range(1, 16)
-}
-_STAGING_GB10_CANONICAL_NODES = [
-    f"trt-gb10-{index}" for index in range(1, 16)
-]
+_STAGING_GB10_HOST_INTENTS = {f"trt-gb10-{index}": "active" for index in range(1, 16)}
+_STAGING_GB10_RETIRED_HOST_INTENTS = {f"trt-gb10-{index}": "stopped" for index in range(1, 16)}
+_STAGING_GB10_CANONICAL_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
 _STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
 _STAGING_GB10_TARGET_SLOTS = 150
@@ -809,8 +804,7 @@ def _external_slurm_acceptance_check(
     )
     raw_supervisors = external_workers.get("external_slurm_autoscaler_supervisors")
     has_gb10_supervisor = isinstance(raw_supervisors, list) and any(
-        isinstance(row, dict) and row.get("pool_name") == "gb10"
-        for row in raw_supervisors
+        isinstance(row, dict) and row.get("pool_name") == "gb10" for row in raw_supervisors
     )
     if not has_gb10_external_policy and not has_gb10_supervisor and not blockers:
         return None
@@ -822,9 +816,7 @@ def _external_slurm_acceptance_check(
     prerequisites = prerequisites if isinstance(prerequisites, dict) else {}
     supervisors = raw_supervisors if isinstance(raw_supervisors, list) else []
     activation_requested = any(
-        isinstance(pool, dict)
-        and pool.get("pool_name") == "gb10"
-        and pool.get("enabled") is True
+        isinstance(pool, dict) and pool.get("pool_name") == "gb10" and pool.get("enabled") is True
         for pool in slurm_pools
     ) or any(
         isinstance(row, dict)
@@ -844,9 +836,7 @@ def _external_slurm_acceptance_check(
         and pool.get("actuator") == "slurm"
         and pool.get("external_runner") is True
     ]
-    raw_expected_nodes = (
-        gb10_policies[0].get("allowed_nodes") if len(gb10_policies) == 1 else None
-    )
+    raw_expected_nodes = gb10_policies[0].get("allowed_nodes") if len(gb10_policies) == 1 else None
     expected_nodes = (
         raw_expected_nodes
         if isinstance(raw_expected_nodes, list)
@@ -854,64 +844,24 @@ def _external_slurm_acceptance_check(
         else []
     )
     authority_matches = False
-    if authority_artifact is not None:
+    if (
+        authority_artifact is not None
+        and isinstance(release.get("git_sha"), str)
+        and isinstance(expected_profile_sha256, str)
+    ):
         try:
-            generated_at = datetime.fromisoformat(str(authority_artifact["generated_at"]))
-            expires_at = datetime.fromisoformat(str(authority_artifact["expires_at"]))
-            now = datetime.now(UTC)
-            times_valid = (
-                generated_at.tzinfo is not None
-                and expires_at.tzinfo is not None
-                and generated_at <= now
-                and expires_at > now
-                and (expires_at - generated_at).total_seconds() <= 3600
+            validate_gb10_slurm_acceptance(
+                authority_artifact,
+                candidate_sha=release["git_sha"],
+                candidate_tree=None,
+                profile_sha256=expected_profile_sha256,
+                nodes=expected_nodes,
+                now=datetime.now(UTC),
             )
-        except (KeyError, TypeError, ValueError):
-            times_valid = False
-        probed_nodes = authority_artifact.get("probed_nodes")
-        deferred_busy_nodes = authority_artifact.get("deferred_busy_nodes")
-        coverage_matches = bool(
-            isinstance(probed_nodes, list)
-            and probed_nodes
-            and all(isinstance(node, str) for node in probed_nodes)
-            and len(set(probed_nodes)) == len(probed_nodes)
-            and isinstance(deferred_busy_nodes, list)
-            and all(isinstance(node, str) for node in deferred_busy_nodes)
-            and len(set(deferred_busy_nodes)) == len(deferred_busy_nodes)
-            and not (set(probed_nodes) & set(deferred_busy_nodes))
-            and set(probed_nodes) | set(deferred_busy_nodes) == set(expected_nodes)
-            and probed_nodes
-            == [node for node in expected_nodes if node in set(probed_nodes)]
-            and deferred_busy_nodes
-            == [node for node in expected_nodes if node in set(deferred_busy_nodes)]
-        )
-        authority_matches = bool(
-            type(authority_artifact.get("schema_version")) is int
-            and authority_artifact.get("schema_version") == 1
-            and authority_artifact.get("kind") == "loom_gb10_slurm_acceptance"
-            and authority_artifact.get("result") == "pass"
-            and authority_artifact.get("candidate_sha") == release.get("git_sha")
-            and isinstance(authority_artifact.get("candidate_tree"), str)
-            and re.fullmatch(r"[0-9a-f]{40}", authority_artifact["candidate_tree"])
-            and authority_artifact.get("profile_sha256") == expected_profile_sha256
-            and authority_artifact.get("cluster_name") == "trt-gb10"
-            and authority_artifact.get("controller_host") == "gx10-01c7"
-            and authority_artifact.get("service_identity")
-            == {
-                "user": "loom-rollout",
-                "uid": 995,
-                "gid": 2007,
-                "account": "loom-staging",
-                "qos": "loom-staging",
-            }
-            and authority_artifact.get("nodes") == expected_nodes
-            and type(authority_artifact.get("node_count")) is int
-            and authority_artifact.get("node_count") == len(expected_nodes)
-            and type(authority_artifact.get("probed_node_count")) is int
-            and authority_artifact.get("probed_node_count") == len(probed_nodes or [])
-            and coverage_matches
-            and times_valid
-        )
+        except ValueError:
+            pass
+        else:
+            authority_matches = True
     dynamic_blockers = list(blockers)
     if activation_requested:
         desired_states = external_workers.get("gb10_desired_states")
@@ -921,8 +871,7 @@ def _external_slurm_acceptance_check(
             and isinstance(desired_states[0], dict)
             and desired_states[0].get("pool_name") == "gb10"
             and desired_states[0].get("target_slots") == 0
-            and desired_states[0].get("host_intents")
-            == _STAGING_GB10_RETIRED_HOST_INTENTS
+            and desired_states[0].get("host_intents") == _STAGING_GB10_RETIRED_HOST_INTENTS
         )
         if not retired:
             dynamic_blockers.append("gb10_node_agent_authority_not_retired")
@@ -948,26 +897,16 @@ def _external_slurm_acceptance_check(
             )
             else None
         ),
-        "authority_required": prerequisites.get(
-            "require_external_allocation_authority"
-        ),
-        "authority_verified": (
-            authority_matches and not authority_error
-        ),
+        "authority_required": prerequisites.get("require_external_allocation_authority"),
+        "authority_verified": (authority_matches and not authority_error),
         "authority_candidate_sha": (
-            authority_artifact.get("candidate_sha")
-            if authority_artifact is not None
-            else None
+            authority_artifact.get("candidate_sha") if authority_artifact is not None else None
         ),
         "authority_node_count": (
-            authority_artifact.get("node_count")
-            if authority_artifact is not None
-            else None
+            authority_artifact.get("node_count") if authority_artifact is not None else None
         ),
         "authority_probed_node_count": (
-            authority_artifact.get("probed_node_count")
-            if authority_artifact is not None
-            else None
+            authority_artifact.get("probed_node_count") if authority_artifact is not None else None
         ),
         "authority_error": authority_error,
         "blockers": sorted(set(dynamic_blockers)),
@@ -1593,9 +1532,7 @@ def _gb10_manifest_policy_mismatches(
     )
     expected_slots = 0 if requires_retirement else _STAGING_GB10_TARGET_SLOTS
     expected_intents = (
-        _STAGING_GB10_RETIRED_HOST_INTENTS
-        if requires_retirement
-        else _STAGING_GB10_HOST_INTENTS
+        _STAGING_GB10_RETIRED_HOST_INTENTS if requires_retirement else _STAGING_GB10_HOST_INTENTS
     )
     if desired.get("target_slots") != expected_slots:
         issues.append(f"staging GB10 target_slots must be {expected_slots}")
@@ -1739,9 +1676,7 @@ def _current_active_gb10_worker_ids(
     """Resolve current worker registrations for the manifest-active GB10 hosts."""
     expected_hosts = _manifest_active_gb10_hosts(manifest)
     release = manifest.get("release")
-    release_environment = (
-        str(release.get("environment") or "") if isinstance(release, dict) else ""
-    )
+    release_environment = str(release.get("environment") or "") if isinstance(release, dict) else ""
     errors: list[str] = []
     if not expected_hosts:
         errors.append("release manifest has no active GB10 hosts")
@@ -2044,11 +1979,9 @@ def _hf_mirror_boundary_check(
         if isinstance(gb10_status_artifact, dict)
         else None
     )
-    current_active_worker_ids, active_worker_identity_errors = (
-        _current_active_gb10_worker_ids(
-            manifest=manifest,
-            status=gb10_status_artifact,
-        )
+    current_active_worker_ids, active_worker_identity_errors = _current_active_gb10_worker_ids(
+        manifest=manifest,
+        status=gb10_status_artifact,
     )
     evidence.update(
         {
@@ -2198,9 +2131,7 @@ def _hf_mirror_boundary_check(
             "canary_trial_worker_ids": canary_worker_ids,
             "canary_worker_ids_schema_valid": canary_worker_ids_schema_valid,
             "canary_unexpected_worker_ids": unexpected_canary_worker_ids,
-            "canary_workers_match_current_candidate": (
-                canary_workers_match_current_candidate
-            ),
+            "canary_workers_match_current_candidate": (canary_workers_match_current_candidate),
         }
     )
     terminal_pools = (

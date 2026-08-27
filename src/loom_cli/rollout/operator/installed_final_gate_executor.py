@@ -23,6 +23,7 @@ from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .config import OperatorConfig
 from .final_browser_executor import FinalBrowserExecutor
+from .final_capacity_executor import FinalCapacityExecutor
 from .final_gate_plan import FinalGatePlan
 from .final_smoke_executor import FinalSmokeExecutor
 from .final_summary_executor import FinalSummaryExecutor
@@ -161,6 +162,11 @@ class InstalledFinalGateExecutor:
     ) -> FinalGateResult:
         installed = self._validate_plan(plan)
         if check_id in {"final.protected-apply", "final.convergence"}:
+            gb10_controller = build_fixed_gb10_external_supervisor_transport(
+                candidate_sha=plan.candidate_sha,
+                candidate_tree=plan.candidate_tree,
+                run=self._supervisor_ssh_run,
+            )
             container_registry = str(
                 load_cluster_config(self.config.cluster_config_path).container_registry
             )
@@ -174,13 +180,7 @@ class InstalledFinalGateExecutor:
                 max_concurrency=self.config.gb10_prep_concurrency,
             )
             external_supervisors: dict[str, ProtectedExternalSupervisorTransport] = {
-                GB10_CONTROLLER_EXECUTION_HOST: (
-                    build_fixed_gb10_external_supervisor_transport(
-                        candidate_sha=plan.candidate_sha,
-                        candidate_tree=plan.candidate_tree,
-                        run=self._supervisor_ssh_run,
-                    )
-                ),
+                GB10_CONTROLLER_EXECUTION_HOST: gb10_controller,
                 STAGING_ROLLOUT_EXECUTION_HOST: (
                     build_fixed_external_supervisor_transport(service_uid=self.service_uid)
                 ),
@@ -215,6 +215,14 @@ class InstalledFinalGateExecutor:
                 candidate_root=self.config.runner_repo,
                 external_supervisor_transports=external_supervisors,
                 container_registry=container_registry,
+            )(check_id, operation, plan)
+        if check_id == "final.capacity":
+            return FinalCapacityExecutor(
+                transport_factory=lambda: build_fixed_gb10_external_supervisor_transport(
+                    candidate_sha=plan.candidate_sha,
+                    candidate_tree=plan.candidate_tree,
+                    run=self._capacity_ssh_run,
+                )
             )(check_id, operation, plan)
         if check_id == "final.smoke":
             return FinalSmokeExecutor(
@@ -294,6 +302,18 @@ class InstalledFinalGateExecutor:
         )
 
     @staticmethod
+    def _capacity_ssh_run(
+        argv: Sequence[str],
+        input_payload: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return _run_command(
+            argv,
+            timeout=1500,
+            capture_output=True,
+            input_payload=input_payload,
+        )
+
+    @staticmethod
     def _browser_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return _run_command(argv, timeout=900, capture_output=False)
 
@@ -315,7 +335,7 @@ def _run_command(
         # newline is literal argument text, not an injection vector. A NUL byte
         # is still rejected (it cannot appear in an execve argument).
         or any(not item or "\x00" in item for item in command)
-        or not 1 <= timeout <= 900
+        or not 1 <= timeout <= 1800
     ):
         raise ValueError("installed final command is invalid")
     if input_payload is not None and (

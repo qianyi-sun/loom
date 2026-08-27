@@ -165,15 +165,18 @@ class AttestedFinalGateAuthority:
         self,
         *,
         now: datetime,
+        clock: Callable[[], datetime] | None = None,
         prior_executions: Mapping[str, CheckExecution] | None = None,
         durable_prior_executions: frozenset[str] = frozenset(),
         on_execution: Callable[[CheckExecution], None] | None = None,
     ) -> AttestedFinalGateReport:
         """Apply once, then verify every non-mutating protected invariant."""
+        live_clock = clock or (lambda: now)
+        execution_time = live_clock()
         if (
-            now.tzinfo is None
-            or now.utcoffset() is None
-            or (now >= self._attestation.expires_at and not self._post_apply_resume)
+            execution_time.tzinfo is None
+            or execution_time.utcoffset() is None
+            or (execution_time >= self._attestation.expires_at and not self._post_apply_resume)
         ):
             raise ValueError("final gate attestation expired before execution")
         prior = dict(prior_executions or {})
@@ -192,7 +195,7 @@ class AttestedFinalGateAuthority:
                 raise ValueError("durable final gate evidence identity is invalid")
             selected = self.select_resume_evidence(
                 {check_id: prior[check_id] for check_id in durable_prior_executions},
-                now=now,
+                now=execution_time,
             )
             if set(selected) != set(durable_prior_executions):
                 raise ValueError("durable final gate evidence drifted")
@@ -200,7 +203,7 @@ class AttestedFinalGateAuthority:
             self._context,
             operation=self._operations(),
             through_tier=4,
-            now=lambda: now,
+            now=live_clock,
             prior_executions=prior,
             freshness_exempt_prior_executions=durable_prior_executions,
             on_execution=on_execution,

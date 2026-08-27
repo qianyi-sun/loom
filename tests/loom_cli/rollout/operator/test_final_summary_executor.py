@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -21,6 +22,7 @@ _CHECKS = (
     "final.protected-apply",
     "final.convergence",
     "final.drift",
+    "final.capacity",
     "final.smoke",
     "final.browser",
 )
@@ -29,7 +31,7 @@ _CHECKS = (
 def _execution(check_id: str, plan, *, candidate_sha: str | None = None) -> CheckExecution:
     operation = (
         CheckOperation.APPLY
-        if check_id in {"final.protected-apply", "final.smoke", "final.browser"}
+        if check_id in {"final.protected-apply", "final.capacity", "final.smoke", "final.browser"}
         else CheckOperation.VERIFY
     )
     evidence = {
@@ -79,7 +81,7 @@ def test_final_summary_seals_exact_complete_predecessor_evidence(tmp_path: Path)
     for check_id in _CHECKS:
         store.publish(_execution(check_id, plan))
 
-    result = FinalSummaryExecutor(tmp_path / "state", store.service_uid)(
+    result = FinalSummaryExecutor(tmp_path / "state", store.service_uid, now=lambda: _NOW)(
         "final.summary",
         CheckOperation.VERIFY,
         plan,
@@ -105,3 +107,23 @@ def test_final_summary_fails_closed_on_missing_or_drifted_evidence(tmp_path: Pat
         "coverage": "final-gate-evidence-incomplete",
         "final.protected-apply": "final-gate-evidence-drift",
     }
+
+
+def test_final_summary_rechecks_every_predecessor_freshness_at_seal_time(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    store = _store(tmp_path, plan)
+    for check_id in _CHECKS:
+        execution = _execution(check_id, plan)
+        if check_id == "final.capacity":
+            execution = replace(execution, expires_at=_NOW + timedelta(minutes=30))
+        store.publish(execution)
+
+    result = FinalSummaryExecutor(
+        tmp_path / "state",
+        store.service_uid,
+        now=lambda: _NOW + timedelta(minutes=30),
+    )("final.summary", CheckOperation.VERIFY, plan)
+
+    assert result.blockers == {"final.capacity": "final-gate-evidence-expired"}
