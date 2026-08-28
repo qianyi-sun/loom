@@ -13,6 +13,7 @@ from typing import cast
 
 import pytest
 
+from loom_cli.rollout.operator import staging_mutation_guard
 from loom_cli.rollout.operator.readonly_database_client import DatabaseQuery
 from loom_cli.rollout.operator.staging_mutation_guard import (
     MutationGuardError,
@@ -43,6 +44,15 @@ def _config(tmp_path: Path):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     return replace(make_config(), runtime_root=runtime_root)
+
+
+@pytest.fixture(autouse=True)
+def _trusted_reconciliation_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        staging_mutation_guard,
+        "_resolve_candidate",
+        lambda _config: (_CANDIDATE_SHA, _CANDIDATE_TREE),
+    )
 
 
 def _cronjob(*, active: bool = False) -> dict[str, object]:
@@ -603,6 +613,69 @@ def test_reconcile_restores_exact_annotated_freeze_only_when_unit_is_absent(
     assert result == {"request_id": _REQUEST_ID, "status": "restored"}
     assert cluster.events == ["restore"]
     assert cast(dict[str, object], cluster.cronjob["spec"])["suspend"] is False
+
+
+def test_reconcile_rejects_foreign_candidate_annotations_without_restoring(
+    tmp_path: Path,
+) -> None:
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+    metadata = cast(dict[str, object], cluster.cronjob["metadata"])
+    cast(dict[str, str], metadata["annotations"])[_CANDIDATE_ANNOTATION] = "c" * 40
+
+    with pytest.raises(MutationGuardError, match="candidate"):
+        reconcile_orphaned_guard(
+            config=_config(tmp_path),
+            service_uid=os.getuid(),
+            run=cluster,
+            show_guard=lambda _request_id: None,
+        )
+
+    assert cluster.events == []
+
+
+def test_reconcile_rejects_annotated_unsuspended_cronjob_when_unit_is_absent(
+    tmp_path: Path,
+) -> None:
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+    cast(dict[str, object], cluster.cronjob["spec"])["suspend"] = False
+
+    with pytest.raises(MutationGuardError, match="suspension"):
+        reconcile_orphaned_guard(
+            config=_config(tmp_path),
+            service_uid=os.getuid(),
+            run=cluster,
+            show_guard=lambda _request_id: None,
+        )
+
+    assert cluster.events == []
+
+
+def test_reconcile_rejects_annotated_unsuspended_cronjob_when_unit_is_active(
+    tmp_path: Path,
+) -> None:
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+    config = _config(tmp_path)
+    _write_ready_evidence(config)
+    cast(dict[str, object], cluster.cronjob["spec"])["suspend"] = False
+    readbacks: list[str] = []
+
+    def active_guard(request_id: str) -> SimpleNamespace:
+        readbacks.append(request_id)
+        return SimpleNamespace(is_running=True, main_pid=4321)
+
+    with pytest.raises(MutationGuardError, match="suspension"):
+        reconcile_orphaned_guard(
+            config=config,
+            service_uid=os.getuid(),
+            run=cluster,
+            show_guard=active_guard,
+        )
+
+    assert cluster.events == []
+    assert readbacks == []
 
 
 def test_reconcile_rejects_partial_annotations_and_unsafe_evidence(tmp_path: Path) -> None:

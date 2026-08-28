@@ -846,6 +846,11 @@ def reconcile_orphaned_guard(
         raise MutationGuardError("lifecycle CronJob guard annotation is invalid") from exc
     if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
         raise MutationGuardError("lifecycle CronJob guard annotation is invalid")
+    if not cronjob.suspended:
+        raise MutationGuardError("lifecycle CronJob guard annotations require suspension")
+    installed_candidate_sha, installed_candidate_tree = _resolve_candidate(config)
+    if (candidate_sha, candidate_tree) != (installed_candidate_sha, installed_candidate_tree):
+        raise MutationGuardError("lifecycle CronJob guard candidate authority drifted")
     status = show_guard(request_id)
     evidence_path = guard_evidence_path(config, request_id)
     if status is not None:
