@@ -28,6 +28,7 @@ import tomllib
 import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
@@ -168,6 +169,7 @@ _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-
 _BACKUP_UNIT_RE = re.compile(r"^loom-staging-backup-[A-Za-z0-9_.@:-]+[.]service$")
 _MUTATION_GUARD_UNIT_RE = re.compile(r"^loom-staging-mutation-guard-[A-Za-z0-9_.@:-]+[.]service$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
+_DURABLE_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RUNTIME_IMPORT_RENDER = (
     "import loom_cli.rollout.operator.broker; "
@@ -1570,21 +1572,32 @@ def _durable_preflight_backup_status(
             value.get("preflight_attestation_sha256"),
         )
         if (
-            phase not in known_phases
+            not isinstance(phase, str)
+            or phase not in known_phases
             or value.get("schema_version") != 1
             or type(value.get("schema_version")) is not int
             or type(sequence) is not int
             or sequence < 0
             or value.get("request_id") != request.name
+            or not isinstance(value.get("request_id"), str)
+            or _DURABLE_SAFE_ID_RE.fullmatch(value["request_id"]) is None
             or not isinstance(value.get("job_id"), str)
-            or _REQUEST_ID_RE.fullmatch(value["job_id"]) is None
-            or (updated_at is not None and not isinstance(updated_at, str))
+            or _DURABLE_SAFE_ID_RE.fullmatch(value["job_id"]) is None
             or (
                 phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code)
             )
             or (phase != "backup_failed" and failure_code is not None)
         ):
             return "unknown"
+        if updated_at is not None:
+            if not isinstance(updated_at, str):
+                return "unknown"
+            try:
+                parsed_updated_at = datetime.fromisoformat(updated_at)
+            except ValueError:
+                return "unknown"
+            if parsed_updated_at.tzinfo is None or parsed_updated_at.utcoffset() is None:
+                return "unknown"
         verified = phase in {"backup_verified", "launch_pending", "launch_running"}
         valid_digests = all(
             isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
@@ -4315,40 +4328,49 @@ class HostSystem:
             service_uid=service_uid,
             service_gid=service_gid,
         )
-        if durable_status != "idle":
-            return durable_status
+        if durable_status == "unknown":
+            return "unknown"
+        # Maintenance admission is serialized with broker launch.  After it
+        # owns that boundary, a safe durable phase without a live backup,
+        # rollout, or guard unit is orphaned history rather than executable
+        # work.  Keep validating the history so malformed state fails closed,
+        # then let the fixed unit inventory decide whether execution is live.
 
-        result = self.runner.run(
-            [
-                "sudo",
-                "-n",
-                "-u",
-                SERVICE_USER,
-                "--",
-                "/usr/bin/env",
-                "-i",
-                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
-                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
-                "PATH=/usr/bin:/bin",
-                "LANG=C.UTF-8",
-                "LC_ALL=C.UTF-8",
-                "/usr/bin/systemctl",
-                "--user",
-                "list-units",
-                "--all",
-                "--plain",
-                "--full",
-                "--type=service",
-                "--no-legend",
-                "--no-pager",
-                "loom-staging-rollout-*.service",
-                "loom-staging-backup-*.service",
-                "loom-staging-mutation-guard-*.service",
-            ],
-            check=False,
-        )
+        try:
+            result = self.runner.run(
+                [
+                    "sudo",
+                    "-n",
+                    "-u",
+                    SERVICE_USER,
+                    "--",
+                    "/usr/bin/env",
+                    "-i",
+                    f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                    f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                    "PATH=/usr/bin:/bin",
+                    "LANG=C.UTF-8",
+                    "LC_ALL=C.UTF-8",
+                    "/usr/bin/systemctl",
+                    "--user",
+                    "list-units",
+                    "--all",
+                    "--plain",
+                    "--full",
+                    "--type=service",
+                    "--no-legend",
+                    "--no-pager",
+                    "loom-staging-rollout-*.service",
+                    "loom-staging-backup-*.service",
+                    "loom-staging-mutation-guard-*.service",
+                ],
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "unknown"
         if result.returncode != 0 or result.stderr.strip():
             return "unknown"
+        live = False
         for line in result.stdout.splitlines():
             fields = line.split(maxsplit=4)
             if len(fields) < 4:
@@ -4369,9 +4391,19 @@ class HostSystem:
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(sub_state) is None
             ):
                 return "unknown"
-            if active_state not in {"inactive", "failed"}:
-                return "busy"
-        return "idle"
+            if (active_state, sub_state) in {
+                ("inactive", "dead"),
+                ("failed", "failed"),
+            }:
+                continue
+            if active_state == "deactivating" or (active_state, sub_state) in {
+                ("active", "running"),
+                ("activating", "start"),
+            }:
+                live = True
+                continue
+            return "unknown"
+        return "busy" if live else "idle"
 
     def begin_maintenance(self) -> None:
         uid, gid = self._service_ids()
