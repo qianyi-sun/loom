@@ -312,6 +312,7 @@ class LifecycleCoordinator:
             return self._launch_under_guard(envelope)
 
     def _launch_under_guard(self, envelope: DriverEnvelope) -> ActivePointer:
+        self.assert_admission_open()
         try:
             persisted = self.store.read_attempt_envelope(
                 envelope.request_id,

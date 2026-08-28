@@ -104,6 +104,15 @@ CREDENTIAL_REFRESH_SERVICE = "loom-staging-rollout-credential-refresh.service"
 CREDENTIAL_REFRESH_TIMER = "loom-staging-rollout-credential-refresh.timer"
 CREDENTIAL_REFRESH_SERVICE_PATH = Path("/etc/systemd/system") / CREDENTIAL_REFRESH_SERVICE
 CREDENTIAL_REFRESH_TIMER_PATH = Path("/etc/systemd/system") / CREDENTIAL_REFRESH_TIMER
+MUTATION_GUARD_RECONCILE_PATH = Path(
+    "/usr/local/libexec/loom-staging-rollout-mutation-guard-reconcile"
+)
+MUTATION_GUARD_RECONCILE_SERVICE = "loom-staging-rollout-mutation-guard-reconcile.service"
+MUTATION_GUARD_RECONCILE_TIMER = "loom-staging-rollout-mutation-guard-reconcile.timer"
+MUTATION_GUARD_RECONCILE_SERVICE_PATH = (
+    Path("/etc/systemd/system") / MUTATION_GUARD_RECONCILE_SERVICE
+)
+MUTATION_GUARD_RECONCILE_TIMER_PATH = Path("/etc/systemd/system") / MUTATION_GUARD_RECONCILE_TIMER
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-loom-staging-rollout.conf")
@@ -156,6 +165,9 @@ _MAX_WORKER_ENV_BYTES = 1 << 20
 _INOTIFY_MIN_INSTANCES = 1024
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
+_BACKUP_UNIT_RE = re.compile(r"^loom-staging-backup-[A-Za-z0-9_.@:-]+[.]service$")
+_MUTATION_GUARD_UNIT_RE = re.compile(r"^loom-staging-mutation-guard-[A-Za-z0-9_.@:-]+[.]service$")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RUNTIME_IMPORT_RENDER = (
     "import loom_cli.rollout.operator.broker; "
@@ -236,6 +248,9 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "credential-refresh-helper",
         "credential-refresh-service",
         "credential-refresh-timer",
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
         "gb10-known-hosts",
         "gb10-trust-tool",
         "final-gate-helper",
@@ -250,6 +265,14 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "worker-env-template",
     }
 )
+_MUTATION_GUARD_RECOVERY_ASSETS = frozenset(
+    {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    }
+)
+_LEGACY_INSTALL_ATTESTATION_ASSETS = _INSTALL_ATTESTATION_ASSETS - _MUTATION_GUARD_RECOVERY_ASSETS
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1427,6 +1450,154 @@ def _maintenance_marker(
             os.close(fd)
 
 
+def _durable_preflight_backup_status(
+    state_root: Path,
+    *,
+    service_uid: int,
+    service_gid: int,
+) -> str:
+    """Return busy/idle/unknown from bounded service-owned backup state."""
+
+    requests_root = state_root / "requests"
+    try:
+        requests_metadata = os.lstat(requests_root)
+    except FileNotFoundError:
+        return "idle"
+    except OSError:
+        return "unknown"
+    if (
+        not stat.S_ISDIR(requests_metadata.st_mode)
+        or requests_metadata.st_uid != service_uid
+        or requests_metadata.st_gid != service_gid
+        or stat.S_IMODE(requests_metadata.st_mode) != 0o700
+    ):
+        return "unknown"
+    try:
+        requests = list(os.scandir(requests_root))
+    except OSError:
+        return "unknown"
+    if len(requests) > 10_000:
+        return "unknown"
+    active = False
+    active_phases = {
+        "backup_pending",
+        "backup_running",
+        "backup_cancel_requested",
+        "backup_verified",
+        "launch_pending",
+    }
+    known_phases = active_phases | {"backup_failed", "launch_running"}
+    expected_fields = {
+        "failure_code",
+        "job_id",
+        "lease_digest",
+        "manifest_sha256",
+        "preflight_attestation_sha256",
+        "phase",
+        "request_id",
+        "schema_version",
+        "sequence",
+        "updated_at",
+    }
+    for request in requests:
+        if (
+            _REQUEST_ID_RE.fullmatch(request.name) is None
+            or request.is_symlink()
+            or not request.is_dir(follow_symlinks=False)
+        ):
+            return "unknown"
+        try:
+            request_metadata = request.stat(follow_symlinks=False)
+        except OSError:
+            return "unknown"
+        if (
+            request_metadata.st_uid != service_uid
+            or request_metadata.st_gid != service_gid
+            or stat.S_IMODE(request_metadata.st_mode) != 0o700
+        ):
+            return "unknown"
+        backup_root = Path(request.path) / "preflight-backup"
+        try:
+            backup_metadata = os.lstat(backup_root)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return "unknown"
+        if (
+            not stat.S_ISDIR(backup_metadata.st_mode)
+            or backup_metadata.st_uid != service_uid
+            or backup_metadata.st_gid != service_gid
+            or stat.S_IMODE(backup_metadata.st_mode) != 0o700
+        ):
+            return "unknown"
+        state_path = backup_root / "state.json"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(state_path, flags)
+        except OSError:
+            return "unknown"
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != service_uid
+                or metadata.st_gid != service_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+                or metadata.st_size > 64 * 1024
+            ):
+                return "unknown"
+            payload = os.read(fd, 64 * 1024 + 1)
+        except OSError:
+            return "unknown"
+        finally:
+            os.close(fd)
+        if len(payload) > 64 * 1024:
+            return "unknown"
+        try:
+            value = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return "unknown"
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            return "unknown"
+        phase = value.get("phase")
+        sequence = value.get("sequence")
+        updated_at = value.get("updated_at")
+        failure_code = value.get("failure_code")
+        digests = (
+            value.get("manifest_sha256"),
+            value.get("lease_digest"),
+            value.get("preflight_attestation_sha256"),
+        )
+        if (
+            phase not in known_phases
+            or value.get("schema_version") != 1
+            or type(value.get("schema_version")) is not int
+            or type(sequence) is not int
+            or sequence < 0
+            or value.get("request_id") != request.name
+            or not isinstance(value.get("job_id"), str)
+            or _REQUEST_ID_RE.fullmatch(value["job_id"]) is None
+            or (updated_at is not None and not isinstance(updated_at, str))
+            or (
+                phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code)
+            )
+            or (phase != "backup_failed" and failure_code is not None)
+        ):
+            return "unknown"
+        verified = phase in {"backup_verified", "launch_pending", "launch_running"}
+        valid_digests = all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in digests
+        )
+        if verified != valid_digests or (
+            not verified and any(digest is not None for digest in digests)
+        ):
+            return "unknown"
+        active = active or phase in active_phases
+    return "busy" if active else "idle"
+
+
 class HostSystem:
     """Command-backed adapter for accounts, ACLs, Git, systemd, and kubeconfig."""
 
@@ -1743,6 +1914,7 @@ class HostSystem:
                     "loom-staging-rollout-rehearsal",
                     "loom-staging-rollout-final-gate",
                     "loom-staging-rollout-credential-refresh",
+                    "loom-staging-rollout-mutation-guard-reconcile",
                     "loom-staging-rollout.sudoers",
                     SHARED_WORK2_MOUNT_UNIT,
                 )
@@ -1789,6 +1961,9 @@ class HostSystem:
             self.runner.run(["bash", "-n", str(directory / "loom-staging-rollout-final-gate")])
             self.runner.run(
                 ["bash", "-n", str(directory / "loom-staging-rollout-credential-refresh")]
+            )
+            self.runner.run(
+                ["bash", "-n", str(directory / "loom-staging-rollout-mutation-guard-reconcile")]
             )
             self.runner.run(["visudo", "-cf", str(directory / "loom-staging-rollout.sudoers")])
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(shared_repo_helper)])
@@ -2115,6 +2290,32 @@ class HostSystem:
     def disable_credential_refresh_timer(self) -> None:
         self.runner.run(["systemctl", "disable", "--now", CREDENTIAL_REFRESH_TIMER])
         self.runner.run(["systemctl", "stop", CREDENTIAL_REFRESH_SERVICE])
+
+    def mutation_guard_reconcile_timer_ready(self) -> bool:
+        enabled = self._probe(["systemctl", "is-enabled", MUTATION_GUARD_RECONCILE_TIMER])
+        active = self._probe(["systemctl", "is-active", MUTATION_GUARD_RECONCILE_TIMER])
+        return bool(
+            enabled.returncode == 0
+            and enabled.stdout.strip() == "enabled"
+            and not enabled.stderr.strip()
+            and active.returncode == 0
+            and active.stdout.strip() == "active"
+            and not active.stderr.strip()
+        )
+
+    def ensure_mutation_guard_reconcile_timer(self, *, reload_units: bool) -> bool:
+        before = self.mutation_guard_reconcile_timer_ready()
+        if reload_units:
+            self.reload_systemd()
+        if reload_units or not before:
+            self.runner.run(["systemctl", "enable", "--now", MUTATION_GUARD_RECONCILE_TIMER])
+        if not self.mutation_guard_reconcile_timer_ready():
+            raise InstallError("mutation guard reconciliation timer did not converge")
+        return reload_units or not before
+
+    def disable_mutation_guard_reconcile_timer(self) -> None:
+        self.runner.run(["systemctl", "disable", "--now", MUTATION_GUARD_RECONCILE_TIMER])
+        self.runner.run(["systemctl", "stop", MUTATION_GUARD_RECONCILE_SERVICE])
 
     @staticmethod
     def _validate_shared_worker_repo_report(payload: object) -> dict[str, object]:
@@ -4109,6 +4310,14 @@ class HostSystem:
                 return "unknown"
             return "busy"
 
+        durable_status = _durable_preflight_backup_status(
+            STATE_ROOT,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        )
+        if durable_status != "idle":
+            return durable_status
+
         result = self.runner.run(
             [
                 "sudo",
@@ -4133,6 +4342,8 @@ class HostSystem:
                 "--no-legend",
                 "--no-pager",
                 "loom-staging-rollout-*.service",
+                "loom-staging-backup-*.service",
+                "loom-staging-mutation-guard-*.service",
             ],
             check=False,
         )
@@ -4145,7 +4356,14 @@ class HostSystem:
             unit_name, load_state, active_state, sub_state = fields[:4]
             if (
                 len(unit_name) > 255
-                or _ROLLOUT_UNIT_RE.fullmatch(unit_name) is None
+                or not any(
+                    pattern.fullmatch(unit_name) is not None
+                    for pattern in (
+                        _ROLLOUT_UNIT_RE,
+                        _BACKUP_UNIT_RE,
+                        _MUTATION_GUARD_UNIT_RE,
+                    )
+                )
                 or load_state != "loaded"
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(active_state) is None
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(sub_state) is None
@@ -4654,6 +4872,8 @@ class HostInstaller:
         accepted_assets = (
             _INSTALL_ATTESTATION_ASSETS,
             _INSTALL_ATTESTATION_ASSETS - {"worker-env-template"},
+            _LEGACY_INSTALL_ATTESTATION_ASSETS,
+            _LEGACY_INSTALL_ATTESTATION_ASSETS - {"worker-env-template"},
         )
         if (
             not isinstance(statement, dict)
@@ -4949,6 +5169,27 @@ class HostInstaller:
                 "root",
                 "root",
             ),
+            (
+                MUTATION_GUARD_RECONCILE_PATH,
+                self._asset("loom-staging-rollout-mutation-guard-reconcile"),
+                0o755,
+                "root",
+                "root",
+            ),
+            (
+                MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+                self._asset(MUTATION_GUARD_RECONCILE_SERVICE),
+                0o644,
+                "root",
+                "root",
+            ),
+            (
+                MUTATION_GUARD_RECONCILE_TIMER_PATH,
+                self._asset(MUTATION_GUARD_RECONCILE_TIMER),
+                0o644,
+                "root",
+                "root",
+            ),
         )
         sudoers = self._asset("loom-staging-rollout.sudoers")
         attestation_assets = {
@@ -4958,6 +5199,11 @@ class HostInstaller:
             "credential-refresh-helper": self._asset("loom-staging-rollout-credential-refresh"),
             "credential-refresh-service": self._asset(CREDENTIAL_REFRESH_SERVICE),
             "credential-refresh-timer": self._asset(CREDENTIAL_REFRESH_TIMER),
+            "mutation-guard-reconcile-helper": self._asset(
+                "loom-staging-rollout-mutation-guard-reconcile"
+            ),
+            "mutation-guard-reconcile-service": self._asset(MUTATION_GUARD_RECONCILE_SERVICE),
+            "mutation-guard-reconcile-timer": self._asset(MUTATION_GUARD_RECONCILE_TIMER),
             "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
             "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
             "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
@@ -5244,6 +5490,7 @@ class HostInstaller:
             package_runtime_ready and self.system.preflight_credentials_ready(candidate_venv)
         )
         credential_refresh_timer_ready = self.system.credential_refresh_timer_ready()
+        mutation_guard_reconcile_timer_ready = self.system.mutation_guard_reconcile_timer_ready()
         installed_files_ready = all(
             self.filesystem.file_matches(
                 destination,
@@ -5359,6 +5606,7 @@ class HostInstaller:
             or not package_runtime_ready
             or not preflight_credentials_ready
             or not credential_refresh_timer_ready
+            or not mutation_guard_reconcile_timer_ready
             or not preflight_candidate_source_ready
             or not broker_runtime_ready
             or not installed_files_ready
@@ -5540,6 +5788,7 @@ class HostInstaller:
             )
 
         credential_refresh_units_changed = False
+        mutation_guard_reconcile_units_changed = False
         for destination, payload, mode, owner, group in installed_files:
             file_changed = self.filesystem.atomic_write(
                 destination,
@@ -5554,6 +5803,11 @@ class HostInstaller:
                     CREDENTIAL_REFRESH_TIMER_PATH,
                 }:
                     credential_refresh_units_changed = True
+                if destination in {
+                    MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+                    MUTATION_GUARD_RECONCILE_TIMER_PATH,
+                }:
+                    mutation_guard_reconcile_units_changed = True
             if self.system.install_owner(destination, owner, mode, group=group):
                 changes.append(f"ownership:{destination}")
         if self.system.reconcile_gb10_active_hosts(candidate_venv, source_sha):
@@ -5562,6 +5816,10 @@ class HostInstaller:
             reload_units=credential_refresh_units_changed
         ):
             changes.append("credential-refresh-timer")
+        if self.system.ensure_mutation_guard_reconcile_timer(
+            reload_units=mutation_guard_reconcile_units_changed
+        ):
+            changes.append("mutation-guard-reconcile-timer")
         if self.system.ensure_inotify_capacity():
             changes.append("sysctl:fs.inotify.max_user_instances")
         if not self.system.broker_runtime_ready(candidate_venv):
@@ -5750,6 +6008,21 @@ class HostInstaller:
                 self._asset(CREDENTIAL_REFRESH_TIMER),
                 0o644,
             ),
+            (
+                MUTATION_GUARD_RECONCILE_PATH,
+                self._asset("loom-staging-rollout-mutation-guard-reconcile"),
+                0o755,
+            ),
+            (
+                MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+                self._asset(MUTATION_GUARD_RECONCILE_SERVICE),
+                0o644,
+            ),
+            (
+                MUTATION_GUARD_RECONCILE_TIMER_PATH,
+                self._asset(MUTATION_GUARD_RECONCILE_TIMER),
+                0o644,
+            ),
         )
         failures = [
             str(path)
@@ -5802,6 +6075,11 @@ class HostInstaller:
                 "credential-refresh-helper": self._asset("loom-staging-rollout-credential-refresh"),
                 "credential-refresh-service": self._asset(CREDENTIAL_REFRESH_SERVICE),
                 "credential-refresh-timer": self._asset(CREDENTIAL_REFRESH_TIMER),
+                "mutation-guard-reconcile-helper": self._asset(
+                    "loom-staging-rollout-mutation-guard-reconcile"
+                ),
+                "mutation-guard-reconcile-service": self._asset(MUTATION_GUARD_RECONCILE_SERVICE),
+                "mutation-guard-reconcile-timer": self._asset(MUTATION_GUARD_RECONCILE_TIMER),
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
                 "readonly-authority": self._source_file("deploy/k8s/staging-rollout-readonly.yaml"),
@@ -5847,6 +6125,8 @@ class HostInstaller:
             failures.append("preflight-credentials")
         if not self.system.credential_refresh_timer_ready():
             failures.append("credential-refresh-timer")
+        if not self.system.mutation_guard_reconcile_timer_ready():
+            failures.append("mutation-guard-reconcile-timer")
         if not self.system.preflight_candidate_source_ready(candidate_venv):
             failures.append("candidate-source-publication")
         if not self.filesystem.exists(SERVICE_KEY):
@@ -6123,6 +6403,11 @@ class HostInstaller:
         credential_refresh_unit_present = self.filesystem.exists(CREDENTIAL_REFRESH_TIMER_PATH)
         if credential_refresh_unit_present:
             self.system.disable_credential_refresh_timer()
+        mutation_guard_reconcile_unit_present = self.filesystem.exists(
+            MUTATION_GUARD_RECONCILE_TIMER_PATH
+        )
+        if mutation_guard_reconcile_unit_present:
+            self.system.disable_mutation_guard_reconcile_timer()
         removable_files = [
             ROLLOUT_CLIENT_PATH,
             ROLLOUT_BROKER_PATH,
@@ -6141,13 +6426,20 @@ class HostInstaller:
             CREDENTIAL_REFRESH_PATH,
             CREDENTIAL_REFRESH_SERVICE_PATH,
             CREDENTIAL_REFRESH_TIMER_PATH,
+            MUTATION_GUARD_RECONCILE_PATH,
+            MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+            MUTATION_GUARD_RECONCILE_TIMER_PATH,
         ]
         if created_service_key:
             removable_files.extend((SERVICE_KEY, Path(str(SERVICE_KEY) + ".pub")))
         for path in removable_files:
             if self.filesystem.remove(path):
                 removed.append(str(path))
-        if mount_unit_present or credential_refresh_unit_present:
+        if (
+            mount_unit_present
+            or credential_refresh_unit_present
+            or mutation_guard_reconcile_unit_present
+        ):
             self.system.reload_systemd()
         if self.filesystem.remove_tree(GENERATED_ROOT):
             removed.append(str(GENERATED_ROOT))

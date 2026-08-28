@@ -35,7 +35,12 @@ _NAMESPACE = "loom-staging"
 _SERVICE = "service/loom-postgres-rw"
 _REMOTE_PORT = 5432
 _START_TIMEOUT_SECONDS = 15.0
-_STOP_TIMEOUT_SECONDS = 5.0
+READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS = 15
+READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS = 5
+_STDERR_FINISH_TIMEOUT_SECONDS = 1
+READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS = (
+    2 * READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS + _STDERR_FINISH_TIMEOUT_SECONDS
+)
 _DIAGNOSTIC_LIMIT = 8 * 1024
 _CHILD_ENVIRONMENT = {
     "HOME": "/var/lib/loom-staging-rollout",
@@ -57,6 +62,8 @@ class TunnelProcess(Protocol):
 
 
 class DatabaseConnection(Protocol):
+    autocommit: bool
+
     def execute(
         self,
         query: str,
@@ -147,7 +154,7 @@ class _BoundedStderrCapture:
 
     def finish(self) -> None:
         if self._stream is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=_STDERR_FINISH_TIMEOUT_SECONDS)
 
 
 def _classify_tunnel_failure(
@@ -222,7 +229,10 @@ def _connect(
         user=credential.role,
         password=credential.password,
         connect_timeout=5,
-        options="-c default_transaction_read_only=on -c statement_timeout=15000",
+        options=(
+            "-c default_transaction_read_only=on "
+            f"-c statement_timeout={READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS * 1000}"
+        ),
         row_factory=dict_row,
     )
 
@@ -232,18 +242,18 @@ def _stop_exact(process: TunnelProcess) -> None:
         return
     process.terminate()
     try:
-        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+        process.wait(timeout=READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         if process.poll() is None:
             process.kill()
             try:
-                process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+                process.wait(timeout=READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("readonly database port-forward did not stop") from exc
 
 
 @contextmanager
-def open_readonly_database_query(
+def _open_readonly_database_connection(
     *,
     service_uid: int,
     kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
@@ -252,8 +262,7 @@ def open_readonly_database_query(
     connect: Connect = _connect,
     allocate_port: PortAllocator = _allocate_port,
     wait_ready: WaitReady = _wait_ready,
-) -> Iterator[DatabaseQuery]:
-    """Yield one query callback backed by a single read-only transaction."""
+) -> Iterator[DatabaseConnection]:
 
     if (
         service_uid < 1
@@ -319,26 +328,7 @@ def open_readonly_database_query(
                 diagnostic,
             ) from None
         connection = connect("127.0.0.1", port, credential)
-        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-
-        def query(sql: str) -> tuple[Mapping[str, object], ...]:
-            if not sql or len(sql) > 16_384 or "\x00" in sql:
-                raise ValueError("readonly database query is invalid")
-            cursor = connection.execute(sql)
-            rows = cursor.fetchall()
-            if len(rows) > 1024 or not all(isinstance(row, Mapping) for row in rows):
-                raise ValueError("readonly database query evidence is invalid")
-            return tuple(dict(row) for row in rows)
-
-        yield query
-        connection.execute("ROLLBACK")
-    except BaseException:
-        if connection is not None:
-            try:
-                connection.execute("ROLLBACK")
-            except Exception:
-                pass
-        raise
+        yield connection
     finally:
         if connection is not None:
             connection.close()
@@ -346,6 +336,79 @@ def open_readonly_database_query(
             _stop_exact(process)
         finally:
             diagnostics.finish()
+
+
+def _query_callback(connection: DatabaseConnection) -> DatabaseQuery:
+    def query(sql: str) -> tuple[Mapping[str, object], ...]:
+        if not sql or len(sql) > 16_384 or "\x00" in sql:
+            raise ValueError("readonly database query is invalid")
+        cursor = connection.execute(sql)
+        rows = cursor.fetchall()
+        if len(rows) > 1024 or not all(isinstance(row, Mapping) for row in rows):
+            raise ValueError("readonly database query evidence is invalid")
+        return tuple(dict(row) for row in rows)
+
+    return query
+
+
+@contextmanager
+def open_readonly_database_query(
+    *,
+    service_uid: int,
+    kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
+    credential_path: Path = READONLY_DATABASE_CREDENTIAL_PATH,
+    spawn: Spawn = _spawn,
+    connect: Connect = _connect,
+    allocate_port: PortAllocator = _allocate_port,
+    wait_ready: WaitReady = _wait_ready,
+) -> Iterator[DatabaseQuery]:
+    """Yield one query callback backed by a single read-only transaction."""
+
+    with _open_readonly_database_connection(
+        service_uid=service_uid,
+        kubeconfig_path=kubeconfig_path,
+        credential_path=credential_path,
+        spawn=spawn,
+        connect=connect,
+        allocate_port=allocate_port,
+        wait_ready=wait_ready,
+    ) as connection:
+        connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        try:
+            yield _query_callback(connection)
+            connection.execute("ROLLBACK")
+        except BaseException:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+
+@contextmanager
+def open_readonly_database_guard_query(
+    *,
+    service_uid: int,
+    kubeconfig_path: Path = READONLY_KUBECONFIG_PATH,
+    credential_path: Path = READONLY_DATABASE_CREDENTIAL_PATH,
+    spawn: Spawn = _spawn,
+    connect: Connect = _connect,
+    allocate_port: PortAllocator = _allocate_port,
+    wait_ready: WaitReady = _wait_ready,
+) -> Iterator[DatabaseQuery]:
+    """Yield one autocommit query callback pinned to one read-only backend."""
+
+    with _open_readonly_database_connection(
+        service_uid=service_uid,
+        kubeconfig_path=kubeconfig_path,
+        credential_path=credential_path,
+        spawn=spawn,
+        connect=connect,
+        allocate_port=allocate_port,
+        wait_ready=wait_ready,
+    ) as connection:
+        connection.autocommit = True
+        yield _query_callback(connection)
 
 
 def probe_installed_readonly_database(
@@ -453,6 +516,9 @@ class InstalledReadonlyMutationEpochSource:
 
 
 __all__ = [
+    "READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS",
+    "READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS",
+    "READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS",
     "Connect",
     "DatabaseConnection",
     "InstalledReadonlyDatabaseEvidenceSource",
@@ -463,6 +529,7 @@ __all__ = [
     "Spawn",
     "TunnelProcess",
     "WaitReady",
+    "open_readonly_database_guard_query",
     "open_readonly_database_query",
     "probe_installed_readonly_database",
     "probe_installed_readonly_database_baseline",
