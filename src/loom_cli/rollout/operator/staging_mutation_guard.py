@@ -865,6 +865,8 @@ def _resolve_candidate(config: OperatorConfig) -> tuple[str, str]:
             result = subprocess.run(
                 [
                     "/usr/bin/git",
+                    "-c",
+                    f"safe.directory={config.runner_repo}",
                     "-C",
                     str(config.runner_repo),
                     "rev-parse",

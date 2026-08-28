@@ -19,6 +19,7 @@ from loom_cli.rollout.operator.staging_mutation_guard import (
     MutationGuardError,
     MutationGuardEvidence,
     MutationGuardManager,
+    _resolve_candidate,
     guard_evidence_path,
     hold_request_guard,
     read_mutation_guard_evidence,
@@ -51,6 +52,38 @@ def _config(tmp_path: Path):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     return replace(make_config(), runtime_root=runtime_root)
+
+
+def test_candidate_resolution_accepts_root_owned_installer_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config()
+
+    def root_owned_git(
+        argv: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text, timeout, env
+        safe_directory = ["-c", f"safe.directory={config.runner_repo}"]
+        if not any(argv[index : index + 2] == safe_directory for index in range(len(argv) - 1)):
+            return subprocess.CompletedProcess(
+                argv,
+                128,
+                "",
+                "fatal: detected dubious ownership in repository\n",
+            )
+        revision = argv[-1]
+        values = {"HEAD": _CANDIDATE_SHA, "HEAD^{tree}": _CANDIDATE_TREE}
+        return subprocess.CompletedProcess(argv, 0, f"{values[revision]}\n", "")
+
+    monkeypatch.setattr(staging_mutation_guard.subprocess, "run", root_owned_git)
+
+    assert _resolve_candidate(config) == (_CANDIDATE_SHA, _CANDIDATE_TREE)
 
 
 @pytest.fixture(autouse=True)
