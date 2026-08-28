@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+import loom_cli.rollout.operator.protected_external_supervisor_transport as transport_module
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
+    ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPredecessorAuthority,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
@@ -32,6 +34,9 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     ServiceRuntimeStatus,
     TimerRuntimeStatus,
+)
+from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    GB10_CONTROLLER_UNIT_DIR,
 )
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
@@ -134,6 +139,62 @@ def _absent_external_supervisor_observation(
             unit_sha256={},
         ),
     )
+
+
+def _repairable_gb10_external_supervisor_observation(
+    artifact: ExternalSupervisorArtifact,
+) -> ExternalSupervisorLiveObservation:
+    predecessor_artifact = active_external_supervisor_artifact(
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        image_tag="staging-1111111",
+    ).for_execution_host("gx10-01c7")
+    predecessor = ExternalSupervisorCanonicalIdentity.build(
+        predecessor_artifact,
+        plan_digest="3" * 64,
+        attestation_digest="4" * 64,
+        transition_group_id="5" * 32,
+        runtime_evidence_digest=transport_module._expected_activation_runtime_digest(
+            predecessor_artifact,
+            unit_dir=GB10_CONTROLLER_UNIT_DIR,
+        ),
+        unit_dir=str(GB10_CONTROLLER_UNIT_DIR),
+    )
+    observation = ExternalSupervisorLiveObservation(
+        unit_payloads={
+            name: payload.encode() for name, payload in predecessor.unit_payloads.items()
+        },
+        timer_statuses={
+            supervisor.timer_name: TimerRuntimeStatus(
+                load_state="loaded",
+                unit_file_state="enabled",
+                active_state="active",
+                fragment_path=str(GB10_CONTROLLER_UNIT_DIR / supervisor.timer_name),
+                need_daemon_reload="no",
+            )
+            for supervisor in predecessor_artifact.supervisors
+        },
+        service_statuses={
+            supervisor.service_name: ServiceRuntimeStatus(
+                load_state="loaded",
+                result="exit-code",
+                exec_main_status=1,
+                fragment_path=str(GB10_CONTROLLER_UNIT_DIR / supervisor.service_name),
+                need_daemon_reload="no",
+            )
+            for supervisor in predecessor_artifact.supervisors
+        },
+        canonical_identity=predecessor,
+    )
+    assert (
+        transport_module.classify_external_supervisor_live_state(
+            artifact,
+            observation,
+            unit_dir=GB10_CONTROLLER_UNIT_DIR,
+        )
+        == "repairable"
+    )
+    return observation
 
 
 def _plan() -> RehearsalPlan:
@@ -1129,8 +1190,7 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
     ]
     assert len(validation_commands) == 4
     by_pool = {
-        command[command.index("--pool-name") + 1]: command
-        for command in validation_commands
+        command[command.index("--pool-name") + 1]: command for command in validation_commands
     }
     assert set(by_pool) == {
         "gb10",
@@ -1163,6 +1223,41 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
         for pool_name, command in by_pool.items()
         if pool_name in {"gb10", "task-image-builder-gb10"}
     )
+
+
+def test_external_supervisor_validation_accepts_repairable_gb10_controller_proof() -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+    validation_commands: list[tuple[str, ...]] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
+        if command[0] == "kubectl" and "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
+            validation_commands.append(command)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(command)
+
+    digest, blocker = IsolatedRehearsalExecutor(
+        run=run,
+        external_supervisor_artifacts=lambda _plan: artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=(_repairable_gb10_external_supervisor_observation),
+    )._validate_external_supervisors(plan)
+
+    assert blocker is None
+    assert digest is not None and len(digest) == 64
+    assert len(validation_commands) == 4
 
 
 def test_external_supervisor_validation_fails_closed_without_gb10_controller_proof() -> None:
