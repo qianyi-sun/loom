@@ -244,10 +244,7 @@ def service_account(candidate_sha: str) -> dict[str, Any]:
     }
 
 
-def network_policy(candidate_sha: str, dns_service_ip: str) -> dict[str, Any]:
-    dns_ip = ipaddress.ip_address(dns_service_ip)
-    if dns_ip.version != 4:
-        raise ValueError("CoreDNS service must use an IPv4 cluster IP")
+def network_policy(candidate_sha: str) -> dict[str, Any]:
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -264,8 +261,7 @@ def network_policy(candidate_sha: str, dns_service_ip: str) -> dict[str, Any]:
                                 "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                             },
                             "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
-                        },
-                        {"ipBlock": {"cidr": f"{dns_ip}/32"}},
+                        }
                     ],
                     "ports": [
                         {"port": 53, "protocol": "UDP"},
@@ -277,46 +273,76 @@ def network_policy(candidate_sha: str, dns_service_ip: str) -> dict[str, Any]:
     }
 
 
-def pod(candidate_sha: str, image: str) -> dict[str, Any]:
+def pod(
+    candidate_sha: str, image: str, dns_nameservers: Sequence[str] = ()
+) -> dict[str, Any]:
     metadata = namespaced_metadata(_POD, candidate_sha)
     metadata["labels"]["app"] = _POD
+    spec: dict[str, Any] = {
+        "activeDeadlineSeconds": 180,
+        "automountServiceAccountToken": False,
+        "enableServiceLinks": False,
+        "restartPolicy": "Never",
+        "runtimeClassName": _RUNTIME_CLASS,
+        "serviceAccountName": "attempt",
+        "securityContext": {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "containers": [
+            {
+                "name": "probe",
+                "image": image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["python", "-c", _PROBE],
+                "resources": {
+                    "requests": {"cpu": "50m", "memory": "64Mi"},
+                    "limits": {"cpu": "500m", "memory": "256Mi"},
+                },
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                    "privileged": False,
+                    "readOnlyRootFilesystem": True,
+                },
+            }
+        ],
+    }
+    if dns_nameservers:
+        spec["dnsPolicy"] = "None"
+        spec["dnsConfig"] = {
+            "nameservers": list(dns_nameservers),
+            "searches": [
+                f"{_NAMESPACE}.svc.cluster.local",
+                "svc.cluster.local",
+                "cluster.local",
+            ],
+            "options": [{"name": "ndots", "value": "5"}],
+        }
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": metadata,
-        "spec": {
-            "activeDeadlineSeconds": 180,
-            "automountServiceAccountToken": False,
-            "enableServiceLinks": False,
-            "restartPolicy": "Never",
-            "runtimeClassName": _RUNTIME_CLASS,
-            "serviceAccountName": "attempt",
-            "securityContext": {
-                "runAsNonRoot": True,
-                "runAsUser": 65532,
-                "runAsGroup": 65532,
-                "seccompProfile": {"type": "RuntimeDefault"},
-            },
-            "containers": [
-                {
-                    "name": "probe",
-                    "image": image,
-                    "imagePullPolicy": "IfNotPresent",
-                    "command": ["python", "-c", _PROBE],
-                    "resources": {
-                        "requests": {"cpu": "50m", "memory": "64Mi"},
-                        "limits": {"cpu": "500m", "memory": "256Mi"},
-                    },
-                    "securityContext": {
-                        "allowPrivilegeEscalation": False,
-                        "capabilities": {"drop": ["ALL"]},
-                        "privileged": False,
-                        "readOnlyRootFilesystem": True,
-                    },
-                }
-            ],
-        },
+        "spec": spec,
     }
+
+
+def ready_coredns_endpoint_ips(endpoint_slices: Mapping[str, Any]) -> list[str]:
+    addresses: set[str] = set()
+    for item in endpoint_slices.get("items", []):
+        for endpoint in item.get("endpoints", []):
+            if endpoint.get("conditions", {}).get("ready") is False:
+                continue
+            for address in endpoint.get("addresses", []):
+                try:
+                    parsed = ipaddress.ip_address(address)
+                except ValueError:
+                    continue
+                if parsed.version == 4:
+                    addresses.add(str(parsed))
+    return sorted(addresses)
 
 
 def forbidden_pods(candidate_sha: str, image: str) -> dict[str, dict[str, Any]]:
@@ -390,11 +416,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         kubectl.create(namespace(args.candidate_sha))
         created_namespace = True
         kubectl.create(service_account(args.candidate_sha))
-        dns_service = kubectl.get_json("--namespace", "kube-system", "service", "coredns")
-        dns_service_ip = dns_service.get("spec", {}).get("clusterIP")
-        if not isinstance(dns_service_ip, str) or not dns_service_ip:
-            raise RuntimeError("CoreDNS service has no cluster IP")
-        kubectl.create(network_policy(args.candidate_sha, dns_service_ip))
+        dns_slices = kubectl.get_json(
+            "--namespace",
+            "kube-system",
+            "endpointslice",
+            "--selector=kubernetes.io/service-name=coredns",
+        )
+        dns_endpoint_ips = ready_coredns_endpoint_ips(dns_slices)
+        if not dns_endpoint_ips:
+            raise RuntimeError("CoreDNS has no ready IPv4 endpoints")
+        kubectl.create(network_policy(args.candidate_sha))
 
         denied: dict[str, str] = {}
         for name, document in forbidden_pods(args.candidate_sha, args.image).items():
@@ -409,7 +440,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             denied[name] = result.stderr.strip()
 
-        kubectl.create(pod(args.candidate_sha, args.image))
+        kubectl.create(pod(args.candidate_sha, args.image, dns_endpoint_ips[:3]))
         wait_result = kubectl.run(
             (
                 "--namespace",
@@ -460,7 +491,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "image": args.image,
             "image_id": container_status.get("imageID"),
             "container_id": container_status.get("containerID"),
-            "dns_service_ip": dns_service_ip,
+            "dns_endpoint_ips": dns_endpoint_ips[:3],
             "node": node_name,
             "pod_uid": observed_pod.get("metadata", {}).get("uid"),
             "probe": probe,

@@ -42,7 +42,7 @@ def test_pod_is_digest_pinned_and_restricted() -> None:
 
 
 def test_network_policy_allows_only_dns() -> None:
-    document = _MODULE.network_policy("b" * 40, "172.20.0.10")
+    document = _MODULE.network_policy("b" * 40)
     spec = document["spec"]
 
     assert spec["ingress"] == []
@@ -56,8 +56,7 @@ def test_network_policy_allows_only_dns() -> None:
                         "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                     },
                     "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
-                },
-                {"ipBlock": {"cidr": "172.20.0.10/32"}},
+                }
             ],
             "ports": [
                 {"port": 53, "protocol": "UDP"},
@@ -65,6 +64,39 @@ def test_network_policy_allows_only_dns() -> None:
             ],
         }
     ]
+
+
+def test_pod_can_pin_ready_coredns_endpoints() -> None:
+    image = "ghcr.io/qianyi-sun/probe@sha256:" + "a" * 64
+    document = _MODULE.pod("b" * 40, image, ["10.0.9.16", "10.0.9.60"])
+
+    assert document["spec"]["dnsPolicy"] == "None"
+    assert document["spec"]["dnsConfig"] == {
+        "nameservers": ["10.0.9.16", "10.0.9.60"],
+        "searches": [
+            "loom-nebius-runtime-smoke.svc.cluster.local",
+            "svc.cluster.local",
+            "cluster.local",
+        ],
+        "options": [{"name": "ndots", "value": "5"}],
+    }
+
+
+def test_ready_coredns_endpoint_ips_filters_unready_and_non_ipv4() -> None:
+    endpoint_slices = {
+        "items": [
+            {
+                "endpoints": [
+                    {"addresses": ["10.0.9.60"], "conditions": {"ready": True}},
+                    {"addresses": ["10.0.9.16"], "conditions": {"ready": True}},
+                    {"addresses": ["10.0.9.99"], "conditions": {"ready": False}},
+                    {"addresses": ["2001:db8::1"], "conditions": {"ready": True}},
+                ]
+            }
+        ]
+    }
+
+    assert _MODULE.ready_coredns_endpoint_ips(endpoint_slices) == ["10.0.9.16", "10.0.9.60"]
 
 
 def test_namespace_pins_current_nebius_pod_security_version() -> None:
