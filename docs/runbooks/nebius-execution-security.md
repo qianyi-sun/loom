@@ -115,22 +115,18 @@ namespace, and hostPath variants. It captures the Pod/node/image/container
 identities and every redacted kubectl result, then deletes the namespace and
 RuntimeClass even on failure.
 
-Convert the checked-in RuntimeClass YAML to JSON without changing its semantic
-content, then run the smoke only during an authorized window in which the
-pinned handler is installed on a disposable execution node:
+Run the smoke only during an authorized window in which the pinned handler is
+installed on a disposable execution node:
 
 ```bash
 candidate_sha="$(git rev-parse HEAD)"
 image="ghcr.io/qianyi-sun/loom-execution-actuator@sha256:<reviewed-digest>"
-runtime_json="$(mktemp)"
-kubectl create --dry-run=client \
-  -f deploy/terraform/nebius/modules/execution-target/runtime/loom-sandbox-runtime-class.yaml \
-  -o json >"$runtime_json"
 python scripts/ops/nebius_runtime_containment_smoke.py \
   --kubeconfig /path/to/owner-only-kubeconfig \
   --candidate-sha "$candidate_sha" \
   --image "$image" \
-  --runtime-class-json "$runtime_json" \
+  --runtime-class \
+    deploy/terraform/nebius/modules/execution-target/runtime/loom-sandbox-runtime-class.yaml \
   --evidence-dir /path/to/new-owner-only-evidence-directory
 ```
 

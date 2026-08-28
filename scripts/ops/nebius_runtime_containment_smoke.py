@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 _NAMESPACE = "loom-nebius-runtime-smoke"
 _POD = "runtime-containment"
 _RUNTIME_CLASS = "loom-sandbox"
@@ -364,7 +366,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.evidence_dir.exists():
         raise ValueError("--evidence-dir must not already exist")
 
-    runtime_class = json.loads(args.runtime_class_json.read_text())
+    runtime_class = yaml.safe_load(args.runtime_class.read_text())
+    if not isinstance(runtime_class, dict):
+        raise ValueError("runtime class asset must contain one Kubernetes object")
     if runtime_class.get("metadata", {}).get("name") != _RUNTIME_CLASS:
         raise ValueError("runtime class asset does not define loom-sandbox")
 
@@ -485,7 +489,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--kubeconfig", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--image", required=True)
-    parser.add_argument("--runtime-class-json", type=Path, required=True)
+    parser.add_argument("--runtime-class", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -494,7 +498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         result = run(args)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         if args.evidence_dir.is_dir():
             (args.evidence_dir / "error.json").write_text(
                 json.dumps({"error": str(exc)}, indent=2, sort_keys=True) + "\n"

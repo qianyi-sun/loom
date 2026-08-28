@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -105,8 +103,8 @@ def test_run_rejects_unpinned_image_before_kubectl(tmp_path: Path, image: str) -
             "b" * 40,
             "--image",
             image,
-            "--runtime-class-json",
-            str(tmp_path / "runtime.json"),
+            "--runtime-class",
+            str(tmp_path / "runtime.yaml"),
             "--evidence-dir",
             str(tmp_path / "evidence"),
         ]
@@ -116,8 +114,8 @@ def test_run_rejects_unpinned_image_before_kubectl(tmp_path: Path, image: str) -
         _MODULE.run(args)
 
 
-def test_checked_in_runtime_class_can_be_supplied_as_json(tmp_path: Path) -> None:
-    runtime_yaml = (
+def test_checked_in_runtime_class_is_the_direct_input() -> None:
+    runtime_class = (
         _ROOT
         / "deploy"
         / "terraform"
@@ -126,16 +124,7 @@ def test_checked_in_runtime_class_can_be_supplied_as_json(tmp_path: Path) -> Non
         / "execution-target"
         / "runtime"
         / "loom-sandbox-runtime-class.yaml"
-    ).read_text()
+    )
+    runtime_yaml = runtime_class.read_text()
     assert "name: loom-sandbox" in runtime_yaml
     assert "handler: runsc-loom-sandbox" in runtime_yaml
-
-    runtime_json: dict[str, Any] = {
-        "apiVersion": "node.k8s.io/v1",
-        "kind": "RuntimeClass",
-        "metadata": {"name": "loom-sandbox"},
-        "handler": "runsc-loom-sandbox",
-    }
-    path = tmp_path / "runtime.json"
-    path.write_text(json.dumps(runtime_json))
-    assert json.loads(path.read_text())["metadata"]["name"] == "loom-sandbox"
