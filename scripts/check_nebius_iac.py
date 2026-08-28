@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -213,65 +212,6 @@ def check_nebius_iac(
     )
     _require(
         'roles    = ["storage.object-editor"]' in module, "evidence writers need object-only access"
-    )
-
-    runtime_root = root / "modules" / "execution-target" / "runtime"
-    profile_path = runtime_root / "loom-sandbox-profile.json"
-    profile_bytes = profile_path.read_bytes()
-    profile = _load_json(profile_path)
-    profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
-    _require(
-        profile.get("schema") == "loom.nebius-runtime-profile.v1",
-        f"{profile_path}: schema must remain pinned",
-    )
-    _require(
-        profile.get("host", {}).get("containerd_version") == "v2.2.6",
-        f"{profile_path}: live-measured containerd version must remain exact",
-    )
-    _require(
-        profile.get("runtime", {}).get("platform") == "systrap",
-        f"{profile_path}: cpu-e2 requires systrap",
-    )
-    _require(
-        profile.get("runtime", {}).get("network") == "sandbox",
-        f"{profile_path}: host networking is forbidden",
-    )
-    _require(
-        profile.get("runtime_class", {}).get("name") == "loom-sandbox",
-        f"{profile_path}: RuntimeClass name must remain canonical",
-    )
-    runtime_class_path = runtime_root / "loom-sandbox-runtime-class.yaml"
-    runtime_class = runtime_class_path.read_text(encoding="utf-8")
-    _require(
-        profile_sha256 in runtime_class,
-        f"{runtime_class_path}: annotation must bind the exact profile digest",
-    )
-    _require(
-        profile_sha256[:32] in runtime_class and profile_sha256[32:] in runtime_class,
-        f"{runtime_class_path}: selector must bind both digest halves",
-    )
-    _require(
-        "handler: runsc-loom-sandbox" in runtime_class,
-        f"{runtime_class_path}: handler must fail closed to gVisor",
-    )
-    template_path = (
-        root / "modules" / "execution-target" / "templates" / "execution-runtime.cloud-config.tftpl"
-    )
-    template = template_path.read_text(encoding="utf-8")
-    for marker in (
-        "LOOM_NEBIUS_RUNTIME_INSTALL_OK",
-        'platform = "systrap"',
-        'network = "sandbox"',
-        "containerd config dump",
-    ):
-        _require(marker in template, f"{template_path}: missing runtime safety marker {marker!r}")
-    _require(
-        "cloud_init_user_data = local.execution_runtime_cloud_init" in module,
-        "execution nodes must consume the pinned runtime installer",
-    )
-    _require(
-        module.count('"loom.nebius/runtime-profile-') == 2,
-        "execution nodes must carry both profile digest labels",
     )
 
 

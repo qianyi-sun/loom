@@ -15,9 +15,6 @@ the authorization and cost gate in
 ## Layout
 
 - `modules/execution-target`: reusable, version-pinned target resources.
-  Its `runtime/` profile, RuntimeClass, and `templates/` cloud-init install the
-  exact gVisor systrap handler on execution nodes without replacing Nebius'
-  managed containerd configuration.
 - `stack`: the only root module operators plan and apply.
 - `targets`: the sole shared-cluster example. Its development-named anchor is
   retained deliberately so the existing live state converges instead of
@@ -50,15 +47,6 @@ These checks exercise repository structure and mocked Terraform plans only.
 They do not prove Nebius credentials, quota, capacity, price, creation,
 convergence, Kubernetes access, pod execution, autoscaling, isolation, disaster
 recovery, or destruction.
-
-The execution runtime is separately pinned to gVisor
-`release-20260810.0`. The installer verifies the archive SHA-512, selected
-member sizes and SHA-256 digests, the live-measured containerd `v2.2.6`
-contract, and the managed `/etc/containerd/conf.d/*.toml` import before it
-restarts containerd. Any failure removes the handler drop-in and restores the
-ordinary runtime. The `loom-sandbox` RuntimeClass binds both halves of the
-canonical profile digest so an unprepared node fails scheduling instead of
-falling back to `runc`.
 
 Provider `0.6.46` exposes Managed Kubernetes audit logging but no native
 monitoring, alert, dashboard, or budget resources. This stack enables audit

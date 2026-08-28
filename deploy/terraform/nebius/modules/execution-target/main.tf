@@ -1,28 +1,5 @@
 locals {
   resource_prefix = replace(var.target_id, "nebius-", "loom-")
-  runtime_profile = jsondecode(file("${path.module}/runtime/loom-sandbox-profile.json"))
-  runtime_profile_sha256 = filesha256(
-    "${path.module}/runtime/loom-sandbox-profile.json"
-  )
-  execution_runtime_cloud_init = templatefile(
-    "${path.module}/templates/execution-runtime.cloud-config.tftpl",
-    {
-      archive_url        = local.runtime_profile.archive.url
-      archive_sha512     = local.runtime_profile.archive.sha512
-      runsc_sha256       = local.runtime_profile.archive.members.runsc.sha256
-      runsc_size         = local.runtime_profile.archive.members.runsc.size
-      shim_sha256        = local.runtime_profile.archive.members["containerd-shim-runsc-v1"].sha256
-      shim_size          = local.runtime_profile.archive.members["containerd-shim-runsc-v1"].size
-      containerd_version = local.runtime_profile.host.containerd_version
-      import_glob        = local.runtime_profile.host.import_glob
-      release_root       = local.runtime_profile.installation.release_root
-      runsc_config       = local.runtime_profile.installation.runsc_config
-      containerd_drop_in = local.runtime_profile.installation.containerd_drop_in
-      shim_link          = local.runtime_profile.installation.shim_link
-      release_version    = local.runtime_profile.release.version
-      profile_sha256     = local.runtime_profile_sha256
-    }
-  )
   # Preserve the labels already attached to the live development-origin
   # resources. Some Nebius IAM relationship resources replace on metadata-only
   # label changes. The physical shared scope is carried by the contract/output
@@ -290,13 +267,10 @@ resource "nebius_mk8s_v1_node_group" "execution" {
     max_pods           = 16
     metadata = {
       labels = {
-        "loom.nebius/node-role"         = "execution"
-        "loom.nebius/cluster-scope-id"  = var.cluster_scope_id
-        "loom.nebius/runtime-profile-a" = substr(local.runtime_profile_sha256, 0, 32)
-        "loom.nebius/runtime-profile-b" = substr(local.runtime_profile_sha256, 32, 32)
+        "loom.nebius/node-role"        = "execution"
+        "loom.nebius/cluster-scope-id" = var.cluster_scope_id
       }
     }
-    cloud_init_user_data = local.execution_runtime_cloud_init
     taints = [{
       key    = "loom.nebius/execution"
       value  = "true"

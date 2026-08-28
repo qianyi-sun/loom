@@ -154,23 +154,11 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    work and traffic require separate approval. A second cluster or region is
    outside baseline scope.
 
-A generic Linux pod proves Kubernetes scheduling and network plumbing only. It
-does not prove hostile-workload isolation, Loom scheduler/worker/model/verifier
-flow, or deliverable artifacts. Execution nodes install the exact profile in
-`modules/execution-target/runtime/loom-sandbox-profile.json`; apply the adjacent
-`loom-sandbox-runtime-class.yaml` only after the node serial log contains
-`LOOM_NEBIUS_RUNTIME_INSTALL_OK` with the same SHA-256 profile digest.
-
-The minimum runtime smoke is one digest-pinned, non-root Pod with
-`runtimeClassName: loom-sandbox`. Acceptance requires the Pod to become Running
-on a profile-labelled execution node and to read
-`/proc/gvisor/kernel_is_gvisor` from inside the container. Delete the Pod and
-RuntimeClass after the marker smoke, force the execution group to zero, then
-restore autoscaling `0..1`. A passing marker smoke proves the systrap handler,
-not issue #1551's hostile-workload acceptance: escape, host filesystem/device,
-metadata/credential, gateway-only egress, resource-accounting, restart, and
-performance cases remain mandatory before adversarial workloads or Loom
-admission are enabled. Never fall back to the shared-kernel default runtime.
+A generic Linux Pod proves Kubernetes scheduling and network plumbing only. It
+does not prove the Loom scheduler, worker, model, verifier, or artifact path.
+Use the managed cluster's default container runtime with the repository's
+restricted, non-root Pod settings. A custom sandbox RuntimeClass is optional
+defense in depth, not an admission requirement for this project.
 
 ## Workload placement contract
 

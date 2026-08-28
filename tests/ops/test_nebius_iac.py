@@ -55,14 +55,3 @@ def test_backend_credentials_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ContractError, match="credentials may not be stored"):
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
-
-
-def test_runtime_profile_digest_drift_is_rejected(tmp_path: Path) -> None:
-    repo_root, nebius_root = _copy_contract(tmp_path)
-    path = nebius_root / "modules" / "execution-target" / "runtime" / "loom-sandbox-profile.json"
-    document = json.loads(path.read_text(encoding="utf-8"))
-    document["runtime"]["network"] = "host"
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-
-    with pytest.raises(ContractError, match="host networking is forbidden"):
-        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)

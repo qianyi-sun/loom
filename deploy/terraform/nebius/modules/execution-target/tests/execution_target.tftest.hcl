@@ -70,23 +70,6 @@ run "development_private_payg_plan" {
     condition     = nebius_mk8s_v1_node_group.execution.template.taints[0].key == "loom.nebius/execution"
     error_message = "Execution nodes must be isolated by the accepted taint."
   }
-
-  assert {
-    condition = (
-      startswith(nebius_mk8s_v1_node_group.execution.template.cloud_init_user_data, "#cloud-config") &&
-      strcontains(nebius_mk8s_v1_node_group.execution.template.cloud_init_user_data, "platform = \"systrap\"") &&
-      strcontains(nebius_mk8s_v1_node_group.execution.template.cloud_init_user_data, "LOOM_NEBIUS_RUNTIME_INSTALL_OK")
-    )
-    error_message = "Execution nodes must install the pinned fail-closed systrap runtime."
-  }
-
-  assert {
-    condition = (
-      length(nebius_mk8s_v1_node_group.execution.template.metadata.labels["loom.nebius/runtime-profile-a"]) == 32 &&
-      length(nebius_mk8s_v1_node_group.execution.template.metadata.labels["loom.nebius/runtime-profile-b"]) == 32
-    )
-    error_message = "Execution scheduling must bind both halves of the runtime profile digest."
-  }
 }
 
 run "public_control_plane_is_cidr_bounded" {
