@@ -79,6 +79,8 @@ class FakeSystem:
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
         self.orphan_recovery_calls: list[tuple[str, str | None, bool]] = []
+        self.orphan_recovery_auth_calls: list[tuple[str, str, bool]] = []
+        self.asset_validation_calls: list[tuple[Path, str, bool]] = []
 
     def _observe_runtime_venv(self, venv: Path) -> None:
         self.runtime_venvs.add(venv)
@@ -102,8 +104,10 @@ class FakeSystem:
         action: str,
         approved_plan_sha256: str | None,
         installed_source_sha: str,
+        deadline_monotonic: float,
     ) -> dict[str, object]:
         assert installed_source_sha == "a" * 40
+        assert deadline_monotonic > 0
         self.orphan_recovery_calls.append((action, approved_plan_sha256, self.maintenance))
         if action == "inventory":
             return {"plan": {"schema_version": 1}, "plan_sha256": "f" * 64}
@@ -140,9 +144,20 @@ class FakeSystem:
         assert source_sha == self.remote_source_sha
         self.validated += 1
 
+    def validate_invocation_dev_head(
+        self,
+        invocation_head: str,
+        installed_source_sha: str,
+    ) -> None:
+        self.orphan_recovery_auth_calls.append(
+            (invocation_head, installed_source_sha, self.maintenance)
+        )
+        self.validated += 1
+
     def validate_assets(self, source_root: Path, source_sha: str) -> None:
         assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
         assert source_sha == self.remote_source_sha
+        self.asset_validation_calls.append((source_root, source_sha, self.maintenance))
         self.validated += 1
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
@@ -722,7 +737,8 @@ class FakeSystem:
     def verify_user_manager(self) -> None:
         return None
 
-    def active_status(self) -> str:
+    def active_status(self, installed_source_sha: str) -> str:
+        assert installed_source_sha in {"a" * 40, "b" * 40}
         self.admission_disabled_at_status = (
             not self.filesystem.exists(host.SUDOERS_PATH) and self.maintenance
         )
@@ -1196,6 +1212,23 @@ def test_orphaned_backup_recovery_is_digest_approved_and_maintenance_bounded(
         ("apply", "f" * 64, True),
     ]
     assert system.maintenance is False
+
+
+def test_orphaned_backup_recovery_authenticates_exact_dev_checkout_before_maintenance(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.orphan_recovery_auth_calls.clear()
+    system.asset_validation_calls.clear()
+
+    installer.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+    )
+
+    assert system.orphan_recovery_auth_calls == [("a" * 40, "a" * 40, False)]
+    assert system.asset_validation_calls == [(host.REPO_ROOT, "a" * 40, False)]
 
 
 def test_orphaned_backup_recovery_cli_dispatches_inventory_and_approved_apply(
@@ -3442,6 +3475,23 @@ def test_trust_subprocess_inherits_lifecycle_lock_without_ambient_home() -> None
     assert environment["LOGNAME"] == host.SERVICE_USER
 
 
+def test_subprocess_runner_converts_a_command_timeout_to_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def time_out(*args, **kwargs):  # type: ignore[no-untyped-def]
+        assert args == (["systemctl", "is-active", "example.service"],)
+        assert kwargs["timeout"] == 1.5
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(host.subprocess, "run", time_out)
+
+    with pytest.raises(host.InstallError, match="command timed out safely: systemctl"):
+        host.SubprocessRunner().run(
+            ["systemctl", "is-active", "example.service"],
+            timeout=1.5,
+        )
+
+
 def test_host_system_derives_private_key_fingerprint_and_rejects_pair_mismatch() -> None:
     class KeyRunner:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
@@ -4438,7 +4488,7 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
     runner = StatusRunner()
 
-    assert host.HostSystem(runner).active_status() == expected
+    assert host.HostSystem(runner).active_status(TEST_CANDIDATE_SHA) == expected
     assert all(str(host.BROKER_PATH) not in call for call, _ in runner.calls)
     systemd_calls = [call for call in runner.calls if "/usr/bin/systemctl" in call[0]]
     assert systemd_calls == [
@@ -4469,9 +4519,47 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
                 "loom-staging-backup-*.service",
                 "loom-staging-mutation-guard-*.service",
             ],
-            {"check": False},
+            {"check": False, "timeout": 30.0},
         )
     ]
+
+
+def test_active_status_treats_a_bounded_systemd_timeout_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service_uid = 1001
+    service_gid = 1002
+
+    class TimeoutRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            service_identity = _service_identity_result(
+                call,
+                uid=service_uid,
+                gid=service_gid,
+            )
+            if service_identity is not None:
+                return service_identity
+            assert kwargs == {"check": False, "timeout": 30.0}
+            raise host.InstallError("command timed out safely: sudo")
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        if path == host.MAINTENANCE_MARKER:
+            return _status_metadata(stat.S_IFREG | 0o600, uid=0, gid=0)
+        if path == host.STATE_ROOT:
+            return _status_metadata(
+                stat.S_IFDIR | 0o700,
+                uid=service_uid,
+                gid=service_gid,
+            )
+        if path == host.STATE_ROOT / "requests":
+            raise FileNotFoundError(path)
+        assert path == host.ACTIVE_POINTER
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+
+    assert host.HostSystem(TimeoutRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -4555,7 +4643,7 @@ def test_active_status_treats_safe_durable_preflight_backup_without_live_unit_as
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status() == expected
+    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == expected
 
 
 def _prepare_durable_active_status(
@@ -4672,7 +4760,7 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
+    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == "unknown"
     assert not any("/usr/bin/systemctl" in call for call in calls)
 
 
@@ -4759,7 +4847,7 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
                 raise unit_outcome
             return unit_outcome
 
-    assert host.HostSystem(StatusRunner()).active_status() == expected
+    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == expected
     assert [call for call in calls if "/usr/bin/systemctl" in call[0]] == [
         (
             [
@@ -4788,7 +4876,7 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
                 "loom-staging-backup-*.service",
                 "loom-staging-mutation-guard-*.service",
             ],
-            {"check": False},
+            {"check": False, "timeout": host._HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS},
         )
     ]
 
@@ -4819,7 +4907,7 @@ def test_active_status_keeps_legacy_request_directory_without_durable_state_trav
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status() == "idle"
+    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == "idle"
     assert any("/usr/bin/systemctl" in call for call in calls)
 
 
@@ -4878,7 +4966,27 @@ def _write_orphaned_backup_fixture(
     if referenced:
         active = {
             "bundle_name": job["bundle_name"],
+            "created_at": "2026-07-25T01:45:04+00:00",
+            "failure_code": None,
+            "lease": {
+                "component_sha256": {"database": "4" * 64},
+                "created_at": "2026-07-25T01:45:04+00:00",
+                "db_snapshot_identity": "snapshot-orphan001",
+                "environment": "staging",
+                "expires_at": "2026-07-26T01:45:04+00:00",
+                "lease_id": "lease-orphan001",
+                "manifest_sha256": "5" * 64,
+                "mutation_epoch": 10,
+                "namespace": "loom-staging",
+                "object_inventory_root": "6" * 64,
+                "restore_verified_at": "2026-07-25T01:46:04+00:00",
+                "schema_revision": "schema-orphan001",
+                "schema_version": 1,
+                "source_request_id": job["request_id"],
+            },
+            "manifest_sha256": "5" * 64,
             "payload_id": job["payload_id"],
+            "phase": "active",
             "request_id": job["request_id"],
         }
     rotation = {
@@ -4893,6 +5001,135 @@ def _write_orphaned_backup_fixture(
     rotation_path.chmod(0o600)
     evidence_root = tmp_path / "orphan-evidence"
     return state_root, evidence_root, service_uid, service_gid
+
+
+def _rewrite_orphaned_backup_json(path: Path, **updates: object) -> None:
+    value = json.loads(path.read_text())
+    value.update(updates)
+    path.write_text(json.dumps(value, sort_keys=True) + "\n")
+
+
+@pytest.mark.parametrize(
+    ("updates", "label"),
+    [
+        ({"generation": -1}, "negative generation"),
+        (
+            {"candidate": {"payload_id": "payload-candidate001"}},
+            "malformed candidate",
+        ),
+        (
+            {
+                "retirements": [
+                    {
+                        "payload_id": "payload-retired001",
+                        "request_id": "req-retired001",
+                    }
+                ]
+            },
+            "malformed retirement",
+        ),
+    ],
+)
+def test_orphaned_backup_inventory_rejects_noncanonical_rotation_schema(
+    tmp_path: Path,
+    updates: dict[str, object],
+    label: str,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    _rewrite_orphaned_backup_json(state_root / "backup-rotation.json", **updates)
+
+    with pytest.raises(host.InstallError, match="rotation evidence is invalid"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "timestamp_field"),
+    [
+        ("requests/req-orphan001/preflight-backup/job.json", "created_at"),
+        ("requests/req-orphan001/preflight-backup/state.json", "updated_at"),
+    ],
+)
+def test_orphaned_backup_inventory_rejects_invalid_job_timestamps(
+    tmp_path: Path,
+    relative_path: str,
+    timestamp_field: str,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    _rewrite_orphaned_backup_json(
+        state_root / relative_path,
+        **{timestamp_field: "not-a-timestamp"},
+    )
+
+    with pytest.raises(host.InstallError, match="job authority is invalid"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+def test_orphaned_backup_inventory_rejects_noncanonical_nested_lease_request(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        referenced=True,
+    )
+    rotation_path = state_root / "backup-rotation.json"
+    rotation = json.loads(rotation_path.read_text())
+    rotation["active"]["request_id"] = "othername"
+    rotation["active"]["lease"]["source_request_id"] = "othername"
+    rotation_path.write_text(json.dumps(rotation, sort_keys=True) + "\n")
+
+    with pytest.raises(host.InstallError, match="rotation evidence is invalid"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+def test_durable_backup_inventory_rejects_invalid_state_timestamp(tmp_path: Path) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    _rewrite_orphaned_backup_json(
+        state_root / "requests/req-orphan001/preflight-backup/state.json",
+        updated_at="not-a-timestamp",
+    )
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
+    )
 
 
 @pytest.mark.parametrize("phase", ["backup_running", "backup_verified", "launch_pending"])
@@ -4940,6 +5177,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
@@ -4956,6 +5194,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
@@ -5051,12 +5290,169 @@ def test_orphaned_backup_receipt_stops_applying_if_payload_becomes_referenced(
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
         )
         == "unknown"
     )
+
+
+def test_orphaned_backup_receipt_stops_applying_if_candidate_becomes_installed(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha="a" * 40,
+        )
+        == "busy"
+    )
+
+
+def test_orphaned_backup_apply_replays_the_exact_approved_plan(tmp_path: Path) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+    first = host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    replay_plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    second = host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+
+    assert replay_plan == plan
+    assert second == first
+
+
+def test_orphaned_backup_inventory_has_a_hard_request_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+
+    class Entry:
+        def __init__(self, index: int) -> None:
+            self.name = f"req-overflow-{index:05d}"
+
+        def stat(self, *, follow_symlinks: bool):  # type: ignore[no-untyped-def]
+            del follow_symlinks
+            raise AssertionError("entries above the hard limit must not be inspected")
+
+    class Scan:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return iter(Entry(index) for index in range(10_001))
+
+        def __exit__(self, *args):  # type: ignore[no-untyped-def]
+            del args
+
+    real_scandir = host.os.scandir
+
+    def bounded_scandir(path: Path):  # type: ignore[no-untyped-def]
+        if Path(path) == state_root / "requests":
+            return Scan()
+        return real_scandir(path)
+
+    monkeypatch.setattr(host.os, "scandir", bounded_scandir)
+
+    with pytest.raises(host.InstallError, match="request inventory exceeds"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+def test_orphaned_backup_inventory_obeys_the_operation_deadline(tmp_path: Path) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            deadline_monotonic=0.0,
+        )
 
 
 def test_orphaned_backup_inventory_rejects_unsafe_request_directory(
@@ -5172,7 +5568,7 @@ def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
     runner = PointerRunner()
 
-    assert host.HostSystem(runner).active_status() == "busy"
+    assert host.HostSystem(runner).active_status(TEST_CANDIDATE_SHA) == "busy"
     assert runner.calls == [
         ["getent", "passwd", host.SERVICE_USER],
         ["getent", "group", host.SERVICE_GROUP],
@@ -5220,7 +5616,7 @@ def test_active_status_fails_closed_on_unsafe_state_authority(
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
 
-    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
+    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
 
 
 def test_active_status_fails_closed_without_safe_maintenance_marker(
@@ -5237,7 +5633,7 @@ def test_active_status_fails_closed_without_safe_maintenance_marker(
         lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
     )
 
-    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
+    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
 
 
 def _root_directory_metadata(*, mode: int = 0o700, uid: int = 0) -> os.stat_result:
@@ -7054,6 +7450,62 @@ def test_invocation_checkout_rejects_replaceable_root_authority_before_git(
 
     with pytest.raises(host.InstallError, match="root authority parent is unsafe"):
         host.HostSystem(NoGitRunner()).validate_invocation_checkout()
+
+
+def test_recovery_invocation_requires_the_exact_remote_dev_head() -> None:
+    invocation_head = "a" * 40
+
+    class StaleDevRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            assert list(argv) == [
+                "git",
+                "ls-remote",
+                "--exit-code",
+                host.REMOTE_URL,
+                host.FETCH_REF,
+            ]
+            return host.CommandResult(0, f"{'b' * 40}\t{host.FETCH_REF}\n")
+
+    with pytest.raises(host.InstallError, match="exact merged dev head"):
+        host.HostSystem(StaleDevRunner()).validate_invocation_dev_head(
+            invocation_head,
+            "c" * 40,
+        )
+
+
+def test_recovery_invocation_proves_installed_source_is_its_ancestor() -> None:
+    invocation_head = "a" * 40
+    installed_source_sha = "c" * 40
+
+    class ExactDevRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            if call[:2] == ["git", "ls-remote"]:
+                return host.CommandResult(0, f"{invocation_head}\t{host.FETCH_REF}\n")
+            assert call == [
+                "git",
+                "-C",
+                str(host.REPO_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                installed_source_sha,
+                invocation_head,
+            ]
+            return host.CommandResult(0)
+
+    runner = ExactDevRunner()
+    host.HostSystem(runner).validate_invocation_dev_head(
+        invocation_head,
+        installed_source_sha,
+    )
+
+    assert len(runner.calls) == 2
 
 
 def test_source_asset_read_is_bound_to_exact_git_object() -> None:

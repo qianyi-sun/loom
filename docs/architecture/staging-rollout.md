@@ -182,17 +182,30 @@ state, including records left by older implementations after their systemd
 owner disappeared. The candidate must differ from the currently installed
 source; a current-candidate request remains owned by normal recovery or
 `resume`. A superseded record that is absent from the current backup
-rotation is not silently ignored or edited. Root must run the merged installer's
-`orphaned-backup-recovery inventory`, review its exact job/state/rotation
-digest, and apply that digest. Apply enters the normal maintenance admission
+rotation is not silently ignored or edited. Root must run the recovery command
+from a clean, root-owned checkout whose only remote is the approved origin and
+whose HEAD is the exact current `dev` ref. The installed source must be its
+ancestor, and the checkout's rollout assets are validated before maintenance or
+receipt publication.
+
+`orphaned-backup-recovery inventory` validates the complete canonical v3
+rotation, preflight-job, job-state, lease, and nested timestamp contracts. It
+includes every exact eligible record even when its receipt is already valid, so
+the approved plan digest is stable across a completed replay or a crash after
+publishing only some receipts. Apply enters the normal maintenance admission
 freeze, proves the active pointer is absent and no rollout, backup, or guard
 unit is live across two inventories, then publishes a root-owned receipt bound
-to the unchanged job and state bytes. Host inactivity accepts the receipt only
-while those bytes
-remain exact and the payload remains absent from the live rotation. Unsafe
-metadata, a referenced payload, concurrent drift, or an unknown receipt keeps
-the upgrade blocked. The receipt does not rewrite request history or claim that
-partial backup data was deleted.
+to the unchanged job and state bytes. Each systemd inventory has a 30-second
+ceiling, request enumeration stops at 10,000 entries, and one 600-second
+monotonic deadline covers the maintenance recovery operation; expiry refuses
+and the maintenance marker is removed by the command's unconditional cleanup.
+
+Host inactivity accepts a receipt only while its bytes remain exact, its
+candidate differs from the source currently installed at every receipt use,
+and its payload remains absent from the live rotation. Unsafe metadata, a
+referenced payload, concurrent drift, malformed canonical evidence, or an
+unknown receipt keeps the upgrade blocked. The receipt does not rewrite request
+history or claim that partial backup data was deleted.
 
 ## Failure behavior
 

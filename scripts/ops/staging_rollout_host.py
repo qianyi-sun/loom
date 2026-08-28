@@ -24,9 +24,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -170,8 +171,16 @@ _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-
 _BACKUP_UNIT_RE = re.compile(r"^loom-staging-backup-[A-Za-z0-9_.@:-]+[.]service$")
 _MUTATION_GUARD_UNIT_RE = re.compile(r"^loom-staging-mutation-guard-[A-Za-z0-9_.@:-]+[.]service$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
-_DURABLE_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
+_BACKUP_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
+_BACKUP_PAYLOAD_ID_RE = re.compile(r"^payload-[a-z0-9][a-z0-9-]{7,63}$")
+_BACKUP_LEASE_ID_RE = re.compile(r"^lease-[a-z0-9][a-z0-9-]{7,63}$")
+_BACKUP_LEASE_REQUEST_ID_RE = re.compile(r"^req-[a-z0-9][a-z0-9-]{7,63}$")
+_BACKUP_COMPONENT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_BACKUP_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
+_HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS = 30.0
+_ORPHANED_BACKUP_MAX_REQUESTS = 10_000
+_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS = 600.0
 _ACTIVE_PREFLIGHT_BACKUP_PHASES = frozenset(
     {
         "backup_pending",
@@ -662,6 +671,7 @@ class Runner(Protocol):
         check: bool = True,
         env: dict[str, str] | None = None,
         pass_fds: tuple[int, ...] = (),
+        timeout: float | None = None,
     ) -> CommandResult: ...
 
 
@@ -674,21 +684,26 @@ class SubprocessRunner:
         check: bool = True,
         env: dict[str, str] | None = None,
         pass_fds: tuple[int, ...] = (),
+        timeout: float | None = None,
     ) -> CommandResult:
-        completed = subprocess.run(
-            list(argv),
-            input=input_text,
-            capture_output=True,
-            text=True,
-            check=False,
-            pass_fds=pass_fds,
-            env=env
-            or {
-                "PATH": _ROOT_PATH,
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-            },
-        )
+        try:
+            completed = subprocess.run(
+                list(argv),
+                input=input_text,
+                capture_output=True,
+                text=True,
+                check=False,
+                pass_fds=pass_fds,
+                env=env
+                or {
+                    "PATH": _ROOT_PATH,
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                },
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise InstallError(f"command timed out safely: {Path(argv[0]).name}") from exc
         result = CommandResult(completed.returncode, completed.stdout, completed.stderr)
         if check and result.returncode != 0:
             raise InstallError(f"command failed safely: {Path(argv[0]).name}")
@@ -1467,12 +1482,15 @@ def _durable_preflight_backup_status(
     *,
     service_uid: int,
     service_gid: int,
+    installed_source_sha: str,
     evidence_root: Path = ORPHANED_BACKUP_EVIDENCE_ROOT,
     authority_uid: int = 0,
     authority_gid: int = 0,
 ) -> str:
     """Return busy/idle/unknown from bounded service-owned backup state."""
 
+    if _SHA_RE.fullmatch(installed_source_sha) is None:
+        return "unknown"
     requests_root = state_root / "requests"
     try:
         requests_metadata = os.lstat(requests_root)
@@ -1495,19 +1513,6 @@ def _durable_preflight_backup_status(
         return "unknown"
     active = False
     active_phases = _ACTIVE_PREFLIGHT_BACKUP_PHASES
-    known_phases = active_phases | {"backup_failed", "launch_running"}
-    expected_fields = {
-        "failure_code",
-        "job_id",
-        "lease_digest",
-        "manifest_sha256",
-        "preflight_attestation_sha256",
-        "phase",
-        "request_id",
-        "schema_version",
-        "sequence",
-        "updated_at",
-    }
     for request in requests:
         if (
             _REQUEST_ID_RE.fullmatch(request.name) is None
@@ -1567,52 +1572,11 @@ def _durable_preflight_backup_status(
             value = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             return "unknown"
-        if not isinstance(value, dict) or set(value) != expected_fields:
+        if not isinstance(value, dict):
             return "unknown"
-        phase = value.get("phase")
-        sequence = value.get("sequence")
-        updated_at = value.get("updated_at")
-        failure_code = value.get("failure_code")
-        digests = (
-            value.get("manifest_sha256"),
-            value.get("lease_digest"),
-            value.get("preflight_attestation_sha256"),
-        )
-        if (
-            not isinstance(phase, str)
-            or phase not in known_phases
-            or value.get("schema_version") != 1
-            or type(value.get("schema_version")) is not int
-            or type(sequence) is not int
-            or sequence < 0
-            or value.get("request_id") != request.name
-            or not isinstance(value.get("request_id"), str)
-            or _DURABLE_SAFE_ID_RE.fullmatch(value["request_id"]) is None
-            or not isinstance(value.get("job_id"), str)
-            or _DURABLE_SAFE_ID_RE.fullmatch(value["job_id"]) is None
-            or (
-                phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code)
-            )
-            or (phase != "backup_failed" and failure_code is not None)
-        ):
-            return "unknown"
-        if updated_at is not None:
-            if not isinstance(updated_at, str):
-                return "unknown"
-            try:
-                parsed_updated_at = datetime.fromisoformat(updated_at)
-            except ValueError:
-                return "unknown"
-            if parsed_updated_at.tzinfo is None or parsed_updated_at.utcoffset() is None:
-                return "unknown"
-        verified = phase in {"backup_verified", "launch_pending", "launch_running"}
-        valid_digests = all(
-            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
-            for digest in digests
-        )
-        if verified != valid_digests or (
-            not verified and any(digest is not None for digest in digests)
-        ):
+        try:
+            phase = _validate_backup_job_state(value, request_id=request.name)
+        except (TypeError, ValueError):
             return "unknown"
         if phase in active_phases:
             receipt = _orphaned_backup_receipt_status(
@@ -1625,6 +1589,7 @@ def _durable_preflight_backup_status(
                 service_gid=service_gid,
                 authority_uid=authority_uid,
                 authority_gid=authority_gid,
+                installed_source_sha=installed_source_sha,
             )
             if receipt == "invalid":
                 return "unknown"
@@ -1692,6 +1657,315 @@ def _read_owned_json(
     return value, payload
 
 
+def _backup_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("backup timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("backup timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("backup timestamp is invalid")
+    return parsed
+
+
+def _backup_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _bounded_backup_identity(value: object, *, limit: int = 160) -> bool:
+    return isinstance(value, str) and bool(
+        value
+        and value == value.strip()
+        and len(value) <= limit
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
+def _validate_backup_lease(
+    value: object,
+    *,
+    request_id: str,
+    manifest_sha256: str,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("backup lease schema is invalid")
+    expected = {
+        "component_sha256",
+        "created_at",
+        "db_snapshot_identity",
+        "environment",
+        "expires_at",
+        "lease_id",
+        "manifest_sha256",
+        "mutation_epoch",
+        "namespace",
+        "object_inventory_root",
+        "restore_verified_at",
+        "schema_revision",
+        "schema_version",
+        "source_request_id",
+    }
+    components = value.get("component_sha256")
+    mutation_epoch = value.get("mutation_epoch")
+    if (
+        set(value) != expected
+        or value.get("schema_version") != 1
+        or type(mutation_epoch) is not int
+        or mutation_epoch < 0
+        or not isinstance(components, Mapping)
+        or not 1 <= len(components) <= 32
+        or any(
+            not isinstance(name, str)
+            or _BACKUP_COMPONENT_NAME_RE.fullmatch(name) is None
+            or not _backup_sha256(digest)
+            for name, digest in components.items()
+        )
+        or not isinstance(value.get("lease_id"), str)
+        or _BACKUP_LEASE_ID_RE.fullmatch(value["lease_id"]) is None
+        or value.get("source_request_id") != request_id
+        or _BACKUP_LEASE_REQUEST_ID_RE.fullmatch(request_id) is None
+        or value.get("manifest_sha256") != manifest_sha256
+        or value.get("environment") != "staging"
+        or not isinstance(value.get("namespace"), str)
+        or _BACKUP_NAMESPACE_RE.fullmatch(value["namespace"]) is None
+        or not _bounded_backup_identity(value.get("db_snapshot_identity"))
+        or not _bounded_backup_identity(value.get("schema_revision"), limit=64)
+        or not _backup_sha256(value.get("object_inventory_root"))
+    ):
+        raise ValueError("backup lease schema is invalid")
+    created_at = _backup_timestamp(value.get("created_at"))
+    expires_at = _backup_timestamp(value.get("expires_at"))
+    restore_verified_at = _backup_timestamp(value.get("restore_verified_at"))
+    if not created_at <= restore_verified_at < expires_at:
+        raise ValueError("backup lease timestamp ordering is invalid")
+
+
+def _validate_backup_payload_record(value: object) -> tuple[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("backup payload record schema is invalid")
+    expected = {
+        "bundle_name",
+        "created_at",
+        "failure_code",
+        "lease",
+        "manifest_sha256",
+        "payload_id",
+        "phase",
+        "request_id",
+    }
+    payload_id = value.get("payload_id")
+    request_id = value.get("request_id")
+    bundle_name = value.get("bundle_name")
+    phase = value.get("phase")
+    manifest_sha256 = value.get("manifest_sha256")
+    lease = value.get("lease")
+    failure_code = value.get("failure_code")
+    if (
+        set(value) != expected
+        or not isinstance(payload_id, str)
+        or _BACKUP_PAYLOAD_ID_RE.fullmatch(payload_id) is None
+        or not isinstance(request_id, str)
+        or _BACKUP_SAFE_ID_RE.fullmatch(request_id) is None
+        or not isinstance(bundle_name, str)
+        or not bundle_name
+        or "/" in bundle_name
+        or bundle_name != bundle_name.strip()
+        or phase
+        not in {
+            "active",
+            "creating",
+            "failed",
+            "manifest_verified",
+            "restore_verified",
+        }
+    ):
+        raise ValueError("backup payload record schema is invalid")
+    _backup_timestamp(value.get("created_at"))
+    manifest_verified = phase in {"active", "manifest_verified", "restore_verified"}
+    restore_verified = phase in {"active", "restore_verified"}
+    if manifest_verified != _backup_sha256(manifest_sha256):
+        raise ValueError("backup payload manifest binding is invalid")
+    if restore_verified:
+        if not isinstance(manifest_sha256, str):  # covered above; narrows for mypy
+            raise ValueError("backup payload manifest binding is invalid")
+        _validate_backup_lease(
+            lease,
+            request_id=request_id,
+            manifest_sha256=manifest_sha256,
+        )
+    elif lease is not None:
+        raise ValueError("backup payload lease binding is invalid")
+    if phase == "failed":
+        if not isinstance(failure_code, str) or not failure_code:
+            raise ValueError("backup payload failure binding is invalid")
+    elif failure_code is not None:
+        raise ValueError("backup payload failure binding is invalid")
+    return payload_id, phase
+
+
+def _validate_backup_retirement_record(value: object) -> str:
+    if not isinstance(value, Mapping):
+        raise ValueError("backup retirement record schema is invalid")
+    expected = {
+        "bundle_name",
+        "manifest_sha256",
+        "payload_id",
+        "reason",
+        "request_id",
+    }
+    payload_id = value.get("payload_id")
+    request_id = value.get("request_id")
+    bundle_name = value.get("bundle_name")
+    manifest_sha256 = value.get("manifest_sha256")
+    if (
+        set(value) != expected
+        or not isinstance(payload_id, str)
+        or _BACKUP_PAYLOAD_ID_RE.fullmatch(payload_id) is None
+        or not isinstance(request_id, str)
+        or _BACKUP_SAFE_ID_RE.fullmatch(request_id) is None
+        or value.get("reason") not in {"failed", "superseded"}
+        or (
+            bundle_name is not None
+            and (
+                not isinstance(bundle_name, str)
+                or not bundle_name
+                or "/" in bundle_name
+                or bundle_name != bundle_name.strip()
+            )
+        )
+        or (manifest_sha256 is not None and not _backup_sha256(manifest_sha256))
+    ):
+        raise ValueError("backup retirement record schema is invalid")
+    return payload_id
+
+
+def _validate_preflight_backup_job(
+    job: Mapping[str, object],
+    *,
+    request_id: str,
+    state_job_id: object,
+) -> tuple[str, str, str]:
+    expected = {
+        "bundle_name",
+        "candidate_sha",
+        "candidate_tree",
+        "created_at",
+        "environment",
+        "job_id",
+        "mutation_epoch",
+        "namespace",
+        "payload_id",
+        "preflight_assessment_sha256",
+        "preflight_coverage_sha256",
+        "preflight_registry_sha256",
+        "request_id",
+        "schema_version",
+    }
+    mutation_epoch = job.get("mutation_epoch")
+    payload_id = job.get("payload_id")
+    bundle_name = job.get("bundle_name")
+    candidate_sha = job.get("candidate_sha")
+    candidate_tree = job.get("candidate_tree")
+    identifiers = (job.get("job_id"), job.get("request_id"), payload_id)
+    if (
+        set(job) != expected
+        or job.get("schema_version") != 1
+        or any(
+            not isinstance(identifier, str) or _BACKUP_SAFE_ID_RE.fullmatch(identifier) is None
+            for identifier in identifiers
+        )
+        or job.get("request_id") != request_id
+        or job.get("job_id") != state_job_id
+        or job.get("environment") != "staging"
+        or job.get("namespace") != "loom-staging"
+        or type(mutation_epoch) is not int
+        or mutation_epoch < 0
+        or not isinstance(candidate_sha, str)
+        or _SHA_RE.fullmatch(candidate_sha) is None
+        or not isinstance(candidate_tree, str)
+        or _SHA_RE.fullmatch(candidate_tree) is None
+        or any(
+            not _backup_sha256(job.get(field))
+            for field in (
+                "preflight_assessment_sha256",
+                "preflight_coverage_sha256",
+                "preflight_registry_sha256",
+            )
+        )
+        or not isinstance(bundle_name, str)
+        or not bundle_name
+        or "/" in bundle_name
+        or bundle_name != bundle_name.strip()
+    ):
+        raise ValueError("preflight backup job schema is invalid")
+    _backup_timestamp(job.get("created_at"))
+    if not isinstance(payload_id, str):  # covered above; narrows for mypy
+        raise ValueError("preflight backup job schema is invalid")
+    return payload_id, bundle_name, candidate_sha
+
+
+def _validate_backup_job_state(
+    state: Mapping[str, object],
+    *,
+    request_id: str,
+) -> str:
+    expected = {
+        "failure_code",
+        "job_id",
+        "lease_digest",
+        "manifest_sha256",
+        "preflight_attestation_sha256",
+        "phase",
+        "request_id",
+        "schema_version",
+        "sequence",
+        "updated_at",
+    }
+    phase = state.get("phase")
+    sequence = state.get("sequence")
+    job_id = state.get("job_id")
+    failure_code = state.get("failure_code")
+    digests = (
+        state.get("manifest_sha256"),
+        state.get("lease_digest"),
+        state.get("preflight_attestation_sha256"),
+    )
+    if (
+        set(state) != expected
+        or phase
+        not in {
+            "backup_cancel_requested",
+            "backup_failed",
+            "backup_pending",
+            "backup_running",
+            "backup_verified",
+            "launch_pending",
+            "launch_running",
+        }
+        or state.get("schema_version") != 1
+        or type(sequence) is not int
+        or sequence < 0
+        or _BACKUP_SAFE_ID_RE.fullmatch(request_id) is None
+        or state.get("request_id") != request_id
+        or not isinstance(job_id, str)
+        or _BACKUP_SAFE_ID_RE.fullmatch(job_id) is None
+        or (phase == "backup_failed") != (isinstance(failure_code, str) and bool(failure_code))
+    ):
+        raise ValueError("backup job state schema is invalid")
+    updated_at = state.get("updated_at")
+    if updated_at is not None:
+        _backup_timestamp(updated_at)
+    verified = phase in {"backup_verified", "launch_pending", "launch_running"}
+    if verified != all(_backup_sha256(digest) for digest in digests) or (
+        not verified and any(digest is not None for digest in digests)
+    ):
+        raise ValueError("backup job state digest binding is invalid")
+    if not isinstance(phase, str):  # covered above; narrows for mypy
+        raise ValueError("backup job state schema is invalid")
+    return phase
+
+
 def _orphaned_backup_receipt_status(
     request_id: str,
     *,
@@ -1703,7 +1977,10 @@ def _orphaned_backup_receipt_status(
     service_gid: int,
     authority_uid: int,
     authority_gid: int,
+    installed_source_sha: str,
 ) -> str:
+    if _SHA_RE.fullmatch(installed_source_sha) is None:
+        return "invalid"
     receipt_path = evidence_root / f"{request_id}.json"
     try:
         root_metadata = os.lstat(evidence_root)
@@ -1774,6 +2051,7 @@ def _orphaned_backup_receipt_status(
         or receipt.get("payload_id") != job.get("payload_id")
         or receipt.get("bundle_name") != job.get("bundle_name")
         or receipt.get("candidate_sha") != job.get("candidate_sha")
+        or receipt_candidate_sha == installed_source_sha
     ):
         return "stale"
     return "valid"
@@ -1794,17 +2072,38 @@ def _read_backup_rotation_references(
         set(rotation) != {"active", "candidate", "generation", "retirements", "schema_version"}
         or rotation.get("schema_version") != 3
         or type(generation) is not int
+        or generation < 0
         or not isinstance(retirements, list)
     ):
         raise InstallError("backup rotation evidence is invalid")
-    referenced: set[str] = set()
-    records = [rotation.get("active"), rotation.get("candidate"), *retirements]
-    for record in records:
-        if record is None:
-            continue
-        if not isinstance(record, dict) or not isinstance(record.get("payload_id"), str):
-            raise InstallError("backup rotation evidence is invalid")
-        referenced.add(record["payload_id"])
+    try:
+        active = rotation.get("active")
+        candidate = rotation.get("candidate")
+        active_identity = _validate_backup_payload_record(active) if active is not None else None
+        candidate_identity = (
+            _validate_backup_payload_record(candidate) if candidate is not None else None
+        )
+        if active_identity is not None and active_identity[1] != "active":
+            raise ValueError("active backup payload is not active")
+        if candidate_identity is not None and candidate_identity[1] == "active":
+            raise ValueError("candidate backup payload is active")
+        referenced = {
+            identity[0]
+            for identity in (active_identity, candidate_identity)
+            if identity is not None
+        }
+        if len(referenced) != sum(
+            identity is not None for identity in (active_identity, candidate_identity)
+        ):
+            raise ValueError("active and candidate backup payloads overlap")
+        retirement_ids = [_validate_backup_retirement_record(item) for item in retirements]
+        if len(set(retirement_ids)) != len(retirement_ids) or referenced.intersection(
+            retirement_ids
+        ):
+            raise ValueError("backup retirement queue overlaps live payloads")
+        referenced.update(retirement_ids)
+    except (TypeError, ValueError) as exc:
+        raise InstallError("backup rotation evidence is invalid") from exc
     return rotation, payload, referenced
 
 
@@ -1821,6 +2120,21 @@ def _rotation_references_payload(
     return payload_id in referenced
 
 
+def _orphaned_backup_deadline(deadline_monotonic: float | None) -> float:
+    if deadline_monotonic is None:
+        return time.monotonic() + _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS
+    if not isinstance(deadline_monotonic, (int, float)):
+        raise InstallError("orphaned backup operation deadline is invalid")
+    return float(deadline_monotonic)
+
+
+def _orphaned_backup_remaining(deadline_monotonic: float) -> float:
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise InstallError("orphaned backup operation deadline exceeded")
+    return remaining
+
+
 def _orphaned_backup_recovery_plan(
     state_root: Path,
     *,
@@ -1830,7 +2144,10 @@ def _orphaned_backup_recovery_plan(
     authority_uid: int,
     authority_gid: int,
     installed_source_sha: str,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
+    deadline_monotonic = _orphaned_backup_deadline(deadline_monotonic)
+    _orphaned_backup_remaining(deadline_monotonic)
     if _SHA_RE.fullmatch(installed_source_sha) is None:
         raise InstallError("installed source SHA is invalid")
     requests_root = state_root / "requests"
@@ -1851,8 +2168,21 @@ def _orphaned_backup_recovery_plan(
     rotation_generation = rotation.get("generation")
     if type(rotation_generation) is not int:  # validated by the strict reader
         raise InstallError("backup rotation evidence is invalid")
+    try:
+        with os.scandir(requests_root) as entries:
+            requests: list[os.DirEntry[str]] = []
+            for request in entries:
+                _orphaned_backup_remaining(deadline_monotonic)
+                if len(requests) >= _ORPHANED_BACKUP_MAX_REQUESTS:
+                    raise InstallError("orphaned backup request inventory exceeds hard limit")
+                requests.append(request)
+    except InstallError:
+        raise
+    except OSError as exc:
+        raise InstallError("orphaned backup request authority is unavailable") from exc
     items: list[dict[str, object]] = []
-    for request in sorted(os.scandir(requests_root), key=lambda entry: entry.name):
+    for request in sorted(requests, key=lambda entry: entry.name):
+        _orphaned_backup_remaining(deadline_monotonic)
         try:
             request_metadata = request.stat(follow_symlinks=False)
         except OSError as exc:
@@ -1882,54 +2212,10 @@ def _orphaned_backup_recovery_plan(
         state, state_payload = _read_owned_json(
             backup_root / "state.json", uid=service_uid, gid=service_gid
         )
-        phase = state.get("phase")
-        sequence = state.get("sequence")
-        state_job_id = state.get("job_id")
-        failure_code = state.get("failure_code")
-        expected_state_fields = {
-            "failure_code",
-            "job_id",
-            "lease_digest",
-            "manifest_sha256",
-            "preflight_attestation_sha256",
-            "phase",
-            "request_id",
-            "schema_version",
-            "sequence",
-            "updated_at",
-        }
-        verified = phase in {"backup_verified", "launch_pending", "launch_running"}
-        digests = (
-            state.get("manifest_sha256"),
-            state.get("lease_digest"),
-            state.get("preflight_attestation_sha256"),
-        )
-        valid_digests = all(
-            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
-            for digest in digests
-        )
-        if (
-            set(state) != expected_state_fields
-            or phase
-            not in {
-                *_ACTIVE_PREFLIGHT_BACKUP_PHASES,
-                "backup_failed",
-                "launch_running",
-            }
-            or state.get("schema_version") != 1
-            or type(sequence) is not int
-            or sequence < 0
-            or state.get("request_id") != request.name
-            or not isinstance(state_job_id, str)
-            or _REQUEST_ID_RE.fullmatch(state_job_id) is None
-            or (
-                state.get("updated_at") is not None and not isinstance(state.get("updated_at"), str)
-            )
-            or (phase == "backup_failed") != (isinstance(failure_code, str) and bool(failure_code))
-            or (verified != valid_digests)
-            or (not verified and any(digest is not None for digest in digests))
-        ):
-            raise InstallError("orphaned backup job authority is invalid")
+        try:
+            phase = _validate_backup_job_state(state, request_id=request.name)
+        except (TypeError, ValueError) as exc:
+            raise InstallError("orphaned backup job authority is invalid") from exc
         if phase not in _ACTIVE_PREFLIGHT_BACKUP_PHASES:
             continue
         state_sha256 = hashlib.sha256(state_payload).hexdigest()
@@ -1943,67 +2229,25 @@ def _orphaned_backup_recovery_plan(
             service_gid=service_gid,
             authority_uid=authority_uid,
             authority_gid=authority_gid,
+            installed_source_sha=installed_source_sha,
         )
         if receipt == "invalid":
             raise InstallError("orphaned backup receipt authority is unsafe")
         job, job_payload = _read_owned_json(
             backup_root / "job.json", uid=service_uid, gid=service_gid
         )
-        payload_id = job.get("payload_id")
-        bundle_name = job.get("bundle_name")
-        mutation_epoch = job.get("mutation_epoch")
-        candidate_sha = job.get("candidate_sha")
-        candidate_tree = job.get("candidate_tree")
-        if (
-            set(job)
-            != {
-                "bundle_name",
-                "candidate_sha",
-                "candidate_tree",
-                "created_at",
-                "environment",
-                "job_id",
-                "mutation_epoch",
-                "namespace",
-                "payload_id",
-                "preflight_assessment_sha256",
-                "preflight_coverage_sha256",
-                "preflight_registry_sha256",
-                "request_id",
-                "schema_version",
-            }
-            or job.get("schema_version") != 1
-            or job.get("request_id") != request.name
-            or job.get("job_id") != state.get("job_id")
-            or job.get("environment") != "staging"
-            or job.get("namespace") != "loom-staging"
-            or type(mutation_epoch) is not int
-            or mutation_epoch < 0
-            or not isinstance(candidate_sha, str)
-            or _SHA_RE.fullmatch(candidate_sha) is None
-            or not isinstance(candidate_tree, str)
-            or _SHA_RE.fullmatch(candidate_tree) is None
-            or any(
-                not isinstance(job.get(field), str)
-                or re.fullmatch(r"[0-9a-f]{64}", str(job.get(field))) is None
-                for field in (
-                    "preflight_assessment_sha256",
-                    "preflight_coverage_sha256",
-                    "preflight_registry_sha256",
-                )
+        try:
+            payload_id, bundle_name, candidate_sha = _validate_preflight_backup_job(
+                job,
+                request_id=request.name,
+                state_job_id=state.get("job_id"),
             )
-            or not isinstance(payload_id, str)
-            or _REQUEST_ID_RE.fullmatch(payload_id) is None
-            or not isinstance(bundle_name, str)
-            or _REQUEST_ID_RE.fullmatch(bundle_name) is None
-        ):
-            raise InstallError("orphaned backup job authority is invalid")
+        except (TypeError, ValueError) as exc:
+            raise InstallError("orphaned backup job authority is invalid") from exc
         if payload_id in referenced:
             raise InstallError("orphaned backup payload is still referenced")
         if candidate_sha == installed_source_sha:
             raise InstallError("orphaned backup candidate is not superseded")
-        if receipt == "valid":
-            continue
         items.append(
             {
                 "bundle_name": bundle_name,
@@ -2033,7 +2277,10 @@ def _apply_orphaned_backup_recovery(
     authority_gid: int,
     approved_plan_sha256: str,
     installed_source_sha: str,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
+    deadline_monotonic = _orphaned_backup_deadline(deadline_monotonic)
+    _orphaned_backup_remaining(deadline_monotonic)
     plan = _orphaned_backup_recovery_plan(
         state_root,
         evidence_root=evidence_root,
@@ -2042,6 +2289,7 @@ def _apply_orphaned_backup_recovery(
         authority_uid=authority_uid,
         authority_gid=authority_gid,
         installed_source_sha=installed_source_sha,
+        deadline_monotonic=deadline_monotonic,
     )
     plan_payload = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
     digest = hashlib.sha256(plan_payload).hexdigest()
@@ -2081,6 +2329,7 @@ def _apply_orphaned_backup_recovery(
         raise InstallError("orphaned backup evidence root is unsafe")
     reconciled_request_ids: list[object] = []
     for item in items:
+        _orphaned_backup_remaining(deadline_monotonic)
         assert isinstance(item, dict)
         receipt = dict(item)
         receipt.update({"plan_sha256": digest, "schema_version": 1})
@@ -2108,6 +2357,7 @@ def _apply_orphaned_backup_recovery(
             raise
         reconciled_request_ids.append(item["request_id"])
     try:
+        _orphaned_backup_remaining(deadline_monotonic)
         directory_fd = os.open(
             evidence_root,
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
@@ -2120,6 +2370,7 @@ def _apply_orphaned_backup_recovery(
         raise InstallError("orphaned backup receipt publication failed safely") from exc
     finally:
         os.close(directory_fd)
+    _orphaned_backup_remaining(deadline_monotonic)
     return {
         "approved_plan_sha256": digest,
         "reconciled_request_ids": reconciled_request_ids,
@@ -2285,6 +2536,36 @@ class HostSystem:
                 "--is-ancestor",
                 invocation_head,
                 source_sha,
+            ]
+        )
+
+    def validate_invocation_dev_head(
+        self,
+        invocation_head: str,
+        installed_source_sha: str,
+    ) -> None:
+        """Bind recovery authority to the exact current merged dev checkout."""
+        if (
+            _SHA_RE.fullmatch(invocation_head) is None
+            or _SHA_RE.fullmatch(installed_source_sha) is None
+        ):
+            raise InstallError("recovery invocation source binding is invalid")
+        remote = self.runner.run(
+            ["git", "ls-remote", "--exit-code", REMOTE_URL, FETCH_REF]
+        ).stdout.splitlines()
+        fields = remote[0].split() if len(remote) == 1 else []
+        remote_sha = fields[0] if len(fields) == 2 and fields[1] == FETCH_REF else ""
+        if remote_sha != invocation_head:
+            raise InstallError("recovery invocation is not the exact merged dev head")
+        self.runner.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                installed_source_sha,
+                invocation_head,
             ]
         )
 
@@ -2501,7 +2782,7 @@ class HostSystem:
             self.runner.run([str(SYSTEM_PYTHON), "-m", "py_compile", str(export_helper)])
 
     def source_file(self, source_root: Path, source_sha: str, relative_path: str) -> bytes:
-        if source_root != INSTALL_SOURCE or _SHA_RE.fullmatch(source_sha) is None:
+        if source_root not in {INSTALL_SOURCE, REPO_ROOT} or _SHA_RE.fullmatch(source_sha) is None:
             raise InstallError("root installation source binding is invalid")
         if relative_path.startswith("/") or ".." in Path(relative_path).parts:
             raise InstallError("root installation source path is unsafe")
@@ -4796,7 +5077,7 @@ class HostSystem:
             failures.append("gb10-trust")
         return failures
 
-    def active_status(self) -> str:
+    def active_status(self, installed_source_sha: str) -> str:
         """Prove inactivity without importing the runtime being replaced.
 
         Install and uninstall call this only after ``begin_maintenance`` has
@@ -4843,6 +5124,7 @@ class HostSystem:
             STATE_ROOT,
             service_uid=service_uid,
             service_gid=service_gid,
+            installed_source_sha=installed_source_sha,
         )
         if durable_status == "unknown":
             return "unknown"
@@ -4854,7 +5136,14 @@ class HostSystem:
 
         return self._rollout_unit_status(service_uid)
 
-    def _rollout_unit_status(self, service_uid: int) -> str:
+    def _rollout_unit_status(
+        self,
+        service_uid: int,
+        *,
+        timeout_seconds: float = _HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS,
+    ) -> str:
+        if timeout_seconds <= 0:
+            return "unknown"
         try:
             result = self.runner.run(
                 [
@@ -4884,6 +5173,7 @@ class HostSystem:
                     "loom-staging-mutation-guard-*.service",
                 ],
                 check=False,
+                timeout=timeout_seconds,
             )
         except (InstallError, OSError, subprocess.TimeoutExpired):
             return "unknown"
@@ -4930,8 +5220,11 @@ class HostSystem:
         action: str,
         approved_plan_sha256: str | None,
         installed_source_sha: str,
+        deadline_monotonic: float,
     ) -> dict[str, object]:
         """Inventory or attest only exact unowned, unreferenced backup states."""
+        deadline_monotonic = _orphaned_backup_deadline(deadline_monotonic)
+        _orphaned_backup_remaining(deadline_monotonic)
         service_uid, service_gid = self._service_ids()
         try:
             pointer = os.lstat(ACTIVE_POINTER)
@@ -4943,7 +5236,16 @@ class HostSystem:
             if stat.S_ISREG(pointer.st_mode):
                 raise InstallError("active rollout blocks orphaned backup recovery")
             raise InstallError("active rollout authority is unsafe")
-        if self._rollout_unit_status(service_uid) != "idle":
+        if (
+            self._rollout_unit_status(
+                service_uid,
+                timeout_seconds=min(
+                    _HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS,
+                    _orphaned_backup_remaining(deadline_monotonic),
+                ),
+            )
+            != "idle"
+        ):
             raise InstallError("rollout owner units block orphaned backup recovery")
         plan = _orphaned_backup_recovery_plan(
             STATE_ROOT,
@@ -4953,10 +5255,20 @@ class HostSystem:
             authority_uid=0,
             authority_gid=0,
             installed_source_sha=installed_source_sha,
+            deadline_monotonic=deadline_monotonic,
         )
         plan_payload = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
         plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
-        if self._rollout_unit_status(service_uid) != "idle":
+        if (
+            self._rollout_unit_status(
+                service_uid,
+                timeout_seconds=min(
+                    _HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS,
+                    _orphaned_backup_remaining(deadline_monotonic),
+                ),
+            )
+            != "idle"
+        ):
             raise InstallError("rollout owner units changed during orphaned backup recovery")
         if action == "inventory" and approved_plan_sha256 is None:
             return {"plan": plan, "plan_sha256": plan_sha256}
@@ -4971,6 +5283,7 @@ class HostSystem:
             authority_gid=0,
             approved_plan_sha256=approved_plan_sha256,
             installed_source_sha=installed_source_sha,
+            deadline_monotonic=deadline_monotonic,
         )
 
     def begin_maintenance(self) -> None:
@@ -6226,7 +6539,7 @@ class HostInstaller:
                 if admission_was_present:
                     restore_admission()
                 raise
-            status = self.system.active_status()
+            status = self.system.active_status(source_sha)
             if status in {"pending", "running", "cancel_requested", "busy", "unknown"}:
                 if admission_was_present:
                     restore_admission()
@@ -6793,7 +7106,9 @@ class HostInstaller:
         previous = self.system.maintenance_marker_status()
         if enabled:
             self.system.begin_maintenance()
-            status = self.system.active_status()
+            if self.source_sha is None:  # validated and bound above
+                raise InstallError("installed source SHA is unavailable")
+            status = self.system.active_status(self.source_sha)
             if status != "idle":
                 if previous == "disabled":
                     self.system.end_maintenance()
@@ -6815,7 +7130,9 @@ class HostInstaller:
                 "rollout": "idle",
                 "source_sha": self.source_sha,
             }
-        status = self.system.active_status()
+        if self.source_sha is None:  # validated and bound above
+            raise InstallError("installed source SHA is unavailable")
+        status = self.system.active_status(self.source_sha)
         if status != "idle":
             if status == "unknown":
                 raise InstallError("cannot prove staging rollout is inactive")
@@ -6860,14 +7177,21 @@ class HostInstaller:
         self._bind_existing_source(record)
         if self.source_sha is None:  # validated and bound above
             raise InstallError("installed source SHA is unavailable")
+        if self.source_mode != "merged-dev":
+            raise InstallError("orphaned backup recovery requires a merged dev installation")
+        invocation_head = self.system.validate_invocation_checkout()
+        self.system.validate_invocation_dev_head(invocation_head, self.source_sha)
+        self.system.validate_assets(REPO_ROOT, invocation_head)
         if self.system.maintenance_marker_status() != "disabled":
             raise InstallError("orphaned backup recovery requires disabled maintenance")
+        deadline_monotonic = time.monotonic() + _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS
         self.system.begin_maintenance()
         try:
             return self.system.orphaned_backup_recovery(
                 action=action,
                 approved_plan_sha256=approved_plan_sha256,
                 installed_source_sha=self.source_sha,
+                deadline_monotonic=deadline_monotonic,
             )
         finally:
             self.system.end_maintenance()
@@ -6966,7 +7290,7 @@ class HostInstaller:
                     self.filesystem.atomic_write(SUDOERS_PATH, sudoers, 0o440)
                     self.system.install_owner(SUDOERS_PATH, "root", 0o440)
                 raise
-            status = self.system.active_status()
+            status = self.system.active_status(self.source_sha)
             if status in {"pending", "running", "cancel_requested", "busy", "unknown"}:
                 if admission_was_present:
                     sudoers = self._asset("loom-staging-rollout.sudoers")

@@ -114,15 +114,24 @@ sudo -n python3 scripts/ops/staging_rollout_host.py \
   orphaned-backup-recovery apply --approved-plan-sha256 SHA256
 ```
 
-Apply is authorized only by the exact inventory digest. It temporarily enters
-maintenance, requires no active pointer or live rollout/backup/guard unit, rejects
-any payload still present in active/candidate/retirement rotation state, and
-refuses a request for the currently installed candidate. It publishes a
-root-owned receipt bound to the exact unchanged candidate, job, and state. A
-later byte change or renewed rotation reference invalidates the receipt and
-blocks installation again. This migration attests that the historical record
-no longer owns work; it does not mutate the service-owned history or clean
-backup data.
+The command authenticates that checkout as the exact current merged `dev` head,
+proves the installed source is its ancestor, and validates its rollout assets
+before entering maintenance. Apply is authorized only by the exact inventory
+digest. It requires no active pointer or live rollout/backup/guard unit, rejects
+malformed canonical rotation/job/state/lease evidence, rejects any payload still
+present in active/candidate/retirement rotation state, and refuses a request for
+the currently installed candidate. Inventory is capped at 10,000 requests; each
+of the two systemd inventories is capped at 30 seconds; and the complete
+maintenance recovery operation has a 600-second monotonic deadline with
+unconditional marker cleanup.
+
+Apply publishes a root-owned receipt bound to the exact unchanged candidate,
+job, and state. Plans retain already-receipted eligible items, so the same
+approved digest is replay-safe after success or partial publication. A later
+byte change, renewed rotation reference, or installation of the receipt's
+candidate invalidates its authority and blocks installation again. This
+migration attests that the historical record no longer owns work; it does not
+mutate the service-owned history or clean backup data.
 
 The broker enforces a single environment lifecycle owner. Broker unavailability
 does not grant authority for direct mutation. See
