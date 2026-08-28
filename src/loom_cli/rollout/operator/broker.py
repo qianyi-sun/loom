@@ -80,6 +80,7 @@ from .preflight_artifact_references import (
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
     read_component_failure,
+    read_component_failure_diagnostic,
 )
 from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import (
@@ -1311,7 +1312,7 @@ def _protected_apply_progress(
     dependencies: BrokerDependencies,
     request_id: str,
     attempt_number: int,
-) -> tuple[str, str, tuple[str, ...]] | None:
+) -> tuple[str, str, tuple[str, ...], str | None, str | None] | None:
     """Return only secret-free component metadata from the protected journal."""
     root = (
         dependencies.config.state_root
@@ -1379,11 +1380,43 @@ def _protected_apply_progress(
                 if failure.component_id != component_id:
                     raise RequestStoreError("protected apply progress is unsafe")
                 failed_hosts = failure.failed_hosts
-            return component_id, "protected_component_incomplete", failed_hosts
+            failure_code: str | None = None
+            diagnostic: str | None = None
+            diagnostic_path = component_root / "failure-diagnostic.json"
+            try:
+                has_diagnostic = _private_progress_file(
+                    diagnostic_path,
+                    service_uid=service_uid,
+                )
+            except RequestStoreError:
+                has_diagnostic = False
+            if has_diagnostic:
+                try:
+                    failure_diagnostic = read_component_failure_diagnostic(
+                        diagnostic_path,
+                        service_uid=service_uid,
+                    )
+                except (OSError, ProtectedApplyJournalError):
+                    failure_diagnostic = None
+                if failure_diagnostic is not None and (
+                    failure_diagnostic.component_id != component_id
+                    or failure_diagnostic.ordinal != _ordinal
+                ):
+                    failure_diagnostic = None
+                if failure_diagnostic is not None:
+                    failure_code = failure_diagnostic.failure_code
+                    diagnostic = failure_diagnostic.diagnostic
+            return (
+                component_id,
+                "protected_component_incomplete",
+                failed_hosts,
+                failure_code,
+                diagnostic,
+            )
         last_complete = component_id
     if last_complete is None:
         return None
-    return last_complete, "protected_component_complete", ()
+    return last_complete, "protected_component_complete", (), None, None
 
 
 def _final_gate_progress(
@@ -1454,11 +1487,21 @@ def _request_status(
         except RequestStoreError:
             protected_progress = None
         if protected_progress is not None:
-            component_id, progress_reason, failed_hosts = protected_progress
+            component_id, progress_reason, failed_hosts, failure_code, diagnostic = (
+                protected_progress
+            )
             payload["protected_component"] = component_id
             payload["protected_component_status"] = progress_reason
             if failed_hosts:
                 payload["protected_failed_hosts"] = list(failed_hosts)
+            if failure_code is not None:
+                payload["protected_failure_code"] = failure_code
+            if diagnostic is not None:
+                payload["protected_failure_diagnostic"] = redact_rollout_text(
+                    diagnostic,
+                    known_secrets=dependencies.known_secrets(),
+                    limit=512,
+                )
         try:
             final_gate_progress = _final_gate_progress(
                 dependencies,

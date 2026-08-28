@@ -2149,6 +2149,156 @@ def test_status_reports_incomplete_protected_component_without_reading_payload(
     assert "must-not-be-read" not in deps.stdout.getvalue()
 
 
+def test_status_reports_certified_protected_component_failure_diagnostic(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    manifests = root / "02-staging-manifests"
+    _private_directory(manifests)
+    _private_file(manifests / "intent.json")
+    diagnostic = (
+        "unclassified staging-manifests failure: RuntimeError "
+        "at protected_apply_executor.py:245 in _run"
+    )
+    _private_file(
+        manifests / "failure-diagnostic.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "component_id": "staging-manifests",
+                "ordinal": 2,
+                "failure_code": "apply-failed",
+                "diagnostic": diagnostic,
+            }
+        ),
+    )
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "staging-manifests"
+    assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert payload["protected_failure_code"] == "apply-failed"
+    assert payload["protected_failure_diagnostic"] == diagnostic
+
+
+@pytest.mark.parametrize(
+    "diagnostic_record",
+    [
+        {
+            "schema_version": 2,
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+        },
+        {
+            "schema_version": 1,
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "unbounded-runtime-detail",
+            "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+        },
+        {
+            "schema_version": 1,
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "secret-bearing-detail\nsecond line",
+        },
+        {
+            "schema_version": 1,
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "x" * 513,
+        },
+        {
+            "schema_version": 1,
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+            "private_detail": "secret-bearing-detail",
+        },
+        {
+            "schema_version": 1,
+            "component_id": "database-migration",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified database-migration failure: RuntimeError",
+        },
+        {
+            "schema_version": 1,
+            "component_id": "staging-manifests",
+            "ordinal": 3,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+        },
+    ],
+)
+def test_status_hides_uncertified_protected_component_failure_diagnostic(
+    tmp_path: Path,
+    diagnostic_record: dict[str, object],
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    manifests = root / "02-staging-manifests"
+    _private_directory(manifests)
+    _private_file(manifests / "intent.json")
+    _private_file(
+        manifests / "failure-diagnostic.json",
+        json.dumps(diagnostic_record),
+    )
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "staging-manifests"
+    assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert "protected_failure_code" not in payload
+    assert "protected_failure_diagnostic" not in payload
+    assert "secret-bearing-detail" not in deps.stdout.getvalue()
+
+
+def test_status_ignores_unsafe_protected_failure_diagnostic_metadata(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    manifests = root / "02-staging-manifests"
+    _private_directory(manifests)
+    _private_file(manifests / "intent.json")
+    outside = tmp_path / "secret-bearing-detail.json"
+    _private_file(outside, '{"private":"secret-bearing-detail"}')
+    (manifests / "failure-diagnostic.json").symlink_to(outside)
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "staging-manifests"
+    assert payload["protected_component_status"] == "protected_component_incomplete"
+    assert "protected_failure_code" not in payload
+    assert "protected_failure_diagnostic" not in payload
+    assert "secret-bearing-detail" not in deps.stdout.getvalue()
+
+
 def test_status_fails_closed_on_unsafe_protected_progress_metadata(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
