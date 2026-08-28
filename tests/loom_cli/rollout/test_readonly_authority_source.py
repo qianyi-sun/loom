@@ -123,6 +123,33 @@ def test_server_observed_readonly_authority_accepts_exact_safe_rules() -> None:
     assert all("--raw" in argv and argv[-2:] == ("-f", "-") for argv, _stdin in calls)
 
 
+def test_server_observed_readonly_authority_digest_ignores_rule_order() -> None:
+    ordered_rules = _rules()
+    reordered_rules = _rules()
+    reordered_status = cast(dict[str, object], reordered_rules["status"])
+    reordered_resource_rules = cast(list[dict[str, object]], reordered_status["resourceRules"])
+    reordered_resource_rules.reverse()
+    ordered_run, _ordered_calls = _run_for(ordered_rules)
+    reordered_run, _reordered_calls = _run_for(reordered_rules)
+
+    ordered_evidence = probe_readonly_authority(
+        cast(JsonCommandRunner, ordered_run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+        application_observation=_application,
+    )
+    reordered_evidence = probe_readonly_authority(
+        cast(JsonCommandRunner, reordered_run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+        application_observation=_application,
+    )
+
+    assert ordered_evidence.capability_source_digest == (
+        reordered_evidence.capability_source_digest
+    )
+
+
 def test_server_observed_authority_accepts_select_only_database_digest() -> None:
     run, _calls = _run_for(_rules())
 
