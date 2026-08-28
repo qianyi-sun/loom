@@ -227,29 +227,34 @@ validated the receipt into the live-rotation check; it never reopens the job and
 mixes identities from two reads.
 
 Each systemd inventory has a 30-second ceiling and request enumeration stops at
-10,000 entries. One real-time watchdog starts before lifecycle-lock acquisition
-and enforces the 600-second monotonic deadline across checkout authentication,
+10,000 entries. One watchdog starts before lifecycle-lock acquisition and
+enforces the 600-second monotonic deadline across checkout authentication,
 subprocesses, filesystem reads, maintenance, planning, and publication. Apply
 rechecks the deadline after receipt fsync and before atomic replacement, so an
 overrun cannot start another publication. Expiry interrupts normally
 interruptible kernel operations and subprocesses and refuses the command. The
-watchdog is main-thread only and refuses before lifecycle mutation if
-`ITIMER_REAL` is already active or `SIGALRM` is pending, so it never consumes
-another subsystem's timer or pending signal. Otherwise it temporarily owns and
-unblocks `SIGALRM`. Restoration catches an owned expiry delivered immediately
-before its signal-block call and retries that block a bounded number of times.
-Only after independently verifying that `SIGALRM` is blocked does it make
-bounded cancellation attempts and independently verify that `ITIMER_REAL` is
-disarmed. While the watchdog handler is still installed, it synchronously drains
-and verifies absence of any owned pending expiry. Only that proven state may
-restore and verify the prior handler and exact signal mask. If blocking,
-disarming, draining, or handler restoration cannot be proven, restoration fails
-without unblocking the signal or exposing the prior handler to an owned timer.
-If exact mask restoration itself fails after the prior handler is restored, the
-already-disarmed timer and drained pending set still prevent owned delivery.
-A restoration failure takes precedence over an owned expiry, which takes
-precedence over any body error; without either watchdog condition, the original
-body error is preserved.
+watchdog is main-thread only and refuses before lifecycle mutation if a foreign
+`ITIMER_REAL` is active or `SIGALRM` is pending, so it never consumes another
+subsystem's timer or pending signal. Otherwise it captures the main-thread
+identity, installs and unblocks its `SIGALRM` handler, and starts a dedicated
+sender thread. That sender waits on the monotonic deadline and then targets the
+main thread with `signal.pthread_kill`; the watchdog never arms `ITIMER_REAL`.
+Restoration catches an owned expiry delivered immediately before its signal-block
+call and retries that block a bounded number of times. Only after independently
+verifying that `SIGALRM` is blocked does it set the sender cancellation event,
+bounded-join the sender, and verify that the sender stopped. While the watchdog
+handler is still installed, it synchronously drains and verifies absence of any
+owned pending delivery. Only that proven state may restore and verify the prior
+handler and exact signal mask. If blocking cannot be proven, restoration aborts
+before restoring the recorded prior handler or exact mask; the current handler is
+left unchanged and the mask state remains explicitly unverified. Once blocking
+is proven, failure to stop the sender or to prove handler ownership and pending
+delivery leaves `SIGALRM` blocked and the current handler unchanged rather than
+exposing the recorded prior handler. If exact mask restoration itself fails
+after the prior handler is restored, the stopped sender and drained pending set
+still prevent owned delivery. A restoration failure takes precedence over an
+owned expiry, which takes precedence over any body error; without either
+watchdog condition, the original body error is preserved.
 
 Maintenance enable owns its previously empty marker slot before creation and
 rolls back a partial publication even if interruption occurs as the create call
@@ -258,14 +263,14 @@ marker directly without another fallible status probe. An absent cleanup marker
 is an idempotent no-op and does not wait on the launch lock. Cleanup receives the
 same absolute deadline and reuses the exact service UID/GID authenticated before
 maintenance enable; after expiry it performs no fresh NSS identity discovery.
-Launch-lock acquisition stays interruptible while the one-shot watchdog is
-armed and also uses nonblocking attempts bounded by the monotonic deadline after
-the watchdog has fired. It never arms a second timer. If the cached identity is
-unavailable or the lock remains unavailable at expiry, recovery reports failure
-and retains the valid marker fail-closed. After lock acquisition and marker
-metadata validation, `SIGALRM` delivery is deferred only across unlink plus
-parent-directory fsync; a timeout made pending there is reported immediately
-after that critical section.
+Launch-lock acquisition stays interruptible before the dedicated sender delivers
+`SIGALRM` and also uses nonblocking attempts bounded by the same monotonic
+deadline after delivery is observed. Cleanup starts no second sender and polls
+that absolute deadline instead. If the cached identity is unavailable or the
+lock remains unavailable at expiry, recovery reports failure and retains the
+valid marker fail-closed. After lock acquisition and marker metadata validation,
+`SIGALRM` delivery is deferred only across unlink plus parent-directory fsync; a
+timeout made pending there is reported immediately after that critical section.
 As with every userspace watchdog, the process cannot preempt a kernel task in
 uninterruptible I/O sleep; that host fault remains fail-closed in maintenance
 and requires host-level diagnosis rather than being reported as a completed

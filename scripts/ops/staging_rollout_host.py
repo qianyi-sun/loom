@@ -184,6 +184,7 @@ _HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS = 30.0
 _ORPHANED_BACKUP_MAX_REQUESTS = 10_000
 _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS = 600.0
 _WATCHDOG_RESTORATION_ATTEMPTS = 3
+_WATCHDOG_SENDER_JOIN_TIMEOUT_SECONDS = 5.0
 _FORBIDDEN_GIT_HISTORY_PATHS = (
     Path("refs/replace"),
     Path("info/grafts"),
@@ -2293,6 +2294,7 @@ class _OrphanedBackupWatchdogState:
     cleanup_depth: int = 0
     expiry_observed: bool = False
     restoration_in_progress: bool = False
+    entry_ready: bool = False
 
 
 _ACTIVE_ORPHANED_BACKUP_WATCHDOG: _OrphanedBackupWatchdogState | None = None
@@ -2306,62 +2308,146 @@ def _orphaned_backup_deadline(deadline_monotonic: float | None) -> float:
     return float(deadline_monotonic)
 
 
-@contextlib.contextmanager
-def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]:
-    """Interrupt every normally interruptible recovery operation at one deadline."""
+class _OrphanedBackupDeadlineGuard:
+    """Own and restore the process alarm around one recovery operation."""
 
-    global _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+    def __init__(self, deadline_monotonic: float) -> None:
+        self._deadline_monotonic = deadline_monotonic
+        self._watchdog_state: _OrphanedBackupWatchdogState | None = None
+        self._previous_mask: set[int | signal.Signals] | None = None
+        self._previous_handler: Any = None
+        self._watchdog_owns_alarm = False
+        self._deadline_handler = self._deadline_expired
+        self._main_thread_id: int | None = None
+        self._sender_cancelled = threading.Event()
+        self._sender: threading.Thread | None = None
+        self._sender_error: BaseException | None = None
 
-    if threading.current_thread() is not threading.main_thread():
-        raise InstallError("orphaned backup deadline watchdog requires the main thread")
-    if _ACTIVE_ORPHANED_BACKUP_WATCHDOG is not None:
-        raise InstallError("orphaned backup deadline watchdog is already active")
-    remaining = _orphaned_backup_remaining(deadline_monotonic)
-    try:
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
-        previous_handler = signal.getsignal(signal.SIGALRM)
-        previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
-        alarm_pending = signal.SIGALRM in signal.sigpending()
-    except (OSError, ValueError) as exc:
-        with contextlib.suppress(OSError, ValueError):
-            if "previous_mask" in locals():
-                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        raise InstallError("orphaned backup deadline watchdog is unavailable") from exc
-    if previous_delay > 0.0 or previous_interval > 0.0 or alarm_pending:
+    def _send_deadline(self, remaining: float) -> None:
+        if self._sender_cancelled.wait(remaining):
+            return
+        main_thread_id = self._main_thread_id
+        if main_thread_id is None:
+            self._sender_error = OSError("watchdog main-thread identity is unavailable")
+            return
         try:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        except (OSError, ValueError) as exc:
-            raise InstallError("orphaned backup deadline watchdog restoration failed") from exc
-        raise InstallError("orphaned backup recovery conflicts with an active process timer")
+            signal.pthread_kill(main_thread_id, signal.SIGALRM)
+        except BaseException as exc:
+            self._sender_error = exc
 
-    watchdog_state = _OrphanedBackupWatchdogState(
-        deadline_error=InstallError("orphaned backup operation deadline exceeded")
-    )
-    _ACTIVE_ORPHANED_BACKUP_WATCHDOG = watchdog_state
-
-    def deadline_expired(_signum: int, _frame: Any) -> None:
+    def _deadline_expired(self, _signum: int, frame: Any) -> None:
+        watchdog_state = self._watchdog_state
+        if watchdog_state is None:
+            return
         watchdog_state.expiry_observed = True
-        if watchdog_state.cleanup_depth > 0 or watchdog_state.restoration_in_progress:
+        active_frame = frame
+        entering = False
+        exiting = False
+        while active_frame is not None:
+            entering = entering or active_frame.f_code is type(self).__enter__.__code__
+            exiting = exiting or active_frame.f_code is type(self).__exit__.__code__
+            active_frame = active_frame.f_back
+        if exiting:
+            # Unlike a generator's finally suite, __exit__ has an identity the
+            # handler can recognize even before its first Python assignment,
+            # including when delivery occurs inside a trace/profile callback.
+            watchdog_state.restoration_in_progress = True
+            return
+        if (
+            watchdog_state.cleanup_depth > 0
+            or watchdog_state.restoration_in_progress
+            or (entering and not watchdog_state.entry_ready)
+        ):
             return
         raise watchdog_state.deadline_error
 
-    watchdog_owns_alarm = False
-    try:
+    def __enter__(self) -> None:
+        global _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+
+        if threading.current_thread() is not threading.main_thread():
+            raise InstallError("orphaned backup deadline watchdog requires the main thread")
+        if _ACTIVE_ORPHANED_BACKUP_WATCHDOG is not None:
+            raise InstallError("orphaned backup deadline watchdog is already active")
+        remaining = _orphaned_backup_remaining(self._deadline_monotonic)
         try:
-            signal.signal(signal.SIGALRM, deadline_expired)
-            # The arming call may install a timer and still report failure, so
-            # restoration must treat pending SIGALRM as ours before calling it.
-            watchdog_owns_alarm = True
-            signal.setitimer(signal.ITIMER_REAL, remaining)
-            active_mask = set(previous_mask)
-            active_mask.discard(signal.SIGALRM)
-            signal.pthread_sigmask(signal.SIG_SETMASK, active_mask)
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+            alarm_pending = signal.SIGALRM in signal.sigpending()
         except (OSError, ValueError) as exc:
+            with contextlib.suppress(OSError, ValueError):
+                if "previous_mask" in locals():
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             raise InstallError("orphaned backup deadline watchdog is unavailable") from exc
-        yield
-        _orphaned_backup_remaining(deadline_monotonic)
-    finally:
+        if previous_delay > 0.0 or previous_interval > 0.0 or alarm_pending:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            except (OSError, ValueError) as exc:
+                raise InstallError("orphaned backup deadline watchdog restoration failed") from exc
+            raise InstallError("orphaned backup recovery conflicts with an active process timer")
+
+        watchdog_state = _OrphanedBackupWatchdogState(
+            deadline_error=InstallError("orphaned backup operation deadline exceeded")
+        )
+        self._watchdog_state = watchdog_state
+        self._previous_mask = previous_mask
+        self._previous_handler = previous_handler
+        _ACTIVE_ORPHANED_BACKUP_WATCHDOG = watchdog_state
+
+        try:
+            try:
+                signal.signal(signal.SIGALRM, self._deadline_handler)
+                self._watchdog_owns_alarm = True
+                self._main_thread_id = threading.get_ident()
+                self._sender = threading.Thread(
+                    target=self._send_deadline,
+                    args=(remaining,),
+                    name="loom-orphaned-backup-watchdog",
+                    daemon=True,
+                )
+                self._sender.start()
+                active_mask = set(previous_mask)
+                active_mask.discard(signal.SIGALRM)
+                signal.pthread_sigmask(signal.SIG_SETMASK, active_mask)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise InstallError("orphaned backup deadline watchdog is unavailable") from exc
+            watchdog_state.entry_ready = True
+            if watchdog_state.expiry_observed:
+                raise watchdog_state.deadline_error
+            return None
+        except BaseException:
+            watchdog_state.restoration_in_progress = True
+            self._restore()
+            raise
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: Any,
+    ) -> None:
+        watchdog_state = self._watchdog_state
+        if watchdog_state is None:
+            raise InstallError("orphaned backup deadline watchdog restoration failed")
         watchdog_state.restoration_in_progress = True
+        deadline_check_error: BaseException | None = None
+        try:
+            _orphaned_backup_remaining(self._deadline_monotonic)
+        except InstallError:
+            watchdog_state.expiry_observed = True
+        except BaseException as exc:
+            deadline_check_error = exc
+        self._restore()
+        if deadline_check_error is not None:
+            raise deadline_check_error
+
+    def _restore(self) -> None:
+        global _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+
+        watchdog_state = self._watchdog_state
+        previous_mask = self._previous_mask
+        if watchdog_state is None or previous_mask is None:
+            raise InstallError("orphaned backup deadline watchdog restoration failed")
         restoration_error: BaseException | None = None
         if (
             _ACTIVE_ORPHANED_BACKUP_WATCHDOG is not watchdog_state
@@ -2377,7 +2463,7 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
                 signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
                 current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
             except InstallError as exc:
-                if not watchdog_owns_alarm or exc is not watchdog_state.deadline_error:
+                if not self._watchdog_owns_alarm or exc is not watchdog_state.deadline_error:
                     block_error = exc
                     continue
                 watchdog_state.expiry_observed = True
@@ -2393,39 +2479,34 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
         if not restoration_blocked:
             restoration_error = block_error or OSError("SIGALRM could not be blocked")
 
-        timer_disarmed = False
-        if restoration_blocked:
-            disarm_error: BaseException | None = None
-            for _attempt in range(_WATCHDOG_RESTORATION_ATTEMPTS):
-                try:
-                    signal.setitimer(signal.ITIMER_REAL, 0.0)
-                except (OSError, ValueError) as exc:
-                    disarm_error = exc
-                try:
-                    timer_disarmed = signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
-                except (OSError, ValueError) as exc:
-                    disarm_error = exc
-                    timer_disarmed = False
-                if timer_disarmed:
-                    disarm_error = None
-                    break
-                if disarm_error is None:
-                    disarm_error = OSError("ITIMER_REAL remains armed")
-            if not timer_disarmed:
-                restoration_error = disarm_error or OSError("ITIMER_REAL disarm is unverified")
+        sender_stopped = False
+        self._sender_cancelled.set()
+        sender = self._sender
+        if sender is None:
+            restoration_error = OSError("watchdog sender was not created")
+        elif sender.ident is None:
+            sender_stopped = not sender.is_alive()
+            if not sender_stopped:
+                restoration_error = OSError("watchdog sender identity is unavailable")
+        else:
+            sender.join(timeout=_WATCHDOG_SENDER_JOIN_TIMEOUT_SECONDS)
+            sender_stopped = not sender.is_alive()
+            if not sender_stopped:
+                restoration_error = OSError("watchdog sender did not stop")
+            elif self._sender_error is not None:
+                restoration_error = self._sender_error
 
         handler_safe = False
         pending_drained = False
-        if restoration_blocked and timer_disarmed:
+        if restoration_blocked and sender_stopped:
             try:
                 current_handler = signal.getsignal(signal.SIGALRM)
-                if watchdog_owns_alarm:
-                    if current_handler is not deadline_expired:
+                if self._watchdog_owns_alarm:
+                    if current_handler is not self._deadline_handler:
                         raise OSError("SIGALRM watchdog handler ownership changed")
-                    if signal.SIGALRM in signal.sigpending():
-                        signal.sigwait({signal.SIGALRM})
+                    if signal.sigtimedwait({signal.SIGALRM}, 0.0) is not None:
                         watchdog_state.expiry_observed = True
-                elif current_handler not in (previous_handler, deadline_expired):
+                elif current_handler not in (self._previous_handler, self._deadline_handler):
                     raise OSError("SIGALRM handler ownership changed during setup")
                 if signal.SIGALRM in signal.sigpending():
                     raise OSError("SIGALRM pending delivery was not drained")
@@ -2435,7 +2516,7 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
                 restoration_error = exc
 
         if restoration_error is not None or not (
-            restoration_blocked and timer_disarmed and handler_safe and pending_drained
+            restoration_blocked and sender_stopped and handler_safe and pending_drained
         ):
             raise InstallError("orphaned backup deadline watchdog restoration failed") from (
                 restoration_error or OSError("watchdog restoration state is unverified")
@@ -2443,12 +2524,12 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
 
         handler_error: BaseException | None = None
         try:
-            if signal.getsignal(signal.SIGALRM) is not previous_handler:
-                signal.signal(signal.SIGALRM, previous_handler)
+            if signal.getsignal(signal.SIGALRM) is not self._previous_handler:
+                signal.signal(signal.SIGALRM, self._previous_handler)
         except (OSError, ValueError) as exc:
             handler_error = exc
         try:
-            handler_restored = signal.getsignal(signal.SIGALRM) is previous_handler
+            handler_restored = signal.getsignal(signal.SIGALRM) is self._previous_handler
         except (OSError, ValueError) as exc:
             handler_error = exc
             handler_restored = False
@@ -2476,6 +2557,14 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
         # outranks any body exception. Otherwise the body exception propagates.
         if watchdog_state.expiry_observed:
             raise watchdog_state.deadline_error
+
+
+def _orphaned_backup_deadline_guard(
+    deadline_monotonic: float,
+) -> contextlib.AbstractContextManager[None]:
+    """Interrupt every normally interruptible recovery operation at one deadline."""
+
+    return _OrphanedBackupDeadlineGuard(deadline_monotonic)
 
 
 @contextlib.contextmanager

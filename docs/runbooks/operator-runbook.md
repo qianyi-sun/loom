@@ -130,22 +130,27 @@ recovery. Apply repeats this history check on the exact recomputed plan whose
 approved digest will be published. Inventory is capped at 10,000 requests and
 each of the two systemd inventories is capped at 30 seconds.
 
-A process-level real-time watchdog starts before the lifecycle lock and enforces
-one 600-second monotonic deadline across authentication, external commands,
+A process-level watchdog starts before the lifecycle lock and enforces one
+600-second monotonic deadline across authentication, external commands,
 filesystem work, maintenance, and publication. No receipt replacement begins
 after its final post-fsync deadline check. The watchdog requires the main thread
 and refuses before lifecycle mutation when a foreign `ITIMER_REAL` is active or
-`SIGALRM` is pending; it never consumes or replaces another subsystem's timer
-or pending signal. With the timer otherwise unused, it temporarily owns and
-unblocks `SIGALRM`. During restoration, an owned expiry immediately before the
-block is recorded and blocking is retried within a fixed bound. Cancellation is
-also bounded and its return status is not trusted: the helper independently
-verifies the timer is disarmed, drains and verifies owned pending delivery while
-blocked with its handler installed, and only then restores and verifies the
-prior handler and exact mask. A pre-restoration proof failure leaves `SIGALRM`
-blocked rather than exposing a prior handler to Loom's timer; a later exact-mask
-restoration failure is also safe because the timer is already disarmed and its
-pending delivery drained.
+`SIGALRM` is pending; it never consumes or replaces another subsystem's timer or
+pending signal. Otherwise it captures the main-thread identity, installs and
+unblocks its `SIGALRM` handler, and starts a dedicated sender thread. The sender
+waits on the monotonic deadline and then uses `signal.pthread_kill` to target the
+main thread; the watchdog never arms `ITIMER_REAL`. During restoration, an owned
+delivery immediately before the signal block is recorded and blocking is retried
+within a fixed bound. Once blocking is independently verified, the helper sets
+the sender cancellation event, bounded-joins the sender, and verifies that it
+stopped. With the watchdog handler still installed, it then drains and verifies
+owned pending delivery before restoring and verifying the prior handler and exact
+mask. If blocking cannot be proven, restoration aborts before restoring the
+recorded handler or mask; it leaves the current handler unchanged and reports
+that the mask state is unverified. After blocking is proven, a sender-stop,
+handler-ownership, or pending-delivery proof failure leaves `SIGALRM` blocked and
+the current handler unchanged. A later exact-mask restoration failure is safe
+because the sender is stopped and its pending delivery is already drained.
 Restoration failure outranks owned expiry, owned expiry outranks a body error,
 and an unrelated body error is otherwise preserved.
 
@@ -155,10 +160,11 @@ and removes a successful marker without a second status probe. An absent marker
 is an immediate idempotent cleanup. Cleanup uses the original absolute deadline
 and the exact service UID/GID authenticated at maintenance enable; it performs
 no fresh NSS identity lookup after expiry. It uses nonblocking launch-lock
-attempts even after the one-shot timer has fired and never starts another timer.
-Lock wait remains normally interruptible while the watchdog is armed. If the
-cached identity is unavailable or the lock is unavailable at expiry, recovery
-returns an error and retains the marker. Only after lock acquisition and marker
+attempts bounded by the same monotonic deadline after sender delivery is
+observed. Cleanup starts no second sender and polls that absolute deadline
+instead. Lock wait remains normally interruptible before delivery. If the cached
+identity is unavailable or the lock is unavailable at expiry, recovery returns
+an error and retains the marker. Only after lock acquisition and marker
 validation is `SIGALRM` deferred across unlink plus directory fsync; a timeout
 pending there is reported immediately after that critical section. A host stuck
 in kernel uninterruptible I/O cannot be preempted by userspace; if the command

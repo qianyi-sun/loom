@@ -1482,8 +1482,7 @@ def test_orphaned_backup_deadline_cannot_interrupt_valid_marker_cleanup(
         stop_receiver.set()
         receiver.join(timeout=2)
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
@@ -1538,8 +1537,7 @@ def test_orphaned_backup_deadline_defers_through_nested_marker_cleanup() -> None
         stop_receiver.set()
         receiver.join(timeout=2)
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
@@ -1550,64 +1548,146 @@ def test_orphaned_backup_deadline_defers_through_nested_marker_cleanup() -> None
 
 
 @pytest.mark.timeout(0)
-def test_orphaned_backup_deadline_defers_cross_thread_expiry_during_restoration(
+def test_orphaned_backup_deadline_joins_sender_before_handler_restoration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous_handler = host.signal.getsignal(host.signal.SIGALRM)
     previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
-    real_setitimer = host.signal.setitimer
+    real_signal = host.signal.signal
     real_pthread_sigmask = host.signal.pthread_sigmask
     previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
-    receiver_ready = threading.Event()
-    trigger_alarm = threading.Event()
-    alarm_raised = threading.Event()
-    stop_receiver = threading.Event()
+    signal_calls = 0
 
-    def receive_process_alarm() -> None:
-        real_pthread_sigmask(host.signal.SIG_UNBLOCK, {host.signal.SIGALRM})
-        receiver_ready.set()
-        assert trigger_alarm.wait(timeout=2)
-        host.signal.raise_signal(host.signal.SIGALRM)
-        alarm_raised.set()
-        stop_receiver.wait(timeout=2)
-        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-
-    def disarm_while_alarm_arrives(which, seconds, interval=0.0):  # type: ignore[no-untyped-def]
-        result = real_setitimer(which, seconds, interval)
-        if which == host.signal.ITIMER_REAL and seconds == 0.0:
-            trigger_alarm.set()
-            assert alarm_raised.wait(timeout=2)
-        return result
-
-    receiver = threading.Thread(target=receive_process_alarm)
-    receiver.start()
-    assert receiver_ready.wait(timeout=2)
-    monkeypatch.setattr(host.signal, "setitimer", disarm_while_alarm_arrives)
+    def require_stopped_sender(signum, handler):  # type: ignore[no-untyped-def]
+        nonlocal signal_calls
+        signal_calls += 1
+        if signal_calls == 2:
+            assert not any(
+                thread.name == "loom-orphaned-backup-watchdog" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+        return real_signal(signum, handler)
 
     try:
-        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
-            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
-                pass
-
-        restored_handler = host.signal.getsignal(host.signal.SIGALRM)
-        restored_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
-        restored_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
-        restored_pending = host.signal.sigpending()
+        monkeypatch.setattr(host.signal, "signal", require_stopped_sender)
+        with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+            pass
     finally:
-        real_setitimer(host.signal.ITIMER_REAL, 0.0)
-        stop_receiver.set()
-        receiver.join(timeout=2)
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
-        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
+        real_signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
-    assert not receiver.is_alive()
-    assert restored_handler is previous_handler
-    assert restored_timer == previous_timer
-    assert restored_mask == previous_mask
-    assert host.signal.SIGALRM not in restored_pending
+    assert signal_calls == 2
+    assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_restores_when_expiry_arrives_at_restoration_entry() -> None:
+    script = """
+import dis
+import signal
+import sys
+import threading
+import time
+
+from scripts.ops import staging_rollout_host as host
+
+guard_code = host._OrphanedBackupDeadlineGuard.__exit__.__code__
+instructions = list(dis.get_instructions(guard_code))
+restoration_entry = next(
+    instruction.offset
+    for instruction in instructions
+    if instruction.opname != "RESUME"
+)
+previous_handler = signal.getsignal(signal.SIGALRM)
+previous_timer = signal.getitimer(signal.ITIMER_REAL)
+previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+expiry_injected = False
+receiver_ready = threading.Event()
+trigger_expiry = threading.Event()
+expiry_delivered = threading.Event()
+stop_receiver = threading.Event()
+
+def receive_process_alarm():
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+    receiver_ready.set()
+    if not trigger_expiry.wait(timeout=1):
+        return
+    signal.raise_signal(signal.SIGALRM)
+    expiry_delivered.set()
+    stop_receiver.wait(timeout=1)
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+
+def inject_at_restoration_entry(frame, event, _arg):
+    global expiry_injected
+    if frame.f_code is guard_code:
+        frame.f_trace_opcodes = True
+        if (
+            event == "opcode"
+            and frame.f_lasti == restoration_entry
+            and not expiry_injected
+        ):
+            expiry_injected = True
+            trigger_expiry.set()
+            if not expiry_delivered.wait(timeout=1):
+                raise AssertionError("background SIGALRM delivery timed out")
+    return inject_at_restoration_entry
+
+receiver = threading.Thread(target=receive_process_alarm)
+receiver.start()
+try:
+    if previous_timer != (0.0, 0.0):
+        raise SystemExit(10)
+    if not receiver_ready.wait(timeout=1):
+        raise SystemExit(18)
+    sys.settrace(inject_at_restoration_entry)
+    try:
+        with host._orphaned_backup_deadline_guard(time.monotonic() + 5.0):
+            pass
+    except host.InstallError as exc:
+        if "operation deadline exceeded" not in str(exc):
+            raise
+    else:
+        raise SystemExit(11)
+    finally:
+        sys.settrace(None)
+
+    if not expiry_injected:
+        raise SystemExit(12)
+    if signal.getsignal(signal.SIGALRM) is not previous_handler:
+        raise SystemExit(13)
+    if signal.getitimer(signal.ITIMER_REAL) != previous_timer:
+        raise SystemExit(14)
+    if signal.pthread_sigmask(signal.SIG_BLOCK, set()) != previous_mask:
+        raise SystemExit(15)
+    if signal.SIGALRM in signal.sigpending():
+        raise SystemExit(16)
+    if host._ACTIVE_ORPHANED_BACKUP_WATCHDOG is not None:
+        raise SystemExit(17)
+finally:
+    sys.settrace(None)
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    signal.setitimer(signal.ITIMER_REAL, 0.0)
+    signal.sigtimedwait({signal.SIGALRM}, 0.0)
+    stop_receiver.set()
+    receiver.join(timeout=1)
+    signal.signal(signal.SIGALRM, previous_handler)
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    if receiver.is_alive():
+        raise SystemExit(19)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=host.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr, result.returncode)
 
 
 @pytest.mark.timeout(0)
@@ -1828,7 +1908,7 @@ def test_orphaned_backup_deadline_refuses_an_active_process_timer() -> None:
 
 
 @pytest.mark.timeout(0)
-def test_orphaned_backup_deadline_drains_owned_pending_alarm_before_restoration(
+def test_orphaned_backup_deadline_drains_owned_pending_alarm_without_blocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous_handler = host.signal.getsignal(host.signal.SIGALRM)
@@ -1851,10 +1931,14 @@ def test_orphaned_backup_deadline_drains_owned_pending_alarm_before_restoration(
                 os.kill(os.getpid(), host.signal.SIGALRM)
         return result
 
+    def reject_blocking_wait(_signals: object) -> None:
+        raise AssertionError("owned alarm drain must never block")
+
     try:
         assert previous_timer == (0.0, 0.0)
         host.signal.signal(host.signal.SIGALRM, prior_handler)
         monkeypatch.setattr(host.signal, "pthread_sigmask", inject_owned_expiry)
+        monkeypatch.setattr(host.signal, "sigwait", reject_blocking_wait)
 
         with pytest.raises(host.InstallError, match="operation deadline exceeded"):
             with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
@@ -1869,142 +1953,208 @@ def test_orphaned_backup_deadline_drains_owned_pending_alarm_before_restoration(
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
         host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
 
 @pytest.mark.timeout(0)
-def test_orphaned_backup_deadline_drains_owned_alarm_when_arming_reports_failure(
+def test_orphaned_backup_deadline_targets_only_the_main_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous_handler = host.signal.getsignal(host.signal.SIGALRM)
     previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
     real_setitimer = host.signal.setitimer
-    real_pthread_sigmask = host.signal.pthread_sigmask
-    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    real_pthread_kill = host.signal.pthread_kill
+    previous_mask = host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set())
+    receiver_ready = [threading.Event() for _ in range(18)]
+    stop_receivers = threading.Event()
     prior_handler_calls = 0
+    targeted_thread_ids: list[int] = []
 
     def prior_handler(_signum: int, _frame: object) -> None:
         nonlocal prior_handler_calls
         prior_handler_calls += 1
 
-    def arm_then_report_failure(which, seconds, interval=0.0):  # type: ignore[no-untyped-def]
+    def receive_process_alarm(index: int) -> None:
+        host.signal.pthread_sigmask(host.signal.SIG_UNBLOCK, {host.signal.SIGALRM})
+        receiver_ready[index].set()
+        stop_receivers.wait(timeout=2)
+        host.signal.pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+
+    def reject_process_timer(which: int, seconds: float, interval: float = 0.0) -> None:
         if which == host.signal.ITIMER_REAL and seconds > 0.0:
-            real_setitimer(which, 0.001)
-            host.time.sleep(0.01)
-            raise OSError("injected post-arm setup failure")
-        return real_setitimer(which, seconds, interval)
+            raise AssertionError("watchdog must not arm a process-directed timer")
+        real_setitimer(which, seconds, interval)
+
+    def record_thread_signal(thread_id: int, signum: int) -> None:
+        targeted_thread_ids.append(thread_id)
+        real_pthread_kill(thread_id, signum)
+
+    receivers = [
+        threading.Thread(target=receive_process_alarm, args=(index,))
+        for index in range(len(receiver_ready))
+    ]
+    for receiver in receivers:
+        receiver.start()
+    for ready in receiver_ready:
+        assert ready.wait(timeout=2)
 
     try:
         assert previous_timer == (0.0, 0.0)
         host.signal.signal(host.signal.SIGALRM, prior_handler)
-        monkeypatch.setattr(host.signal, "setitimer", arm_then_report_failure)
+        monkeypatch.setattr(host.signal, "setitimer", reject_process_timer)
+        monkeypatch.setattr(host.signal, "pthread_kill", record_thread_signal)
+        for _attempt in range(20):
+            started = host.time.monotonic()
+            with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+                with host._orphaned_backup_deadline_guard(started + 0.001):
+                    host.time.sleep(0.01)
+            assert prior_handler_calls == 0
+            assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+            assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+            assert host._ACTIVE_ORPHANED_BACKUP_WATCHDOG is None
+        assert targeted_thread_ids == [threading.get_ident()] * 20
+    finally:
+        host.signal.pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        real_setitimer(host.signal.ITIMER_REAL, 0.0)
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
+        stop_receivers.set()
+        for receiver in receivers:
+            receiver.join(timeout=2)
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        host.signal.pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
-        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+    assert all(not receiver.is_alive() for receiver in receivers)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_restores_after_sender_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+
+    class FailingSender:
+        ident = None
+
+        def start(self) -> None:
+            raise OSError("injected sender start failure")
+
+        def join(self, *, timeout: float) -> None:
+            raise AssertionError(timeout)
+
+        def is_alive(self) -> bool:
+            return False
+
+    def failing_sender(**_kwargs):  # type: ignore[no-untyped-def]
+        return FailingSender()
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        monkeypatch.setattr(host.threading, "Thread", failing_sender)
+
+        with pytest.raises(host.InstallError, match="watchdog is unavailable"):
             with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
                 raise AssertionError("failed watchdog setup entered the body")
 
-        assert prior_handler_calls == 0
-        assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+        assert host.signal.getsignal(host.signal.SIGALRM) is previous_handler
         assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
         assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
         assert host.signal.SIGALRM not in host.signal.sigpending()
+        assert host._ACTIVE_ORPHANED_BACKUP_WATCHDOG is None
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-        real_setitimer(host.signal.ITIMER_REAL, 0.0)
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
 
 @pytest.mark.timeout(0)
-def test_orphaned_backup_deadline_never_restores_foreign_handler_with_armed_timer() -> None:
-    script = """
-import signal
-import time
-
-from scripts.ops import staging_rollout_host as host
-
-real_setitimer = signal.setitimer
-
-def fail_cancellation(which, seconds, interval=0.0):
-    if which == signal.ITIMER_REAL and seconds == 0.0:
-        raise OSError("injected persistent watchdog cancellation failure")
-    return real_setitimer(which, 0.05, interval)
-
-signal.signal(signal.SIGALRM, signal.SIG_DFL)
-signal.setitimer = fail_cancellation
-try:
-    with host._orphaned_backup_deadline_guard(time.monotonic() + 1.0):
-        pass
-except host.InstallError as exc:
-    if "watchdog restoration failed" not in str(exc):
-        raise
-else:
-    raise SystemExit(2)
-
-# An unsafe implementation restores SIG_DFL and unblocks SIGALRM here; the
-# still-armed timer then terminates this process during the sleep.
-time.sleep(0.15)
-if signal.getsignal(signal.SIGALRM) is signal.SIG_DFL:
-    raise SystemExit(3)
-current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-if signal.SIGALRM not in current_mask:
-    raise SystemExit(4)
-raise SystemExit(0)
-"""
-
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=host.REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=2,
-        check=False,
-    )
-
-    assert result.returncode == 0, (result.stdout, result.stderr, result.returncode)
-
-
-@pytest.mark.timeout(0)
-def test_orphaned_backup_deadline_trusts_verified_disarm_not_cancellation_return(
+def test_orphaned_backup_deadline_translates_sender_start_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous_handler = host.signal.getsignal(host.signal.SIGALRM)
     previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
-    real_setitimer = host.signal.setitimer
+    real_thread_start = host.threading.Thread.start
     real_pthread_sigmask = host.signal.pthread_sigmask
     previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
-    cancellation_calls = 0
+    previous_pending = host.signal.sigpending()
+    previous_watchdog = host._ACTIVE_ORPHANED_BACKUP_WATCHDOG
+    body_entered = False
 
-    def disarm_then_report_failure(which, seconds, interval=0.0):  # type: ignore[no-untyped-def]
-        nonlocal cancellation_calls
-        if which == host.signal.ITIMER_REAL and seconds == 0.0:
-            cancellation_calls += 1
-            real_setitimer(which, seconds, interval)
-            raise OSError("injected cancellation reporting failure")
-        return real_setitimer(which, seconds, interval)
+    def fail_watchdog_sender_start(sender: threading.Thread) -> None:
+        if sender.name == "loom-orphaned-backup-watchdog":
+            raise RuntimeError("can't start new thread")
+        real_thread_start(sender)
 
     try:
         assert previous_timer == (0.0, 0.0)
-        monkeypatch.setattr(host.signal, "setitimer", disarm_then_report_failure)
+        assert host.signal.SIGALRM not in previous_pending
+        assert previous_watchdog is None
+        monkeypatch.setattr(host.threading.Thread, "start", fail_watchdog_sender_start)
 
-        with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
-            pass
+        with pytest.raises(host.InstallError, match="watchdog is unavailable") as error:
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                body_entered = True
 
-        assert cancellation_calls == 1
+        assert not body_entered
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert str(error.value.__cause__) == "can't start new thread"
         assert host.signal.getsignal(host.signal.SIGALRM) is previous_handler
         assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
         assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+        assert host.signal.sigpending() == previous_pending
+        assert host._ACTIVE_ORPHANED_BACKUP_WATCHDOG is previous_watchdog
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
-        real_setitimer(host.signal.ITIMER_REAL, 0.0)
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_never_restores_handler_while_sender_is_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_signal = host.signal.signal
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+
+    class StuckSender:
+        ident = 1
+
+        def start(self) -> None:
+            return
+
+        def join(self, *, timeout: float) -> None:
+            assert timeout == host._WATCHDOG_SENDER_JOIN_TIMEOUT_SECONDS
+
+        def is_alive(self) -> bool:
+            return True
+
+    def stuck_sender(**_kwargs):  # type: ignore[no-untyped-def]
+        return StuckSender()
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        monkeypatch.setattr(host.threading, "Thread", stuck_sender)
+
+        with pytest.raises(host.InstallError, match="watchdog restoration failed"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                pass
+
+        assert host.signal.getsignal(host.signal.SIGALRM) is not previous_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert host.signal.SIGALRM in real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
+        real_signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
 
@@ -2048,8 +2198,7 @@ def test_orphaned_backup_deadline_restores_after_preblock_owned_delivery(
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
         host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         host.signal.signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
@@ -2059,6 +2208,38 @@ def test_orphaned_backup_deadline_preserves_body_error_without_watchdog_failure(
     with pytest.raises(RuntimeError, match="original body failure"):
         with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
             raise RuntimeError("original body failure")
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_checks_clock_after_body_before_success() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    previous_mask = host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set())
+    real_monotonic = host.time.monotonic
+    now = real_monotonic()
+    clock = now
+    deadline_error: host.InstallError | None = None
+
+    def monotonic() -> float:
+        return clock
+
+    host.time.monotonic = monotonic
+    try:
+        try:
+            with host._orphaned_backup_deadline_guard(now + 1.0):
+                clock = now + 2.0
+        except host.InstallError as exc:
+            deadline_error = exc
+    finally:
+        host.time.monotonic = real_monotonic
+
+    assert host.signal.getsignal(host.signal.SIGALRM) is previous_handler
+    assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+    assert host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+    assert host.signal.SIGALRM not in host.signal.sigpending()
+    assert host._ACTIVE_ORPHANED_BACKUP_WATCHDOG is None
+    assert deadline_error is not None
+    assert "operation deadline exceeded" in str(deadline_error)
 
 
 @pytest.mark.timeout(0)
@@ -2093,8 +2274,7 @@ def test_orphaned_backup_deadline_restoration_failure_outranks_body_error(
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
         host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
-        if host.signal.SIGALRM in host.signal.sigpending():
-            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.sigtimedwait({host.signal.SIGALRM}, 0.0)
         real_signal(host.signal.SIGALRM, previous_handler)
         real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
 
@@ -2164,8 +2344,7 @@ try:
     if signal.pthread_sigmask(signal.SIG_BLOCK, set()) != guard_mask:
         raise SystemExit(17)
 finally:
-    if signal.SIGALRM in signal.sigpending():
-        signal.sigwait({signal.SIGALRM})
+    signal.sigtimedwait({signal.SIGALRM}, 0.0)
     signal.signal(signal.SIGALRM, previous_handler)
     signal.pthread_sigmask(signal.SIG_SETMASK, outer_mask)
 """
