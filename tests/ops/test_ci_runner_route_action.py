@@ -12,6 +12,8 @@ from loom_control_plane import ci_runner_lease_broker as leases
 from loom_control_plane import ci_runner_route_controller as controller
 
 HEAD_SHA = "a" * 40
+RUNTIME_SHA = "b" * 40
+RUNTIME_TREE = "c" * 40
 
 
 def _module() -> ModuleType:
@@ -63,6 +65,23 @@ def _config() -> leases.LeaseBrokerConfig:
     )
 
 
+def _broker(tmp_path: Path) -> leases.CiRunnerLeaseBroker:
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker.record_trusted_workflow_generation(
+        candidate_sha=RUNTIME_SHA,
+        candidate_tree=RUNTIME_TREE,
+        workflow_blobs={
+            name: marker * 40
+            for name, marker in zip(
+                leases.WORKFLOW_CLASS_CONTRACTS, ("d", "e", "f", "1"), strict=True
+            )
+        },
+        evidence={"kind": "installed_runtime", "runtime_sha": RUNTIME_SHA},
+        predecessor_generation_id=None,
+    )
+    return broker
+
+
 def test_disabled_action_emits_exact_hosted_routes_without_request(tmp_path: Path) -> None:
     action = _module()
     output = tmp_path / "output"
@@ -84,7 +103,7 @@ def test_active_action_and_broker_share_exact_request_and_assignment_contract(
     environment = _environment(tmp_path, mode="oldlab-preferred-v1")
     request_value = action.prepare(environment, output)
     request = leases.RouteRequest.from_mapping(request_value)
-    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker = _broker(tmp_path)
     document = broker.allocate_route(request)
     response = document.public_dict()
 
@@ -120,7 +139,7 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
     environment = _environment(tmp_path, mode="oldlab-preferred-v1")
     request_value = action.prepare(environment, tmp_path / "output")
     request = leases.RouteRequest.from_mapping(request_value)
-    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker = _broker(tmp_path)
     response = broker.allocate_route(request).public_dict()
     response["assignments"][1]["slot"] = response["assignments"][0]["slot"]
     with pytest.raises(action.RouteActionError, match="duplicated or out of range"):
@@ -158,7 +177,7 @@ def test_poll_accepts_only_the_exact_digest_check(
     environment = _environment(tmp_path, mode="oldlab-preferred-v1")
     request_value = action.prepare(environment, tmp_path / "request-output")
     request = leases.RouteRequest.from_mapping(request_value)
-    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker = _broker(tmp_path)
     response = broker.allocate_route(request).public_dict()
     external_id = (
         f"{action.CHECK_PREFIX}:{request.workflow_id}:{request.workflow_run_id}:"
@@ -242,11 +261,12 @@ def test_poll_never_hides_an_ambiguous_trusted_identity(
     assert not (tmp_path / "poll-output").exists()
 
 
-def test_hosted_deadline_exceeds_the_oldlab_publish_window() -> None:
+def test_hosted_deadline_exceeds_direct_publish_and_retry_window() -> None:
     action = _module()
     controller_window = (
         controller.OLDLAB_REQUEST_MAX_AGE_SECONDS
-        + controller.PUBLISHER_POLL_SECONDS * controller.PUBLISHER_POLL_ATTEMPTS
+        + 2 * controller.GITHUB_REQUEST_TIMEOUT_SECONDS
+        + controller.PUBLISHER_RETRY_SECONDS
     )
 
     assert controller_window < action.POLL_TIMEOUT_SECONDS < 5 * 60

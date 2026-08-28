@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import hmac
 import io
 import json
 import os
@@ -13,7 +10,6 @@ import re
 import sqlite3
 import stat
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +22,11 @@ from http.client import HTTPMessage
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+import jwt
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
 from loom_control_plane.ci_runner_lease_broker import (
     WORKFLOW_CLASS_CONTRACTS,
     AssignmentState,
@@ -36,6 +37,7 @@ from loom_control_plane.ci_runner_lease_broker import (
     RouteDecision,
     RouteDecisionState,
     RouteRequest,
+    TrustedWorkflowGeneration,
 )
 
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
@@ -45,20 +47,24 @@ ROUTE_CHECK_PREFIX = "loom-ci-route-v1"
 GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
+GITHUB_REQUEST_TIMEOUT_SECONDS = 20
 MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
-MAX_PUBLISHER_PAYLOAD_BYTES = 40 * 1024
-PUBLISHER_POLL_SECONDS = 2.0
-PUBLISHER_POLL_ATTEMPTS = 60
-PUBLISHER_RETRY_SECONDS = 300
+PUBLISHER_RETRY_SECONDS = 15
 ROUTE_DECISION_RETENTION_DAYS = 7
 OLDLAB_REQUEST_MAX_AGE_SECONDS = 30
-PUBLISHER_WORKFLOW = "ci-runner-route-publisher.yml"
+TRUSTED_BRANCH = "dev"
 ALLOWED_EVENTS = {"pull_request", "merge_group", "workflow_dispatch", "push"}
 WORKFLOW_PATHS = {
     "CI": ".github/workflows/ci.yml",
     "images": ".github/workflows/images.yml",
     "cluster-smoke": ".github/workflows/cluster-smoke.yml",
     "staging-smoke": ".github/workflows/staging-smoke.yml",
+}
+REQUIRED_SOURCE_CHECKS = {
+    "repository-checks": "CI",
+    "images-gate": "images",
+    "cluster-smoke-gate": "cluster-smoke",
+    "staging-smoke-gate": "staging-smoke",
 }
 JOB_NAMES = {
     "CI": {
@@ -84,8 +90,12 @@ ROUTE_JOB_NAMES = {
     "staging-smoke": "resolve oldlab-first staging route",
 }
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SOURCE_JOB_URL_RE = re.compile(
+    r"^https://github\.com/qianyi-sun/loom/actions/runs/[1-9][0-9]*/job/[1-9][0-9]*$"
+)
 MAX_TOKEN_BYTES = 4096
-MAX_PUBLISHER_KEY_BYTES = 4096
+MAX_APP_PRIVATE_KEY_BYTES = 64 * 1024
+MAX_INSTALLATION_TOKEN_BYTES = 4096
 
 
 class RouteControllerError(RuntimeError):
@@ -106,6 +116,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class RouteGitHubAPI(Protocol):
+    def branch_head(self, branch: str) -> str: ...
+
+    def commit(self, ref: str) -> Mapping[str, object]: ...
+
+    def compare_commits(self, base: str, head: str) -> Mapping[str, object]: ...
+
+    def associated_pull_requests(self, commit_sha: str) -> Sequence[Mapping[str, object]]: ...
+
     def active_workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, object]]: ...
 
     def route_artifact(
@@ -120,11 +138,13 @@ class RouteGitHubAPI(Protocol):
 
     def check_runs(self, head_sha: str, name: str) -> Sequence[Mapping[str, object]]: ...
 
-    def dispatch_route_publisher(
-        self, *, candidate_sha: str, payload_b64: str, signature: str
-    ) -> None: ...
-
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]: ...
+
+
+class RouteCheckPublisher(Protocol):
+    app_id: int
+
+    def publish(self, payload: Mapping[str, object]) -> Mapping[str, object]: ...
 
 
 class GitHubRouteAPI:
@@ -157,7 +177,9 @@ class GitHubRouteAPI:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(
+                request, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS
+            ) as response:
                 raw = cast(bytes, response.read(MAX_JSON_BYTES + 1))
         except urllib.error.HTTPError as exc:
             raise RouteControllerError(
@@ -173,6 +195,42 @@ class GitHubRouteAPI:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise RouteControllerError("GitHub API returned invalid JSON") from exc
+
+    def commit(self, ref: str) -> Mapping[str, object]:
+        encoded_ref = urllib.parse.quote(ref, safe="")
+        payload = self._request("GET", f"/commits/{encoded_ref}")
+        if not isinstance(payload, dict):
+            raise RouteControllerError("GitHub commit identity is malformed")
+        return payload
+
+    def branch_head(self, branch: str) -> str:
+        if branch != TRUSTED_BRANCH:
+            raise RouteControllerError("trusted branch is outside the route contract")
+        payload = self.commit(branch)
+        sha = payload.get("sha")
+        if not isinstance(sha, str) or _SHA_RE.fullmatch(sha) is None:
+            raise RouteControllerError("GitHub trusted branch head is malformed")
+        return sha
+
+    def compare_commits(self, base: str, head: str) -> Mapping[str, object]:
+        if _SHA_RE.fullmatch(base) is None or _SHA_RE.fullmatch(head) is None:
+            raise RouteControllerError("GitHub compare identity is malformed")
+        payload = self._request(
+            "GET", f"/compare/{base}...{head}?per_page=1&page=1"
+        )
+        if not isinstance(payload, dict):
+            raise RouteControllerError("GitHub compare response is malformed")
+        return payload
+
+    def associated_pull_requests(
+        self, commit_sha: str
+    ) -> Sequence[Mapping[str, object]]:
+        if _SHA_RE.fullmatch(commit_sha) is None:
+            raise RouteControllerError("GitHub commit pull identity is malformed")
+        payload = self._request("GET", f"/commits/{commit_sha}/pulls?per_page=100")
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise RouteControllerError("GitHub associated pull inventory is malformed")
+        return cast(list[dict[str, object]], payload)
 
     def active_workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, object]]:
         payload = self._request(
@@ -239,7 +297,7 @@ class GitHubRouteAPI:
         )
         opener = urllib.request.build_opener(_NoRedirect())
         try:
-            opener.open(initial, timeout=20)
+            opener.open(initial, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as exc:
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise RouteControllerError(
@@ -267,7 +325,9 @@ class GitHubRouteAPI:
             headers={"User-Agent": "loom-ci-route-controller/1"},
         )
         try:
-            with urllib.request.urlopen(download, timeout=20) as response:
+            with urllib.request.urlopen(
+                download, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS
+            ) as response:
                 raw = cast(bytes, response.read(MAX_ARTIFACT_BYTES + 1))
         except urllib.error.HTTPError as exc:
             raise RouteControllerError(
@@ -298,30 +358,13 @@ class GitHubRouteAPI:
         encoded_name = urllib.parse.quote(name, safe="")
         payload = self._request(
             "GET",
-            f"/commits/{head_sha}/check-runs?check_name={encoded_name}&filter=all&per_page=100",
+            f"/commits/{head_sha}/check-runs?check_name={encoded_name}"
+            "&filter=latest&per_page=100",
         )
         checks = payload.get("check_runs") if isinstance(payload, dict) else None
         if not isinstance(checks, list):
             raise RouteControllerError("GitHub check-run inventory is malformed")
         return [item for item in checks if isinstance(item, dict)]
-
-    def dispatch_route_publisher(
-        self, *, candidate_sha: str, payload_b64: str, signature: str
-    ) -> None:
-        result = self._request(
-            "POST",
-            f"/actions/workflows/{PUBLISHER_WORKFLOW}/dispatches",
-            payload={
-                "ref": "dev",
-                "inputs": {
-                    "candidate_sha": candidate_sha,
-                    "payload_b64": payload_b64,
-                    "signature": signature,
-                },
-            },
-        )
-        if result is not None:
-            raise RouteControllerError("GitHub route publisher dispatch returned a body")
 
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]:
         payload = self._request(
@@ -333,6 +376,153 @@ class GitHubRouteAPI:
         return [item for item in jobs if isinstance(item, dict)]
 
 
+class GitHubAppRouteCheckPublisher:
+    """Create route CheckRuns directly with one least-privilege GitHub App."""
+
+    def __init__(
+        self,
+        *,
+        repository: str,
+        app_id: int,
+        installation_id: int,
+        private_key_pem: bytes,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        if repository != EXPECTED_REPOSITORY:
+            raise RouteControllerError("route publisher repository is invalid")
+        if (
+            isinstance(app_id, bool)
+            or not isinstance(app_id, int)
+            or app_id < 1
+            or isinstance(installation_id, bool)
+            or not isinstance(installation_id, int)
+            or installation_id < 1
+        ):
+            raise RouteControllerError("route publisher app identity is invalid")
+        try:
+            key = serialization.load_pem_private_key(private_key_pem, password=None)
+        except (TypeError, ValueError, UnsupportedAlgorithm) as exc:
+            raise RouteControllerError("route publisher app private key is invalid") from exc
+        if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
+            raise RouteControllerError("route publisher app private key is invalid")
+        self.repository = repository
+        self.app_id = app_id
+        self.installation_id = installation_id
+        self._private_key_pem = private_key_pem
+        self.now = now or (lambda: datetime.now(UTC))
+        self._cached_token: str | None = None
+        self._cached_token_expires_at: datetime | None = None
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        token: str,
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, separators=(",", ":")).encode(),
+            method=method,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "loom-ci-route-app-publisher/1",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS
+            ) as response:
+                raw = cast(bytes, response.read(MAX_JSON_BYTES + 1))
+        except urllib.error.HTTPError as exc:
+            raise RouteControllerError(
+                f"GitHub route publisher {method} failed with HTTP {exc.code}"
+            ) from None
+        except (OSError, TimeoutError) as exc:
+            raise RouteControllerError(
+                f"GitHub route publisher {method} failed"
+            ) from exc
+        if len(raw) > MAX_JSON_BYTES:
+            raise RouteControllerError("GitHub route publisher response is too large")
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RouteControllerError(
+                "GitHub route publisher returned invalid JSON"
+            ) from exc
+        if not isinstance(value, dict):
+            raise RouteControllerError("GitHub route publisher response is malformed")
+        return value
+
+    def _installation_token(self) -> str:
+        observed_at = self.now()
+        if observed_at.tzinfo is None:
+            raise RouteControllerError("route publisher clock is invalid")
+        observed_at = observed_at.astimezone(UTC)
+        if (
+            self._cached_token is not None
+            and self._cached_token_expires_at is not None
+            and self._cached_token_expires_at > observed_at + timedelta(minutes=1)
+        ):
+            return self._cached_token
+        issued_at = int(observed_at.timestamp())
+        try:
+            app_jwt = jwt.encode(
+                {
+                    "iat": issued_at - 60,
+                    "exp": issued_at + 540,
+                    "iss": str(self.app_id),
+                },
+                self._private_key_pem,
+                algorithm="RS256",
+            )
+        except jwt.PyJWTError as exc:
+            raise RouteControllerError("route publisher JWT creation failed") from exc
+        response = self._request(
+            "POST",
+            f"https://api.github.com/app/installations/{self.installation_id}/access_tokens",
+            token=app_jwt,
+            payload={
+                "repositories": ["loom"],
+                "permissions": {"checks": "write"},
+            },
+        )
+        token = response.get("token")
+        permissions = response.get("permissions")
+        expires_at = response.get("expires_at")
+        parsed_expiry = (
+            _github_timestamp(expires_at, "installation_token.expires_at")
+            if isinstance(expires_at, str)
+            else None
+        )
+        if (
+            not isinstance(token, str)
+            or not token
+            or len(token.encode()) > MAX_INSTALLATION_TOKEN_BYTES
+            or any(character.isspace() for character in token)
+            or not isinstance(permissions, dict)
+            or permissions.get("checks") != "write"
+            or parsed_expiry is None
+            or parsed_expiry <= observed_at + timedelta(minutes=1)
+        ):
+            raise RouteControllerError("GitHub route publisher token is malformed")
+        self._cached_token = token
+        self._cached_token_expires_at = parsed_expiry
+        return token
+
+    def publish(self, payload: Mapping[str, object]) -> Mapping[str, object]:
+        return self._request(
+            "POST",
+            f"https://api.github.com/repos/{self.repository}/check-runs",
+            token=self._installation_token(),
+            payload=payload,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ReconcileResult:
     requests_seen: int
@@ -342,8 +532,16 @@ class ReconcileResult:
     routes_abandoned: int
     assignments_released: int
     decisions_pruned: int
+    runtime_sha: str
+    trusted_workflow_sha: str
+    trusted_workflow_digest: str
+    observed_dev_sha: str | None
+    generation_lag_commits: int | None
+    workflow_blob_drift: Mapping[str, bool] | None
+    generation_promoted: bool
+    generation_blocker: str | None
 
-    def public_dict(self) -> dict[str, int]:
+    def public_dict(self) -> dict[str, object]:
         return {
             "requests_seen": self.requests_seen,
             "routes_published": self.routes_published,
@@ -352,6 +550,18 @@ class ReconcileResult:
             "routes_abandoned": self.routes_abandoned,
             "assignments_released": self.assignments_released,
             "decisions_pruned": self.decisions_pruned,
+            "runtime_sha": self.runtime_sha,
+            "trusted_workflow_sha": self.trusted_workflow_sha,
+            "trusted_workflow_digest": self.trusted_workflow_digest,
+            "observed_dev_sha": self.observed_dev_sha,
+            "generation_lag_commits": self.generation_lag_commits,
+            "workflow_blob_drift": (
+                dict(self.workflow_blob_drift)
+                if self.workflow_blob_drift is not None
+                else None
+            ),
+            "generation_promoted": self.generation_promoted,
+            "generation_blocker": self.generation_blocker,
         }
 
 
@@ -417,25 +627,19 @@ def _read_token(path: Path) -> str:
     return token
 
 
-def _read_publisher_key(path: Path) -> bytes:
+def _read_app_private_key(path: Path) -> bytes:
     try:
         metadata = path.lstat()
         raw = path.read_bytes()
     except OSError as exc:
-        raise RouteControllerError("could not read route publisher key file") from exc
+        raise RouteControllerError("could not read route publisher app private key") from exc
     if not stat.S_ISREG(metadata.st_mode):
-        raise RouteControllerError("route publisher key source must be a regular file")
+        raise RouteControllerError("route publisher app key must be a regular file")
     if stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise RouteControllerError("route publisher key file grants group or other access")
-    if not raw or len(raw) > MAX_PUBLISHER_KEY_BYTES or b"\x00" in raw:
-        raise RouteControllerError("route publisher key file has an invalid size or encoding")
-    try:
-        key = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise RouteControllerError("route publisher key file is not UTF-8") from exc
-    if len(key) < 32 or any(character.isspace() for character in key):
-        raise RouteControllerError("route publisher key must contain one strong opaque value")
-    return key.encode()
+        raise RouteControllerError("route publisher app key grants group or other access")
+    if not raw or len(raw) > MAX_APP_PRIVATE_KEY_BYTES or b"\x00" in raw:
+        raise RouteControllerError("route publisher app key has an invalid size")
+    return raw
 
 
 def _workflow_name_for_id(workflow_id: int) -> str:
@@ -465,29 +669,242 @@ class CiRunnerRouteController:
         *,
         api: RouteGitHubAPI,
         broker: CiRunnerLeaseBroker,
-        candidate_sha: str,
-        publisher_key: bytes,
-        publisher_poll_attempts: int = PUBLISHER_POLL_ATTEMPTS,
-        publisher_poll_seconds: float = PUBLISHER_POLL_SECONDS,
-        sleep: Callable[[float], None] = time.sleep,
+        runtime_sha: str,
+        publisher: RouteCheckPublisher,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        if _SHA_RE.fullmatch(candidate_sha) is None:
-            raise RouteControllerError("candidate SHA must be a full lowercase commit SHA")
+        if _SHA_RE.fullmatch(runtime_sha) is None:
+            raise RouteControllerError("runtime SHA must be a full lowercase commit SHA")
         self.api = api
         self.broker = broker
-        self.candidate_sha = candidate_sha
-        if len(publisher_key) < 32:
-            raise RouteControllerError("route publisher key is too short")
-        if publisher_poll_attempts < 1 or publisher_poll_seconds < 0:
-            raise RouteControllerError("route publisher polling configuration is invalid")
-        self.publisher_key = publisher_key
-        self.publisher_poll_attempts = publisher_poll_attempts
-        self.publisher_poll_seconds = publisher_poll_seconds
-        self.sleep = sleep
+        self.runtime_sha = runtime_sha
+        if publisher.app_id < 1:
+            raise RouteControllerError("route publisher app identity is invalid")
+        self.publisher = publisher
         self.now = now or (lambda: datetime.now(UTC))
 
+    def _workflow_blobs(self, ref: str) -> dict[str, str]:
+        return {
+            workflow_name: self.api.content_blob_sha(path, ref)
+            for workflow_name, path in sorted(WORKFLOW_PATHS.items())
+        }
+
+    @staticmethod
+    def _commit_tree(commit: Mapping[str, object], expected_sha: str) -> str:
+        if commit.get("sha") != expected_sha:
+            raise RouteControllerError("GitHub commit SHA does not match trusted candidate")
+        commit_value = commit.get("commit")
+        tree = commit_value.get("tree") if isinstance(commit_value, dict) else None
+        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
+        if not isinstance(tree_sha, str) or _SHA_RE.fullmatch(tree_sha) is None:
+            raise RouteControllerError("GitHub commit tree identity is malformed")
+        return tree_sha
+
+    def _bootstrap_trusted_workflow_generation(self) -> TrustedWorkflowGeneration:
+        commit = self.api.commit(self.runtime_sha)
+        candidate_tree = self._commit_tree(commit, self.runtime_sha)
+        return self.broker.record_trusted_workflow_generation(
+            candidate_sha=self.runtime_sha,
+            candidate_tree=candidate_tree,
+            workflow_blobs=self._workflow_blobs(self.runtime_sha),
+            evidence={
+                "kind": "installed_runtime",
+                "runtime_sha": self.runtime_sha,
+            },
+            predecessor_generation_id=None,
+            now=self.now(),
+        )
+
+    def _advance_trusted_workflow_generation(
+        self, current: TrustedWorkflowGeneration, dev_head: str
+    ) -> tuple[TrustedWorkflowGeneration, bool]:
+        if dev_head == current.candidate_sha:
+            return current, False
+        compare = self.api.compare_commits(current.candidate_sha, dev_head)
+        commits = compare.get("commits")
+        ahead_by = compare.get("ahead_by")
+        behind_by = compare.get("behind_by")
+        total_commits = compare.get("total_commits")
+        if (
+            compare.get("status") != "ahead"
+            or isinstance(ahead_by, bool)
+            or not isinstance(ahead_by, int)
+            or isinstance(behind_by, bool)
+            or not isinstance(behind_by, int)
+            or isinstance(total_commits, bool)
+            or not isinstance(total_commits, int)
+            or ahead_by < 1
+            or behind_by != 0
+            or total_commits < 1
+            or not isinstance(commits, list)
+            or len(commits) != 1
+            or any(not isinstance(item, dict) for item in commits)
+        ):
+            raise RouteControllerError("trusted dev history is incomplete or non-monotonic")
+        next_summary = cast(dict[str, object], commits[0])
+        next_sha = next_summary.get("sha")
+        parents = next_summary.get("parents")
+        if (
+            not isinstance(next_sha, str)
+            or _SHA_RE.fullmatch(next_sha) is None
+            or not isinstance(parents, list)
+            or len(parents) != 1
+            or not isinstance(parents[0], dict)
+            or parents[0].get("sha") != current.candidate_sha
+        ):
+            raise RouteControllerError("next trusted dev commit is not a linear successor")
+        commit = self.api.commit(next_sha)
+        candidate_tree = self._commit_tree(commit, next_sha)
+        pulls = self.api.associated_pull_requests(next_sha)
+        matching_pulls = [
+            pull
+            for pull in pulls
+            if pull.get("merge_commit_sha") == next_sha
+            and pull.get("state") == "closed"
+            and isinstance(pull.get("merged_at"), str)
+        ]
+        if len(matching_pulls) != 1:
+            raise RouteControllerError("trusted dev commit has ambiguous merge ownership")
+        pull = matching_pulls[0]
+        head = pull.get("head")
+        base = pull.get("base")
+        head_repo = head.get("repo") if isinstance(head, dict) else None
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        pull_number = pull.get("number")
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if (
+            isinstance(pull_number, bool)
+            or not isinstance(pull_number, int)
+            or pull_number < 1
+            or not isinstance(head_sha, str)
+            or _SHA_RE.fullmatch(head_sha) is None
+            or not isinstance(head_repo, dict)
+            or head_repo.get("full_name") != EXPECTED_REPOSITORY
+            or not isinstance(base, dict)
+            or base.get("ref") != TRUSTED_BRANCH
+            or not isinstance(base_repo, dict)
+            or base_repo.get("full_name") != EXPECTED_REPOSITORY
+        ):
+            raise RouteControllerError("trusted dev merge pull identity is invalid")
+        merged_at = _github_timestamp(pull.get("merged_at"), "pull_request.merged_at")
+        check_evidence: dict[str, object] = {}
+        for check_name, workflow_name in REQUIRED_SOURCE_CHECKS.items():
+            inventory = list(self.api.check_runs(head_sha, check_name))
+            if len(inventory) != 1:
+                raise RouteControllerError(
+                    f"protected source check {check_name} is missing or ambiguous"
+                )
+            check = inventory[0]
+            app = check.get("app")
+            details_url = check.get("details_url")
+            if (
+                check.get("name") != check_name
+                or check.get("head_sha") != head_sha
+                or check.get("status") != "completed"
+                or check.get("conclusion") != "success"
+                or not isinstance(app, dict)
+                or app.get("id") != GITHUB_ACTIONS_APP_ID
+                or not isinstance(details_url, str)
+                or _SOURCE_JOB_URL_RE.fullmatch(details_url) is None
+            ):
+                raise RouteControllerError(
+                    f"protected source check {check_name} is missing or ambiguous"
+                )
+            check_id = _exact_int(check.get("id"), f"{check_name}.id")
+            check_evidence[check_name] = {
+                "id": check_id,
+                "workflow": workflow_name,
+                "details_url": cast(str, check["details_url"]),
+            }
+        generation = self.broker.record_trusted_workflow_generation(
+            candidate_sha=next_sha,
+            candidate_tree=candidate_tree,
+            workflow_blobs=self._workflow_blobs(next_sha),
+            evidence={
+                "kind": "protected_merge",
+                "merge_commit_sha": next_sha,
+                "pull_request_number": pull_number,
+                "pull_request_head_sha": head_sha,
+                "merged_at": merged_at.isoformat().replace("+00:00", "Z"),
+                "observed_dev_head": dev_head,
+                "checks": check_evidence,
+            },
+            predecessor_generation_id=current.generation_id,
+            now=self.now(),
+        )
+        return generation, True
+
+    def _generation_observation(
+        self,
+        generation: TrustedWorkflowGeneration,
+        observed_dev_sha: str,
+    ) -> tuple[int, dict[str, bool]]:
+        if observed_dev_sha == generation.candidate_sha:
+            return 0, {workflow_name: False for workflow_name in sorted(WORKFLOW_PATHS)}
+        compare = self.api.compare_commits(generation.candidate_sha, observed_dev_sha)
+        ahead_by = compare.get("ahead_by")
+        behind_by = compare.get("behind_by")
+        if (
+            compare.get("status") != "ahead"
+            or isinstance(ahead_by, bool)
+            or not isinstance(ahead_by, int)
+            or ahead_by < 1
+            or isinstance(behind_by, bool)
+            or not isinstance(behind_by, int)
+            or behind_by != 0
+        ):
+            raise RouteControllerError(
+                "trusted workflow generation lag is non-monotonic"
+            )
+        trusted_blobs = generation.workflow_blobs()
+        observed_blobs = self._workflow_blobs(observed_dev_sha)
+        return ahead_by, {
+            workflow_name: observed_blobs[workflow_name] != trusted_blobs[workflow_name]
+            for workflow_name in sorted(WORKFLOW_PATHS)
+        }
+
     def reconcile(self) -> ReconcileResult:
+        generation = self.broker.current_trusted_workflow_generation()
+        if generation is None:
+            generation = self._bootstrap_trusted_workflow_generation()
+        observed_dev_sha: str | None = None
+        generation_promoted = False
+        generation_blocker: str | None = None
+        try:
+            observed_dev_sha = self.api.branch_head(TRUSTED_BRANCH)
+            generation, generation_promoted = (
+                self._advance_trusted_workflow_generation(generation, observed_dev_sha)
+            )
+        except (LeaseBrokerError, RouteControllerError) as exc:
+            generation_blocker = str(exc)
+        generation_lag_commits: int | None = None
+        workflow_blob_drift: dict[str, bool] | None = None
+        if observed_dev_sha is not None:
+            try:
+                generation_lag_commits, workflow_blob_drift = (
+                    self._generation_observation(generation, observed_dev_sha)
+                )
+            except (LeaseBrokerError, RouteControllerError) as exc:
+                if generation_blocker is None:
+                    generation_blocker = str(exc)
+        promotion_result = (
+            "blocked"
+            if generation_blocker is not None
+            else "promoted"
+            if generation_promoted
+            else "current"
+        )
+        self.broker.record_trusted_workflow_observation(
+            runtime_sha=self.runtime_sha,
+            publisher_app_id=self.publisher.app_id,
+            trust_generation_id=generation.generation_id,
+            observed_dev_sha=observed_dev_sha,
+            generation_lag_commits=generation_lag_commits,
+            workflow_blob_drift=workflow_blob_drift,
+            promotion_result=promotion_result,
+            promotion_blocker=generation_blocker,
+            now=self.now(),
+        )
         seen = 0
         outcomes = {"published": 0, "replayed": 0, "pending": 0, "abandoned": 0}
         processed: set[str] = set()
@@ -512,7 +929,7 @@ class CiRunnerRouteController:
                 self._validate_run(run, request)
                 workflow_path = WORKFLOW_PATHS[request.workflow_name]
                 head_blob = self.api.content_blob_sha(workflow_path, request.head_sha)
-                trusted_blob = self.api.content_blob_sha(workflow_path, self.candidate_sha)
+                trusted_blob = generation.workflow_blobs()[request.workflow_name]
                 created_at = _github_timestamp(
                     artifact.get("created_at"), "artifact.created_at"
                 )
@@ -520,13 +937,21 @@ class CiRunnerRouteController:
                 if observed_at.tzinfo is None:
                     raise RouteControllerError("controller observation time is invalid")
                 age_seconds = (observed_at.astimezone(UTC) - created_at).total_seconds()
-                allow_oldlab = (
-                    head_blob == trusted_blob
-                    and 0 <= age_seconds <= OLDLAB_REQUEST_MAX_AGE_SECONDS
-                )
+                if head_blob != trusted_blob:
+                    eligibility_reason = "workflow_blob_drift"
+                elif age_seconds < 0:
+                    eligibility_reason = "future_request"
+                elif age_seconds > OLDLAB_REQUEST_MAX_AGE_SECONDS:
+                    eligibility_reason = "stale_request"
+                else:
+                    eligibility_reason = "trusted_workflow_match"
+                allow_oldlab = eligibility_reason == "trusted_workflow_match"
                 decision = self.broker.decide_route(
                     request,
                     allow_oldlab=allow_oldlab,
+                    trust_generation_id=generation.generation_id,
+                    eligibility_reason=eligibility_reason,
+                    publisher_app_id=self.publisher.app_id,
                     now=observed_at,
                 )
                 if decision.request_sha256 in processed:
@@ -552,6 +977,14 @@ class CiRunnerRouteController:
             routes_abandoned=outcomes["abandoned"],
             assignments_released=released,
             decisions_pruned=pruned,
+            runtime_sha=self.runtime_sha,
+            trusted_workflow_sha=generation.candidate_sha,
+            trusted_workflow_digest=generation.generation_digest,
+            observed_dev_sha=observed_dev_sha,
+            generation_lag_commits=generation_lag_commits,
+            workflow_blob_drift=workflow_blob_drift,
+            generation_promoted=generation_promoted,
+            generation_blocker=generation_blocker,
         )
 
     def _active_route_artifacts(
@@ -625,7 +1058,11 @@ class CiRunnerRouteController:
             self.api.check_runs(decision.head_sha, cast(str, payload["name"]))
         )
         if existing:
-            self._validate_published_check(existing, payload)
+            self._validate_published_check(
+                existing,
+                payload,
+                expected_app_id=decision.publisher_app_id,
+            )
             self.broker.mark_route_published(
                 decision.request_sha256,
                 now=self.now(),
@@ -699,30 +1136,21 @@ class CiRunnerRouteController:
             decision.request_sha256,
             now=observed_at,
         )
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        if len(canonical) > MAX_PUBLISHER_PAYLOAD_BYTES:
-            raise RouteControllerError("route publisher payload exceeds the size limit")
-        payload_b64 = base64.b64encode(canonical).decode("ascii")
-        signature = hmac.new(self.publisher_key, canonical, hashlib.sha256).hexdigest()
-        self.api.dispatch_route_publisher(
-            candidate_sha=self.candidate_sha,
-            payload_b64=payload_b64,
-            signature=signature,
-        )
-        for attempt in range(self.publisher_poll_attempts):
-            published = list(
-                self.api.check_runs(decision.head_sha, cast(str, payload["name"]))
+        if decision.publisher_app_id != self.publisher.app_id:
+            raise RouteControllerError(
+                "frozen route publisher app is unavailable in this runtime"
             )
-            if published:
-                self._validate_published_check(published, payload)
-                self.broker.mark_route_published(
-                    decision.request_sha256,
-                    now=self.now(),
-                )
-                return "published"
-            if attempt + 1 < self.publisher_poll_attempts:
-                self.sleep(self.publisher_poll_seconds)
-        return "pending"
+        published = self.publisher.publish(payload)
+        self._validate_published_check(
+            (published,),
+            payload,
+            expected_app_id=decision.publisher_app_id,
+        )
+        self.broker.mark_route_published(
+            decision.request_sha256,
+            now=self.now(),
+        )
+        return "published"
 
     def _route_delivery_is_terminal(
         self,
@@ -758,9 +1186,12 @@ class CiRunnerRouteController:
             released += 1
         return released
 
-    @staticmethod
     def _validate_published_check(
-        checks: Sequence[Mapping[str, object]], payload: Mapping[str, object]
+        self,
+        checks: Sequence[Mapping[str, object]],
+        payload: Mapping[str, object],
+        *,
+        expected_app_id: int | None,
     ) -> None:
         if len(checks) != 1:
             raise RouteControllerError("route check identity is ambiguous")
@@ -779,7 +1210,7 @@ class CiRunnerRouteController:
             or output.get("title") != expected_output["title"]
             or output.get("summary") != expected_output["summary"]
             or not isinstance(app, dict)
-            or app.get("id") != GITHUB_ACTIONS_APP_ID
+            or app.get("id") != expected_app_id
         ):
             raise RouteControllerError("existing route check does not match assignment")
 
@@ -853,10 +1284,12 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("/etc/loom-ci-runner-pool/profile.toml"),
     )
     parser.add_argument("--repository", default=EXPECTED_REPOSITORY)
-    parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--runtime-sha", required=True)
     parser.add_argument("--token-file", type=Path)
     parser.add_argument("--token-env", default="GH_TOKEN")
-    parser.add_argument("--publisher-secret-file", type=Path, required=True)
+    parser.add_argument("--publisher-app-id", type=int, required=True)
+    parser.add_argument("--publisher-installation-id", type=int, required=True)
+    parser.add_argument("--publisher-app-private-key-file", type=Path, required=True)
     return parser
 
 
@@ -870,15 +1303,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if not token:
             raise RouteControllerError("GitHub token environment variable is absent")
-        publisher_key = _read_publisher_key(args.publisher_secret_file)
+        publisher_private_key = _read_app_private_key(
+            args.publisher_app_private_key_file
+        )
         config = LeaseBrokerConfig.from_profile(args.profile)
         broker = CiRunnerLeaseBroker(args.state_db, config)
         api = GitHubRouteAPI(repository=args.repository, token=token)
+        publisher = GitHubAppRouteCheckPublisher(
+            repository=args.repository,
+            app_id=args.publisher_app_id,
+            installation_id=args.publisher_installation_id,
+            private_key_pem=publisher_private_key,
+        )
         controller = CiRunnerRouteController(
             api=api,
             broker=broker,
-            candidate_sha=args.candidate_sha,
-            publisher_key=publisher_key,
+            runtime_sha=args.runtime_sha,
+            publisher=publisher,
         )
         result: object = controller.reconcile().public_dict()
     except (LeaseBrokerError, RouteControllerError, OSError, sqlite3.Error) as exc:

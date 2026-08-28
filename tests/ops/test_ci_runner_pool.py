@@ -875,8 +875,8 @@ def test_systemd_unit_uses_independent_candidate_sources() -> None:
 
     assert "LoadCredential=github-token:" in service
     assert "${CREDENTIALS_DIRECTORY}/github-token" in service
-    assert "LoadCredential=route-publisher-hmac:" in service
-    assert "${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
+    assert "route-publisher" not in service
+    assert "loom-ci-runner-route-controller" not in service
     pool_command = next(
         line
         for line in service.splitlines()
