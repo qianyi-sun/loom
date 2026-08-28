@@ -324,19 +324,46 @@ The Tier 0–2 assessment remains outside the lifecycle mutation guard. For a
 non-preview launch, the broker binds the exact candidate and epoch first, then
 acquires the request-bound guard before publishing the detached backup job.
 The guard's ready evidence must agree with the request ID, candidate SHA and
-tree, and mutation epoch at broker admission, backup-worker continuation, and
-detached attempt execution. This prevents an in-memory handoff, a stale
-request, or a different candidate from turning a valid assessment into mutation
-authority.
+tree, original mutation epoch, database backend PID, and entry-anchored
+absolute deadline at broker admission, backup-worker continuation, and detached
+attempt execution. This prevents an in-memory handoff, a stale request, or a
+different candidate from turning a valid assessment into mutation authority.
 
-The guard suspends the legacy lifecycle CronJob, waits for a verified active
-job to finish, and holds the shared PostgreSQL advisory lock. Once the backup
-worker has started the detached rollout attempt, it hands that same guard to
-the attempt; guard ownership ends only through the verified release path or
-the guarded orphan reconciler. Thus preflight evidence, backup, protected
-apply, and final admission have one continuous candidate- and request-bound
-mutation exclusion window, while the regular lifecycle lock still governs the
-broader rollout lifecycle.
+The guard suspends the legacy lifecycle CronJob and requires a stable empty
+inventory of exact owner-UID nonterminal Jobs before and after taking the
+shared PostgreSQL advisory lock. A dedicated autocommit session continuously
+proves the same backend owns that exact lock. The request-bound backup and
+attempt units each declare `After=` on the exact guard, without `BindsTo=`, and
+the guard independently checks their exact owner liveness. This lets the owner
+synchronously complete verified guard release before publishing its terminal
+event and clearing the active pointer. A fixed request-bound guard
+`ExecStopPost` is a no-op only for exact released evidence; ready, missing, or
+unsafe evidence instead requires a fully validated exact owner inventory and
+hard-kills each live backup or attempt control group with `SIGKILL`. Exact unit
+names, never wildcard kill targets or graceful owner stops, prevent recursive
+release deadlock and cross-request fencing. If that stop-post action cannot
+prove dispatch, the minute reconciler retries the same fence while keeping the
+CronJob suspended. Even a successful kill is followed by two fresh, complete,
+stable-empty exact-owner inventories and an unchanged-evidence read before
+restoration; any live/deactivating owner or uncertainty defers restoration to a
+later timer run. Released evidence plus surviving annotations is rejected as a
+normal-release contradiction. The guard uses `Restart=no` and one
+entry-anchored absolute lifetime. Once the backup worker has started the
+detached rollout attempt, it hands that same guard to the attempt; guard
+ownership ends only through the verified release path or guarded orphan
+reconciliation. Thus preflight evidence, backup, protected apply, and final
+admission have one continuous candidate- and request-bound mutation exclusion
+window, while the regular lifecycle lock still governs the broader rollout
+lifecycle. Resume reloads the immutable original preflight request, reacquires
+the guard, and refuses original-epoch or current-epoch drift before launch.
+
+The guard CLI keeps fixed Kubernetes subprocesses at 120 seconds and caps each
+fixed systemd inventory or kill at 30 seconds. Its largest immediate unsafe
+fence is one inventory plus two exact kills, or 90 seconds, below
+`TimeoutStopSec=180s`. The reconciliation service allows 12 minutes for its
+conservative 571-second sequence: three Kubernetes commands, two 15-second
+candidate-identity commands, six systemd commands, and the stable-absence
+poll. Any timeout still preserves the freeze for the next minute-timer retry.
 
 Preview is deliberately narrower. `start --dry-run` performs normal admission,
 candidate resolution, assessment, and final epoch-drift checking, then writes a

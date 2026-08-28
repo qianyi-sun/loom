@@ -165,6 +165,9 @@ _MAX_WORKER_ENV_BYTES = 1 << 20
 _INOTIFY_MIN_INSTANCES = 1024
 _ROOT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-9]*[.]service$")
+_BACKUP_UNIT_RE = re.compile(r"^loom-staging-backup-[A-Za-z0-9_.@:-]+[.]service$")
+_MUTATION_GUARD_UNIT_RE = re.compile(r"^loom-staging-mutation-guard-[A-Za-z0-9_.@:-]+[.]service$")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RUNTIME_IMPORT_RENDER = (
     "import loom_cli.rollout.operator.broker; "
@@ -262,6 +265,14 @@ _INSTALL_ATTESTATION_ASSETS = frozenset(
         "worker-env-template",
     }
 )
+_MUTATION_GUARD_RECOVERY_ASSETS = frozenset(
+    {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    }
+)
+_LEGACY_INSTALL_ATTESTATION_ASSETS = _INSTALL_ATTESTATION_ASSETS - _MUTATION_GUARD_RECOVERY_ASSETS
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1437,6 +1448,154 @@ def _maintenance_marker(
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def _durable_preflight_backup_status(
+    state_root: Path,
+    *,
+    service_uid: int,
+    service_gid: int,
+) -> str:
+    """Return busy/idle/unknown from bounded service-owned backup state."""
+
+    requests_root = state_root / "requests"
+    try:
+        requests_metadata = os.lstat(requests_root)
+    except FileNotFoundError:
+        return "idle"
+    except OSError:
+        return "unknown"
+    if (
+        not stat.S_ISDIR(requests_metadata.st_mode)
+        or requests_metadata.st_uid != service_uid
+        or requests_metadata.st_gid != service_gid
+        or stat.S_IMODE(requests_metadata.st_mode) != 0o700
+    ):
+        return "unknown"
+    try:
+        requests = list(os.scandir(requests_root))
+    except OSError:
+        return "unknown"
+    if len(requests) > 10_000:
+        return "unknown"
+    active = False
+    active_phases = {
+        "backup_pending",
+        "backup_running",
+        "backup_cancel_requested",
+        "backup_verified",
+        "launch_pending",
+    }
+    known_phases = active_phases | {"backup_failed", "launch_running"}
+    expected_fields = {
+        "failure_code",
+        "job_id",
+        "lease_digest",
+        "manifest_sha256",
+        "preflight_attestation_sha256",
+        "phase",
+        "request_id",
+        "schema_version",
+        "sequence",
+        "updated_at",
+    }
+    for request in requests:
+        if (
+            _REQUEST_ID_RE.fullmatch(request.name) is None
+            or request.is_symlink()
+            or not request.is_dir(follow_symlinks=False)
+        ):
+            return "unknown"
+        try:
+            request_metadata = request.stat(follow_symlinks=False)
+        except OSError:
+            return "unknown"
+        if (
+            request_metadata.st_uid != service_uid
+            or request_metadata.st_gid != service_gid
+            or stat.S_IMODE(request_metadata.st_mode) != 0o700
+        ):
+            return "unknown"
+        backup_root = Path(request.path) / "preflight-backup"
+        try:
+            backup_metadata = os.lstat(backup_root)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return "unknown"
+        if (
+            not stat.S_ISDIR(backup_metadata.st_mode)
+            or backup_metadata.st_uid != service_uid
+            or backup_metadata.st_gid != service_gid
+            or stat.S_IMODE(backup_metadata.st_mode) != 0o700
+        ):
+            return "unknown"
+        state_path = backup_root / "state.json"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(state_path, flags)
+        except OSError:
+            return "unknown"
+        try:
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != service_uid
+                or metadata.st_gid != service_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+                or metadata.st_size > 64 * 1024
+            ):
+                return "unknown"
+            payload = os.read(fd, 64 * 1024 + 1)
+        except OSError:
+            return "unknown"
+        finally:
+            os.close(fd)
+        if len(payload) > 64 * 1024:
+            return "unknown"
+        try:
+            value = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return "unknown"
+        if not isinstance(value, dict) or set(value) != expected_fields:
+            return "unknown"
+        phase = value.get("phase")
+        sequence = value.get("sequence")
+        updated_at = value.get("updated_at")
+        failure_code = value.get("failure_code")
+        digests = (
+            value.get("manifest_sha256"),
+            value.get("lease_digest"),
+            value.get("preflight_attestation_sha256"),
+        )
+        if (
+            phase not in known_phases
+            or value.get("schema_version") != 1
+            or type(value.get("schema_version")) is not int
+            or type(sequence) is not int
+            or sequence < 0
+            or value.get("request_id") != request.name
+            or not isinstance(value.get("job_id"), str)
+            or _REQUEST_ID_RE.fullmatch(value["job_id"]) is None
+            or (updated_at is not None and not isinstance(updated_at, str))
+            or (
+                phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code)
+            )
+            or (phase != "backup_failed" and failure_code is not None)
+        ):
+            return "unknown"
+        verified = phase in {"backup_verified", "launch_pending", "launch_running"}
+        valid_digests = all(
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            for digest in digests
+        )
+        if verified != valid_digests or (
+            not verified and any(digest is not None for digest in digests)
+        ):
+            return "unknown"
+        active = active or phase in active_phases
+    return "busy" if active else "idle"
 
 
 class HostSystem:
@@ -4151,6 +4310,14 @@ class HostSystem:
                 return "unknown"
             return "busy"
 
+        durable_status = _durable_preflight_backup_status(
+            STATE_ROOT,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        )
+        if durable_status != "idle":
+            return durable_status
+
         result = self.runner.run(
             [
                 "sudo",
@@ -4175,6 +4342,8 @@ class HostSystem:
                 "--no-legend",
                 "--no-pager",
                 "loom-staging-rollout-*.service",
+                "loom-staging-backup-*.service",
+                "loom-staging-mutation-guard-*.service",
             ],
             check=False,
         )
@@ -4187,7 +4356,14 @@ class HostSystem:
             unit_name, load_state, active_state, sub_state = fields[:4]
             if (
                 len(unit_name) > 255
-                or _ROLLOUT_UNIT_RE.fullmatch(unit_name) is None
+                or not any(
+                    pattern.fullmatch(unit_name) is not None
+                    for pattern in (
+                        _ROLLOUT_UNIT_RE,
+                        _BACKUP_UNIT_RE,
+                        _MUTATION_GUARD_UNIT_RE,
+                    )
+                )
                 or load_state != "loaded"
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(active_state) is None
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(sub_state) is None
@@ -4696,6 +4872,8 @@ class HostInstaller:
         accepted_assets = (
             _INSTALL_ATTESTATION_ASSETS,
             _INSTALL_ATTESTATION_ASSETS - {"worker-env-template"},
+            _LEGACY_INSTALL_ATTESTATION_ASSETS,
+            _LEGACY_INSTALL_ATTESTATION_ASSETS - {"worker-env-template"},
         )
         if (
             not isinstance(statement, dict)

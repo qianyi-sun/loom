@@ -80,6 +80,7 @@ def valid_envelope() -> DriverEnvelope:
         scope="current-gb10",
         gb10_prep_concurrency=8,
         resume=False,
+        resolved_tree="b" * 40,
     )
 
 
@@ -95,9 +96,29 @@ class FakeStore:
             status="pending",
         )
         self.active_history: list[ActivePointer | None] = [self.active]
+        original = make_preflight_request()
+        self.preflight_request = replace(
+            original,
+            request_id=envelope.request_id,
+            rollout_id=envelope.rollout_id,
+            candidate=replace(
+                original.candidate,
+                resolved_sha=envelope.resolved_sha,
+                image_tag=envelope.image_tag,
+                resolved_tree=envelope.resolved_tree,
+            ),
+            candidate_tree=envelope.resolved_tree or "b" * 40,
+            mutation_epoch=7,
+        )
 
     def read_attempt_envelope(self, request_id: str, attempt_number: int) -> DriverEnvelope:
+        self.order.append("envelope-read")
         return self.envelope
+
+    def read_preflight_request(self, request_id: str):  # type: ignore[no-untyped-def]
+        self.order.append("preflight-request-read")
+        assert request_id == self.preflight_request.request_id
+        return self.preflight_request
 
     def append_event(self, event: RequestEvent) -> Path:
         self.events.append(event)
@@ -224,6 +245,7 @@ def worker_fakes(*, driver_rc: int = 0) -> Bundle:
         run_driver=run_driver,
         now=lambda: "2026-07-14T12:00:00Z",
         stderr=io.StringIO(),
+        state_root=Path("/var/lib/loom-staging-rollout"),
         mutation_guard=FakeMutationGuard(order, record=False),
     )
     return Bundle(deps, store, order)
@@ -243,6 +265,46 @@ def test_attempt_releases_guard_before_every_terminal_event(driver_rc: int) -> N
     assert guard.released == [REQUEST_ID]
 
 
+def test_attempt_claims_guard_and_validates_original_binding_before_store_or_driver_lock() -> None:
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order)
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    assert run_attempt(valid_envelope(), dependencies) == 0
+
+    assert bundle.order.index("guard-ready") < bundle.order.index("preflight-request-read")
+    assert bundle.order.index("guard-ready") < bundle.order.index("envelope-read")
+    assert bundle.order.index("guard-ready") < bundle.order.index("driver-lock-acquire")
+
+
+@pytest.mark.parametrize("drift", ["tree", "epoch"])
+def test_attempt_rejects_original_tree_or_epoch_drift_before_driver_lock(drift: str) -> None:
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order)
+    if drift == "tree":
+        bundle.store.preflight_request = replace(
+            bundle.store.preflight_request,
+            candidate=replace(
+                bundle.store.preflight_request.candidate,
+                resolved_tree="c" * 40,
+            ),
+            candidate_tree="c" * 40,
+        )
+    else:
+        bundle.store.preflight_request = replace(
+            bundle.store.preflight_request,
+            mutation_epoch=8,
+        )
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    with pytest.raises(ValueError, match="binding drifted"):
+        run_attempt(valid_envelope(), dependencies)
+
+    assert "driver-lock-acquire" not in bundle.order
+    assert "driver-run" not in bundle.order
+    assert guard.released == [REQUEST_ID]
+
+
 def test_attempt_release_failure_prevents_apparent_success_terminal_event() -> None:
     bundle = worker_fakes()
     guard = FakeMutationGuard(bundle.order, release_error=RuntimeError("release failed"))
@@ -259,7 +321,9 @@ def test_worker_holds_lifecycle_lock_and_runs_only_finalized_envelope() -> None:
     bundle = worker_fakes()
     assert run_attempt(valid_envelope(), bundle.deps) == 0
     assert bundle.order == [
+        "preflight-request-read",
         "driver-lock-acquire",
+        "envelope-read",
         "active-running",
         "attempt_running",
         "driver-run",
@@ -287,7 +351,9 @@ def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
 
     assert run_attempt(valid_envelope(), bundle.deps) == 1
     assert bundle.order == [
+        "preflight-request-read",
         "driver-lock-acquire",
+        "envelope-read",
         "final-admission",
         "attempt_failed",
         "active-clear-pending",
@@ -485,6 +551,40 @@ def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None
     assert state.manifest_sha256 == "d" * 64
     assert state.lease_digest == "e" * 64
     assert state.preflight_attestation_sha256 == "f" * 64
+
+
+def test_backup_worker_claims_guard_before_any_mutable_store_read(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    order: list[str] = []
+    guard = FakeMutationGuard(
+        order,
+        candidate_sha=job.candidate_sha,
+        mutation_epoch=job.mutation_epoch,
+    )
+    original_read = store.read_preflight_backup_job
+
+    def read_preflight_backup_job(request_id: str):  # type: ignore[no-untyped-def]
+        order.append("store-read")
+        return original_read(request_id)
+
+    store.read_preflight_backup_job = read_preflight_backup_job  # type: ignore[method-assign]
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        mutation_guard=guard,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 0
+    assert order.index("guard-ready") < order.index("store-read")
 
 
 def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
@@ -912,13 +1012,62 @@ def test_worker_sigterm_during_envelope_load_is_bookkept_deterministically(
 
     bundle.deps.load_envelope = load_envelope
     rc = worker_main(
-        ["run-attempt", "--envelope", "/protected/envelope.json"],
+        [
+            "run-attempt",
+            "--envelope",
+            "/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json",
+        ],
         dependencies=bundle.deps,
     )
 
     assert rc == 130
     assert bundle.store.events[-1].event == "cancelled"
     assert bundle.store.active is None
+
+
+@pytest.mark.parametrize(
+    ("command", "path", "loader_field"),
+    [
+        (
+            "run-attempt",
+            "/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json",
+            "load_envelope",
+        ),
+        (
+            "run-backup",
+            "/var/lib/loom-staging-rollout/requests/req-alpha/preflight-backup/job.json",
+            "load_backup_job",
+        ),
+    ],
+)
+def test_worker_loader_failure_releases_path_bound_guard(
+    command: str,
+    path: str,
+    loader_field: str,
+) -> None:
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order)
+
+    def fail_load(_path: Path):  # type: ignore[no-untyped-def]
+        bundle.order.append("loader")
+        raise ValueError("injected loader failure")
+
+    dependencies = replace(
+        bundle.deps,
+        mutation_guard=guard,
+        **{loader_field: fail_load},
+    )
+
+    assert (
+        worker_main(
+            [command, "--envelope" if command == "run-attempt" else "--job", path],
+            dependencies=dependencies,
+        )
+        == 1
+    )
+
+    assert bundle.order[:3] == ["guard-ready", "loader", "guard-release"]
+    assert guard.released == [REQUEST_ID]
 
 
 @pytest.mark.parametrize(
@@ -948,7 +1097,11 @@ def test_worker_sigterm_cannot_interrupt_terminal_bookkeeping_or_cas_cleanup(
     bundle.store.append_event = append_event  # type: ignore[method-assign]
 
     rc = worker_main(
-        ["run-attempt", "--envelope", "/protected/envelope.json"],
+        [
+            "run-attempt",
+            "--envelope",
+            "/var/lib/loom-staging-rollout/requests/req-alpha/attempts/1/envelope.json",
+        ],
         dependencies=bundle.deps,
     )
 
@@ -978,7 +1131,7 @@ def test_default_worker_run_uses_exact_sanitized_environment(
     worker_module._run(["systemctl", "--user", "show"], environment=expected)
 
     assert environments == [expected]
-    assert timeouts == [120]
+    assert timeouts == [240]
 
 
 @pytest.mark.parametrize(

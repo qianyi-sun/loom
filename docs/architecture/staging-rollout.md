@@ -75,11 +75,16 @@ a non-preview `start` acquires a request-bound mutation guard before publishing
 the backup job. The service-owned transient guard unit first suspends the
 legacy `loom-staging-data-lifecycle` CronJob with a resource-version-checked
 patch and annotations carrying the request ID, candidate SHA, and candidate
-tree. It verifies the exact CronJob identity and waits for every already-active
-CronJob Job to finish. It then holds the fixed PostgreSQL staging-mutation
-advisory lock on one session, reads the authoritative mutation epoch, and
-publishes private ready evidence bound to the request ID, candidate SHA/tree,
-epoch, guard PID, CronJob UID, and suspension resource version.
+tree. It verifies the exact CronJob identity, lists nonterminal Jobs by the
+CronJob's exact controller UID, validates every Job's label and sole controller
+owner, and requires two consecutive empty inventories. After acquiring the
+database lock, it repeats that stable-empty inventory before publishing
+readiness. The fixed PostgreSQL staging-mutation advisory lock lives on a
+dedicated autocommit session; the guard binds its backend PID and continuously
+proves that same backend still owns the exact lock. Private ready evidence is
+bound to the request ID, candidate SHA/tree, epoch, guard PID, database backend
+PID, entry-anchored absolute deadline, CronJob UID, and suspension resource
+version.
 
 The broker rechecks that evidence and the epoch before it publishes the
 request-bound detached backup job. The backup worker independently rechecks
@@ -88,22 +93,59 @@ detached rollout attempt only after it has launched that attempt. The attempt
 again requires ready evidence and retains the guard through protected apply,
 final gates, and every terminal path. A launch or backup failure before
 handoff releases it; the attempt releases it on completion, failure,
-cancellation, or an exception. Release stops the unit, restores the exact
-annotated CronJob to unsuspended state while removing the annotations, confirms
-that restoration, unlocks PostgreSQL, and publishes released evidence. Binding
-or restoration drift fails closed rather than resuming a different CronJob or
-candidate.
+cancellation, or an exception. The request-bound backup and attempt units use
+`After=` for the exact guard unit, while the guard independently checks that an
+exact backup or attempt owner, including one still deactivating, remains
+present. They deliberately do not use `BindsTo=`: a worker synchronously stops
+the guard during normal release and must remain alive to publish its terminal
+event and clear the active pointer after that verified stop returns. Normal
+release restores the exact annotated CronJob to unsuspended state while
+removing the annotations, confirms that restoration, unlocks PostgreSQL, and
+publishes released evidence. The guard's fixed request-bound `ExecStopPost`
+then treats exact released evidence as a strict no-op. If evidence is ready,
+missing, or unsafe instead, it validates the complete exact owner inventory and
+uses `systemctl --user kill --kill-whom=all --signal=SIGKILL` on each live
+request-bound backup or attempt unit. It never uses a wildcard in a kill call
+or recursively stops an owner. Loss of the ready database session, backend, or
+advisory lock is irreversible for that guard process: it leaves the CronJob
+suspended and retains ready evidence while the stop fence terminates unsafe
+owners for reconciliation. Binding, owner-inventory, or restoration drift
+fails closed rather than resuming a different CronJob or candidate.
+
+The guard CLI retains a 120-second ceiling for each fixed Kubernetes command
+and caps every fixed systemd owner inventory or kill at 30 seconds. An unsafe
+stop fence can issue at most one inventory and two exact owner kills, so its
+90-second command bound stays below the guard unit's `TimeoutStopSec=180s`.
 
 The transient guard has a finite `RuntimeMaxSec` of 30 hours, derived from the
 bounded backup and final-gate budgets, readiness allowance, and operational
-margin; it is never an indefinite freeze. A root-owned persistent systemd
+margin. It uses `Restart=no`; one absolute lifetime begins at guard-unit entry,
+and its internal deadline expires five minutes before systemd's runtime bound.
+It is never an indefinite freeze. A root-owned persistent systemd
 timer invokes reconciliation every minute. Reconciliation runs as the rollout
 service user and restores only an exact suspended, fully annotated guard whose
 request unit is absent and whose candidate, CronJob UID, and (when present)
-private evidence remain authoritative. An active verified unit is left alone;
-an unannotated suspension, incomplete annotation, unsafe evidence, or identity
-drift fails closed. This covers crashes, restarts, reboots, and finite-runtime
-expiry without treating arbitrary CronJob state as safe to change.
+private evidence remain authoritative. Before restoration it retries the same
+exact hard fence, then requires two fresh complete owner inventories separated
+by a poll to show no live or deactivating owner. A successful `systemctl kill`
+only proves signal dispatch and never authorizes restoration. Evidence must
+also remain unchanged across the fence and absence proof. Any list, kill,
+recheck, sleep, or evidence uncertainty keeps the annotated CronJob suspended
+for the next timer run. Exact released evidence with surviving annotations is
+contradictory—normal release already removes them—and also fails closed. An
+active verified unit is left alone; an unannotated suspension, incomplete
+annotation, unsafe evidence, or identity drift fails closed after fencing when
+an exact request can be derived. The stop fence covers main-process failure,
+hard death, and finite-runtime termination, while reconciliation makes that
+fence durably retryable before restoration. Together these mechanisms cover
+crashes, restarts, reboots, and expiry without treating arbitrary CronJob state
+as safe to change.
+
+The reconciliation oneshot has a conservative 571-second bound: three
+Kubernetes commands at 120 seconds, two candidate-identity commands at 15
+seconds, six systemd commands at 30 seconds, and the one-second stable-absence
+poll. Its `TimeoutStartSec=12min` supplies more than one minute of margin over
+that complete fail-closed sequence.
 
 ## Lifecycle
 
@@ -115,8 +157,10 @@ expiry without treating arbitrary CronJob state as safe to change.
    secrets or the service checkout.
 4. `cancel` records the operator and reason, terminates the active attempt, and
    preserves resumable state.
-5. `resume` reuses the original request envelope, candidate, and backup while
-   creating a new attributed attempt.
+5. `resume` reloads the immutable original preflight request, reacquires the
+   guard, and refuses candidate SHA/tree, guard epoch, or live epoch drift from
+   the original epoch before creating a new attributed attempt. Any prelaunch
+   refusal releases the newly acquired guard.
 
 An incomplete backup can be removed only through the request-bound cleanup
 command. A manifest- and restore-verified candidate whose detached job reached

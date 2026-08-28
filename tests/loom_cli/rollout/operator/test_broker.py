@@ -32,6 +32,7 @@ from loom_cli.rollout.operator.model import (
     CallerIdentity,
     CandidateBinding,
     DriverEnvelope,
+    PreflightRequest,
     RequestEvent,
     RolloutRequest,
 )
@@ -104,6 +105,7 @@ class FakeStore:
     def __init__(self, order: list[str]) -> None:
         self.order = order
         self.requests: dict[str, RolloutRequest] = {}
+        self.preflight_requests: dict[str, PreflightRequest] = {}
         self.events: dict[str, list[RequestEvent]] = {}
         self.envelopes: dict[tuple[str, int], DriverEnvelope] = {}
         self.active: ActivePointer | None = None
@@ -111,6 +113,21 @@ class FakeStore:
     def create_request(self, request: RolloutRequest) -> Path:
         self.order.append("request")
         self.requests[request.request_id] = request
+        self.preflight_requests[request.request_id] = PreflightRequest(
+            request_id=request.request_id,
+            rollout_id=request.rollout_id,
+            caller=request.caller,
+            candidate=request.candidate,
+            candidate_tree=request.candidate.resolved_tree or "b" * 40,
+            requested_at=request.requested_at,
+            runner_config_sha256=request.runner_config_sha256,
+            preflight_assessment_sha256="6" * 64,
+            preflight_registry_sha256=request.preflight_registry_sha256,
+            preflight_coverage_sha256=request.preflight_coverage_sha256,
+            mutation_epoch=7,
+            environment="staging",
+            namespace="loom-staging",
+        )
         self.events[request.request_id] = []
         return Path("/request.json")
 
@@ -118,6 +135,11 @@ class FakeStore:
         if request_id not in self.requests:
             raise RuntimeError("request does not exist")
         return self.requests[request_id]
+
+    def read_preflight_request(self, request_id: str) -> PreflightRequest:
+        if request_id not in self.preflight_requests:
+            raise RuntimeError("preflight request does not exist")
+        return self.preflight_requests[request_id]
 
     def append_event(self, event: RequestEvent) -> Path:
         self.events[event.request_id].append(event)
@@ -161,6 +183,7 @@ class FakeCandidate:
             resolved_sha=SHA,
             image_tag="staging-aaaaaaa",
             fetched_at="2026-07-14T12:00:00Z",
+            resolved_tree="b" * 40,
         )
 
 
@@ -456,6 +479,13 @@ def fakes(tmp_path: Path, *, backup: FakeBackup | None = None) -> FakeBundle:
         stdout,
         stderr,
     )
+
+
+def _enable_guarded_resume(bundle: FakeBundle, *, mutation_epoch: int = 7) -> FakeMutationGuard:
+    guard = FakeMutationGuard(bundle.order, mutation_epoch=mutation_epoch)
+    bundle.dependencies.mutation_guard = guard
+    bundle.dependencies.read_mutation_epoch = lambda: 7
+    return guard
 
 
 @pytest.mark.parametrize(
@@ -1227,7 +1257,7 @@ def test_devansh_can_preflight_sealed_cumulative_candidate_without_request(
     result = _last_json(deps.stdout)
     assert result == {
         "candidate_sha": SHA,
-        "candidate_tree": None,
+        "candidate_tree": "b" * 40,
         "coverage_sha256": assessment.coverage_digest,
         "mutation_epoch": 7,
         "preflight_artifact_bundle_sha256": PREFLIGHT_ARTIFACT_BUNDLE_SHA256,
@@ -1387,6 +1417,8 @@ def test_durable_retention_claim_blocks_start_and_resume_before_side_effects(
 ) -> None:
     deps = fakes(tmp_path)
     deps.lifecycle.retention_claim = True
+    if command[0] == "resume":
+        _enable_guarded_resume(deps)
 
     assert broker_main(command, dependencies=deps.dependencies) == 1
 
@@ -1968,12 +2000,14 @@ def test_unknown_request_preview_resume_and_done_resume_are_rejected(tmp_path: P
             status="done",
         )
     )
+    _enable_guarded_resume(done)
     assert broker_main(["resume", REQUEST_ID], dependencies=done.dependencies) == 1
 
 
 def test_resume_reuses_original_sha_backup_and_rollout_id(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    guard = _enable_guarded_resume(deps)
     deps.store.active = None
     deps.store.append_event(
         RequestEvent(
@@ -1998,8 +2032,48 @@ def test_resume_reuses_original_sha_backup_and_rollout_id(tmp_path: Path) -> Non
     assert envelope.backup_manifest_sha256 == first.backup_manifest_sha256
     assert envelope.rollout_id == first.rollout_id
     assert envelope.resume is True
+    assert guard.acquired == [REQUEST_ID]
+    assert guard.released == []
+    assert deps.order.index("guard-acquire") < deps.order.index("systemd")
     assert deps.candidate.fetch_count == 1
     assert deps.backup.create_count == 1
+
+
+@pytest.mark.parametrize("drift", ["guard", "database"])
+def test_resume_requires_original_epoch_and_releases_guard_on_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    guard = _enable_guarded_resume(deps)
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    if drift == "guard":
+        guard.mutation_epoch = 8
+    else:
+        deps.dependencies.read_mutation_epoch = lambda: 8
+    starts_before = deps.systemd.start_count
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+
+    assert guard.acquired == [REQUEST_ID]
+    assert guard.released == [REQUEST_ID]
+    assert deps.store.next_attempt_number(REQUEST_ID) == 2
+    assert deps.store.active is None
+    assert deps.systemd.start_count == starts_before
 
 
 def test_cancel_records_actor_reason_and_terminates_known_unit(tmp_path: Path) -> None:
@@ -2339,6 +2413,7 @@ def test_resume_rejects_every_config_bound_drift_before_publication_or_launch(
     envelopes_before = dict(deps.store.envelopes)
     starts_before = deps.systemd.start_count
     deps.dependencies.config = replace(deps.config, **{field: value})  # type: ignore[arg-type]
+    _enable_guarded_resume(deps)
 
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
     assert deps.store.envelopes == envelopes_before
@@ -2354,6 +2429,7 @@ def test_resume_recovers_finalized_prelaunch_orphan_without_creating_new_attempt
     first = deps.store.read_attempt_envelope(REQUEST_ID, 1)
     deps.store.active = None
     deps.systemd.start_count = 0
+    _enable_guarded_resume(deps)
 
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
     assert deps.store.read_attempt_envelope(REQUEST_ID, 1) == first
@@ -2373,6 +2449,7 @@ def test_resume_recovers_orphan_when_crash_preceded_publication_event(
     deps.store.events[REQUEST_ID] = [
         event for event in deps.store.events[REQUEST_ID] if event.event != "envelope_published"
     ]
+    _enable_guarded_resume(deps)
 
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
     assert deps.store.active is not None
@@ -2387,6 +2464,7 @@ def test_resume_does_not_recover_orphan_when_expected_unit_exists(tmp_path: Path
     deps.systemd.start_count = 0
     unit = f"loom-staging-rollout-{REQUEST_ID}-1.service"
     deps.systemd.visible_units.add(unit)
+    _enable_guarded_resume(deps)
 
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
     assert deps.store.active is None
@@ -2412,6 +2490,7 @@ def test_resume_rejects_orphan_whose_backup_drifted_from_first_attempt(
             reason="driver_failed",
         )
     )
+    _enable_guarded_resume(deps)
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
     deps.store.active = None
     second = deps.store.read_attempt_envelope(REQUEST_ID, 2)
@@ -2510,6 +2589,7 @@ def test_terminal_event_wins_if_termination_reports_failure_after_worker_exit(
     deps.stdout.truncate(0)
     assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
     assert _last_json(deps.stdout)["status"] == "cancelled"
+    _enable_guarded_resume(deps)
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
     assert deps.store.read_active() is not None
     assert deps.store.read_active().attempt_number == 2
@@ -2599,7 +2679,7 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     stream = broker_module._stream(["journalctl"], environment=expected)
     stream.close()
     assert run_environments == [expected, expected, expected]
-    assert run_timeouts == [30, 120, 120]
+    assert run_timeouts == [30, 240, 240]
     assert popen_environments == [expected]
 
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from collections.abc import Callable, Generator, Iterator
@@ -13,14 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
-from loom_cli.rollout.final_gate_command_runner import FINAL_GATE_MAX_ELAPSED_SECONDS
-
 from ..systemd_readiness import parse_systemctl_properties
 from .config import OperatorConfig
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
 from .staging_mutation_guard import (
+    MUTATION_GUARD_RUNTIME_SECONDS,
     MutationGuardError,
     MutationGuardEvidence,
     guard_evidence_path,
@@ -90,13 +89,6 @@ _TRANSIENT_UNIT_RE = re.compile(
     r"|loom-preflight-lifecycle-[0-9a-f]{16})[.]service\Z"
 )
 _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS = 1_500
-_MUTATION_GUARD_OPERATIONAL_MARGIN_SECONDS = 5 * 60 * 60
-_MUTATION_GUARD_RUNTIME_SECONDS = (
-    DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
-    + FINAL_GATE_MAX_ELAPSED_SECONDS
-    + _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS
-    + _MUTATION_GUARD_OPERATIONAL_MARGIN_SECONDS
-)
 _MUTATION_GUARD_STOP_WAIT_SECONDS = 60
 _SHOW_PROPERTIES = (
     "ActiveState",
@@ -570,13 +562,17 @@ class SystemdUserManager:
         self._guard_readiness_timeout_seconds = guard_readiness_timeout_seconds
 
     def start_argv(self, envelope_path: Path, unit_name: str) -> list[str]:
-        _attempt_identity(self.config, envelope_path, unit_name)
+        request_id, _attempt_number = _attempt_identity(
+            self.config,
+            envelope_path,
+            unit_name,
+        )
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
         )
         python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
-        return transient_service_argv(
+        argv = transient_service_argv(
             unit_name=unit_name,
             working_directory=self.config.runner_repo,
             command=(
@@ -591,6 +587,12 @@ class SystemdUserManager:
                 str(envelope_path),
             ),
         )
+        guard_unit = mutation_guard_unit_name(request_id)
+        argv[10:10] = [
+            "--property",
+            f"After={guard_unit}",
+        ]
+        return argv
 
     def start_attempt(self, envelope_path: Path, unit_name: str) -> None:
         argv = self.start_argv(envelope_path, unit_name)
@@ -602,13 +604,13 @@ class SystemdUserManager:
             raise UnitLaunchError("transient rollout unit launch failed")
 
     def start_backup_argv(self, job_path: Path, unit_name: str) -> list[str]:
-        _backup_identity(self.config, job_path, unit_name)
+        request_id = _backup_identity(self.config, job_path, unit_name)
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
         )
         python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
-        return transient_service_argv(
+        argv = transient_service_argv(
             unit_name=unit_name,
             working_directory=self.config.runner_repo,
             command=(
@@ -623,6 +625,12 @@ class SystemdUserManager:
                 str(job_path),
             ),
         )
+        guard_unit = mutation_guard_unit_name(request_id)
+        argv[10:10] = [
+            "--property",
+            f"After={guard_unit}",
+        ]
+        return argv
 
     def start_backup(self, job_path: Path, unit_name: str) -> None:
         argv = self.start_backup_argv(job_path, unit_name)
@@ -655,19 +663,160 @@ class SystemdUserManager:
                 request_id,
             ),
         )
+        fence_command = (
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in environment.items()),
+            str(python_path),
+            "-m",
+            "loom_cli.rollout.operator.staging_mutation_guard",
+            "fence",
+            "--request-id",
+            request_id,
+        )
         argv[10:10] = [
             "--property",
-            "Restart=on-failure",
-            "--property",
-            "RestartSec=5s",
+            "Restart=no",
             "--property",
             "KillMode=mixed",
             "--property",
-            "TimeoutStopSec=120s",
+            "TimeoutStopSec=180s",
             "--property",
-            f"RuntimeMaxSec={_MUTATION_GUARD_RUNTIME_SECONDS}s",
+            f"RuntimeMaxSec={MUTATION_GUARD_RUNTIME_SECONDS}s",
+            "--property",
+            f"ExecStopPost={shlex.join(fence_command)}",
         ]
         return argv
+
+    def _mutation_guard_owner_units(self, request_id: str) -> tuple[str, ...]:
+        """Return a fully validated inventory of exact live request owners."""
+
+        try:
+            mutation_guard_unit_name(request_id)
+        except UnitLaunchError as exc:
+            raise SystemdQueryError("mutation guard owner identity is invalid") from exc
+        backup_unit = f"loom-staging-backup-{request_id}.service"
+        attempt_pattern = f"loom-staging-rollout-{request_id}-*.service"
+        argv = [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--full",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+            backup_unit,
+            attempt_pattern,
+        ]
+        try:
+            result = self._run(argv)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemdQueryError("mutation guard owner query failed") from exc
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or result.stderr.strip()
+            or "\x00" in result.stdout
+            or "\x00" in result.stderr
+            or len(result.stdout.encode()) > 1024 * 1024
+            or len(result.stderr.encode()) > 1024 * 1024
+        ):
+            raise SystemdQueryError("mutation guard owner query failed")
+        live_units: list[str] = []
+        live_attempts: set[int] = set()
+        seen: set[str] = set()
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=4)
+            if len(fields) < 4:
+                raise SystemdQueryError("mutation guard owner output is malformed")
+            unit_name, load_state, active_state, sub_state = fields[:4]
+            if (
+                unit_name in seen
+                or load_state != "loaded"
+                or _STATUS_TOKEN_RE.fullmatch(active_state) is None
+                or _STATUS_TOKEN_RE.fullmatch(sub_state) is None
+            ):
+                raise SystemdQueryError("mutation guard owner output is malformed")
+            seen.add(unit_name)
+            if unit_name == backup_unit:
+                unit_kind = "backup"
+            else:
+                try:
+                    unit_request_id, attempt_number = _parse_unit_name(
+                        unit_name,
+                        error_type=SystemdQueryError,
+                    )
+                except SystemdQueryError as exc:
+                    raise SystemdQueryError("mutation guard owner is foreign") from exc
+                if unit_request_id != request_id:
+                    raise SystemdQueryError("mutation guard owner is foreign")
+                unit_kind = "attempt"
+            if (active_state, sub_state) in {
+                ("inactive", "dead"),
+                ("failed", "failed"),
+            }:
+                continue
+            if active_state != "deactivating" and (active_state, sub_state) not in {
+                ("active", "running"),
+                ("activating", "start"),
+            }:
+                raise SystemdQueryError("mutation guard owner status is unsafe")
+            if unit_kind == "backup":
+                live_units.append(unit_name)
+            else:
+                live_attempts.add(attempt_number)
+                live_units.append(unit_name)
+        if len(live_attempts) > 1:
+            raise SystemdQueryError("mutation guard owner attempts are ambiguous")
+        return tuple(live_units)
+
+    def mutation_guard_owner_running(self, request_id: str) -> bool:
+        """Return whether one exact backup/attempt owns the request guard."""
+
+        return bool(self._mutation_guard_owner_units(request_id))
+
+    def fence_mutation_guard_owners(self, request_id: str) -> None:
+        """Hard-fence exact owners unless normal guard release was verified."""
+
+        evidence_path = guard_evidence_path(self.config, request_id)
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError:
+            evidence = None
+        if (
+            evidence is not None
+            and evidence.request_id == request_id
+            and evidence.candidate_sha == self.config.runner_repo.parent.name
+            and evidence.state == "released"
+        ):
+            return
+        live_units = self._mutation_guard_owner_units(request_id)
+        fence_failed = False
+        for unit_name in live_units:
+            try:
+                result = self._run(
+                    [
+                        "systemctl",
+                        "--user",
+                        "kill",
+                        "--kill-whom=all",
+                        "--signal=SIGKILL",
+                        unit_name,
+                    ]
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                fence_failed = True
+                continue
+            if result.returncode != 0:
+                fence_failed = True
+        if fence_failed:
+            raise SystemdOperationError("mutation guard owner fence failed")
 
     def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
         mutation_guard_unit_name(request_id)

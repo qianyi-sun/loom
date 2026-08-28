@@ -1796,6 +1796,35 @@ def test_upgrade_from_legacy_attestation_reimports_only_protected_worker_env(
     assert upgraded["asset_sha256"]["worker-env-template"] == hashlib.sha256(protected).hexdigest()
 
 
+@pytest.mark.parametrize("without_worker_env", [False, True])
+def test_upgrade_accepts_only_exact_pre_mutation_guard_asset_schemas(
+    tmp_path: Path,
+    without_worker_env: bool,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    for label in {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    }:
+        statement["asset_sha256"].pop(label)
+    if without_worker_env:
+        statement["asset_sha256"].pop("worker-env-template")
+    installer.filesystem.atomic_write(
+        host.INSTALL_ATTESTATION,
+        (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        0o640,
+        expected_nlink=1,
+    )
+
+    assert installer.install(TEAM_ID)["ok"] is True
+
+    upgraded = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    assert set(upgraded["asset_sha256"]) == host._INSTALL_ATTESTATION_ASSETS
+
+
 def test_reinstall_rejects_worker_env_drift_before_attestation_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2727,6 +2756,18 @@ def test_mutation_guard_reconcile_assets_converge_and_uninstall_cleanly(tmp_path
     assert '"$@"' not in helper_text
     assert "User=root" in service_text
     assert "Group=root" in service_text
+    timeout_line = next(
+        line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")
+    )
+    timeout_minutes = int(timeout_line.removeprefix("TimeoutStartSec=").removesuffix("min"))
+    timeout_seconds = timeout_minutes * 60
+    full_reconcile_bound = (
+        3 * 120  # initial GET plus restore GET/PATCH
+        + 2 * 15  # candidate SHA/tree resolution
+        + 6 * 30  # guard show, fence list/two kills, two absence inventories
+        + 1  # stable-absence poll
+    )
+    assert timeout_seconds >= full_reconcile_bound + 60
     assert f"ExecStart={host.MUTATION_GUARD_RECONCILE_PATH}" in service_text
     assert "OnBootSec=1min" in timer_text
     assert "OnUnitActiveSec=1min" in timer_text
@@ -2747,9 +2788,12 @@ def test_mutation_guard_reconcile_assets_converge_and_uninstall_cleanly(tmp_path
         host.MUTATION_GUARD_RECONCILE_TIMER_PATH,
     ):
         assert installer.filesystem.exists(path)
-        assert (path, "root", "root", 0o755 if path == host.MUTATION_GUARD_RECONCILE_PATH else 0o644) in (
-            system.install_owner_calls
-        )
+        assert (
+            path,
+            "root",
+            "root",
+            0o755 if path == host.MUTATION_GUARD_RECONCILE_PATH else 0o644,
+        ) in (system.install_owner_calls)
     assert system.mutation_guard_reconcile_timer is True
     assert "mutation-guard-reconcile-timer" in first["changed"]
     assert second["changed"] == []
@@ -4236,6 +4280,20 @@ def _status_metadata(mode: int, *, uid: int, gid: int) -> os.stat_result:
         (
             host.CommandResult(
                 0,
+                "loom-staging-backup-request-1.service loaded active running backup\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-mutation-guard-request-1.service loaded active running guard\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
                 "loom-staging-rollout-request-1.service loaded maintenance dead rollout\n",
             ),
             "busy",
@@ -4286,6 +4344,8 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
                 uid=service_uid,
                 gid=service_gid,
             )
+        if path == host.STATE_ROOT / "requests":
+            raise FileNotFoundError(path)
         assert path == host.ACTIVE_POINTER
         raise FileNotFoundError(path)
 
@@ -4320,10 +4380,96 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
                 "--no-legend",
                 "--no-pager",
                 "loom-staging-rollout-*.service",
+                "loom-staging-backup-*.service",
+                "loom-staging-mutation-guard-*.service",
             ],
             {"check": False},
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("backup_pending", "busy"),
+        ("backup_running", "busy"),
+        ("backup_cancel_requested", "busy"),
+        ("backup_verified", "busy"),
+        ("launch_pending", "busy"),
+        ("launch_running", "idle"),
+        ("backup_failed", "idle"),
+    ],
+)
+def test_active_status_includes_safe_durable_preflight_backup_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    expected: str,
+) -> None:
+    service_uid = os.geteuid()
+    service_gid = os.getegid()
+    state_root = tmp_path / "state"
+    requests_root = state_root / "requests"
+    request_root = requests_root / "req-alpha"
+    backup_root = request_root / "preflight-backup"
+    backup_root.mkdir(parents=True)
+    for directory in (state_root, requests_root, request_root, backup_root):
+        directory.chmod(0o700)
+    state: dict[str, object] = {
+        "failure_code": None,
+        "job_id": "job-alpha000",
+        "lease_digest": None,
+        "manifest_sha256": None,
+        "preflight_attestation_sha256": None,
+        "phase": phase,
+        "request_id": "req-alpha",
+        "schema_version": 1,
+        "sequence": 0,
+        "updated_at": None,
+    }
+    if phase in {"backup_verified", "launch_pending", "launch_running"}:
+        state.update(
+            {
+                "lease_digest": "d" * 64,
+                "manifest_sha256": "e" * 64,
+                "preflight_attestation_sha256": "f" * 64,
+            }
+        )
+    if phase == "backup_failed":
+        state["failure_code"] = "backup_failed"
+    state_path = backup_root / "state.json"
+    state_path.write_text(json.dumps(state) + "\n")
+    state_path.chmod(0o600)
+    marker = tmp_path / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    active_pointer = state_root / "active.json"
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", active_pointer)
+    monkeypatch.setattr(host, "MAINTENANCE_MARKER", marker)
+    real_lstat = host.os.lstat
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        metadata = real_lstat(path)
+        if Path(path) == marker:
+            values = list(metadata)
+            values[4] = 0
+            values[5] = 0
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            identity = _service_identity_result(call, uid=service_uid, gid=service_gid)
+            if identity is not None:
+                return identity
+            return host.CommandResult(0)
+
+    assert host.HostSystem(StatusRunner()).active_status() == expected
 
 
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(

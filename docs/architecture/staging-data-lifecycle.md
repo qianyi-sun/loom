@@ -119,23 +119,55 @@ status. This is an intentional no-op, not a retry or a second writer.
 
 Before acquiring the same database lock, a non-preview rollout suspends the
 legacy staging lifecycle CronJob using the exact CronJob UID and resource
-version, annotates it with its request and candidate SHA/tree, and drains an
-already-active verified CronJob Job. Its guard evidence additionally binds the
-authoritative mutation epoch. The detached backup worker verifies that complete
-request/candidate/epoch binding and transfers it to the detached rollout
-attempt; terminal release restores only that annotated CronJob and then unlocks
-the database. A failed pre-handoff backup releases the guard instead.
+version and annotates it with its request and candidate SHA/tree. It lists
+nonterminal Jobs by the exact CronJob controller UID, validates their labels and
+sole controller owner, and requires two consecutive empty inventories both
+before and after lock acquisition. The advisory lock is held by a dedicated
+autocommit session whose exact backend PID and lock ownership are continuously
+supervised. Ready evidence binds that backend PID, the authoritative mutation
+epoch, and one entry-anchored absolute deadline. The detached backup worker
+verifies the complete request/candidate/tree/epoch binding and transfers it to
+the detached rollout attempt; both request-bound units use `After=` on the
+exact guard without `BindsTo=`, and the guard checks exact owner liveness.
+Terminal release restores only that annotated CronJob, unlocks the database,
+and publishes exact released evidence before the owner writes its terminal
+event and clears its active pointer. The guard's request-bound `ExecStopPost`
+is a strict no-op for that verified release. Ready, missing, or unsafe evidence
+instead makes it validate the complete exact owner inventory and hard-kill each
+live backup or attempt control group with `SIGKILL`; it never sends a wildcard
+kill or gracefully stops an owner, which would recurse into the same release
+path. A failed pre-handoff backup releases the guard instead.
+
+Fixed Kubernetes commands retain a 120-second subprocess ceiling, while fixed
+systemd owner inventories and kills are capped at 30 seconds each. The largest
+immediate unsafe fence performs one inventory and two exact kills, so its
+90-second maximum remains below the guard unit's `TimeoutStopSec=180s`.
 
 The guard's 30-hour finite systemd lifetime prevents an indefinite maintenance
-freeze. A persistent root timer runs orphan reconciliation every minute; it
-restores only a suspended CronJob with complete exact annotations for the
-currently installed candidate and no active request guard unit. Unsafe,
-incomplete, unannotated, or drifted state is left fail-closed for investigation.
-This makes crashes, service restarts, reboots, and expiry recoverable without
-using a broad unsuspend or deleting lifecycle records. Rollout dry-run does not
-take this lock, suspend the CronJob, launch a worker, or mutate lifecycle data;
-it only preserves preliminary preview evidence in the service-owned rollout
-ledger.
+freeze. It uses `Restart=no`, anchors its lifetime before Kubernetes or database
+work, and expires internally five minutes before `RuntimeMaxSec`. A persistent
+root timer runs orphan reconciliation every minute; it restores only a
+suspended CronJob with complete exact annotations for the currently installed
+candidate and no active request guard unit. The stop fence first terminates
+exact surviving owners after main-process failure, hard death, or runtime
+termination. If listing or killing fails, reconciliation retries the same exact
+fence on its next timer run. It never treats successful signal dispatch as unit
+absence: two fresh complete owner inventories separated by a poll must both be
+empty, and evidence must remain unchanged, before restoration. A live or
+deactivating owner and every query, kill, recheck, or evidence uncertainty keep
+the freeze. Released evidence with surviving annotations is contradictory and
+also remains frozen. Unsafe, incomplete, unannotated, or drifted recovery state
+is left fail-closed for investigation. This makes crashes, service restarts,
+reboots, and expiry recoverable without using a broad unsuspend or deleting
+lifecycle records. Rollout dry-run does not take this lock, suspend the CronJob,
+launch a worker, or mutate lifecycle data; it only preserves preliminary
+preview evidence in the service-owned rollout ledger.
+
+The reconciliation oneshot's conservative upper bound is 571 seconds: three
+120-second Kubernetes commands, two 15-second candidate-identity commands, six
+30-second systemd commands, and one second between the two absence inventories.
+`TimeoutStartSec=12min` leaves more than one minute of margin, while any command
+uncertainty still leaves the CronJob frozen for the next retry.
 
 ## Mutation epoch and rollout checkpoints
 

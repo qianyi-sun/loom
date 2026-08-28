@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pwd
 import re
@@ -25,17 +26,19 @@ from loom.staging_mutation_coordination import (
     STAGING_MUTATION_TRY_LOCK_SQL,
     STAGING_MUTATION_UNLOCK_SQL,
 )
+from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
 from loom_cli.rollout.credential_authority import (
     converge_new_private_file,
     read_trusted_file,
 )
+from loom_cli.rollout.final_gate_command_runner import FINAL_GATE_MAX_ELAPSED_SECONDS
 from loom_cli.rollout.readonly_database_authority import DatabaseQuery
 
 from .config import OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
-from .readonly_database_client import open_readonly_database_query
+from .readonly_database_client import open_readonly_database_guard_query
 
 _NAMESPACE = "loom-staging"
 _CRONJOB_NAME = "loom-staging-data-lifecycle"
@@ -55,8 +58,21 @@ _MAX_KUBERNETES_OUTPUT = 1024 * 1024
 _MAX_EVIDENCE_BYTES = 64 * 1024
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
+_KUBERNETES_COMMAND_TIMEOUT_SECONDS = 120
+_SYSTEMD_COMMAND_TIMEOUT_SECONDS = 30
+_CANDIDATE_COMMAND_TIMEOUT_SECONDS = 15
 _DEFAULT_ACTIVE_WAITS = 1320
 _DEFAULT_LOCK_ATTEMPTS = 120
+_DEFAULT_OWNER_LAUNCH_GRACE_SECONDS = 30
+_GUARD_READINESS_SECONDS = 1_500
+_GUARD_OPERATIONAL_MARGIN_SECONDS = 5 * 60 * 60
+MUTATION_GUARD_RUNTIME_SECONDS = (
+    DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
+    + FINAL_GATE_MAX_ELAPSED_SECONDS
+    + _GUARD_READINESS_SECONDS
+    + _GUARD_OPERATIONAL_MARGIN_SECONDS
+)
+_GUARD_INTERNAL_LIFETIME_SECONDS = MUTATION_GUARD_RUNTIME_SECONDS - 5 * 60
 
 _TRY_LOCK_SQL = f"{STAGING_MUTATION_TRY_LOCK_SQL} AS acquired"
 _READ_EPOCH_SQL = (
@@ -64,6 +80,12 @@ _READ_EPOCH_SQL = (
     "WHERE environment = 'staging' AND namespace = 'loom-staging'"
 )
 _UNLOCK_SQL = f"{STAGING_MUTATION_UNLOCK_SQL} AS released"
+_HEALTH_SQL = (
+    "SELECT pg_backend_pid() AS backend_pid, count(*) = 1 AS owns_lock "
+    "FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
+    "AND classid = 1280263818 AND objid = 1621151599 AND objsubid = 1 "
+    "AND mode = 'ExclusiveLock' AND granted"
+)
 
 
 class MutationGuardError(RuntimeError):
@@ -101,6 +123,8 @@ class MutationGuardEvidence:
     candidate_tree: str
     mutation_epoch: int
     guard_pid: int
+    database_backend_pid: int
+    deadline_unix_seconds: int
     cronjob_uid: str
     suspended_resource_version: str
     state: GuardState
@@ -119,6 +143,10 @@ class MutationGuardEvidence:
             or self.mutation_epoch < 0
             or type(self.guard_pid) is not int
             or self.guard_pid < 1
+            or type(self.database_backend_pid) is not int
+            or self.database_backend_pid < 1
+            or type(self.deadline_unix_seconds) is not int
+            or self.deadline_unix_seconds < 1
             or _UID_RE.fullmatch(self.cronjob_uid) is None
             or _RESOURCE_VERSION_RE.fullmatch(self.suspended_resource_version) is None
             or self.state not in {"ready", "released"}
@@ -133,6 +161,8 @@ class MutationGuardEvidence:
             "candidate_sha": self.candidate_sha,
             "candidate_tree": self.candidate_tree,
             "cronjob_uid": self.cronjob_uid,
+            "database_backend_pid": self.database_backend_pid,
+            "deadline_unix_seconds": self.deadline_unix_seconds,
             "guard_pid": self.guard_pid,
             "mutation_epoch": self.mutation_epoch,
             "request_id": self.request_id,
@@ -156,6 +186,8 @@ class MutationGuardEvidence:
         candidate_tree: str,
         mutation_epoch: int,
         guard_pid: int,
+        database_backend_pid: int,
+        deadline_unix_seconds: int,
         cronjob_uid: str,
         suspended_resource_version: str,
         state: GuardState,
@@ -164,6 +196,8 @@ class MutationGuardEvidence:
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
             "cronjob_uid": cronjob_uid,
+            "database_backend_pid": database_backend_pid,
+            "deadline_unix_seconds": deadline_unix_seconds,
             "guard_pid": guard_pid,
             "mutation_epoch": mutation_epoch,
             "request_id": request_id,
@@ -178,6 +212,8 @@ class MutationGuardEvidence:
             candidate_tree=candidate_tree,
             mutation_epoch=mutation_epoch,
             guard_pid=guard_pid,
+            database_backend_pid=database_backend_pid,
+            deadline_unix_seconds=deadline_unix_seconds,
             cronjob_uid=cronjob_uid,
             suspended_resource_version=suspended_resource_version,
             state=state,
@@ -190,6 +226,8 @@ class MutationGuardEvidence:
             "candidate_sha",
             "candidate_tree",
             "cronjob_uid",
+            "database_backend_pid",
+            "deadline_unix_seconds",
             "evidence_digest",
             "guard_pid",
             "mutation_epoch",
@@ -450,46 +488,96 @@ def _patch_cronjob(
     return _parse_cronjob_value(value)
 
 
-def _validate_active_job(
+def _list_nonterminal_owned_jobs(
     config: OperatorConfig,
     run: KubernetesRunner,
     *,
     cronjob_uid: str,
-    reference: _ActiveJob,
-) -> None:
+) -> tuple[_ActiveJob, ...]:
     value = _run_json(
         run,
         [
             *_kubectl_prefix(config),
             "get",
-            f"job/{reference.name}",
+            "jobs",
+            f"--selector=batch.kubernetes.io/controller-uid={cronjob_uid}",
             "--output=json",
             "--request-timeout=60s",
         ],
-        "lifecycle active Job",
+        "lifecycle owned Job inventory",
     )
-    metadata = _mapping(value.get("metadata"), "lifecycle active Job metadata")
-    owners = metadata.get("ownerReferences")
-    if not isinstance(owners, list) or len(owners) != 1:
-        raise MutationGuardError("lifecycle active Job owner authority drifted")
-    owner = _mapping(owners[0], "lifecycle active Job owner")
+    list_metadata = _mapping(value.get("metadata"), "lifecycle owned Job inventory metadata")
+    resource_version = list_metadata.get("resourceVersion")
+    items = value.get("items")
     if (
-        value.get("apiVersion") != "batch/v1"
-        or value.get("kind") != "Job"
-        or metadata.get("name") != reference.name
-        or metadata.get("namespace") != _NAMESPACE
-        or metadata.get("uid") != reference.uid
-        or owner
-        != {
-            "apiVersion": "batch/v1",
-            "blockOwnerDeletion": True,
-            "controller": True,
-            "kind": "CronJob",
-            "name": _CRONJOB_NAME,
-            "uid": cronjob_uid,
-        }
+        value.get("apiVersion") != "v1"
+        or value.get("kind") != "List"
+        or not isinstance(resource_version, str)
+        or (resource_version and _RESOURCE_VERSION_RE.fullmatch(resource_version) is None)
+        or not isinstance(items, list)
+        or len(items) > 256
     ):
-        raise MutationGuardError("lifecycle active Job owner authority drifted")
+        raise MutationGuardError("lifecycle owned Job inventory is invalid")
+    active: list[_ActiveJob] = []
+    for raw_job in items:
+        job = _mapping(raw_job, "lifecycle owned Job")
+        metadata = _mapping(job.get("metadata"), "lifecycle owned Job metadata")
+        labels = _mapping(metadata.get("labels"), "lifecycle owned Job labels")
+        owners = metadata.get("ownerReferences")
+        name = metadata.get("name")
+        uid = metadata.get("uid")
+        if not isinstance(owners, list) or len(owners) != 1:
+            raise MutationGuardError("lifecycle owned Job owner authority drifted")
+        owner = _mapping(owners[0], "lifecycle owned Job owner")
+        if (
+            job.get("apiVersion") != "batch/v1"
+            or job.get("kind") != "Job"
+            or not isinstance(name, str)
+            or _JOB_NAME_RE.fullmatch(name) is None
+            or metadata.get("namespace") != _NAMESPACE
+            or not isinstance(uid, str)
+            or _UID_RE.fullmatch(uid) is None
+            or labels.get("batch.kubernetes.io/controller-uid") != cronjob_uid
+            or labels.get("batch.kubernetes.io/job-name") != name
+            or owner
+            != {
+                "apiVersion": "batch/v1",
+                "blockOwnerDeletion": True,
+                "controller": True,
+                "kind": "CronJob",
+                "name": _CRONJOB_NAME,
+                "uid": cronjob_uid,
+            }
+        ):
+            raise MutationGuardError("lifecycle owned Job owner authority drifted")
+        status = _mapping(job.get("status", {}), "lifecycle owned Job status")
+        conditions = status.get("conditions", [])
+        if not isinstance(conditions, list) or len(conditions) > 32:
+            raise MutationGuardError("lifecycle owned Job terminal state is invalid")
+        terminal = False
+        for raw_condition in conditions:
+            condition = _mapping(raw_condition, "lifecycle owned Job condition")
+            condition_type = condition.get("type")
+            condition_status = condition.get("status")
+            if not isinstance(condition_type, str) or not isinstance(condition_status, str):
+                raise MutationGuardError("lifecycle owned Job terminal state is invalid")
+            if condition_type in {"Complete", "Failed"} and condition_status == "True":
+                terminal = True
+        if not terminal:
+            active.append(_ActiveJob(name=name, uid=uid))
+    return tuple(active)
+
+
+def _require_before_readiness_deadline(
+    monotonic: Callable[[], float],
+    *,
+    deadline_monotonic: float,
+) -> None:
+    observed = monotonic()
+    if not math.isfinite(observed):
+        raise MutationGuardError("mutation guard clock authority was lost")
+    if observed >= deadline_monotonic:
+        raise MutationGuardError("mutation guard absolute deadline expired before readiness")
 
 
 def _wait_until_inactive(
@@ -502,10 +590,18 @@ def _wait_until_inactive(
     candidate_tree: str,
     sleep: Callable[[float], None],
     stop_requested: Callable[[], bool],
+    monotonic: Callable[[], float],
+    deadline_monotonic: float,
     max_waits: int,
 ) -> _CronJob:
     current = held
-    for attempt in range(max_waits + 1):
+    consecutive_empty = 0
+    remaining_waits = max_waits
+    while True:
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
+        )
         if stop_requested():
             raise MutationGuardError("mutation guard stop requested before readiness")
         _require_held(
@@ -515,19 +611,31 @@ def _wait_until_inactive(
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
         )
-        if not current.active_jobs:
+        active_jobs = _list_nonterminal_owned_jobs(
+            config,
+            run,
+            cronjob_uid=held.uid,
+        )
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
+        )
+        consecutive_empty = consecutive_empty + 1 if not active_jobs else 0
+        if consecutive_empty == 2:
             return current
-        for reference in current.active_jobs:
-            _validate_active_job(
-                config,
-                run,
-                cronjob_uid=held.uid,
-                reference=reference,
-            )
-        if attempt == max_waits:
+        if remaining_waits == 0:
             break
+        remaining_waits -= 1
         sleep(1.0)
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
+        )
         current = _load_cronjob(config, run)
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
+        )
     raise MutationGuardError("lifecycle active Job did not finish within the guard bound")
 
 
@@ -589,6 +697,25 @@ def _parse_scalar(
     if type(value) is not expected_type:
         raise MutationGuardError("mutation guard database evidence is invalid")
     return value
+
+
+def _parse_lock_health(
+    rows: tuple[Mapping[str, object], ...],
+) -> tuple[int, bool]:
+    if len(rows) != 1 or set(rows[0]) != {"backend_pid", "owns_lock"}:
+        raise MutationGuardError("mutation guard database lock health is invalid")
+    backend_pid = rows[0]["backend_pid"]
+    owns_lock = rows[0]["owns_lock"]
+    if type(backend_pid) is not int or backend_pid < 1 or type(owns_lock) is not bool:
+        raise MutationGuardError("mutation guard database lock health is invalid")
+    return backend_pid, owns_lock
+
+
+def _require_lock_health(query: DatabaseQuery, *, backend_pid: int | None = None) -> int:
+    observed_pid, owns_lock = _parse_lock_health(query(_HEALTH_SQL))
+    if not owns_lock or (backend_pid is not None and observed_pid != backend_pid):
+        raise MutationGuardError("mutation guard database ownership was lost")
+    return observed_pid
 
 
 def _ensure_evidence_directory(config: OperatorConfig, *, service_uid: int) -> Path:
@@ -714,7 +841,7 @@ def _resolve_candidate(config: OperatorConfig) -> tuple[str, str]:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_CANDIDATE_COMMAND_TIMEOUT_SECONDS,
                 env=environment,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -739,6 +866,7 @@ class MutationGuardManager:
     service_uid: int
     systemd: _MutationGuardSystemd
     resolve_candidate: CandidateResolver = _resolve_candidate
+    wall_time: Callable[[], float] = time.time
 
     def _validate(
         self,
@@ -751,11 +879,19 @@ class MutationGuardManager:
         if self.service_uid < 1:
             raise MutationGuardError("mutation guard manager authority is invalid")
         candidate_sha, candidate_tree = self.resolve_candidate(self.config)
+        observed_wall_time = self.wall_time()
         if (
             evidence.request_id != request_id
             or evidence.candidate_sha != candidate_sha
             or evidence.candidate_tree != candidate_tree
             or evidence.state != state
+            or (
+                state == "ready"
+                and (
+                    not math.isfinite(observed_wall_time)
+                    or evidence.deadline_unix_seconds <= math.floor(observed_wall_time)
+                )
+            )
         ):
             raise MutationGuardError("mutation guard evidence binding drifted")
         return evidence
@@ -817,12 +953,77 @@ def _validate_reconcile_evidence(
         raise MutationGuardError("orphaned mutation guard evidence binding drifted")
 
 
+def _read_reconcile_evidence(
+    *,
+    config: OperatorConfig,
+    service_uid: int,
+    cronjob: _CronJob,
+    request_id: str,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> MutationGuardEvidence | None:
+    evidence_path = guard_evidence_path(config, request_id)
+    try:
+        os.lstat(evidence_path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise MutationGuardError("orphaned mutation guard evidence is unavailable") from exc
+    try:
+        evidence = read_mutation_guard_evidence(
+            evidence_path,
+            service_uid=service_uid,
+        )
+    except MutationGuardError as exc:
+        raise MutationGuardError("orphaned mutation guard evidence is unsafe") from exc
+    _validate_reconcile_evidence(
+        evidence,
+        cronjob=cronjob,
+        request_id=request_id,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    return evidence
+
+
+def _fence_and_require_stable_owner_absence(
+    *,
+    request_id: str,
+    fence_owners: Callable[[str], None] | None,
+    owner_running: Callable[[str], bool] | None,
+    sleep: Callable[[float], None],
+) -> None:
+    if fence_owners is None or owner_running is None:
+        raise MutationGuardError("orphaned mutation guard owner recovery is unavailable")
+    try:
+        fence_owners(request_id)
+    except Exception as exc:
+        raise MutationGuardError("orphaned mutation guard owner fence failed safely") from exc
+    for observation in range(2):
+        try:
+            live_owner = owner_running(request_id)
+        except Exception as exc:
+            raise MutationGuardError("orphaned mutation guard owner absence is unsafe") from exc
+        if type(live_owner) is not bool:
+            raise MutationGuardError("orphaned mutation guard owner absence is unsafe")
+        if live_owner:
+            raise MutationGuardError("orphaned mutation guard owner remains live")
+        if observation == 0:
+            try:
+                sleep(1.0)
+            except Exception as exc:
+                raise MutationGuardError("orphaned mutation guard owner absence is unsafe") from exc
+
+
 def reconcile_orphaned_guard(
     *,
     config: OperatorConfig,
     service_uid: int,
     run: KubernetesRunner,
     show_guard: Callable[[str], _MutationGuardUnitStatus | None],
+    fence_owners: Callable[[str], None] | None = None,
+    owner_running: Callable[[str], bool] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, str]:
     """Restore only an exact annotated freeze whose request unit is absent."""
 
@@ -852,13 +1053,12 @@ def reconcile_orphaned_guard(
     if (candidate_sha, candidate_tree) != (installed_candidate_sha, installed_candidate_tree):
         raise MutationGuardError("lifecycle CronJob guard candidate authority drifted")
     status = show_guard(request_id)
-    evidence_path = guard_evidence_path(config, request_id)
     if status is not None:
         if not status.is_running or status.main_pid < 1:
             raise MutationGuardError("orphaned mutation guard unit is not absent")
         try:
             evidence = read_mutation_guard_evidence(
-                evidence_path,
+                guard_evidence_path(config, request_id),
                 service_uid=service_uid,
             )
         except MutationGuardError as exc:
@@ -873,27 +1073,42 @@ def reconcile_orphaned_guard(
         if evidence.state != "ready" or evidence.guard_pid != status.main_pid:
             raise MutationGuardError("active mutation guard evidence binding drifted")
         return {"request_id": request_id, "status": "active"}
+
+    initial_evidence: MutationGuardEvidence | None = None
+    evidence_error: MutationGuardError | None = None
     try:
-        os.lstat(evidence_path)
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise MutationGuardError("orphaned mutation guard evidence is unavailable") from exc
-    else:
-        try:
-            evidence = read_mutation_guard_evidence(
-                evidence_path,
-                service_uid=service_uid,
-            )
-        except MutationGuardError as exc:
-            raise MutationGuardError("orphaned mutation guard evidence is unsafe") from exc
-        _validate_reconcile_evidence(
-            evidence,
+        initial_evidence = _read_reconcile_evidence(
+            config=config,
+            service_uid=service_uid,
             cronjob=cronjob,
             request_id=request_id,
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
         )
+    except MutationGuardError as exc:
+        evidence_error = exc
+    if initial_evidence is not None and initial_evidence.state == "released":
+        raise MutationGuardError("orphaned mutation guard released evidence contradicts suspension")
+    _fence_and_require_stable_owner_absence(
+        request_id=request_id,
+        fence_owners=fence_owners,
+        owner_running=owner_running,
+        sleep=sleep,
+    )
+    if evidence_error is not None:
+        raise MutationGuardError("orphaned mutation guard evidence is unsafe") from evidence_error
+    final_evidence = _read_reconcile_evidence(
+        config=config,
+        service_uid=service_uid,
+        cronjob=cronjob,
+        request_id=request_id,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    if final_evidence is not None and final_evidence.state == "released":
+        raise MutationGuardError("orphaned mutation guard released evidence contradicts suspension")
+    if final_evidence != initial_evidence:
+        raise MutationGuardError("orphaned mutation guard evidence changed during recovery")
     _restore_cronjob(
         config,
         run,
@@ -911,10 +1126,14 @@ def hold_request_guard(
     request_id: str,
     service_uid: int,
     run: KubernetesRunner,
-    query_context: QueryContext = open_readonly_database_query,
+    query_context: QueryContext = open_readonly_database_guard_query,
     resolve_candidate: CandidateResolver = _resolve_candidate,
     stop_requested: Callable[[], bool],
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    wall_time: Callable[[], float] = time.time,
+    owner_running: Callable[[str], bool] = lambda _request_id: True,
+    owner_launch_grace_seconds: int = _DEFAULT_OWNER_LAUNCH_GRACE_SECONDS,
     max_active_waits: int = _DEFAULT_ACTIVE_WAITS,
     max_lock_attempts: int = _DEFAULT_LOCK_ATTEMPTS,
 ) -> MutationGuardEvidence:
@@ -924,8 +1143,9 @@ def hold_request_guard(
     if (
         service_uid < 1
         or os.geteuid() != service_uid
-        or not 0 <= max_active_waits <= _DEFAULT_ACTIVE_WAITS
+        or not 1 <= max_active_waits <= _DEFAULT_ACTIVE_WAITS
         or not 1 <= max_lock_attempts <= _DEFAULT_LOCK_ATTEMPTS
+        or not 0 <= owner_launch_grace_seconds <= 300
     ):
         raise MutationGuardError("mutation guard process authority is invalid")
     try:
@@ -935,28 +1155,53 @@ def hold_request_guard(
     candidate_sha, candidate_tree = resolve_candidate(config)
     if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
         raise MutationGuardError("mutation guard candidate identity is invalid")
+    started_monotonic = monotonic()
+    started_wall_time = wall_time()
+    if (
+        not math.isfinite(started_monotonic)
+        or not math.isfinite(started_wall_time)
+        or started_wall_time <= 0
+    ):
+        raise MutationGuardError("mutation guard clock authority is invalid")
+    deadline_monotonic = started_monotonic + _GUARD_INTERNAL_LIFETIME_SECONDS
+    deadline_unix_seconds = math.ceil(started_wall_time) + _GUARD_INTERNAL_LIFETIME_SECONDS
+    _require_before_readiness_deadline(
+        monotonic,
+        deadline_monotonic=deadline_monotonic,
+    )
     initial = _load_cronjob(config, run)
+    _require_before_readiness_deadline(
+        monotonic,
+        deadline_monotonic=deadline_monotonic,
+    )
     expected_annotations = _guard_annotations(request_id, candidate_sha, candidate_tree)
     observed_annotations = _guard_annotation_state(initial)
     if observed_annotations:
-        if observed_annotations != expected_annotations:
-            raise MutationGuardError("lifecycle CronJob guard annotation authority drifted")
-    elif initial.suspended:
+        raise MutationGuardError(
+            "lifecycle CronJob is already annotated; annotation authority is occupied"
+        )
+    if initial.suspended:
         raise MutationGuardError("lifecycle CronJob is already suspended")
     restored = False
     acquired = False
+    unsafe_loss = False
+    ready_published = False
     ready: MutationGuardEvidence | None = None
     try:
-        held = (
-            initial
-            if initial.suspended
-            else _patch_cronjob(
-                config,
-                run,
-                resource_version=initial.resource_version,
-                suspend=True,
-                annotations=expected_annotations,
-            )
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
+        )
+        held = _patch_cronjob(
+            config,
+            run,
+            resource_version=initial.resource_version,
+            suspend=True,
+            annotations=expected_annotations,
+        )
+        _require_before_readiness_deadline(
+            monotonic,
+            deadline_monotonic=deadline_monotonic,
         )
         _require_held(
             held,
@@ -974,24 +1219,77 @@ def hold_request_guard(
             candidate_tree=candidate_tree,
             sleep=sleep,
             stop_requested=stop_requested,
+            monotonic=monotonic,
+            deadline_monotonic=deadline_monotonic,
             max_waits=max_active_waits,
         )
         with query_context(service_uid=service_uid) as query:
             try:
                 for attempt in range(max_lock_attempts):
+                    _require_before_readiness_deadline(
+                        monotonic,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                     if stop_requested():
                         raise MutationGuardError("mutation guard stop requested before readiness")
                     acquired = _parse_scalar(
                         query(_TRY_LOCK_SQL), key="acquired", expected_type=bool
                     )
+                    _require_before_readiness_deadline(
+                        monotonic,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                     if acquired:
                         break
                     if attempt + 1 < max_lock_attempts:
                         sleep(1.0)
+                        _require_before_readiness_deadline(
+                            monotonic,
+                            deadline_monotonic=deadline_monotonic,
+                        )
                 if not acquired:
                     raise MutationGuardError("staging mutation advisory lock is unavailable")
+                backend_pid = _require_lock_health(query)
+                _require_before_readiness_deadline(
+                    monotonic,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                post_lock = _load_cronjob(config, run)
+                _require_before_readiness_deadline(
+                    monotonic,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _require_held(
+                    post_lock,
+                    uid=initial.uid,
+                    request_id=request_id,
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                )
+                held = _wait_until_inactive(
+                    config,
+                    run,
+                    post_lock,
+                    request_id=request_id,
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                    sleep=sleep,
+                    stop_requested=stop_requested,
+                    monotonic=monotonic,
+                    deadline_monotonic=deadline_monotonic,
+                    max_waits=max_active_waits,
+                )
+                _require_lock_health(query, backend_pid=backend_pid)
+                _require_before_readiness_deadline(
+                    monotonic,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 mutation_epoch = _parse_scalar(
                     query(_READ_EPOCH_SQL), key="mutation_epoch", expected_type=int
+                )
+                _require_before_readiness_deadline(
+                    monotonic,
+                    deadline_monotonic=deadline_monotonic,
                 )
                 if mutation_epoch < 0:
                     raise MutationGuardError("mutation guard epoch evidence is invalid")
@@ -1001,45 +1299,96 @@ def hold_request_guard(
                     candidate_tree=candidate_tree,
                     mutation_epoch=mutation_epoch,
                     guard_pid=os.getpid(),
+                    database_backend_pid=backend_pid,
+                    deadline_unix_seconds=deadline_unix_seconds,
                     cronjob_uid=initial.uid,
                     suspended_resource_version=held.resource_version,
                     state="ready",
                 )
+                _require_before_readiness_deadline(
+                    monotonic,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 _publish_evidence(config, ready, service_uid=service_uid)
-                while not stop_requested():
-                    sleep(1.0)
+                ready_published = True
+                launch_grace_deadline = monotonic() + owner_launch_grace_seconds
+                try:
+                    while True:
+                        try:
+                            _require_lock_health(query, backend_pid=backend_pid)
+                        except BaseException as exc:
+                            unsafe_loss = True
+                            raise MutationGuardError(
+                                "mutation guard database ownership was lost"
+                            ) from exc
+                        now = monotonic()
+                        if not math.isfinite(now):
+                            unsafe_loss = True
+                            raise MutationGuardError("mutation guard clock authority was lost")
+                        if stop_requested():
+                            break
+                        if now >= deadline_monotonic:
+                            try:
+                                live_owner = owner_running(request_id)
+                            except BaseException as exc:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard owner liveness is unsafe"
+                                ) from exc
+                            if live_owner:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard absolute deadline expired with a live owner"
+                                )
+                            break
+                        if now >= launch_grace_deadline:
+                            try:
+                                live_owner = owner_running(request_id)
+                            except BaseException as exc:
+                                unsafe_loss = True
+                                raise MutationGuardError(
+                                    "mutation guard owner liveness is unsafe"
+                                ) from exc
+                            if not live_owner:
+                                break
+                        sleep(1.0)
+                except BaseException:
+                    if ready_published:
+                        unsafe_loss = True
+                    raise
             finally:
                 release_error: BaseException | None = None
-                try:
-                    _restore_cronjob(
-                        config,
-                        run,
-                        uid=initial.uid,
-                        request_id=request_id,
-                        candidate_sha=candidate_sha,
-                        candidate_tree=candidate_tree,
-                    )
-                    restored = True
-                except BaseException as exc:
-                    release_error = exc
-                if acquired:
+                if not unsafe_loss:
                     try:
-                        unlocked = _parse_scalar(
-                            query(_UNLOCK_SQL), key="released", expected_type=bool
+                        _restore_cronjob(
+                            config,
+                            run,
+                            uid=initial.uid,
+                            request_id=request_id,
+                            candidate_sha=candidate_sha,
+                            candidate_tree=candidate_tree,
                         )
-                        if unlocked is not True:
-                            raise MutationGuardError(
-                                "staging mutation advisory unlock was not confirmed"
-                            )
+                        restored = True
                     except BaseException as exc:
-                        if release_error is None:
-                            release_error = exc
-                if release_error is not None:
-                    raise MutationGuardError(
-                        "mutation guard release failed safely"
-                    ) from release_error
+                        release_error = exc
+                    if acquired:
+                        try:
+                            unlocked = _parse_scalar(
+                                query(_UNLOCK_SQL), key="released", expected_type=bool
+                            )
+                            if unlocked is not True:
+                                raise MutationGuardError(
+                                    "staging mutation advisory unlock was not confirmed"
+                                )
+                        except BaseException as exc:
+                            if release_error is None:
+                                release_error = exc
+                    if release_error is not None:
+                        raise MutationGuardError(
+                            "mutation guard release failed safely"
+                        ) from release_error
     finally:
-        if not restored:
+        if not restored and not unsafe_loss:
             _restore_cronjob(
                 config,
                 run,
@@ -1056,6 +1405,8 @@ def hold_request_guard(
         candidate_tree=ready.candidate_tree,
         mutation_epoch=ready.mutation_epoch,
         guard_pid=ready.guard_pid,
+        database_backend_pid=ready.database_backend_pid,
+        deadline_unix_seconds=ready.deadline_unix_seconds,
         cronjob_uid=ready.cronjob_uid,
         suspended_resource_version=ready.suspended_resource_version,
         state="released",
@@ -1064,13 +1415,18 @@ def hold_request_guard(
     return released_evidence
 
 
-def _run(argv: list[str], *, environment: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str],
+    *,
+    environment: Mapping[str, str],
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=timeout_seconds,
         env=dict(environment),
     )
 
@@ -1080,6 +1436,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     hold = subparsers.add_parser("hold", allow_abbrev=False)
     hold.add_argument("--request-id", required=True)
+    fence = subparsers.add_parser("fence", allow_abbrev=False)
+    fence.add_argument("--request-id", required=True)
     subparsers.add_parser("reconcile", allow_abbrev=False)
     return parser
 
@@ -1104,8 +1462,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         environment = sanitized_child_environment(config, service_uid=service_uid)
 
         def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-            return _run(command, environment=environment)
+            return _run(
+                command,
+                environment=environment,
+                timeout_seconds=_KUBERNETES_COMMAND_TIMEOUT_SECONDS,
+            )
 
+        def run_systemd(command: list[str]) -> subprocess.CompletedProcess[str]:
+            return _run(
+                command,
+                environment=environment,
+                timeout_seconds=_SYSTEMD_COMMAND_TIMEOUT_SECONDS,
+            )
+
+        from .systemd import SystemdUserManager
+
+        systemd = SystemdUserManager(
+            config,
+            service_uid=service_uid,
+            run=run_systemd,
+        )
         if args.command == "hold":
             hold_request_guard(
                 config=config,
@@ -1113,20 +1489,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 service_uid=service_uid,
                 run=run,
                 stop_requested=stopped.is_set,
+                owner_running=systemd.mutation_guard_owner_running,
             )
+        elif args.command == "fence":
+            systemd.fence_mutation_guard_owners(args.request_id)
         else:
-            from .systemd import SystemdUserManager
-
-            systemd = SystemdUserManager(
-                config,
-                service_uid=service_uid,
-                run=run,
-            )
             result = reconcile_orphaned_guard(
                 config=config,
                 service_uid=service_uid,
                 run=run,
                 show_guard=systemd.show_mutation_guard,
+                fence_owners=systemd.fence_mutation_guard_owners,
+                owner_running=systemd.mutation_guard_owner_running,
             )
             sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
         return 0

@@ -1133,6 +1133,8 @@ def _resume(
     validate_safe_identifier(request_id, "request_id")
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
+        if dependencies.mutation_guard is None or dependencies.read_mutation_epoch is None:
+            return _safe_error(dependencies, "staging mutation guard is not configured")
         _assert_available(dependencies)
         report = dependencies.preflight()
         if not report.passed:
@@ -1140,6 +1142,7 @@ def _resume(
             return 1
         try:
             request = dependencies.store.read_request(request_id)
+            original = dependencies.store.read_preflight_request(request_id)
             events = dependencies.store.read_events(request_id)
         except Exception:
             return _safe_error(dependencies, "request does not exist")
@@ -1162,58 +1165,85 @@ def _resume(
         if not resume_binding_matches(dependencies.config, request, latest_envelope):
             return _safe_error(dependencies, "request config binding no longer matches")
         if (
+            original.request_id != request_id
+            or original.rollout_id != request.rollout_id
+            or original.candidate != request.candidate
+            or original.candidate.resolved_sha != first.resolved_sha
+            or original.candidate_tree != first.resolved_tree
+            or original.environment != dependencies.config.environment
+            or original.namespace != dependencies.config.namespace
+        ):
+            return _safe_error(dependencies, "original preflight binding no longer matches")
+        if (
             latest_envelope.backup_manifest_path != first.backup_manifest_path
             or latest_envelope.backup_manifest_sha256 != first.backup_manifest_sha256
         ):
             return _safe_error(dependencies, "request backup binding no longer matches")
-        if _is_prelaunch_orphan(events, latest_attempt):
+        recover_orphan = _is_prelaunch_orphan(events, latest_attempt)
+        if recover_orphan:
             if dependencies.store.read_active() is not None:
                 return _safe_error(dependencies, "request is not a recoverable prelaunch attempt")
             expected_unit = _unit_name(request_id, latest_attempt)
             if dependencies.systemd.show(expected_unit) is not None:
                 return _safe_error(dependencies, "request is not a recoverable prelaunch attempt")
-            pointer = dependencies.lifecycle.launch(latest_envelope)
-            _write_json(
-                dependencies.stdout,
-                {
-                    "request_id": request_id,
-                    "resolved_sha": latest_envelope.resolved_sha,
-                    "image_tag": latest_envelope.image_tag,
-                    "unit": pointer.unit_name,
-                    "status": "pending",
-                    "attempt_number": latest_attempt,
-                },
-            )
-            return 0
-        latest = _latest_attempt_event(events)
-        if latest is None or latest.event not in {
-            "attempt_failed",
-            "cancelled",
-            "launch_failed",
-        }:
-            return _safe_error(dependencies, "request is not in a resumable failed state")
-        attempt_number = next_attempt
-        if attempt_number <= 1:
-            return _safe_error(dependencies, "first finalized attempt is unavailable")
-        envelope = replace(
-            first,
-            attempt_number=attempt_number,
-            attempt_operator=caller.username,
-            attempt_uid=caller.uid,
-            resume=True,
-        )
-        dependencies.store.publish_attempt_envelope(envelope)
-        dependencies.store.append_event(
-            _event(
-                request_id,
-                caller,
-                now=dependencies.now,
-                event="attempt_pending",
+            envelope = latest_envelope
+            attempt_number = latest_attempt
+        else:
+            latest = _latest_attempt_event(events)
+            if latest is None or latest.event not in {
+                "attempt_failed",
+                "cancelled",
+                "launch_failed",
+            }:
+                return _safe_error(dependencies, "request is not in a resumable failed state")
+            attempt_number = next_attempt
+            if attempt_number <= 1:
+                return _safe_error(dependencies, "first finalized attempt is unavailable")
+            envelope = replace(
+                first,
                 attempt_number=attempt_number,
-                status="pending",
+                attempt_operator=caller.username,
+                attempt_uid=caller.uid,
+                resume=True,
             )
-        )
-        pointer = dependencies.lifecycle.launch(envelope)
+        mutation_guard = dependencies.mutation_guard
+        read_mutation_epoch = dependencies.read_mutation_epoch
+        guard_acquired = False
+        guard_transferred = False
+        try:
+            guard_evidence = mutation_guard.acquire(request_id)
+            guard_acquired = True
+            observed_epoch = read_mutation_epoch()
+            if (
+                type(observed_epoch) is not int
+                or guard_evidence.request_id != request_id
+                or guard_evidence.candidate_sha != original.candidate.resolved_sha
+                or guard_evidence.candidate_tree != original.candidate_tree
+                or guard_evidence.mutation_epoch != original.mutation_epoch
+                or guard_evidence.state != "ready"
+                or observed_epoch != original.mutation_epoch
+            ):
+                return _safe_error(
+                    dependencies,
+                    "staging mutation epoch changed since the original preflight",
+                )
+            if not recover_orphan:
+                dependencies.store.publish_attempt_envelope(envelope)
+                dependencies.store.append_event(
+                    _event(
+                        request_id,
+                        caller,
+                        now=dependencies.now,
+                        event="attempt_pending",
+                        attempt_number=attempt_number,
+                        status="pending",
+                    )
+                )
+            pointer = dependencies.lifecycle.launch(envelope)
+            guard_transferred = True
+        finally:
+            if guard_acquired and not guard_transferred:
+                mutation_guard.release(request_id)
         _write_json(
             dependencies.stdout,
             {
@@ -1940,7 +1970,7 @@ def _run(
     *,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    timeout = 120 if argv and argv[0] in {"systemctl", "systemd-run"} else 30
+    timeout = 240 if argv and argv[0] in {"systemctl", "systemd-run"} else 30
     return subprocess.run(
         argv,
         check=False,

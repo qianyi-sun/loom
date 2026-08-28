@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import traceback
 from dataclasses import replace
@@ -307,6 +308,8 @@ def test_start_argv_is_fixed_and_uses_the_sanitized_environment() -> None:
         "UMask=0077",
         "--property",
         f"WorkingDirectory={CANDIDATE_REPO}",
+        "--property",
+        "After=loom-staging-mutation-guard-req-alpha.service",
         "/usr/bin/env",
         "-i",
         "HOME=/var/lib/loom-staging-rollout",
@@ -349,6 +352,8 @@ def test_backup_start_argv_is_fixed_to_one_preflight_job() -> None:
     ]
     assert "--collect" in argv
     assert "UMask=0077" in argv
+    assert not any(item.startswith("BindsTo=") for item in argv)
+    assert "After=loom-staging-mutation-guard-req-alpha.service" in argv
 
 
 @pytest.mark.parametrize(
@@ -406,6 +411,8 @@ class MutationGuardRunner:
             candidate_tree="b" * 40,
             mutation_epoch=100,
             guard_pid=self.evidence_pid,
+            database_backend_pid=9876,
+            deadline_unix_seconds=2_000_000_000,
             cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
             suspended_resource_version="11",
             state=state,
@@ -482,13 +489,38 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
         "--property",
         f"WorkingDirectory={CANDIDATE_REPO}",
     ]
-    assert "Restart=on-failure" in launch
-    assert "RestartSec=5s" in launch
+    assert "Restart=no" in launch
+    assert not any(item.startswith("RestartSec=") for item in launch)
     assert "KillMode=mixed" in launch
-    assert "TimeoutStopSec=120s" in launch
+    assert "TimeoutStopSec=180s" in launch
     runtime_property = next(item for item in launch if item.startswith("RuntimeMaxSec="))
     assert runtime_property.endswith("s")
     assert int(runtime_property.removeprefix("RuntimeMaxSec=").removesuffix("s")) > 0
+    stop_post = [item for item in launch if item.startswith("ExecStopPost=")]
+    assert len(stop_post) == 1
+    assert shlex.split(stop_post[0].removeprefix("ExecStopPost=")) == [
+        "/usr/bin/env",
+        "-i",
+        "HOME=/var/lib/loom-staging-rollout",
+        "USER=loom-rollout",
+        "LOGNAME=loom-rollout",
+        f"PATH={CANDIDATE_VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+        "PYTHONDONTWRITEBYTECODE=1",
+        f"XDG_RUNTIME_DIR=/run/user/{os.getuid()}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{os.getuid()}/bus",
+        "KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig",
+        "LC_ALL=C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_TERMINAL_PROMPT=0",
+        "LOOM_STAGING_ROLLOUT_CONFIG=/etc/loom/staging-rollout.toml",
+        f"{CANDIDATE_VENV}/bin/python",
+        "-m",
+        "loom_cli.rollout.operator.staging_mutation_guard",
+        "fence",
+        "--request-id",
+        "req-alpha",
+    ]
     assert launch[-5:] == [
         "-m",
         "loom_cli.rollout.operator.staging_mutation_guard",
@@ -501,6 +533,290 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
     assert not any("SECRET" in item or "TOKEN" in item for item in launch)
     status = manager.show_mutation_guard("req-alpha")
     assert status is not None and status.is_running
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("", False),
+        (
+            "loom-staging-backup-req-alpha.service loaded active running backup\n",
+            True,
+        ),
+        (
+            "loom-staging-rollout-req-alpha-2.service loaded active running attempt\n",
+            True,
+        ),
+        (
+            "loom-staging-backup-req-alpha.service loaded active running backup\n"
+            "loom-staging-rollout-req-alpha-2.service loaded activating start attempt\n",
+            True,
+        ),
+        (
+            "loom-staging-rollout-req-alpha-2.service loaded deactivating stop-sigterm attempt\n",
+            True,
+        ),
+    ],
+)
+def test_guard_owner_liveness_accepts_only_exact_request_bound_handoff(
+    stdout: str,
+    expected: bool,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    manager = SystemdUserManager(make_config(), service_uid=SERVICE_UID, run=run)
+
+    assert manager.mutation_guard_owner_running("req-alpha") is expected
+    assert calls == [
+        [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--full",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+            "loom-staging-backup-req-alpha.service",
+            "loom-staging-rollout-req-alpha-*.service",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "loom-staging-rollout-req-other-1.service loaded active running foreign\n",
+        (
+            "loom-staging-rollout-req-alpha-1.service loaded active running old\n"
+            "loom-staging-rollout-req-alpha-2.service loaded active running new\n"
+        ),
+        "loom-staging-backup-req-alpha.service loaded maintenance dead unsafe\n",
+    ],
+)
+def test_guard_owner_liveness_fails_closed_on_foreign_ambiguous_or_unsafe_status(
+    stdout: str,
+) -> None:
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, stdout, ""),
+    )
+
+    with pytest.raises(SystemdQueryError, match="owner"):
+        manager.mutation_guard_owner_running("req-alpha")
+
+
+class MutationGuardFenceRunner:
+    def __init__(self, owner_stdout: str) -> None:
+        self.owner_stdout = owner_stdout
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
+        if argv[0:3] == ["systemctl", "--user", "list-units"]:
+            return subprocess.CompletedProcess(argv, 0, self.owner_stdout, "")
+        if argv[0:3] == ["systemctl", "--user", "kill"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+
+def _mutation_guard_fence_manager(
+    tmp_path: Path,
+    *,
+    owner_stdout: str,
+    evidence_state: Literal["ready", "released", "missing", "unsafe"],
+) -> tuple[SystemdUserManager, MutationGuardFenceRunner]:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    config = replace(make_config(), runtime_root=runtime_root)
+    if evidence_state in {"ready", "released"}:
+        MutationGuardRunner(config, service_uid=os.getuid())._publish(evidence_state)
+    elif evidence_state == "unsafe":
+        path = guard_evidence_path(config, "req-alpha")
+        path.parent.mkdir(mode=0o700)
+        path.write_text("not-json\n")
+        path.chmod(0o600)
+    runner = MutationGuardFenceRunner(owner_stdout)
+    return (
+        SystemdUserManager(config, service_uid=os.getuid(), run=runner),
+        runner,
+    )
+
+
+def test_mutation_guard_fence_is_noop_after_exact_verified_release(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=("loom-staging-rollout-req-alpha-1.service loaded active running attempt\n"),
+        evidence_state="released",
+    )
+
+    manager.fence_mutation_guard_owners("req-alpha")
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("evidence_request_id", "evidence_candidate_sha"),
+    [
+        ("req-other", CANDIDATE_SHA),
+        ("req-alpha", "c" * 40),
+    ],
+)
+def test_mutation_guard_fence_rejects_foreign_released_evidence_bindings(
+    tmp_path: Path,
+    evidence_request_id: str,
+    evidence_candidate_sha: str,
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=("loom-staging-rollout-req-alpha-1.service loaded active running attempt\n"),
+        evidence_state="missing",
+    )
+    evidence = MutationGuardEvidence.build(
+        request_id=evidence_request_id,
+        candidate_sha=evidence_candidate_sha,
+        candidate_tree="b" * 40,
+        mutation_epoch=100,
+        guard_pid=4321,
+        database_backend_pid=9876,
+        deadline_unix_seconds=2_000_000_000,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="released",
+    )
+    path = guard_evidence_path(manager.config, "req-alpha")
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(evidence.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
+    path.chmod(0o600)
+
+    manager.fence_mutation_guard_owners("req-alpha")
+
+    assert [call[2] for call in runner.calls] == ["list-units", "kill"]
+    assert runner.calls[-1][-1] == "loom-staging-rollout-req-alpha-1.service"
+
+
+@pytest.mark.parametrize(
+    "evidence_state",
+    [
+        pytest.param("ready", id="runtime-or-sigkill-after-readiness"),
+        pytest.param("missing", id="sigkill-before-evidence"),
+        pytest.param("unsafe", id="unsafe-guard-failure"),
+    ],
+)
+def test_mutation_guard_fence_hard_kills_only_exact_live_owners(
+    tmp_path: Path,
+    evidence_state: Literal["ready", "missing", "unsafe"],
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=(
+            "loom-staging-backup-req-alpha.service loaded active running backup\n"
+            "loom-staging-rollout-req-alpha-2.service loaded deactivating "
+            "stop-sigterm attempt\n"
+        ),
+        evidence_state=evidence_state,
+    )
+
+    manager.fence_mutation_guard_owners("req-alpha")
+
+    assert runner.calls == [
+        [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--full",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+            "loom-staging-backup-req-alpha.service",
+            "loom-staging-rollout-req-alpha-*.service",
+        ],
+        [
+            "systemctl",
+            "--user",
+            "kill",
+            "--kill-whom=all",
+            "--signal=SIGKILL",
+            "loom-staging-backup-req-alpha.service",
+        ],
+        [
+            "systemctl",
+            "--user",
+            "kill",
+            "--kill-whom=all",
+            "--signal=SIGKILL",
+            "loom-staging-rollout-req-alpha-2.service",
+        ],
+    ]
+    assert all(call[2] != "stop" for call in runner.calls)
+
+
+def test_mutation_guard_fence_attempts_every_exact_owner_without_recursive_stop(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=(
+            "loom-staging-backup-req-alpha.service loaded active running backup\n"
+            "loom-staging-rollout-req-alpha-2.service loaded active running attempt\n"
+        ),
+        evidence_state="ready",
+    )
+
+    original_run = runner.__call__
+
+    def fail_first_kill(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        result = original_run(argv)
+        if argv[-1] == "loom-staging-backup-req-alpha.service":
+            return subprocess.CompletedProcess(argv, 1, "", "injected kill failure")
+        return result
+
+    manager._run = fail_first_kill
+
+    with pytest.raises(SystemdOperationError, match="fence"):
+        manager.fence_mutation_guard_owners("req-alpha")
+
+    assert [call[2] for call in runner.calls] == ["list-units", "kill", "kill"]
+    assert [call[-1] for call in runner.calls[1:]] == [
+        "loom-staging-backup-req-alpha.service",
+        "loom-staging-rollout-req-alpha-2.service",
+    ]
+
+
+@pytest.mark.parametrize(
+    "owner_stdout",
+    [
+        "loom-staging-rollout-req-other-1.service loaded active running foreign\n",
+        (
+            "loom-staging-rollout-req-alpha-1.service loaded active running old\n"
+            "loom-staging-rollout-req-alpha-2.service loaded active running new\n"
+        ),
+        "loom-staging-backup-req-alpha.service loaded active\n",
+    ],
+)
+def test_mutation_guard_fence_validates_complete_inventory_before_any_kill(
+    tmp_path: Path,
+    owner_stdout: str,
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=owner_stdout,
+        evidence_state="missing",
+    )
+
+    with pytest.raises(SystemdQueryError, match="owner"):
+        manager.fence_mutation_guard_owners("req-alpha")
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][0:3] == ["systemctl", "--user", "list-units"]
 
 
 def test_mutation_guard_start_covers_complete_protected_ownership_window(tmp_path: Path) -> None:
@@ -518,6 +834,22 @@ def test_mutation_guard_start_covers_complete_protected_ownership_window(tmp_pat
     )
 
     assert runtime_seconds > protected_ownership_window
+
+
+def test_mutation_guard_stop_timeout_exceeds_complete_unsafe_fence(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+
+    manager.start_mutation_guard("req-alpha")
+
+    launch = next(call for call in runner.calls if call[0] == "systemd-run")
+    stop_timeout = int(
+        next(item for item in launch if item.startswith("TimeoutStopSec="))
+        .removeprefix("TimeoutStopSec=")
+        .removesuffix("s")
+    )
+    complete_unsafe_fence = 3 * 30  # one inventory plus two exact owner kills
+
+    assert stop_timeout > complete_unsafe_fence
 
 
 def test_mutation_guard_stop_requires_release_evidence_and_absent_unit(tmp_path: Path) -> None:
