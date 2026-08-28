@@ -677,6 +677,7 @@ def test_apply_fails_closed_on_impossible_restart_state(
     assert service.store.read_preflight_artifact_retention_claim() is not None
 
 
+@pytest.mark.timeout(180)
 def test_repeated_bounded_plans_preserve_active_readable_publication(
     tmp_path: Path,
 ) -> None:
