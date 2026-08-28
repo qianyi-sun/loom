@@ -89,23 +89,20 @@ if [ ! -f "${index_template_path}" ]; then
 fi
 
 tmp_index_path="${index_path}.tmp"
-if [ -n "${route_path}" ]; then
-  sed \
-    -e "s|src=\"\./assets/|src=\"${route_path}/assets/|g" \
-    -e "s|href=\"\./assets/|href=\"${route_path}/assets/|g" \
-    "${index_template_path}" > "${tmp_index_path}"
-  if grep -Eq '(src|href)="\./assets/' "${tmp_index_path}"; then
-    echo "frontend shell retained a relative build asset" >&2
-    rm -f "${tmp_index_path}"
-    exit 1
-  fi
-  if grep -Eq '/(dev|prod|staging)/(dev|prod|staging)/assets/' "${tmp_index_path}"; then
-    echo "frontend shell contains a double or stale route prefix" >&2
-    rm -f "${tmp_index_path}"
-    exit 1
-  fi
-else
-  cp "${index_template_path}" "${tmp_index_path}"
+asset_path="${route_path}/assets/"
+sed \
+  -e "s|src=\"\./assets/|src=\"${asset_path}|g" \
+  -e "s|href=\"\./assets/|href=\"${asset_path}|g" \
+  "${index_template_path}" > "${tmp_index_path}"
+if grep -Eq '(src|href)="\./assets/' "${tmp_index_path}"; then
+  echo "frontend shell retained a relative build asset" >&2
+  rm -f "${tmp_index_path}"
+  exit 1
+fi
+if grep -Eq '/(dev|prod|staging)/(dev|prod|staging)/assets/' "${tmp_index_path}"; then
+  echo "frontend shell contains a double or stale route prefix" >&2
+  rm -f "${tmp_index_path}"
+  exit 1
 fi
 mv "${tmp_index_path}" "${index_path}"
 

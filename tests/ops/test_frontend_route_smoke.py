@@ -6,6 +6,7 @@ import os
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pytest
 from scripts.ops.frontend_route_smoke import (
@@ -1793,10 +1794,13 @@ def test_web_runtime_config_prefixes_staging_assets(tmp_path: Path) -> None:
     assert '="./assets/' not in html
 
 
-def test_web_runtime_config_preserves_root_asset_contract(tmp_path: Path) -> None:
+def test_web_runtime_config_anchors_root_assets_for_deep_routes(tmp_path: Path) -> None:
     _, html = _run_runtime_config(tmp_path, environment="local", route_path="")
-    assert 'href="./assets/index.css"' in html
-    assert 'src="./assets/index.js"' in html
+    assert 'href="/assets/index.css"' in html
+    assert 'src="/assets/index.js"' in html
+    assert urljoin("https://yylx.world/auth/reset", "/assets/index.js") == (
+        "https://yylx.world/assets/index.js"
+    )
 
 
 def test_web_runtime_config_restart_never_retains_or_doubles_prefix(
@@ -1816,3 +1820,7 @@ def test_web_runtime_config_restart_never_retains_or_doubles_prefix(
     assert html.count("/staging/assets/") == 2
     assert "/staging/staging/assets/" not in html
     assert "/prod/assets/" not in html
+
+    _, root_html = _run_runtime_config(tmp_path, environment="local", route_path="")
+    assert root_html.count("/assets/") == 2
+    assert "/staging/assets/" not in root_html
