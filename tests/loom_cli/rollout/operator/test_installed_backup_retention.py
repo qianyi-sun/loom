@@ -219,6 +219,19 @@ def _verified_candidate_recovery_service(
                 status="pending",
             )
 
+    class RecoveryMutationGuard:
+        def assert_ready(self, _request_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                request_id=job.request_id,
+                candidate_sha=job.candidate_sha,
+                candidate_tree=job.candidate_tree,
+                mutation_epoch=job.mutation_epoch,
+                state="ready",
+            )
+
+        def release(self, _request_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(request_id=job.request_id, state="released")
+
     verified = VerifiedBackupJob(
         manifest_path=tmp_path / job.bundle_name / "backup-manifest.json",
         manifest_sha256=manifest_sha256,
@@ -236,6 +249,7 @@ def _verified_candidate_recovery_service(
             found,
             result,
         ),
+        mutation_guard=RecoveryMutationGuard(),
         now=lambda: "2026-07-13T20:06:00Z",
         stderr=SimpleNamespace(write=lambda _value: None),
     )

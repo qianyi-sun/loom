@@ -112,9 +112,7 @@ MUTATION_GUARD_RECONCILE_TIMER = "loom-staging-rollout-mutation-guard-reconcile.
 MUTATION_GUARD_RECONCILE_SERVICE_PATH = (
     Path("/etc/systemd/system") / MUTATION_GUARD_RECONCILE_SERVICE
 )
-MUTATION_GUARD_RECONCILE_TIMER_PATH = (
-    Path("/etc/systemd/system") / MUTATION_GUARD_RECONCILE_TIMER
-)
+MUTATION_GUARD_RECONCILE_TIMER_PATH = Path("/etc/systemd/system") / MUTATION_GUARD_RECONCILE_TIMER
 SUDOERS_PATH = Path("/etc/sudoers.d/loom-staging-rollout")
 TMPFILES_PATH = Path("/etc/tmpfiles.d/loom-staging-rollout.conf")
 SYSCTL_PATH = Path("/etc/sysctl.d/90-loom-staging-rollout.conf")
@@ -5902,9 +5900,7 @@ class HostInstaller:
                 "mutation-guard-reconcile-helper": self._asset(
                     "loom-staging-rollout-mutation-guard-reconcile"
                 ),
-                "mutation-guard-reconcile-service": self._asset(
-                    MUTATION_GUARD_RECONCILE_SERVICE
-                ),
+                "mutation-guard-reconcile-service": self._asset(MUTATION_GUARD_RECONCILE_SERVICE),
                 "mutation-guard-reconcile-timer": self._asset(MUTATION_GUARD_RECONCILE_TIMER),
                 "gb10-known-hosts": self._source_file("deploy/worker-pools/gb10/known_hosts"),
                 "gb10-trust-tool": self._source_file("scripts/ops/staging_rollout_gb10_trust.py"),
