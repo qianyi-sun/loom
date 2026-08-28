@@ -701,13 +701,15 @@ def test_registered_external_supervisor_predecessor_binds_every_controller() -> 
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
 
     assert probe.passed
-    controller_bindings = probe.evidence["controller-bindings"]
-    assert isinstance(controller_bindings, dict)
-    assert controller_bindings["gx10-01c7/authority-digest"] == gb10.authority_digest
-    assert controller_bindings["gx10-01c7/runtime-state"] == "ready"
-    assert controller_bindings["TRT-EAI-OLDLAB-1/authority-digest"] == (oldlab.authority_digest)
+    controller_identities = probe.evidence["controller-identity-bindings"]
+    controller_runtime = probe.evidence["controller-runtime-observations"]
+    assert isinstance(controller_identities, dict)
+    assert isinstance(controller_runtime, dict)
+    assert controller_identities["gx10-01c7/authority-digest"] == gb10.authority_digest
+    assert controller_runtime["gx10-01c7/runtime-state"] == "ready"
+    assert controller_identities["TRT-EAI-OLDLAB-1/authority-digest"] == (oldlab.authority_digest)
     assert (
-        controller_bindings["TRT-EAI-OLDLAB-1/unit/loom-autoscaler-oldlab-staging.timer"]
+        controller_identities["TRT-EAI-OLDLAB-1/unit/loom-autoscaler-oldlab-staging.timer"]
         == oldlab.unit_sha256["loom-autoscaler-oldlab-staging.timer"]
     )
 
@@ -720,7 +722,8 @@ def test_registered_external_supervisor_predecessor_rejects_missing_controller()
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
 
     assert not probe.passed
-    assert probe.evidence["controller-bindings"] == {}
+    assert probe.evidence["controller-identity-bindings"] == {}
+    assert probe.evidence["controller-runtime-observations"] == {}
 
 
 def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_malformed_or_pending() -> (
@@ -822,12 +825,13 @@ def test_registered_credentials_check_attests_metadata_without_secret_values(
 
     assert result.passed
     assert result.evidence["failed-sources"] == {}
-    assert set(result.evidence["metadata-fingerprints"]) == {
+    assert set(result.evidence["stable-metadata-fingerprints"]) == {
         "admin",
         "worker",
         "service",
         "catalog",
     }
+    assert result.evidence["rotating-metadata-fingerprints"] == {}
     rendered = json.dumps(dict(result.evidence), sort_keys=True)
     assert "private-value" not in rendered
     assert "CATALOG_PASSWORD" not in rendered
@@ -889,7 +893,7 @@ def test_registered_credentials_check_reports_all_unsafe_sources(
         "admin": "content-fingerprint-mismatch",
         "worker": "authority-or-stability-failed",
     }
-    assert set(result.evidence["metadata-fingerprints"]) == {"service", "catalog"}
+    assert set(result.evidence["stable-metadata-fingerprints"]) == {"service", "catalog"}
 
 
 def test_registered_credentials_check_rejects_source_binding_drift_before_read(

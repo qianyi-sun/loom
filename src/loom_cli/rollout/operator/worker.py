@@ -19,7 +19,10 @@ from typing import Any, Never, Protocol, TextIO
 
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.failure_authority import RolloutFailureEvidence
-from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
+from loom_cli.rollout.final_attestation_admission import (
+    FinalAttestationAdmission,
+    FinalAttestationAdmissionError,
+)
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_contract import (
     CheckOperation,
@@ -592,6 +595,21 @@ def _run_attempt_owned(
         if dependencies.final_admission is not None:
             try:
                 final_admission = dependencies.final_admission(envelope)
+            except FinalAttestationAdmissionError as exc:
+                signal_controller.seal_terminal(event_cancelled=False)
+                release_guard()
+                dependencies.store.append_event(
+                    _event(
+                        envelope,
+                        dependencies=dependencies,
+                        event="attempt_failed",
+                        status="failed",
+                        reason=(f"preflight.attestation.final-admission.{exc.failure_code}@static"),
+                        current_step="00-final-admission",
+                    )
+                )
+                dependencies.lifecycle.release_active(pointer)
+                return 1
             except Exception:
                 signal_controller.seal_terminal(event_cancelled=False)
                 release_guard()

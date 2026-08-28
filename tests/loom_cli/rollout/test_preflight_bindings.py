@@ -77,7 +77,10 @@ def _executions() -> tuple[CheckExecution, ...]:
         _execution("runner.install", {"attestation-digest": "c" * 64}),
         _execution(
             "credentials.metadata",
-            {"metadata-fingerprints": {"admin": "d" * 64}},
+            {
+                "stable-metadata-fingerprints": {"admin": "d" * 64},
+                "rotating-metadata-fingerprints": {},
+            },
         ),
         _execution(
             "backup.lease-eligibility",
@@ -129,17 +132,15 @@ def _executions() -> tuple[CheckExecution, ...]:
                 "pending-transition-digest": "0" * 64,
                 "transition-clear": True,
                 "runtime-ready": True,
-                "controller-bindings": {
+                "controller-identity-bindings": {
                     "gx10-01c7/authority-kind": "canonical",
                     "gx10-01c7/authority-digest": "8" * 64,
                     "gx10-01c7/pointer-digest": "c" * 64,
                     "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
                         predecessor_units
                     ),
-                    "gx10-01c7/live-evidence-digest": "9" * 64,
                     "gx10-01c7/pending-transition-digest": "0" * 64,
                     "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
-                    "gx10-01c7/runtime-state": "repairable",
                     **{
                         f"gx10-01c7/unit/{name}": digest
                         for name, digest in predecessor_units.items()
@@ -150,14 +151,18 @@ def _executions() -> tuple[CheckExecution, ...]:
                     "TRT-EAI-OLDLAB-1/unit-set-digest": (
                         external_supervisor_unit_set_digest(oldlab_predecessor_units)
                     ),
-                    "TRT-EAI-OLDLAB-1/live-evidence-digest": "b" * 64,
                     "TRT-EAI-OLDLAB-1/pending-transition-digest": "0" * 64,
                     "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
-                    "TRT-EAI-OLDLAB-1/runtime-state": "ready",
                     **{
                         f"TRT-EAI-OLDLAB-1/unit/{name}": digest
                         for name, digest in oldlab_predecessor_units.items()
                     },
+                },
+                "controller-runtime-observations": {
+                    "gx10-01c7/live-evidence-digest": "9" * 64,
+                    "gx10-01c7/runtime-state": "repairable",
+                    "TRT-EAI-OLDLAB-1/live-evidence-digest": "b" * 64,
+                    "TRT-EAI-OLDLAB-1/runtime-state": "ready",
                 },
             },
         ),
@@ -302,11 +307,15 @@ def test_binding_derivation_rejects_incomplete_supervisor_controller_evidence() 
                     key: value for key, value in values.items() if key.startswith("gx10-01c7")
                 }
         elif execution.check_id == "external-supervisor.predecessor":
-            values = evidence["controller-bindings"]
-            assert isinstance(values, dict)
-            evidence["controller-bindings"] = {
-                key: value for key, value in values.items() if key.startswith("gx10-01c7/")
-            }
+            for field in (
+                "controller-identity-bindings",
+                "controller-runtime-observations",
+            ):
+                values = evidence[field]
+                assert isinstance(values, dict)
+                evidence[field] = {
+                    key: value for key, value in values.items() if key.startswith("gx10-01c7/")
+                }
         incomplete.append(_execution(execution.check_id, evidence))
 
     with pytest.raises(ValueError, match="controller coverage"):

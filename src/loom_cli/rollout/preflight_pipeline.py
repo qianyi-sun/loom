@@ -291,8 +291,7 @@ class PreflightRehearsal:
         blockers = tuple(
             PreflightBlocker.from_execution(execution)
             for execution in stable
-            if not execution.passed
-            and execution.check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
+            if not execution.passed and execution.check_id not in _CHECKPOINT_TRANSITION_CHECK_IDS
         )
         rehearsal = cls(
             registry_digest=registry_digest,
@@ -462,6 +461,7 @@ class PreflightPipeline:
         attestation = PreflightAttestation.issue(
             bindings=bindings,
             executions=rehearsal.executions,
+            checks=self._registry.checks,
             issued_at=self._clock(),
             registry_digest=self._registry.registry_digest,
             coverage_digest=self._registry.coverage_digest,
