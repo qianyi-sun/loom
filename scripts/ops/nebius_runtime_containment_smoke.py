@@ -259,7 +259,7 @@ def network_policy(candidate_sha: str) -> dict[str, Any]:
                             "namespaceSelector": {
                                 "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                             },
-                            "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
                         }
                     ],
                     "ports": [

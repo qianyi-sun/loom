@@ -55,7 +55,7 @@ def test_network_policy_allows_only_dns() -> None:
                     "namespaceSelector": {
                         "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                     },
-                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
                 }
             ],
             "ports": [
