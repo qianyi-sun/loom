@@ -107,6 +107,15 @@ approve `backup-retention` to retire the prior active payload. Exact replay is
 idempotent; any lease, attestation, request, Attempt, or rotation drift is a
 hard refusal.
 
+These two rotation-maintenance commands are supported by both installed source
+modes, including an exact pinned `merged-dev` install. Do not reinstall into a
+sealed mode or edit rotation data to gain maintenance access. Source mode is
+not their authority boundary: the broker still requires a coordinator caller,
+the staging/`loom-staging` install binding, the lifecycle launch lock,
+maintenance-idle state, canonical immutable evidence, and the exact inventory
+digest for apply. Manifest ownership remains a separate explicit installer
+opt-in because it mutates candidate-derived Kubernetes resources.
+
 If a host upgrade instead reports an active rollout solely because an older
 nonterminal preflight-backup record survives after its owner units disappeared,
 do not edit `state.json`, invent a lifecycle transition, or delete its bundle.

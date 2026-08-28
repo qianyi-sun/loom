@@ -177,6 +177,18 @@ promoting the candidate; it never deletes either payload. The superseded
 active payload is queued for the separate `backup-retention` inventory/apply
 protocol.
 
+Backup recovery and retention are available to both authenticated
+`sealed-cumulative` and exact installer-pinned `merged-dev` runners. Their
+authority comes from coordinator identity, the staging/`loom-staging` binding,
+the lifecycle launch lock and maintenance-idle proof, and an exact approved
+plan digest—not from the source-mode label. This is intentionally narrower
+than manifest ownership or lifecycle-capacity maintenance: rotation
+maintenance consumes only canonical persisted rotation, job, lease, receipt,
+and backup-payload evidence and cannot select source-derived cluster mutation
+targets. The service constructors, broker admission, and production composition
+share one policy predicate so a valid rotation cannot become unmaintainable
+during a sealed-to-merged installation migration.
+
 Every host install or upgrade fails closed on durable nonterminal
 preflight-backup state, including a fresh reinstall after uninstall: uninstall
 retains both `/var/lib/loom/staging-rollout` and the root receipt directory.
