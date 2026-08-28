@@ -101,6 +101,100 @@ approve `backup-retention` to retire the prior active payload. Exact replay is
 idempotent; any lease, attestation, request, Attempt, or rotation drift is a
 hard refusal.
 
+If a host upgrade instead reports an active rollout solely because an older
+nonterminal preflight-backup record survives after its owner units disappeared,
+do not edit `state.json`, invent a lifecycle transition, or delete its bundle.
+Run the installer from a clean, root-owned checkout of the exact merged `dev`
+commit and review the bounded recovery inventory:
+
+```bash
+sudo -n python3 scripts/ops/staging_rollout_host.py \
+  orphaned-backup-recovery inventory
+sudo -n python3 scripts/ops/staging_rollout_host.py \
+  orphaned-backup-recovery apply --approved-plan-sha256 SHA256
+```
+
+The command authenticates that checkout as the exact current merged `dev` head,
+proves the installed source is its ancestor, and validates its rollout assets
+before entering maintenance. Apply is authorized only by the exact inventory
+digest. It requires no active pointer or live rollout/backup/guard unit, rejects
+malformed canonical rotation/job/state/lease evidence at publication and again
+at every receipt use, rejects any payload still present in
+active/candidate/retirement rotation state, and refuses a request for either the
+installed candidate or the authenticated current-`dev` candidate. Recovery Git
+uses sanitized configuration and rejects replace refs, grafts, shallow history,
+and local or HTTP object alternates. Every recovered candidate must be a Git
+ancestor of that authenticated head and its immutable job tree must equal Git's
+exact candidate tree; unknown, unrelated, or tree-forged history refuses
+recovery. Apply repeats this history check on the exact recomputed plan whose
+approved digest will be published. Inventory is capped at 10,000 requests and
+each of the two systemd inventories is capped at 30 seconds.
+
+A process-level watchdog starts before the lifecycle lock and enforces one
+600-second monotonic deadline across authentication, external commands,
+filesystem work, maintenance, and publication. No receipt replacement begins
+after its final post-fsync deadline check. The watchdog requires the main thread
+and refuses before lifecycle mutation when a foreign `ITIMER_REAL` is active or
+`SIGALRM` is pending; it never consumes or replaces another subsystem's timer or
+pending signal. Otherwise it captures the main-thread identity, installs and
+unblocks its `SIGALRM` handler, and starts a dedicated sender thread. The sender
+waits on the monotonic deadline and then uses `signal.pthread_kill` to target the
+main thread; the watchdog never arms `ITIMER_REAL`. During restoration, an owned
+delivery immediately before the signal block is recorded and blocking is retried
+within a fixed bound. Once blocking is independently verified, the helper sets
+the sender cancellation event, bounded-joins the sender, and verifies that it
+stopped. With the watchdog handler still installed, it then drains and verifies
+owned pending delivery before restoring and verifying the prior handler and exact
+mask. If blocking cannot be proven, restoration aborts before restoring the
+recorded handler or mask; it leaves the current handler unchanged and reports
+that the mask state is unverified. After blocking is proven, a sender-stop,
+handler-ownership, or pending-delivery proof failure leaves `SIGALRM` blocked and
+the current handler unchanged. A later exact-mask restoration failure is safe
+because the sender is stopped and its pending delivery is already drained.
+Restoration failure outranks owned expiry, owned expiry outranks a body error,
+and an unrelated body error is otherwise preserved.
+
+Maintenance enable owns and rolls back its previously empty marker slot across
+the create-return boundary, while recovery owns cleanup before enable begins
+and removes a successful marker without a second status probe. An absent marker
+is an immediate idempotent cleanup. Cleanup uses the original absolute deadline
+and the exact service UID/GID authenticated at maintenance enable; it performs
+no fresh NSS identity lookup after expiry. It uses nonblocking launch-lock
+attempts bounded by the same monotonic deadline after sender delivery is
+observed. Cleanup starts no second sender and polls that absolute deadline
+instead. Lock wait remains normally interruptible before delivery. If the cached
+identity is unavailable or the lock is unavailable at expiry, recovery returns
+an error and retains the marker. Only after lock acquisition and marker
+validation is `SIGALRM` deferred across unlink plus directory fsync; a timeout
+pending there is reported immediately after that critical section. A host stuck
+in kernel uninterruptible I/O cannot be preempted by userspace; if the command
+itself does not return, treat that as a fail-closed host fault and diagnose the
+host rather than rerunning or deleting the marker.
+
+Apply publishes a root-owned receipt bound to the exact unchanged candidate,
+job, and state. Plans retain already-receipted eligible items, so the same
+approved digest is replay-safe after success or partial publication. A later
+byte change, renewed rotation reference, or selection of the receipt's candidate
+as either the installed or prospective install source invalidates its authority
+and blocks installation again. The live-rotation lookup uses the payload ID from
+the exact job bytes that validated the receipt, not a second job read. Uninstall
+explicitly retains the service state and root receipt directory while removing
+the tmpfiles asset and ephemeral runtime directory; a fresh reinstall
+detects any path entry at either retained namespace immediately after invocation
+authentication and before install-source or transaction root-directory
+convergence. A non-directory or symlink refuses there. A safe directory entry
+selects the later fence, which authenticates the retained service identity,
+bootstraps only the fixed `0700` runtime directory, and proves service state,
+marker, and unit authority before install-record, account, service-directory,
+candidate, runtime, or admission convergence. Receipt-root and receipt-file
+semantics are checked only when an active durable request can consume the
+receipt; unsafe receipt metadata never authorizes it. This migration attests
+that the historical record no longer owns work; it does not mutate the
+service-owned history or clean backup data. Until that exact receipt exists, a
+nonterminal durable phase blocks the host even when its unit has disappeared.
+Host inactivity brackets the owner-unit inventory with two complete retained
+state reads so a worker's final atomic publication cannot race the decision.
+
 The broker enforces a single environment lifecycle owner. Broker unavailability
 does not grant authority for direct mutation. See
 [Protected Staging Rollout](../architecture/staging-rollout.md) for the
