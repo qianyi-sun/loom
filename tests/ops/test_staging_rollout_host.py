@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import contextlib
+import grp
 import hashlib
 import json
 import os
+import pwd
+import shutil
 import stat
 import subprocess
 import threading
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -14,6 +19,8 @@ import pytest
 from scripts.ops import staging_rollout_host as host
 
 from loom_cli.rollout.install_attestation import RunnerInstallAttestation
+from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
+from loom_cli.rollout.operator.backup_job import BackupJobState, PreflightBackupJobEnvelope
 
 TEAM_ID = "11111111-1111-4111-8111-111111111111"
 TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
@@ -53,6 +60,7 @@ class FakeSystem:
         self.previous_topology_drift = False
         self.lifecycle_lock_entries = 0
         self.lifecycle_lock_depth = 0
+        self.lifecycle_lock_delay_seconds = 0.0
         self.events: list[str] = []
         self.removed_members: list[str] = []
         self.trust_ready = False
@@ -66,8 +74,12 @@ class FakeSystem:
         self.maintenance = False
         self.maintenance_begins = 0
         self.maintenance_ends = 0
+        self.maintenance_begin_error_after_publish = False
+        self.maintenance_end_delay_seconds = 0.0
+        self.active_status_source_shas: list[frozenset[str]] = []
         self.source_reads: list[str] = []
         self.remote_source_sha = "a" * 40
+        self.invocation_source_sha = "a" * 40
         self.install_source_sha: str | None = None
         self.install_owner_calls: list[tuple[Path, str, str, int]] = []
         self.shared_worker_identity_ready = True
@@ -79,6 +91,10 @@ class FakeSystem:
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
         self.orphan_recovery_calls: list[tuple[str, str | None, bool]] = []
+        self.orphan_recovery_source_shas: list[frozenset[str]] = []
+        self.orphan_recovery_heads: list[str | None] = []
+        self.orphan_recovery_delay_seconds = 0.0
+        self.orphan_recovery_error_after_delay = False
         self.orphan_recovery_auth_calls: list[tuple[str, str, bool]] = []
         self.asset_validation_calls: list[tuple[Path, str, bool]] = []
 
@@ -94,6 +110,8 @@ class FakeSystem:
         self.lifecycle_lock_depth += 1
         assert self.lifecycle_lock_depth == 1
         try:
+            if self.lifecycle_lock_delay_seconds:
+                host.time.sleep(self.lifecycle_lock_delay_seconds)
             yield
         finally:
             self.lifecycle_lock_depth -= 1
@@ -103,11 +121,17 @@ class FakeSystem:
         *,
         action: str,
         approved_plan_sha256: str | None,
-        installed_source_sha: str,
+        forbidden_source_shas: frozenset[str],
         deadline_monotonic: float,
+        recovery_head_sha: str | None = None,
     ) -> dict[str, object]:
-        assert installed_source_sha == "a" * 40
+        self.orphan_recovery_source_shas.append(forbidden_source_shas)
+        self.orphan_recovery_heads.append(recovery_head_sha)
         assert deadline_monotonic > 0
+        if self.orphan_recovery_delay_seconds:
+            host.time.sleep(self.orphan_recovery_delay_seconds)
+        if self.orphan_recovery_error_after_delay:
+            raise host.InstallError("injected orphan recovery failure")
         self.orphan_recovery_calls.append((action, approved_plan_sha256, self.maintenance))
         if action == "inventory":
             return {"plan": {"schema_version": 1}, "plan_sha256": "f" * 64}
@@ -119,7 +143,7 @@ class FakeSystem:
 
     def validate_invocation_checkout(self) -> str:
         self.validated += 1
-        return "a" * 40
+        return self.invocation_source_sha
 
     def prepare_install_source(self) -> tuple[Path, str]:
         self.validated += 1
@@ -373,6 +397,10 @@ class FakeSystem:
 
     def create_runtime_directory(self) -> bool:
         return self.filesystem.ensure_directory(host.RUNTIME_ROOT, 0o700)
+
+    def ensure_maintenance_runtime_directory(self) -> bool:
+        self.events.append("maintenance-runtime:ensure")
+        return self.create_runtime_directory()
 
     def runtime_directory_ready(self) -> bool:
         mapped = self.filesystem.path(host.RUNTIME_ROOT)
@@ -737,20 +765,28 @@ class FakeSystem:
     def verify_user_manager(self) -> None:
         return None
 
-    def active_status(self, installed_source_sha: str) -> str:
-        assert installed_source_sha in {"a" * 40, "b" * 40}
+    def active_status(self, forbidden_source_shas: frozenset[str]) -> str:
+        self.active_status_source_shas.append(forbidden_source_shas)
         self.admission_disabled_at_status = (
             not self.filesystem.exists(host.SUDOERS_PATH) and self.maintenance
         )
         return self.status
 
     def begin_maintenance(self) -> None:
+        if not self.runtime_directory_ready():
+            raise host.InstallError("service runtime directory is unavailable")
         self.maintenance_begins += 1
         self.maintenance = True
+        if self.maintenance_begin_error_after_publish:
+            raise host.InstallError("injected maintenance publication failure")
 
-    def end_maintenance(self) -> None:
-        self.maintenance_ends += 1
-        self.maintenance = False
+    def end_maintenance(self, *, deadline_monotonic: float | None = None) -> None:
+        del deadline_monotonic
+        with host._orphaned_backup_marker_cleanup_guard():
+            if self.maintenance_end_delay_seconds:
+                host.time.sleep(self.maintenance_end_delay_seconds)
+            self.maintenance_ends += 1
+            self.maintenance = False
 
     def maintenance_marker_status(self) -> str:
         return "enabled" if self.maintenance else "disabled"
@@ -1190,6 +1226,7 @@ def test_explicit_maintenance_requires_root(tmp_path: Path) -> None:
         installer.maintenance(enabled=True)
 
 
+@pytest.mark.timeout(0)
 def test_orphaned_backup_recovery_is_digest_approved_and_maintenance_bounded(
     tmp_path: Path,
 ) -> None:
@@ -1214,6 +1251,7 @@ def test_orphaned_backup_recovery_is_digest_approved_and_maintenance_bounded(
     assert system.maintenance is False
 
 
+@pytest.mark.timeout(0)
 def test_orphaned_backup_recovery_authenticates_exact_dev_checkout_before_maintenance(
     tmp_path: Path,
 ) -> None:
@@ -1231,6 +1269,680 @@ def test_orphaned_backup_recovery_authenticates_exact_dev_checkout_before_mainte
     assert system.asset_validation_calls == [(host.REPO_ROOT, "a" * 40, False)]
 
 
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_forbids_installed_and_exact_merged_dev_sources(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.invocation_source_sha = "b" * 40
+    system.remote_source_sha = "b" * 40
+
+    installer.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+    )
+
+    assert system.orphan_recovery_source_shas == [frozenset({"a" * 40, "b" * 40})]
+    assert system.orphan_recovery_heads == ["b" * 40]
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_cleans_a_partially_published_maintenance_marker(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.maintenance_begin_error_after_publish = True
+    maintenance_ends_before_recovery = system.maintenance_ends
+
+    with pytest.raises(host.InstallError, match="maintenance publication failure"):
+        installer.orphaned_backup_recovery(
+            action="inventory",
+            approved_plan_sha256=None,
+        )
+
+    assert system.maintenance is False
+    assert system.maintenance_ends == maintenance_ends_before_recovery + 1
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_deadline_includes_lifecycle_lock_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.lifecycle_lock_delay_seconds = 0.1
+    monkeypatch.setattr(host, "_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS", 0.02)
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        installer.orphaned_backup_recovery(
+            action="inventory",
+            approved_plan_sha256=None,
+        )
+
+    assert system.maintenance is False
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_deadline_cleans_the_maintenance_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.orphan_recovery_delay_seconds = 0.1
+    maintenance_ends_before_recovery = system.maintenance_ends
+    monkeypatch.setattr(host, "_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS", 0.02)
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        installer.orphaned_backup_recovery(
+            action="inventory",
+            approved_plan_sha256=None,
+        )
+
+    assert system.maintenance is False
+    assert system.maintenance_ends == maintenance_ends_before_recovery + 1
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_cleanup_does_not_reprobe_marker_status(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    status_calls = 0
+
+    def marker_status() -> str:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            return "disabled"
+        raise host.InstallError("injected cleanup marker-status failure")
+
+    system.maintenance_marker_status = marker_status  # type: ignore[method-assign]
+
+    result = installer.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+    )
+
+    assert result["plan_sha256"] == "f" * 64
+    assert status_calls == 1
+    assert system.maintenance is False
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_cannot_interrupt_valid_marker_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.orphan_recovery_delay_seconds = 0.02
+    system.orphan_recovery_error_after_delay = True
+    system.maintenance_end_delay_seconds = 0.08
+    maintenance_ends_before_recovery = system.maintenance_ends
+    monkeypatch.setattr(host, "_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        installer.orphaned_backup_recovery(
+            action="inventory",
+            approved_plan_sha256=None,
+        )
+
+    assert system.maintenance is False
+    assert system.maintenance_ends == maintenance_ends_before_recovery + 1
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_interrupts_cleanup_launch_lock_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    runtime = installer.filesystem.path(host.RUNTIME_ROOT)
+    marker = runtime / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    uid, gid = os.geteuid(), os.getegid()
+    lock_fd = os.open(runtime / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    host.fcntl.flock(lock_fd, host.fcntl.LOCK_EX)
+
+    def remove_real_marker(*, deadline_monotonic: float | None = None) -> None:
+        host._maintenance_marker(
+            runtime,
+            service_uid=uid,
+            service_gid=gid,
+            authority_uid=uid,
+            authority_gid=gid,
+            enabled=False,
+            deadline_monotonic=deadline_monotonic,
+        )
+        system.maintenance = False
+
+    def release_launch_lock() -> None:
+        host.time.sleep(0.10)
+        host.fcntl.flock(lock_fd, host.fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    system.end_maintenance = remove_real_marker  # type: ignore[method-assign]
+    monkeypatch.setattr(host, "_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS", 0.02)
+    releaser = threading.Thread(target=release_launch_lock)
+    releaser.start()
+    started = host.time.monotonic()
+    try:
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            installer.orphaned_backup_recovery(
+                action="inventory",
+                approved_plan_sha256=None,
+            )
+        elapsed = host.time.monotonic() - started
+    finally:
+        releaser.join(timeout=2)
+
+    assert marker.is_file()
+    assert elapsed < 0.08
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_cleanup_observes_deadline_after_body_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    runtime = installer.filesystem.path(host.RUNTIME_ROOT)
+    marker = runtime / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    uid, gid = os.geteuid(), os.getegid()
+    lock_fd = os.open(runtime / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    host.fcntl.flock(lock_fd, host.fcntl.LOCK_EX)
+
+    def remove_real_marker(*, deadline_monotonic: float | None = None) -> None:
+        host._maintenance_marker(
+            runtime,
+            service_uid=uid,
+            service_gid=gid,
+            authority_uid=uid,
+            authority_gid=gid,
+            enabled=False,
+            deadline_monotonic=deadline_monotonic,
+        )
+        system.maintenance = False
+
+    def release_launch_lock() -> None:
+        host.time.sleep(0.10)
+        host.fcntl.flock(lock_fd, host.fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    system.end_maintenance = remove_real_marker  # type: ignore[method-assign]
+    system.orphan_recovery_delay_seconds = 0.08
+    monkeypatch.setattr(host, "_ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS", 0.02)
+    releaser = threading.Thread(target=release_launch_lock)
+    releaser.start()
+    started = host.time.monotonic()
+    try:
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            installer.orphaned_backup_recovery(
+                action="inventory",
+                approved_plan_sha256=None,
+            )
+        elapsed = host.time.monotonic() - started
+    finally:
+        releaser.join(timeout=2)
+
+    assert marker.is_file()
+    assert elapsed < 0.08
+
+
+@pytest.mark.timeout(0)
+def test_expired_orphaned_backup_cleanup_reuses_authenticated_service_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    uid, gid = os.geteuid(), os.getegid()
+
+    class IdentityOnceRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            if len(self.calls) > 4:
+                raise AssertionError("expired cleanup attempted fresh identity discovery")
+            if call == ["getent", "passwd", host.SERVICE_USER]:
+                return host.CommandResult(
+                    0,
+                    f"{host.SERVICE_USER}:x:{uid}:{gid}::{host.STATE_ROOT}:{host.SERVICE_SHELL}\n",
+                )
+            if call == ["getent", "group", host.SERVICE_GROUP]:
+                return host.CommandResult(0, f"{host.SERVICE_GROUP}:x:{gid}:\n")
+            if call == ["id", "-u", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{uid}\n")
+            if call == ["id", "-g", host.SERVICE_USER]:
+                return host.CommandResult(0, f"{gid}\n")
+            raise AssertionError(call)
+
+    real_maintenance_marker = host._maintenance_marker
+
+    def current_user_maintenance_marker(root: Path, **kwargs):  # type: ignore[no-untyped-def]
+        return real_maintenance_marker(
+            root,
+            authority_uid=uid,
+            authority_gid=gid,
+            **kwargs,
+        )
+
+    runner = IdentityOnceRunner()
+    system = host.HostSystem(runner)
+    monkeypatch.setattr(host, "RUNTIME_ROOT", runtime)
+    monkeypatch.setattr(host, "_maintenance_marker", current_user_maintenance_marker)
+
+    system.begin_maintenance()
+    marker = runtime / "maintenance"
+    assert marker.is_file()
+    deadline = host.time.monotonic() + 0.02
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        with host._orphaned_backup_deadline_guard(deadline):
+            try:
+                host.time.sleep(0.20)
+            except host.InstallError:
+                pass
+
+    system.end_maintenance(deadline_monotonic=deadline)
+
+    assert not marker.exists()
+    assert len(runner.calls) == 4
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_refuses_an_active_process_timer() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_delay, previous_interval = host.signal.getitimer(host.signal.ITIMER_REAL)
+
+    alarm_calls = 0
+
+    def ignore_alarm(_signum: int, _frame: object) -> None:
+        nonlocal alarm_calls
+        alarm_calls += 1
+
+    started = host.time.monotonic()
+    try:
+        host.signal.signal(host.signal.SIGALRM, ignore_alarm)
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.50)
+        with pytest.raises(host.InstallError, match="active process timer"):
+            with host._orphaned_backup_deadline_guard(started + 0.05):
+                host.time.sleep(0.30)
+        elapsed = host.time.monotonic() - started
+        assert elapsed < 0.05
+        assert alarm_calls == 0
+        assert host.signal.getsignal(host.signal.SIGALRM) is ignore_alarm
+        retained_delay, retained_interval = host.signal.getitimer(host.signal.ITIMER_REAL)
+        assert 0.0 < retained_delay <= 0.50
+        assert retained_interval == 0.0
+    finally:
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        if previous_delay > 0.0:
+            elapsed = max(0.0, host.time.monotonic() - started)
+            if previous_interval > 0.0:
+                if elapsed < previous_delay:
+                    restored_delay = previous_delay - elapsed
+                else:
+                    overdue = elapsed - previous_delay
+                    restored_delay = previous_interval - (overdue % previous_interval)
+                host.signal.setitimer(
+                    host.signal.ITIMER_REAL,
+                    max(restored_delay, 1e-6),
+                    previous_interval,
+                )
+            elif elapsed < previous_delay:
+                host.signal.setitimer(
+                    host.signal.ITIMER_REAL,
+                    max(previous_delay - elapsed, 1e-6),
+                )
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_drains_owned_pending_alarm_before_restoration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    prior_handler_calls = 0
+    restoration_block_calls = 0
+
+    def prior_handler(_signum: int, _frame: object) -> None:
+        nonlocal prior_handler_calls
+        prior_handler_calls += 1
+
+    def inject_owned_expiry(how, mask):  # type: ignore[no-untyped-def]
+        nonlocal restoration_block_calls
+        result = real_pthread_sigmask(how, mask)
+        if how == host.signal.SIG_BLOCK and mask == {host.signal.SIGALRM}:
+            restoration_block_calls += 1
+            if restoration_block_calls == 2:
+                os.kill(os.getpid(), host.signal.SIGALRM)
+        return result
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        host.signal.signal(host.signal.SIGALRM, prior_handler)
+        monkeypatch.setattr(host.signal, "pthread_sigmask", inject_owned_expiry)
+
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                raise RuntimeError("body failure must lose to owned expiry")
+
+        assert restoration_block_calls == 2
+        assert prior_handler_calls == 0
+        assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+        assert host.signal.SIGALRM not in host.signal.sigpending()
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_drains_owned_alarm_when_arming_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_setitimer = host.signal.setitimer
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    prior_handler_calls = 0
+
+    def prior_handler(_signum: int, _frame: object) -> None:
+        nonlocal prior_handler_calls
+        prior_handler_calls += 1
+
+    def arm_then_report_failure(which, seconds, interval=0.0):  # type: ignore[no-untyped-def]
+        if which == host.signal.ITIMER_REAL and seconds > 0.0:
+            real_setitimer(which, 0.001)
+            host.time.sleep(0.01)
+            raise OSError("injected post-arm setup failure")
+        return real_setitimer(which, seconds, interval)
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        host.signal.signal(host.signal.SIGALRM, prior_handler)
+        monkeypatch.setattr(host.signal, "setitimer", arm_then_report_failure)
+
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                raise AssertionError("failed watchdog setup entered the body")
+
+        assert prior_handler_calls == 0
+        assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+        assert host.signal.SIGALRM not in host.signal.sigpending()
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        real_setitimer(host.signal.ITIMER_REAL, 0.0)
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_restores_after_preblock_owned_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    restoration_block_calls = 0
+
+    def prior_handler(_signum: int, _frame: object) -> None:
+        raise AssertionError("owned expiry leaked into prior handler")
+
+    def inject_owned_expiry(how, mask):  # type: ignore[no-untyped-def]
+        nonlocal restoration_block_calls
+        if how == host.signal.SIG_BLOCK and mask == {host.signal.SIGALRM}:
+            restoration_block_calls += 1
+            if restoration_block_calls == 2:
+                os.kill(os.getpid(), host.signal.SIGALRM)
+        return real_pthread_sigmask(how, mask)
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        host.signal.signal(host.signal.SIGALRM, prior_handler)
+        monkeypatch.setattr(host.signal, "pthread_sigmask", inject_owned_expiry)
+
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                pass
+
+        assert restoration_block_calls == 3
+        assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+        assert host.signal.SIGALRM not in host.signal.sigpending()
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_preserves_body_error_without_watchdog_failure() -> None:
+    with pytest.raises(RuntimeError, match="original body failure"):
+        with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+            raise RuntimeError("original body failure")
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_restoration_failure_outranks_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_signal = host.signal.signal
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    signal_calls = 0
+
+    def fail_handler_restoration(signum, handler):  # type: ignore[no-untyped-def]
+        nonlocal signal_calls
+        signal_calls += 1
+        if signal_calls == 2:
+            raise OSError("injected handler restoration failure")
+        return real_signal(signum, handler)
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        monkeypatch.setattr(host.signal, "signal", fail_handler_restoration)
+
+        with pytest.raises(host.InstallError, match="watchdog restoration failed") as error:
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                raise RuntimeError("body failure must lose to restoration failure")
+
+        assert isinstance(error.value.__cause__, OSError)
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        real_signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_outranks_a_translated_body_error() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    previous_mask = host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set())
+    started = host.time.monotonic()
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        with host._orphaned_backup_deadline_guard(started + 0.02):
+            try:
+                host.time.sleep(0.20)
+            except host.InstallError as exc:
+                raise RuntimeError("translated body deadline") from exc
+
+    assert host.time.monotonic() - started < 0.10
+    assert host.signal.getsignal(host.signal.SIGALRM) is previous_handler
+    assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+    assert host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_does_not_consume_foreign_pending_alarm() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    outer_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+    guard_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    prior_handler_calls = 0
+
+    def prior_handler(_signum: int, _frame: object) -> None:
+        nonlocal prior_handler_calls
+        prior_handler_calls += 1
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        host.signal.signal(host.signal.SIGALRM, prior_handler)
+        os.kill(os.getpid(), host.signal.SIGALRM)
+        assert host.signal.SIGALRM in host.signal.sigpending()
+
+        with pytest.raises(host.InstallError, match="active process timer"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+                raise AssertionError("foreign pending alarm guard entered")
+
+        assert prior_handler_calls == 0
+        assert host.signal.SIGALRM in host.signal.sigpending()
+        assert host.signal.getsignal(host.signal.SIGALRM) is prior_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == guard_mask
+    finally:
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, outer_mask)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_non_main_thread_preserves_process_timer() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_delay, previous_interval = host.signal.getitimer(host.signal.ITIMER_REAL)
+    failures: list[BaseException] = []
+    started = host.time.monotonic()
+    try:
+        host.signal.signal(host.signal.SIGALRM, host.signal.SIG_IGN)
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.50)
+
+        def run_guard() -> None:
+            try:
+                with host._orphaned_backup_deadline_guard(host.time.monotonic() + 0.05):
+                    raise AssertionError("non-main recovery guard entered")
+            except BaseException as exc:
+                failures.append(exc)
+
+        worker = threading.Thread(target=run_guard)
+        worker.start()
+        worker.join(timeout=2)
+
+        assert len(failures) == 1
+        assert isinstance(failures[0], host.InstallError)
+        assert "main thread" in str(failures[0])
+        retained_delay, retained_interval = host.signal.getitimer(host.signal.ITIMER_REAL)
+        assert 0.0 < retained_delay <= 0.50
+        assert retained_interval == 0.0
+    finally:
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        if previous_delay > 0.0:
+            elapsed = max(0.0, host.time.monotonic() - started)
+            if previous_interval > 0.0:
+                if elapsed < previous_delay:
+                    restored_delay = previous_delay - elapsed
+                else:
+                    overdue = elapsed - previous_delay
+                    restored_delay = previous_interval - (overdue % previous_interval)
+                host.signal.setitimer(
+                    host.signal.ITIMER_REAL,
+                    max(restored_delay, 1e-6),
+                    previous_interval,
+                )
+            elif elapsed < previous_delay:
+                host.signal.setitimer(
+                    host.signal.ITIMER_REAL,
+                    max(previous_delay - elapsed, 1e-6),
+                )
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_temporarily_unblocks_alarm_delivery() -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_delay, previous_interval = host.signal.getitimer(host.signal.ITIMER_REAL)
+    host.signal.signal(host.signal.SIGALRM, host.signal.SIG_IGN)
+    previous_mask = host.signal.pthread_sigmask(
+        host.signal.SIG_BLOCK,
+        {host.signal.SIGALRM},
+    )
+    started = host.time.monotonic()
+    try:
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            with host._orphaned_backup_deadline_guard(started + 0.05):
+                host.time.sleep(0.30)
+        assert host.time.monotonic() - started < 0.20
+        current_mask = host.signal.pthread_sigmask(host.signal.SIG_BLOCK, set())
+        assert host.signal.SIGALRM in current_mask
+    finally:
+        host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
+        host.signal.pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        if previous_delay > 0.0:
+            host.signal.setitimer(
+                host.signal.ITIMER_REAL,
+                previous_delay,
+                previous_interval,
+            )
+
+
+def test_upgrade_checks_receipts_against_current_and_prospective_sources(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    system.active_status_source_shas.clear()
+    system.remote_source_sha = "b" * 40
+
+    installer.install(TEAM_ID)
+
+    assert system.active_status_source_shas == [frozenset({"a" * 40, "b" * 40})]
+
+
+@pytest.mark.timeout(0)
 def test_orphaned_backup_recovery_cli_dispatches_inventory_and_approved_apply(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2956,6 +3668,31 @@ def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
     assert runner.calls.count(["sysctl", "--load", str(host.SYSCTL_PATH)]) == 1
 
 
+def test_host_system_bootstraps_maintenance_runtime_without_tmpfiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = pwd.getpwuid(os.geteuid())
+    group = grp.getgrgid(os.getegid())
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(host, "SERVICE_USER", account.pw_name)
+    monkeypatch.setattr(host, "SERVICE_GROUP", group.gr_name)
+    monkeypatch.setattr(host, "SERVICE_SHELL", account.pw_shell)
+    monkeypatch.setattr(host, "STATE_ROOT", Path(account.pw_dir))
+    monkeypatch.setattr(host, "RUNTIME_ROOT", runtime_root)
+    monkeypatch.setattr(host, "TMPFILES_PATH", tmp_path / "missing-tmpfiles.conf")
+    system = host.HostSystem(host.SubprocessRunner())
+    ensure_runtime = getattr(system, "ensure_maintenance_runtime_directory", None)
+
+    assert ensure_runtime is not None
+    assert ensure_runtime() is True
+    metadata = runtime_root.stat()
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert (metadata.st_uid, metadata.st_gid) == (os.geteuid(), os.getegid())
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert ensure_runtime() is False
+
+
 def test_check_rejects_root_install_attestation_drift(tmp_path: Path) -> None:
     installer, _ = _installer(tmp_path)
     installer.install(TEAM_ID)
@@ -3122,6 +3859,64 @@ def test_uninstall_refuses_active_request_and_retains_ledger(tmp_path: Path) -> 
         "trust-ledger:revoke",
         "trust-ledger:finalize-check",
     ]
+    assert result["retained"] == [
+        str(host.STATE_ROOT),
+        str(host.ORPHANED_BACKUP_EVIDENCE_ROOT),
+        "/data/loom-staging/rollouts",
+    ]
+
+
+@pytest.mark.parametrize(
+    "retained_root",
+    [host.STATE_ROOT, host.ORPHANED_BACKUP_EVIDENCE_ROOT],
+    ids=["service-state", "root-receipts"],
+)
+def test_fresh_reinstall_rejects_dangling_retained_entry_before_mutation(
+    tmp_path: Path,
+    retained_root: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.filesystem.ensure_directory(host.TRUST_LIFECYCLE_LOCK.parent, 0o755)
+    retained_entry = installer.filesystem.path(retained_root)
+    retained_entry.parent.mkdir(parents=True, exist_ok=True)
+    retained_entry.symlink_to(tmp_path / "missing-retained-authority", target_is_directory=True)
+
+    with pytest.raises(host.InstallError, match="retained staging rollout path entry is unsafe"):
+        installer.install(TEAM_ID)
+
+    assert system.validated == 2
+    assert system.install_source_sha is None
+    assert system.group is False
+    assert system.service_user is False
+    assert system.candidate_syncs == 0
+    assert system.source_reads == []
+    assert system.install_owner_calls == []
+    assert system.maintenance_begins == 0
+    assert system.active_status_source_shas == []
+    assert not installer.filesystem.exists(host.INSTALL_RECORD)
+    assert not installer.filesystem.path(host.RUNNER_ROOT).exists()
+    assert not installer.filesystem.path(host.CANDIDATE_RUNTIME_ROOT).exists()
+    assert retained_entry.is_symlink()
+
+
+def test_fresh_reinstall_bootstraps_runtime_before_retained_activity_fence(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    installer.uninstall(retain_ledger=True)
+    assert not installer.filesystem.exists(host.RUNTIME_ROOT)
+    system.active_status_source_shas.clear()
+    system.status = "busy"
+
+    with pytest.raises(host.InstallError, match="refusing update"):
+        installer.install(TEAM_ID)
+
+    assert system.active_status_source_shas == [frozenset({"a" * 40})]
+    assert installer.filesystem.exists(host.RUNTIME_ROOT)
+    assert "maintenance-runtime:ensure" in system.events
+    assert system.maintenance is False
+    assert not installer.filesystem.exists(host.INSTALL_RECORD)
 
 
 def test_uninstall_remote_revocation_failure_retains_key_tool_record_and_ledger(
@@ -4488,7 +5283,7 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
     runner = StatusRunner()
 
-    assert host.HostSystem(runner).active_status(TEST_CANDIDATE_SHA) == expected
+    assert host.HostSystem(runner).active_status(frozenset({TEST_CANDIDATE_SHA})) == expected
     assert all(str(host.BROKER_PATH) not in call for call, _ in runner.calls)
     systemd_calls = [call for call in runner.calls if "/usr/bin/systemctl" in call[0]]
     assert systemd_calls == [
@@ -4559,7 +5354,9 @@ def test_active_status_treats_a_bounded_systemd_timeout_as_unknown(
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
 
-    assert host.HostSystem(TimeoutRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
+    assert (
+        host.HostSystem(TimeoutRunner()).active_status(frozenset({TEST_CANDIDATE_SHA})) == "unknown"
+    )
 
 
 @pytest.mark.parametrize(
@@ -4643,7 +5440,9 @@ def test_active_status_treats_safe_durable_preflight_backup_without_live_unit_as
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == expected
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({TEST_CANDIDATE_SHA})) == expected
+    )
 
 
 def _prepare_durable_active_status(
@@ -4760,7 +5559,10 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == "unknown"
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA}))
+        == "unknown"
+    )
     assert not any("/usr/bin/systemctl" in call for call in calls)
 
 
@@ -4847,7 +5649,10 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
                 raise unit_outcome
             return unit_outcome
 
-    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == expected
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA}))
+        == expected
+    )
     assert [call for call in calls if "/usr/bin/systemctl" in call[0]] == [
         (
             [
@@ -4907,13 +5712,16 @@ def test_active_status_keeps_legacy_request_directory_without_durable_state_trav
                 return identity
             return host.CommandResult(0)
 
-    assert host.HostSystem(StatusRunner()).active_status(SUPERSEDING_SOURCE_SHA) == "idle"
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA})) == "idle"
+    )
     assert any("/usr/bin/systemctl" in call for call in calls)
 
 
 def _write_orphaned_backup_fixture(
     tmp_path: Path,
     *,
+    bundle_name: str = "20260725T014504Z-req-orphan001",
     phase: str = "backup_running",
     referenced: bool = False,
 ) -> tuple[Path, Path, int, int]:
@@ -4929,35 +5737,36 @@ def _write_orphaned_backup_fixture(
         backup_root,
     ):
         directory.chmod(0o700)
-    verified = phase in {"backup_verified", "launch_pending"}
-    state = {
-        "failure_code": None,
-        "job_id": "job-orphan001",
-        "lease_digest": "d" * 64 if verified else None,
-        "manifest_sha256": "e" * 64 if verified else None,
-        "preflight_attestation_sha256": "f" * 64 if verified else None,
-        "phase": phase,
-        "request_id": "req-orphan001",
-        "schema_version": 1,
-        "sequence": 3,
-        "updated_at": "2026-07-25T01:52:34.957228+00:00",
-    }
-    job = {
-        "bundle_name": "20260725T014504Z-req-orphan001",
-        "candidate_sha": "a" * 40,
-        "candidate_tree": "b" * 40,
-        "created_at": "2026-07-25T01:45:04+00:00",
-        "environment": "staging",
-        "job_id": "job-orphan001",
-        "mutation_epoch": 10,
-        "namespace": "loom-staging",
-        "payload_id": "payload-orphan001",
-        "preflight_assessment_sha256": "1" * 64,
-        "preflight_coverage_sha256": "2" * 64,
-        "preflight_registry_sha256": "3" * 64,
-        "request_id": "req-orphan001",
-        "schema_version": 1,
-    }
+    verified = phase in {"backup_verified", "launch_pending", "launch_running"}
+    state = BackupJobState.from_dict(
+        BackupJobState(
+            job_id="job-orphan001",
+            request_id="req-orphan001",
+            phase=LifecyclePhase(phase),
+            sequence=3,
+            updated_at=datetime.fromisoformat("2026-07-25T01:52:34.957228+00:00"),
+            lease_digest="d" * 64 if verified else None,
+            manifest_sha256="e" * 64 if verified else None,
+            preflight_attestation_sha256="f" * 64 if verified else None,
+        ).to_dict()
+    ).to_dict()
+    job = PreflightBackupJobEnvelope.from_dict(
+        PreflightBackupJobEnvelope(
+            bundle_name=bundle_name,
+            candidate_sha="a" * 40,
+            candidate_tree="b" * 40,
+            created_at=datetime.fromisoformat("2026-07-25T01:45:04+00:00"),
+            environment="staging",
+            job_id="job-orphan001",
+            mutation_epoch=10,
+            namespace="loom-staging",
+            payload_id="payload-orphan001",
+            preflight_assessment_sha256="1" * 64,
+            preflight_coverage_sha256="2" * 64,
+            preflight_registry_sha256="3" * 64,
+            request_id="req-orphan001",
+        ).to_dict()
+    ).to_dict()
     for name, value in (("state.json", state), ("job.json", job)):
         path = backup_root / name
         path.write_text(json.dumps(value, sort_keys=True) + "\n")
@@ -5048,7 +5857,7 @@ def test_orphaned_backup_inventory_rejects_noncanonical_rotation_schema(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5080,7 +5889,7 @@ def test_orphaned_backup_inventory_rejects_invalid_job_timestamps(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5105,8 +5914,62 @@ def test_orphaned_backup_inventory_rejects_noncanonical_nested_lease_request(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
+
+
+@pytest.mark.parametrize("failure_code", ["", 0, False, [], {}])
+def test_orphaned_backup_inventory_rejects_falsey_nonfailed_failure_evidence(
+    tmp_path: Path,
+    failure_code: object,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    _rewrite_orphaned_backup_json(
+        state_root / "requests/req-orphan001/preflight-backup/state.json",
+        failure_code=failure_code,
+    )
+
+    with pytest.raises(host.InstallError, match="job authority is invalid"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+        )
+
+
+def test_durable_backup_inventory_rejects_noncanonical_state_request_id(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    requests_root = state_root / "requests"
+    invalid_request_id = "REQUEST_Invalid"
+    request_root = requests_root / invalid_request_id
+    (requests_root / "req-orphan001").rename(request_root)
+    _rewrite_orphaned_backup_json(
+        request_root / "preflight-backup/state.json",
+        request_id=invalid_request_id,
+    )
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
+    )
 
 
 def test_durable_backup_inventory_rejects_invalid_state_timestamp(tmp_path: Path) -> None:
@@ -5123,7 +5986,7 @@ def test_durable_backup_inventory_rejects_invalid_state_timestamp(tmp_path: Path
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
@@ -5148,7 +6011,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     assert [item["request_id"] for item in plan["items"]] == ["req-orphan001"]
     assert plan["items"][0]["phase"] == phase
@@ -5164,7 +6027,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
         approved_plan_sha256=digest,
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
 
     assert result == {
@@ -5177,7 +6040,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
@@ -5194,7 +6057,7 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
@@ -5208,9 +6071,55 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     assert [item["request_id"] for item in refreshed["items"]] == ["req-orphan001"]
+
+
+def test_orphaned_backup_receipt_accepts_the_published_bundle_name_schema(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        bundle_name="legacy bundle",
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    assert plan["items"][0]["bundle_name"] == "legacy bundle"
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "idle"
+    )
 
 
 def test_orphaned_backup_recovery_refuses_referenced_payload_and_digest_drift(
@@ -5228,7 +6137,7 @@ def test_orphaned_backup_recovery_refuses_referenced_payload_and_digest_drift(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
     state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
@@ -5244,7 +6153,7 @@ def test_orphaned_backup_recovery_refuses_referenced_payload_and_digest_drift(
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
             approved_plan_sha256="0" * 64,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5261,7 +6170,7 @@ def test_orphaned_backup_receipt_stops_applying_if_payload_becomes_referenced(
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     digest = hashlib.sha256(
         (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -5274,15 +6183,16 @@ def test_orphaned_backup_receipt_stops_applying_if_payload_becomes_referenced(
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
         approved_plan_sha256=digest,
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     rotation_path = state_root / "backup-rotation.json"
     rotation = json.loads(rotation_path.read_text())
-    rotation["active"] = {
-        "bundle_name": "20260725T014504Z-req-orphan001",
-        "payload_id": "payload-orphan001",
-        "request_id": "req-orphan001",
-    }
+    referenced_state_root, _, _, _ = _write_orphaned_backup_fixture(
+        tmp_path / "referenced",
+        referenced=True,
+    )
+    referenced_rotation = json.loads((referenced_state_root / "backup-rotation.json").read_text())
+    rotation["active"] = referenced_rotation["active"]
     rotation_path.write_text(json.dumps(rotation, sort_keys=True) + "\n")
 
     assert (
@@ -5290,13 +6200,86 @@ def test_orphaned_backup_receipt_stops_applying_if_payload_becomes_referenced(
             state_root,
             service_uid=service_uid,
             service_gid=service_gid,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
         )
         == "unknown"
     )
+
+
+def test_durable_backup_rotation_check_uses_receipt_validated_job_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    rotation_path = state_root / "backup-rotation.json"
+    rotation = json.loads(rotation_path.read_text())
+    referenced_state_root, _, _, _ = _write_orphaned_backup_fixture(
+        tmp_path / "referenced",
+        referenced=True,
+    )
+    referenced_rotation = json.loads((referenced_state_root / "backup-rotation.json").read_text())
+    rotation["active"] = referenced_rotation["active"]
+    rotation_path.write_text(json.dumps(rotation, sort_keys=True) + "\n")
+    job_path = state_root / "requests/req-orphan001/preflight-backup/job.json"
+    real_read_owned_json = host._read_owned_json
+    job_reads = 0
+
+    def swap_after_first_job_read(
+        path: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[dict[str, object], bytes]:
+        nonlocal job_reads
+        result = real_read_owned_json(path, uid=uid, gid=gid)
+        if path == job_path:
+            job_reads += 1
+            if job_reads == 1:
+                _rewrite_orphaned_backup_json(job_path, payload_id="payload-orphan002")
+        return result
+
+    monkeypatch.setattr(host, "_read_owned_json", swap_after_first_job_read)
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
+    )
+    assert job_reads == 1
 
 
 def test_orphaned_backup_receipt_stops_applying_if_candidate_becomes_installed(
@@ -5312,7 +6295,7 @@ def test_orphaned_backup_receipt_stops_applying_if_candidate_becomes_installed(
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     digest = hashlib.sha256(
         (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -5325,7 +6308,7 @@ def test_orphaned_backup_receipt_stops_applying_if_candidate_becomes_installed(
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
         approved_plan_sha256=digest,
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
 
     assert (
@@ -5336,9 +6319,58 @@ def test_orphaned_backup_receipt_stops_applying_if_candidate_becomes_installed(
             evidence_root=evidence_root,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha="a" * 40,
+            forbidden_source_shas=frozenset({"a" * 40}),
         )
         == "busy"
+    )
+
+
+def test_durable_backup_inventory_rejects_a_legacy_receipt_for_malformed_job(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    job_path = state_root / "requests/req-orphan001/preflight-backup/job.json"
+    _rewrite_orphaned_backup_json(job_path, created_at="not-a-timestamp")
+    receipt_path = evidence_root / "req-orphan001.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["job_sha256"] = hashlib.sha256(job_path.read_bytes()).hexdigest()
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
     )
 
 
@@ -5353,7 +6385,7 @@ def test_orphaned_backup_apply_replays_the_exact_approved_plan(tmp_path: Path) -
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     digest = hashlib.sha256(
         (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -5367,7 +6399,7 @@ def test_orphaned_backup_apply_replays_the_exact_approved_plan(tmp_path: Path) -
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
         approved_plan_sha256=digest,
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     replay_plan = host._orphaned_backup_recovery_plan(
         state_root,
@@ -5376,7 +6408,7 @@ def test_orphaned_backup_apply_replays_the_exact_approved_plan(tmp_path: Path) -
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     second = host._apply_orphaned_backup_recovery(
         state_root,
@@ -5386,11 +6418,264 @@ def test_orphaned_backup_apply_replays_the_exact_approved_plan(tmp_path: Path) -
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
         approved_plan_sha256=digest,
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
 
     assert replay_plan == plan
     assert second == first
+
+
+def test_orphaned_backup_apply_replays_after_partial_receipt_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    requests_root = state_root / "requests"
+    second_request_id = "req-orphan002"
+    second_request_root = requests_root / second_request_id
+    shutil.copytree(requests_root / "req-orphan001", second_request_root)
+    second_backup_root = second_request_root / "preflight-backup"
+    _rewrite_orphaned_backup_json(
+        second_backup_root / "state.json",
+        job_id="job-orphan002",
+        request_id=second_request_id,
+    )
+    _rewrite_orphaned_backup_json(
+        second_backup_root / "job.json",
+        bundle_name="20260725T014504Z-req-orphan002",
+        job_id="job-orphan002",
+        payload_id="payload-orphan002",
+        request_id=second_request_id,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    real_replace = host.os.replace
+    receipt_replacements = 0
+
+    def fail_second_receipt(source: str | Path, destination: str | Path) -> None:
+        nonlocal receipt_replacements
+        if Path(destination).parent == evidence_root:
+            receipt_replacements += 1
+            if receipt_replacements == 2:
+                raise OSError("injected second receipt publication failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(host.os, "replace", fail_second_receipt)
+    with pytest.raises(host.InstallError, match="publication failed safely"):
+        host._apply_orphaned_backup_recovery(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            approved_plan_sha256=digest,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+        )
+
+    assert (evidence_root / "req-orphan001.json").is_file()
+    assert not (evidence_root / f"{second_request_id}.json").exists()
+    monkeypatch.setattr(host.os, "replace", real_replace)
+    assert (
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+        )
+        == plan
+    )
+
+    result = host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+
+    assert result["reconciled_request_ids"] == ["req-orphan001", second_request_id]
+
+
+def test_orphaned_backup_recovery_inventories_units_before_and_after_planning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    active_pointer = state_root / "active.json"
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ORPHANED_BACKUP_EVIDENCE_ROOT", evidence_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", active_pointer)
+    real_scandir = host.os.scandir
+    plan_read = False
+
+    def observe_plan_read(path: Path):  # type: ignore[no-untyped-def]
+        nonlocal plan_read
+        if Path(path) == state_root / "requests":
+            plan_read = True
+        return real_scandir(path)
+
+    monkeypatch.setattr(host.os, "scandir", observe_plan_read)
+
+    class InventorySystem(host.HostSystem):
+        def __init__(self) -> None:
+            super().__init__(host.SubprocessRunner())
+            self.inventories = 0
+
+        def _service_ids(self) -> tuple[int, int]:
+            return service_uid, service_gid
+
+        def _rollout_unit_status(
+            self,
+            service_uid: int,
+            *,
+            timeout_seconds: float = host._HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS,
+        ) -> str:
+            del service_uid, timeout_seconds
+            self.inventories += 1
+            if self.inventories == 2:
+                assert plan_read is True
+            return "idle"
+
+        def validate_recovery_plan_candidate_history(
+            self,
+            plan: Mapping[str, object],
+            *,
+            recovery_head_sha: str,
+        ) -> None:
+            assert recovery_head_sha == "d" * 40
+            assert plan["items"]
+
+    system = InventorySystem()
+    result = system.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+        recovery_head_sha="d" * 40,
+        deadline_monotonic=host.time.monotonic() + 5.0,
+    )
+
+    assert system.inventories == 2
+    assert result["plan"]["schema_version"] == 1
+
+
+def test_orphaned_backup_apply_validates_history_of_exact_approved_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    approved_plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    first_plan = json.loads(json.dumps(approved_plan))
+    first_plan["items"][0]["candidate_sha"] = "b" * 40
+    plans = iter((first_plan, approved_plan))
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ORPHANED_BACKUP_EVIDENCE_ROOT", evidence_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", state_root / "active.json")
+    evidence_root.mkdir(mode=0o700)
+    real_lstat = host.os.lstat
+    real_fchown = host.os.fchown
+
+    def root_evidence_lstat(path: str | os.PathLike[str]) -> os.stat_result:
+        metadata = real_lstat(path)
+        if Path(path) not in {evidence_root.parent, evidence_root}:
+            return metadata
+        values = list(metadata)
+        values[4] = 0
+        values[5] = 0
+        return os.stat_result(values)
+
+    def root_evidence_fchown(fd: int, uid: int, gid: int) -> None:
+        if (uid, gid) != (0, 0):
+            real_fchown(fd, uid, gid)
+
+    monkeypatch.setattr(host.os, "lstat", root_evidence_lstat)
+    monkeypatch.setattr(host.os, "fchown", root_evidence_fchown)
+    monkeypatch.setattr(
+        host,
+        "_orphaned_backup_recovery_plan",
+        lambda *args, **kwargs: next(plans),
+    )
+
+    class HistorySwapSystem(host.HostSystem):
+        def __init__(self) -> None:
+            super().__init__(host.SubprocessRunner())
+            self.validated_candidates: list[str] = []
+
+        def _service_ids(self) -> tuple[int, int]:
+            return service_uid, service_gid
+
+        def _rollout_unit_status(
+            self,
+            service_uid: int,
+            *,
+            timeout_seconds: float = host._HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS,
+        ) -> str:
+            del service_uid, timeout_seconds
+            return "idle"
+
+        def validate_recovery_plan_candidate_history(
+            self,
+            plan: Mapping[str, object],
+            *,
+            recovery_head_sha: str,
+        ) -> None:
+            assert recovery_head_sha == "d" * 40
+            items = plan["items"]
+            assert isinstance(items, list) and len(items) == 1
+            item = items[0]
+            assert isinstance(item, Mapping)
+            candidate_sha = item["candidate_sha"]
+            assert isinstance(candidate_sha, str)
+            self.validated_candidates.append(candidate_sha)
+            if candidate_sha == "a" * 40:
+                raise host.InstallError("candidate is not an ancestor of authenticated dev")
+
+    system = HistorySwapSystem()
+    approved_digest = hashlib.sha256(
+        (json.dumps(approved_plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+    with pytest.raises(host.InstallError, match="not an ancestor"):
+        system.orphaned_backup_recovery(
+            action="apply",
+            approved_plan_sha256=approved_digest,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            recovery_head_sha="d" * 40,
+            deadline_monotonic=host.time.monotonic() + 5.0,
+        )
+
+    assert system.validated_candidates == ["b" * 40, "a" * 40]
+    assert not (evidence_root / "req-orphan001.json").exists()
 
 
 def test_orphaned_backup_inventory_has_a_hard_request_limit(
@@ -5433,7 +6718,7 @@ def test_orphaned_backup_inventory_has_a_hard_request_limit(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5450,9 +6735,58 @@ def test_orphaned_backup_inventory_obeys_the_operation_deadline(tmp_path: Path) 
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
             deadline_monotonic=0.0,
         )
+
+
+def test_orphaned_backup_apply_never_publishes_after_a_mid_write_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    expired = False
+    real_fsync = host.os.fsync
+
+    def monotonic() -> float:
+        return 2.0 if expired else 0.0
+
+    def expire_after_fsync(fd: int) -> None:
+        nonlocal expired
+        real_fsync(fd)
+        expired = True
+
+    monkeypatch.setattr(host.time, "monotonic", monotonic)
+    monkeypatch.setattr(host.os, "fsync", expire_after_fsync)
+
+    with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+        host._apply_orphaned_backup_recovery(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            approved_plan_sha256=digest,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            deadline_monotonic=1.0,
+        )
+
+    assert not (evidence_root / "req-orphan001.json").exists()
 
 
 def test_orphaned_backup_inventory_rejects_unsafe_request_directory(
@@ -5471,7 +6805,7 @@ def test_orphaned_backup_inventory_rejects_unsafe_request_directory(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5490,7 +6824,7 @@ def test_orphaned_backup_inventory_refuses_current_installed_candidate(
             service_gid=service_gid,
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
-            installed_source_sha="a" * 40,
+            forbidden_source_shas=frozenset({"a" * 40}),
         )
 
 
@@ -5507,7 +6841,7 @@ def test_orphaned_backup_apply_refuses_unsafe_root_evidence_parent(
         service_gid=service_gid,
         authority_uid=os.geteuid(),
         authority_gid=os.getegid(),
-        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     digest = hashlib.sha256(
         (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -5523,7 +6857,7 @@ def test_orphaned_backup_apply_refuses_unsafe_root_evidence_parent(
             authority_uid=os.geteuid(),
             authority_gid=os.getegid(),
             approved_plan_sha256=digest,
-            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
         )
 
 
@@ -5568,7 +6902,7 @@ def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
     runner = PointerRunner()
 
-    assert host.HostSystem(runner).active_status(TEST_CANDIDATE_SHA) == "busy"
+    assert host.HostSystem(runner).active_status(frozenset({TEST_CANDIDATE_SHA})) == "busy"
     assert runner.calls == [
         ["getent", "passwd", host.SERVICE_USER],
         ["getent", "group", host.SERVICE_GROUP],
@@ -5616,7 +6950,9 @@ def test_active_status_fails_closed_on_unsafe_state_authority(
 
     monkeypatch.setattr(host.os, "lstat", fake_lstat)
 
-    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({TEST_CANDIDATE_SHA})) == "unknown"
+    )
 
 
 def test_active_status_fails_closed_without_safe_maintenance_marker(
@@ -5633,7 +6969,9 @@ def test_active_status_fails_closed_without_safe_maintenance_marker(
         lambda path: (_ for _ in ()).throw(FileNotFoundError(path)),
     )
 
-    assert host.HostSystem(StatusRunner()).active_status(TEST_CANDIDATE_SHA) == "unknown"
+    assert (
+        host.HostSystem(StatusRunner()).active_status(frozenset({TEST_CANDIDATE_SHA})) == "unknown"
+    )
 
 
 def _root_directory_metadata(*, mode: int = 0o700, uid: int = 0) -> os.stat_result:
@@ -7508,6 +8846,53 @@ def test_recovery_invocation_proves_installed_source_is_its_ancestor() -> None:
     assert len(runner.calls) == 2
 
 
+def test_recovery_plan_candidates_must_be_ancestors_of_authenticated_dev_head() -> None:
+    recovery_head_sha = "c" * 40
+    candidates = ["a" * 40, "b" * 40, "a" * 40]
+
+    class HistoryRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            self.calls.append(call)
+            return host.CommandResult(0)
+
+    runner = HistoryRunner()
+    host.HostSystem(runner).validate_recovery_plan_candidate_history(
+        {"items": [{"candidate_sha": candidate} for candidate in candidates]},
+        recovery_head_sha=recovery_head_sha,
+    )
+
+    assert runner.calls == [
+        [
+            "git",
+            "-C",
+            str(host.REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            candidate,
+            recovery_head_sha,
+        ]
+        for candidate in sorted(set(candidates))
+    ]
+
+
+def test_recovery_plan_refuses_an_unrelated_candidate() -> None:
+    class UnrelatedRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del argv, kwargs
+            raise host.InstallError("command failed safely: git")
+
+    with pytest.raises(host.InstallError, match="command failed safely"):
+        host.HostSystem(UnrelatedRunner()).validate_recovery_plan_candidate_history(
+            {"items": [{"candidate_sha": "a" * 40}]},
+            recovery_head_sha="b" * 40,
+        )
+
+
 def test_source_asset_read_is_bound_to_exact_git_object() -> None:
     sha = "a" * 40
     relative = "deploy/staging-rollout/loom-staging-rollout"
@@ -7616,6 +9001,75 @@ def test_maintenance_marker_transition_is_locked_and_idempotent(tmp_path: Path) 
     assert not (runtime / "maintenance").exists()
 
 
+def test_maintenance_marker_rolls_back_a_partial_enable_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    uid, gid = os.geteuid(), os.getegid()
+    real_fsync = host.os.fsync
+    failed = False
+
+    def fail_marker_fsync(fd: int) -> None:
+        nonlocal failed
+        if not failed and (runtime / "maintenance").exists():
+            failed = True
+            raise OSError("injected marker fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(host.os, "fsync", fail_marker_fsync)
+
+    with pytest.raises(host.InstallError, match="transition failed"):
+        host._maintenance_marker(
+            runtime,
+            service_uid=uid,
+            service_gid=gid,
+            authority_uid=uid,
+            authority_gid=gid,
+            enabled=True,
+        )
+
+    assert failed is True
+    assert not (runtime / "maintenance").exists()
+
+
+def test_maintenance_marker_owns_a_file_created_before_open_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    marker = runtime / "maintenance"
+    uid, gid = os.geteuid(), os.getegid()
+    real_open = host.os.open
+
+    def create_marker_then_interrupt(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        if Path(path) == marker:
+            fd = real_open(path, flags, mode)
+            os.close(fd)
+            raise OSError("injected post-create interruption")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(host.os, "open", create_marker_then_interrupt)
+
+    with pytest.raises(host.InstallError, match="transition failed"):
+        host._maintenance_marker(
+            runtime,
+            service_uid=uid,
+            service_gid=gid,
+            authority_uid=uid,
+            authority_gid=gid,
+            enabled=True,
+        )
+
+    assert not marker.exists()
+
+
 def test_maintenance_marker_waits_for_inflight_launch_guard(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir(mode=0o700)
@@ -7656,6 +9110,72 @@ def test_maintenance_marker_waits_for_inflight_launch_guard(tmp_path: Path) -> N
 
     assert not failures
     assert (runtime / "maintenance").is_file()
+
+
+def test_absent_maintenance_cleanup_does_not_wait_for_launch_lock(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    uid, gid = os.geteuid(), os.getegid()
+    lock_fd = os.open(runtime / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    host.fcntl.flock(lock_fd, host.fcntl.LOCK_EX)
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def clean_absent_marker() -> None:
+        try:
+            host._maintenance_marker(
+                runtime,
+                service_uid=uid,
+                service_gid=gid,
+                authority_uid=uid,
+                authority_gid=gid,
+                enabled=False,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=clean_absent_marker)
+    worker.start()
+    try:
+        assert finished.wait(timeout=0.20)
+    finally:
+        host.fcntl.flock(lock_fd, host.fcntl.LOCK_UN)
+        os.close(lock_fd)
+        worker.join(timeout=2)
+
+    assert not failures
+
+
+@pytest.mark.timeout(0)
+def test_recovery_deadline_interrupts_a_blocked_maintenance_launch_lock(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    uid, gid = os.geteuid(), os.getegid()
+    lock_fd = os.open(runtime / "launch.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    host.fcntl.flock(lock_fd, host.fcntl.LOCK_EX)
+
+    try:
+        with pytest.raises(host.InstallError, match="operation deadline exceeded"):
+            with host._orphaned_backup_deadline_guard(host.time.monotonic() + 0.02):
+                host._maintenance_marker(
+                    runtime,
+                    service_uid=uid,
+                    service_gid=gid,
+                    authority_uid=uid,
+                    authority_gid=gid,
+                    enabled=True,
+                )
+    finally:
+        host.fcntl.flock(lock_fd, host.fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    assert not (runtime / "maintenance").exists()
 
 
 def test_owned_tree_rejects_writable_descendant_and_escaping_symlink(tmp_path: Path) -> None:

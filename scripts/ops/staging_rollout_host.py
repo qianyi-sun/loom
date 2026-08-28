@@ -20,18 +20,20 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeGuard
 
 if TYPE_CHECKING:
     from scripts.ops.staging_rollout_sealed_source import (
@@ -726,6 +728,9 @@ class LocalFilesystem:
     def exists(self, absolute: Path) -> bool:
         return self.path(absolute).exists()
 
+    def lexists(self, absolute: Path) -> bool:
+        return os.path.lexists(self.path(absolute))
+
     def is_safe_directory(self, absolute: Path) -> bool:
         path = self.path(absolute)
         return path.is_dir() and not path.is_symlink()
@@ -1322,6 +1327,23 @@ def _runtime_identity(root: Path, *, service_uid: int, service_gid: int) -> None
         raise InstallError("service runtime directory is unsafe")
 
 
+def _maintenance_marker_lock(fd: int, *, deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            raise InstallError("orphaned backup operation deadline exceeded")
+        time.sleep(min(remaining, 0.01))
+
+
 def _read_root_kubeconfig_source() -> bytes:
     """Read the fixed root kubeconfig through one authority-checked descriptor."""
     try:
@@ -1403,9 +1425,13 @@ def _maintenance_marker(
     enabled: bool,
     authority_uid: int = 0,
     authority_gid: int = 0,
+    deadline_monotonic: float | None = None,
 ) -> None:
     """Change the root-owned admission marker while holding the broker launch lock."""
     _runtime_identity(root, service_uid=service_uid, service_gid=service_gid)
+    marker = root / "maintenance"
+    if not enabled and not os.path.lexists(marker):
+        return
     lock_path = root / "launch.lock"
     existed = os.path.lexists(lock_path)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1413,6 +1439,8 @@ def _maintenance_marker(
         fd = os.open(lock_path, flags, 0o600)
     except OSError as exc:
         raise InstallError("protected launch lock is unavailable") from exc
+    created_marker = False
+    marker_slot_owned = False
     try:
         if not existed:
             os.fchown(fd, service_uid, service_gid)
@@ -1425,8 +1453,10 @@ def _maintenance_marker(
             or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             raise InstallError("protected launch lock metadata is unsafe")
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        marker = root / "maintenance"
+        _maintenance_marker_lock(
+            fd,
+            deadline_monotonic=deadline_monotonic if not enabled else None,
+        )
         if enabled:
             if os.path.lexists(marker):
                 marker_metadata = os.lstat(marker)
@@ -1438,6 +1468,7 @@ def _maintenance_marker(
                 ):
                     raise InstallError("maintenance marker metadata is unsafe")
             else:
+                marker_slot_owned = True
                 marker_fd = os.open(
                     marker,
                     os.O_WRONLY
@@ -1447,6 +1478,7 @@ def _maintenance_marker(
                     | getattr(os, "O_NOFOLLOW", 0),
                     0o600,
                 )
+                created_marker = True
                 try:
                     os.fchown(marker_fd, authority_uid, authority_gid)
                     os.fchmod(marker_fd, 0o600)
@@ -1462,14 +1494,56 @@ def _maintenance_marker(
                 or stat.S_IMODE(marker_metadata.st_mode) != 0o600
             ):
                 raise InstallError("maintenance marker metadata is unsafe")
-            marker.unlink()
-        directory_fd = os.open(root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError as exc:
-        raise InstallError("maintenance admission transition failed") from exc
+            directory_fd = os.open(root, os.O_RDONLY)
+            try:
+                with _orphaned_backup_marker_cleanup_guard():
+                    marker.unlink()
+                    os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        else:
+            directory_fd = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        if enabled:
+            directory_fd = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except BaseException as exc:
+        rollback_required = created_marker
+        if marker_slot_owned and not rollback_required:
+            try:
+                marker_metadata = os.lstat(marker)
+            except FileNotFoundError:
+                pass
+            except OSError as rollback_exc:
+                raise InstallError("maintenance admission rollback failed") from rollback_exc
+            else:
+                if (
+                    not stat.S_ISREG(marker_metadata.st_mode)
+                    or marker_metadata.st_uid != authority_uid
+                    or marker_metadata.st_gid != authority_gid
+                    or stat.S_IMODE(marker_metadata.st_mode) != 0o600
+                ):
+                    raise InstallError("maintenance admission rollback failed") from exc
+                rollback_required = True
+        if rollback_required:
+            try:
+                marker.unlink()
+                directory_fd = os.open(root, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as rollback_exc:
+                raise InstallError("maintenance admission rollback failed") from rollback_exc
+        if isinstance(exc, OSError):
+            raise InstallError("maintenance admission transition failed") from exc
+        raise
     finally:
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1482,14 +1556,16 @@ def _durable_preflight_backup_status(
     *,
     service_uid: int,
     service_gid: int,
-    installed_source_sha: str,
+    forbidden_source_shas: frozenset[str],
     evidence_root: Path = ORPHANED_BACKUP_EVIDENCE_ROOT,
     authority_uid: int = 0,
     authority_gid: int = 0,
 ) -> str:
     """Return busy/idle/unknown from bounded service-owned backup state."""
 
-    if _SHA_RE.fullmatch(installed_source_sha) is None:
+    if not forbidden_source_shas or any(
+        _SHA_RE.fullmatch(source_sha) is None for source_sha in forbidden_source_shas
+    ):
         return "unknown"
     requests_root = state_root / "requests"
     try:
@@ -1579,29 +1655,32 @@ def _durable_preflight_backup_status(
         except (TypeError, ValueError):
             return "unknown"
         if phase in active_phases:
-            receipt = _orphaned_backup_receipt_status(
-                request.name,
-                backup_root=backup_root,
+            request_id = request.name
+            state_job_id = value.get("job_id")
+            job_binding_factory = _preflight_backup_job_binding_reader(
+                backup_root,
+                request_id=request_id,
+                state_job_id=state_job_id,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+            receipt, job_binding = _orphaned_backup_receipt_status(
+                request_id,
                 phase=phase,
                 state_sha256=hashlib.sha256(payload).hexdigest(),
                 evidence_root=evidence_root,
-                service_uid=service_uid,
-                service_gid=service_gid,
                 authority_uid=authority_uid,
                 authority_gid=authority_gid,
-                installed_source_sha=installed_source_sha,
+                forbidden_source_shas=forbidden_source_shas,
+                job_binding_factory=job_binding_factory,
             )
             if receipt == "invalid":
                 return "unknown"
             if receipt == "valid":
                 try:
-                    job, _ = _read_owned_json(
-                        backup_root / "job.json", uid=service_uid, gid=service_gid
-                    )
-                    payload_id = job.get("payload_id")
-                    if not isinstance(payload_id, str) or _rotation_references_payload(
+                    if job_binding is None or _rotation_references_payload(
                         state_root,
-                        payload_id=payload_id,
+                        payload_id=job_binding.payload_id,
                         service_uid=service_uid,
                         service_gid=service_gid,
                     ):
@@ -1680,6 +1759,10 @@ def _bounded_backup_identity(value: object, *, limit: int = 160) -> bool:
         and len(value) <= limit
         and not any(ord(character) < 32 for character in value)
     )
+
+
+def _backup_bundle_name(value: object) -> TypeGuard[str]:
+    return isinstance(value, str) and bool(value and "/" not in value and value == value.strip())
 
 
 def _validate_backup_lease(
@@ -1893,10 +1976,7 @@ def _validate_preflight_backup_job(
                 "preflight_registry_sha256",
             )
         )
-        or not isinstance(bundle_name, str)
-        or not bundle_name
-        or "/" in bundle_name
-        or bundle_name != bundle_name.strip()
+        or not _backup_bundle_name(bundle_name)
     ):
         raise ValueError("preflight backup job schema is invalid")
     _backup_timestamp(job.get("created_at"))
@@ -1950,7 +2030,8 @@ def _validate_backup_job_state(
         or state.get("request_id") != request_id
         or not isinstance(job_id, str)
         or _BACKUP_SAFE_ID_RE.fullmatch(job_id) is None
-        or (phase == "backup_failed") != (isinstance(failure_code, str) and bool(failure_code))
+        or (phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code))
+        or (phase != "backup_failed" and failure_code is not None)
     ):
         raise ValueError("backup job state schema is invalid")
     updated_at = state.get("updated_at")
@@ -1966,48 +2047,109 @@ def _validate_backup_job_state(
     return phase
 
 
+@dataclass(frozen=True)
+class _PreflightBackupJobBinding:
+    payload_id: str
+    bundle_name: str
+    candidate_sha: str
+    job_sha256: str
+
+
+def _read_preflight_backup_job_binding(
+    backup_root: Path,
+    *,
+    request_id: str,
+    state_job_id: object,
+    service_uid: int,
+    service_gid: int,
+) -> _PreflightBackupJobBinding:
+    try:
+        job, job_payload = _read_owned_json(
+            backup_root / "job.json",
+            uid=service_uid,
+            gid=service_gid,
+        )
+        payload_id, bundle_name, candidate_sha = _validate_preflight_backup_job(
+            job,
+            request_id=request_id,
+            state_job_id=state_job_id,
+        )
+    except (InstallError, TypeError, ValueError) as exc:
+        raise InstallError("preflight backup job authority is invalid") from exc
+    return _PreflightBackupJobBinding(
+        payload_id=payload_id,
+        bundle_name=bundle_name,
+        candidate_sha=candidate_sha,
+        job_sha256=hashlib.sha256(job_payload).hexdigest(),
+    )
+
+
+def _preflight_backup_job_binding_reader(
+    backup_root: Path,
+    *,
+    request_id: str,
+    state_job_id: object,
+    service_uid: int,
+    service_gid: int,
+) -> Callable[[], _PreflightBackupJobBinding]:
+    def read_job_binding() -> _PreflightBackupJobBinding:
+        return _read_preflight_backup_job_binding(
+            backup_root,
+            request_id=request_id,
+            state_job_id=state_job_id,
+            service_uid=service_uid,
+            service_gid=service_gid,
+        )
+
+    return read_job_binding
+
+
+def _preflight_backup_job_binding_value(
+    job_binding: _PreflightBackupJobBinding,
+) -> Callable[[], _PreflightBackupJobBinding]:
+    def current_job_binding() -> _PreflightBackupJobBinding:
+        return job_binding
+
+    return current_job_binding
+
+
 def _orphaned_backup_receipt_status(
     request_id: str,
     *,
-    backup_root: Path,
     phase: object,
     state_sha256: str,
     evidence_root: Path,
-    service_uid: int,
-    service_gid: int,
     authority_uid: int,
     authority_gid: int,
-    installed_source_sha: str,
-) -> str:
-    if _SHA_RE.fullmatch(installed_source_sha) is None:
-        return "invalid"
+    forbidden_source_shas: frozenset[str],
+    job_binding_factory: Callable[[], _PreflightBackupJobBinding],
+) -> tuple[str, _PreflightBackupJobBinding | None]:
+    if not forbidden_source_shas or any(
+        _SHA_RE.fullmatch(source_sha) is None for source_sha in forbidden_source_shas
+    ):
+        return "invalid", None
     receipt_path = evidence_root / f"{request_id}.json"
     try:
         root_metadata = os.lstat(evidence_root)
     except FileNotFoundError:
-        return "absent"
+        return "absent", None
     except OSError:
-        return "invalid"
+        return "invalid", None
     if (
         not stat.S_ISDIR(root_metadata.st_mode)
         or root_metadata.st_uid != authority_uid
         or root_metadata.st_gid != authority_gid
         or stat.S_IMODE(root_metadata.st_mode) != 0o700
     ):
-        return "invalid"
+        return "invalid", None
     try:
         receipt, _ = _read_owned_json(
             receipt_path,
             uid=authority_uid,
             gid=authority_gid,
         )
-        job, job_payload = _read_owned_json(
-            backup_root / "job.json",
-            uid=service_uid,
-            gid=service_gid,
-        )
     except InstallError:
-        return "invalid" if os.path.lexists(receipt_path) else "absent"
+        return ("invalid", None) if os.path.lexists(receipt_path) else ("absent", None)
     expected = {
         "bundle_name",
         "candidate_sha",
@@ -2038,23 +2180,26 @@ def _orphaned_backup_receipt_status(
         )
         or not isinstance(receipt_payload_id, str)
         or _REQUEST_ID_RE.fullmatch(receipt_payload_id) is None
-        or not isinstance(receipt_bundle_name, str)
-        or _REQUEST_ID_RE.fullmatch(receipt_bundle_name) is None
+        or not _backup_bundle_name(receipt_bundle_name)
         or not isinstance(receipt.get("plan_sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("plan_sha256"))) is None
     ):
-        return "invalid"
+        return "invalid", None
+    try:
+        job_binding = job_binding_factory()
+    except InstallError:
+        return "invalid", None
     if (
         receipt.get("phase") != phase
         or receipt.get("state_sha256") != state_sha256
-        or receipt.get("job_sha256") != hashlib.sha256(job_payload).hexdigest()
-        or receipt.get("payload_id") != job.get("payload_id")
-        or receipt.get("bundle_name") != job.get("bundle_name")
-        or receipt.get("candidate_sha") != job.get("candidate_sha")
-        or receipt_candidate_sha == installed_source_sha
+        or receipt.get("job_sha256") != job_binding.job_sha256
+        or receipt.get("payload_id") != job_binding.payload_id
+        or receipt.get("bundle_name") != job_binding.bundle_name
+        or receipt.get("candidate_sha") != job_binding.candidate_sha
+        or receipt_candidate_sha in forbidden_source_shas
     ):
-        return "stale"
-    return "valid"
+        return "stale", job_binding
+    return "valid", job_binding
 
 
 def _read_backup_rotation_references(
@@ -2128,6 +2273,113 @@ def _orphaned_backup_deadline(deadline_monotonic: float | None) -> float:
     return float(deadline_monotonic)
 
 
+@contextlib.contextmanager
+def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]:
+    """Interrupt every normally interruptible recovery operation at one deadline."""
+
+    if threading.current_thread() is not threading.main_thread():
+        raise InstallError("orphaned backup deadline watchdog requires the main thread")
+    remaining = _orphaned_backup_remaining(deadline_monotonic)
+    try:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+        alarm_pending = signal.SIGALRM in signal.sigpending()
+    except (OSError, ValueError) as exc:
+        with contextlib.suppress(OSError, ValueError):
+            if "previous_mask" in locals():
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        raise InstallError("orphaned backup deadline watchdog is unavailable") from exc
+    if previous_delay > 0.0 or previous_interval > 0.0 or alarm_pending:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except (OSError, ValueError) as exc:
+            raise InstallError("orphaned backup deadline watchdog restoration failed") from exc
+        raise InstallError("orphaned backup recovery conflicts with an active process timer")
+
+    deadline_error = InstallError("orphaned backup operation deadline exceeded")
+    owned_expiry_observed = False
+
+    def deadline_expired(_signum: int, _frame: Any) -> NoReturn:
+        nonlocal owned_expiry_observed
+        owned_expiry_observed = True
+        raise deadline_error
+
+    watchdog_owns_alarm = False
+    try:
+        try:
+            signal.signal(signal.SIGALRM, deadline_expired)
+            # The arming call may install a timer and still report failure, so
+            # restoration must treat pending SIGALRM as ours before calling it.
+            watchdog_owns_alarm = True
+            signal.setitimer(signal.ITIMER_REAL, remaining)
+            active_mask = set(previous_mask)
+            active_mask.discard(signal.SIGALRM)
+            signal.pthread_sigmask(signal.SIG_SETMASK, active_mask)
+        except (OSError, ValueError) as exc:
+            raise InstallError("orphaned backup deadline watchdog is unavailable") from exc
+        yield
+        _orphaned_backup_remaining(deadline_monotonic)
+    finally:
+        restoration_error: BaseException | None = None
+        restoration_blocked = False
+        while not restoration_blocked and restoration_error is None:
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+                restoration_blocked = True
+            except InstallError as exc:
+                if not watchdog_owns_alarm or exc is not deadline_error:
+                    raise
+                owned_expiry_observed = True
+            except (OSError, ValueError) as exc:
+                restoration_error = exc
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+        except (OSError, ValueError) as exc:
+            if restoration_error is None:
+                restoration_error = exc
+        if watchdog_owns_alarm and restoration_blocked:
+            try:
+                if signal.SIGALRM in signal.sigpending():
+                    signal.sigwait({signal.SIGALRM})
+                    owned_expiry_observed = True
+            except (OSError, ValueError) as exc:
+                if restoration_error is None:
+                    restoration_error = exc
+        try:
+            signal.signal(signal.SIGALRM, previous_handler)
+        except (OSError, ValueError) as exc:
+            if restoration_error is None:
+                restoration_error = exc
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except (OSError, ValueError) as exc:
+            if restoration_error is None:
+                restoration_error = exc
+        # Process-safe restoration outranks an owned expiry; an owned expiry
+        # outranks any body exception. Otherwise the body exception propagates.
+        if restoration_error is not None:
+            raise InstallError("orphaned backup deadline watchdog restoration failed") from (
+                restoration_error
+            )
+        if owned_expiry_observed:
+            raise deadline_error
+
+
+@contextlib.contextmanager
+def _orphaned_backup_marker_cleanup_guard() -> Iterator[None]:
+    """Defer SIGALRM delivery until a valid maintenance marker is removed."""
+
+    try:
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    except (OSError, ValueError) as exc:
+        raise InstallError("orphaned backup cleanup signal guard is unavailable") from exc
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
 def _orphaned_backup_remaining(deadline_monotonic: float) -> float:
     remaining = deadline_monotonic - time.monotonic()
     if remaining <= 0:
@@ -2143,13 +2395,15 @@ def _orphaned_backup_recovery_plan(
     service_gid: int,
     authority_uid: int,
     authority_gid: int,
-    installed_source_sha: str,
+    forbidden_source_shas: frozenset[str],
     deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
     deadline_monotonic = _orphaned_backup_deadline(deadline_monotonic)
     _orphaned_backup_remaining(deadline_monotonic)
-    if _SHA_RE.fullmatch(installed_source_sha) is None:
-        raise InstallError("installed source SHA is invalid")
+    if not forbidden_source_shas or any(
+        _SHA_RE.fullmatch(source_sha) is None for source_sha in forbidden_source_shas
+    ):
+        raise InstallError("recovery source SHA authority is invalid")
     requests_root = state_root / "requests"
     for path in (state_root, requests_root):
         metadata = os.lstat(path)
@@ -2219,40 +2473,40 @@ def _orphaned_backup_recovery_plan(
         if phase not in _ACTIVE_PREFLIGHT_BACKUP_PHASES:
             continue
         state_sha256 = hashlib.sha256(state_payload).hexdigest()
-        receipt = _orphaned_backup_receipt_status(
+        try:
+            job_binding = _read_preflight_backup_job_binding(
+                backup_root,
+                request_id=request.name,
+                state_job_id=state.get("job_id"),
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+        except InstallError as exc:
+            raise InstallError("orphaned backup job authority is invalid") from exc
+        receipt, _ = _orphaned_backup_receipt_status(
             request.name,
-            backup_root=backup_root,
             phase=phase,
             state_sha256=state_sha256,
             evidence_root=evidence_root,
-            service_uid=service_uid,
-            service_gid=service_gid,
             authority_uid=authority_uid,
             authority_gid=authority_gid,
-            installed_source_sha=installed_source_sha,
+            forbidden_source_shas=forbidden_source_shas,
+            job_binding_factory=_preflight_backup_job_binding_value(job_binding),
         )
         if receipt == "invalid":
             raise InstallError("orphaned backup receipt authority is unsafe")
-        job, job_payload = _read_owned_json(
-            backup_root / "job.json", uid=service_uid, gid=service_gid
-        )
-        try:
-            payload_id, bundle_name, candidate_sha = _validate_preflight_backup_job(
-                job,
-                request_id=request.name,
-                state_job_id=state.get("job_id"),
-            )
-        except (TypeError, ValueError) as exc:
-            raise InstallError("orphaned backup job authority is invalid") from exc
+        payload_id = job_binding.payload_id
+        bundle_name = job_binding.bundle_name
+        candidate_sha = job_binding.candidate_sha
         if payload_id in referenced:
             raise InstallError("orphaned backup payload is still referenced")
-        if candidate_sha == installed_source_sha:
+        if candidate_sha in forbidden_source_shas:
             raise InstallError("orphaned backup candidate is not superseded")
         items.append(
             {
                 "bundle_name": bundle_name,
                 "candidate_sha": candidate_sha,
-                "job_sha256": hashlib.sha256(job_payload).hexdigest(),
+                "job_sha256": job_binding.job_sha256,
                 "payload_id": payload_id,
                 "phase": phase,
                 "request_id": request.name,
@@ -2276,7 +2530,8 @@ def _apply_orphaned_backup_recovery(
     authority_uid: int,
     authority_gid: int,
     approved_plan_sha256: str,
-    installed_source_sha: str,
+    forbidden_source_shas: frozenset[str],
+    validate_plan: Callable[[Mapping[str, object]], None] | None = None,
     deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
     deadline_monotonic = _orphaned_backup_deadline(deadline_monotonic)
@@ -2288,13 +2543,15 @@ def _apply_orphaned_backup_recovery(
         service_gid=service_gid,
         authority_uid=authority_uid,
         authority_gid=authority_gid,
-        installed_source_sha=installed_source_sha,
+        forbidden_source_shas=forbidden_source_shas,
         deadline_monotonic=deadline_monotonic,
     )
     plan_payload = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
     digest = hashlib.sha256(plan_payload).hexdigest()
     if digest != approved_plan_sha256:
         raise InstallError("orphaned backup approved plan does not match current evidence")
+    if validate_plan is not None:
+        validate_plan(plan)
     items = plan.get("items")
     if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
         raise InstallError("orphaned backup recovery plan is invalid")
@@ -2343,6 +2600,7 @@ def _apply_orphaned_backup_recovery(
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            _orphaned_backup_remaining(deadline_monotonic)
             os.replace(temporary, destination)
         except OSError as exc:
             with contextlib.suppress(OSError):
@@ -2384,6 +2642,7 @@ class HostSystem:
     def __init__(self, runner: Runner) -> None:
         self.runner = runner
         self._trust_lock_fd: int | None = None
+        self._maintenance_service_ids: tuple[int, int] | None = None
 
     @contextlib.contextmanager
     def trust_lifecycle_lock(self) -> Iterator[None]:
@@ -2568,6 +2827,42 @@ class HostSystem:
                 invocation_head,
             ]
         )
+
+    def validate_recovery_plan_candidate_history(
+        self,
+        plan: Mapping[str, object],
+        *,
+        recovery_head_sha: str,
+    ) -> None:
+        """Prove every recovered candidate is strictly behind authenticated dev."""
+
+        items = plan.get("items")
+        if _SHA_RE.fullmatch(recovery_head_sha) is None or not isinstance(items, list):
+            raise InstallError("orphaned backup recovery candidate history is invalid")
+        candidates: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise InstallError("orphaned backup recovery candidate history is invalid")
+            candidate_sha = item.get("candidate_sha")
+            if (
+                not isinstance(candidate_sha, str)
+                or _SHA_RE.fullmatch(candidate_sha) is None
+                or candidate_sha == recovery_head_sha
+            ):
+                raise InstallError("orphaned backup recovery candidate is not superseded")
+            candidates.add(candidate_sha)
+        for candidate_sha in sorted(candidates):
+            self.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(REPO_ROOT),
+                    "merge-base",
+                    "--is-ancestor",
+                    candidate_sha,
+                    recovery_head_sha,
+                ]
+            )
 
     def prepare_install_source(self) -> tuple[Path, str]:
         self.ensure_root_directory(RUNNER_ROOT, mode=0o755)
@@ -3264,6 +3559,41 @@ class HostSystem:
         self.runner.run(["systemd-tmpfiles", "--create", str(TMPFILES_PATH)])
         expected = f"directory:{SERVICE_USER}:{SERVICE_GROUP}:700"
         confirmed = self.runner.run(["stat", "-c", "%F:%U:%G:%a", str(RUNTIME_ROOT)]).stdout.strip()
+        if confirmed != expected:
+            raise InstallError("service runtime directory did not converge safely")
+        return True
+
+    def ensure_maintenance_runtime_directory(self) -> bool:
+        """Bootstrap only the authenticated ephemeral directory needed to fence retained state."""
+
+        if self.service_user_convergence_needed():
+            raise InstallError("retained staging state requires the canonical service account")
+        service_uid, service_gid = self._service_ids()
+        expected = f"directory:{service_uid}:{service_gid}:700"
+        current = self._probe(["stat", "-c", "%F:%u:%g:%a", str(RUNTIME_ROOT)])
+        if current.returncode == 0:
+            if current.stdout.strip() != expected:
+                raise InstallError("service runtime directory is unsafe")
+            return False
+        if (
+            self._probe(["test", "-e", str(RUNTIME_ROOT)]).returncode == 0
+            or self._probe(["test", "-L", str(RUNTIME_ROOT)]).returncode == 0
+        ):
+            raise InstallError("service runtime directory is unsafe")
+        self.runner.run(
+            [
+                "install",
+                "-d",
+                "-o",
+                str(service_uid),
+                "-g",
+                str(service_gid),
+                "-m",
+                "0700",
+                str(RUNTIME_ROOT),
+            ]
+        )
+        confirmed = self.runner.run(["stat", "-c", "%F:%u:%g:%a", str(RUNTIME_ROOT)]).stdout.strip()
         if confirmed != expected:
             raise InstallError("service runtime directory did not converge safely")
         return True
@@ -5077,7 +5407,7 @@ class HostSystem:
             failures.append("gb10-trust")
         return failures
 
-    def active_status(self, installed_source_sha: str) -> str:
+    def active_status(self, forbidden_source_shas: frozenset[str]) -> str:
         """Prove inactivity without importing the runtime being replaced.
 
         Install and uninstall call this only after ``begin_maintenance`` has
@@ -5124,7 +5454,7 @@ class HostSystem:
             STATE_ROOT,
             service_uid=service_uid,
             service_gid=service_gid,
-            installed_source_sha=installed_source_sha,
+            forbidden_source_shas=forbidden_source_shas,
         )
         if durable_status == "unknown":
             return "unknown"
@@ -5219,7 +5549,8 @@ class HostSystem:
         *,
         action: str,
         approved_plan_sha256: str | None,
-        installed_source_sha: str,
+        forbidden_source_shas: frozenset[str],
+        recovery_head_sha: str,
         deadline_monotonic: float,
     ) -> dict[str, object]:
         """Inventory or attest only exact unowned, unreferenced backup states."""
@@ -5254,8 +5585,12 @@ class HostSystem:
             service_gid=service_gid,
             authority_uid=0,
             authority_gid=0,
-            installed_source_sha=installed_source_sha,
+            forbidden_source_shas=forbidden_source_shas,
             deadline_monotonic=deadline_monotonic,
+        )
+        self.validate_recovery_plan_candidate_history(
+            plan,
+            recovery_head_sha=recovery_head_sha,
         )
         plan_payload = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
         plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
@@ -5282,12 +5617,17 @@ class HostSystem:
             authority_uid=0,
             authority_gid=0,
             approved_plan_sha256=approved_plan_sha256,
-            installed_source_sha=installed_source_sha,
+            forbidden_source_shas=forbidden_source_shas,
+            validate_plan=lambda current_plan: self.validate_recovery_plan_candidate_history(
+                current_plan,
+                recovery_head_sha=recovery_head_sha,
+            ),
             deadline_monotonic=deadline_monotonic,
         )
 
     def begin_maintenance(self) -> None:
         uid, gid = self._service_ids()
+        self._maintenance_service_ids = (uid, gid)
         _maintenance_marker(
             RUNTIME_ROOT,
             service_uid=uid,
@@ -5295,14 +5635,21 @@ class HostSystem:
             enabled=True,
         )
 
-    def end_maintenance(self) -> None:
-        uid, gid = self._service_ids()
+    def end_maintenance(self, *, deadline_monotonic: float | None = None) -> None:
+        identity = self._maintenance_service_ids
+        if identity is None:
+            if deadline_monotonic is not None:
+                raise InstallError("maintenance cleanup service identity is unavailable")
+            identity = self._service_ids()
+        uid, gid = identity
         _maintenance_marker(
             RUNTIME_ROOT,
             service_uid=uid,
             service_gid=gid,
             enabled=False,
+            deadline_monotonic=deadline_monotonic,
         )
+        self._maintenance_service_ids = None
 
     def maintenance_marker_status(self) -> str:
         """Return disabled/enabled or reject unsafe root maintenance authority."""
@@ -5925,6 +6272,11 @@ class HostInstaller:
         team_id = _validate_team_id(team_id)
         self.system.validate_prerequisites()
         invocation_head = self.system.validate_invocation_checkout()
+        retained_roots = (STATE_ROOT, ORPHANED_BACKUP_EVIDENCE_ROOT)
+        retained_entries = tuple(path for path in retained_roots if self.filesystem.lexists(path))
+        if any(not self.filesystem.is_safe_directory(path) for path in retained_entries):
+            raise InstallError("retained staging rollout path entry is unsafe")
+        retained_runtime_authority = bool(retained_entries)
         if sealed_source is None:
             self.source_mode = "merged-dev"
             self.source_tree_sha = None
@@ -6530,8 +6882,22 @@ class HostInstaller:
             or not install_attestation_ready
         )
         transaction_active = transaction_active or requires_mutation
+        forbidden_source_shas = {source_sha}
+        if previous_record is not None:
+            previous_source_sha = previous_record.get("source_sha")
+            if (
+                not isinstance(previous_source_sha, str)
+                or _SHA_RE.fullmatch(previous_source_sha) is None
+            ):
+                raise InstallError("existing install record source SHA is invalid")
+            forbidden_source_shas.add(previous_source_sha)
+        if requires_mutation and retained_runtime_authority:
+            if self.system.ensure_maintenance_runtime_directory():
+                changes.append(f"directory:{RUNTIME_ROOT}")
 
-        if requires_mutation and (admission_enabled or sudoers_present):
+        if requires_mutation and (
+            admission_enabled or sudoers_present or retained_runtime_authority
+        ):
             admission_was_present = self.filesystem.remove(SUDOERS_PATH)
             try:
                 self.system.begin_maintenance()
@@ -6539,7 +6905,7 @@ class HostInstaller:
                 if admission_was_present:
                     restore_admission()
                 raise
-            status = self.system.active_status(source_sha)
+            status = self.system.active_status(frozenset(forbidden_source_shas))
             if status in {"pending", "running", "cancel_requested", "busy", "unknown"}:
                 if admission_was_present:
                     restore_admission()
@@ -7108,7 +7474,7 @@ class HostInstaller:
             self.system.begin_maintenance()
             if self.source_sha is None:  # validated and bound above
                 raise InstallError("installed source SHA is unavailable")
-            status = self.system.active_status(self.source_sha)
+            status = self.system.active_status(frozenset({self.source_sha}))
             if status != "idle":
                 if previous == "disabled":
                     self.system.end_maintenance()
@@ -7132,7 +7498,7 @@ class HostInstaller:
             }
         if self.source_sha is None:  # validated and bound above
             raise InstallError("installed source SHA is unavailable")
-        status = self.system.active_status(self.source_sha)
+        status = self.system.active_status(frozenset({self.source_sha}))
         if status != "idle":
             if status == "unknown":
                 raise InstallError("cannot prove staging rollout is inactive")
@@ -7152,17 +7518,25 @@ class HostInstaller:
         action: str,
         approved_plan_sha256: str | None,
         _lock_held: bool = False,
+        _deadline_monotonic: float | None = None,
     ) -> dict[str, object]:
         """Run one explicit, digest-approved migration of stale backup evidence."""
+        deadline_monotonic = (
+            time.monotonic() + _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS
+            if _deadline_monotonic is None
+            else _orphaned_backup_deadline(_deadline_monotonic)
+        )
         if not _lock_held:
             if self.euid != 0:
                 raise InstallError("orphaned backup recovery requires root")
-            with self.system.trust_lifecycle_lock():
-                return self.orphaned_backup_recovery(
-                    action=action,
-                    approved_plan_sha256=approved_plan_sha256,
-                    _lock_held=True,
-                )
+            with _orphaned_backup_deadline_guard(deadline_monotonic):
+                with self.system.trust_lifecycle_lock():
+                    return self.orphaned_backup_recovery(
+                        action=action,
+                        approved_plan_sha256=approved_plan_sha256,
+                        _lock_held=True,
+                        _deadline_monotonic=deadline_monotonic,
+                    )
         if self.euid != 0:
             raise InstallError("orphaned backup recovery requires root")
         self.system.validate_install_record_authority(allow_absent=False)
@@ -7184,17 +7558,20 @@ class HostInstaller:
         self.system.validate_assets(REPO_ROOT, invocation_head)
         if self.system.maintenance_marker_status() != "disabled":
             raise InstallError("orphaned backup recovery requires disabled maintenance")
-        deadline_monotonic = time.monotonic() + _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS
-        self.system.begin_maintenance()
+        _orphaned_backup_remaining(deadline_monotonic)
+        # Disabled maintenance was authenticated above, so this invocation owns
+        # cleanup before publication begins as well as after it returns.
         try:
+            self.system.begin_maintenance()
             return self.system.orphaned_backup_recovery(
                 action=action,
                 approved_plan_sha256=approved_plan_sha256,
-                installed_source_sha=self.source_sha,
+                forbidden_source_shas=frozenset({self.source_sha, invocation_head}),
+                recovery_head_sha=invocation_head,
                 deadline_monotonic=deadline_monotonic,
             )
         finally:
-            self.system.end_maintenance()
+            self.system.end_maintenance(deadline_monotonic=deadline_monotonic)
 
     def uninstall(
         self,
@@ -7290,7 +7667,7 @@ class HostInstaller:
                     self.filesystem.atomic_write(SUDOERS_PATH, sudoers, 0o440)
                     self.system.install_owner(SUDOERS_PATH, "root", 0o440)
                 raise
-            status = self.system.active_status(self.source_sha)
+            status = self.system.active_status(frozenset({self.source_sha}))
             if status in {"pending", "running", "cancel_requested", "busy", "unknown"}:
                 if admission_was_present:
                     sudoers = self._asset("loom-staging-rollout.sudoers")
@@ -7435,7 +7812,11 @@ class HostInstaller:
         return {
             "ok": True,
             "removed": removed,
-            "retained": [str(STATE_ROOT), "/data/loom-staging/rollouts"],
+            "retained": [
+                str(STATE_ROOT),
+                str(ORPHANED_BACKUP_EVIDENCE_ROOT),
+                "/data/loom-staging/rollouts",
+            ],
         }
 
 

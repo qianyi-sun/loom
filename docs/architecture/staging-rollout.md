@@ -177,35 +177,94 @@ promoting the candidate; it never deletes either payload. The superseded
 active payload is queued for the separate `backup-retention` inventory/apply
 protocol.
 
-Host upgrades also fail closed on every durable nonterminal preflight-backup
-state, including records left by older implementations after their systemd
-owner disappeared. The candidate must differ from the currently installed
-source; a current-candidate request remains owned by normal recovery or
-`resume`. A superseded record that is absent from the current backup
-rotation is not silently ignored or edited. Root must run the recovery command
-from a clean, root-owned checkout whose only remote is the approved origin and
-whose HEAD is the exact current `dev` ref. The installed source must be its
-ancestor, and the checkout's rollout assets are validated before maintenance or
-receipt publication.
+Every host install or upgrade fails closed on durable nonterminal
+preflight-backup state, including a fresh reinstall after uninstall: uninstall
+retains both `/var/lib/loom/staging-rollout` and the root receipt directory.
+Immediately after invocation-checkout authentication, before install-source
+preparation or the install transaction's root-directory convergence, any
+lstat-visible entry at either retained namespace must be an actual directory;
+a file or symlink (including a dangling symlink) refuses installation. A safe
+directory entry selects the later maintenance/activity fence rather than
+authorizing it. Because uninstall also removes tmpfiles configuration and
+`/run/loom-staging-rollout`, that fence authenticates the unchanged canonical
+service account and creates only the ephemeral directory with its exact UID/GID
+and mode `0700`; it does not depend on removed tmpfiles authority. The fence
+then proves service state, marker, and unit authority before install-record,
+account, service-directory, candidate, runtime, or admission convergence.
+Receipt-root and receipt-file semantics are validated only when an active
+durable request can consume that receipt; an unreferenced receipt namespace is
+not eagerly interpreted, and unsafe receipt metadata never authorizes a
+receipt. Receipt authority is rejected when its candidate matches either the
+installed source or the exact prospective source. A current-candidate request
+remains owned by normal recovery or `resume`. A superseded record that is
+absent from the current backup rotation is not silently ignored or edited.
+Root must run the recovery command from a clean, root-owned checkout whose only
+remote is the approved origin and whose HEAD is the exact current `dev` ref.
+The installed source must be its ancestor, every recovered candidate must be a
+strict ancestor of that authenticated head, and both the installed source and
+current head are forbidden recovery candidates after the checkout's rollout
+assets are validated and before maintenance or receipt publication.
 
 `orphaned-backup-recovery inventory` validates the complete canonical v3
-rotation, preflight-job, job-state, lease, and nested timestamp contracts. It
-includes every exact eligible record even when its receipt is already valid, so
-the approved plan digest is stable across a completed replay or a crash after
-publishing only some receipts. Apply enters the normal maintenance admission
-freeze, proves the active pointer is absent and no rollout, backup, or guard
-unit is live across two inventories, then publishes a root-owned receipt bound
-to the unchanged job and state bytes. Each systemd inventory has a 30-second
-ceiling, request enumeration stops at 10,000 entries, and one 600-second
-monotonic deadline covers the maintenance recovery operation; expiry refuses
-and the maintenance marker is removed by the command's unconditional cleanup.
+rotation, preflight-job, job-state, lease, and nested timestamp contracts.
+Receipt consumption independently repeats the canonical immutable-job
+validation; it never relies on the strictness of the version that produced the
+receipt. The inventory includes every exact eligible record even when its
+receipt is already valid, so the approved plan digest is stable across a
+completed replay or a crash after publishing only some receipts. Apply enters
+the normal maintenance admission freeze, proves the active pointer is absent and
+no rollout, backup, or guard unit is live across two inventories, then
+recomputes the exact digest-approved plan and repeats candidate-history
+validation on that same plan before publishing a root-owned receipt. Receipt
+consumption carries the payload ID derived from the same immutable `job.json`
+bytes that validated the receipt into the live-rotation check; it never reopens
+the job and mixes identities from two reads.
+
+Each systemd inventory has a 30-second ceiling and request enumeration stops at
+10,000 entries. One real-time watchdog starts before lifecycle-lock acquisition
+and enforces the 600-second monotonic deadline across checkout authentication,
+subprocesses, filesystem reads, maintenance, planning, and publication. Apply
+rechecks the deadline after receipt fsync and before atomic replacement, so an
+overrun cannot start another publication. Expiry interrupts normally
+interruptible kernel operations and subprocesses and refuses the command. The
+watchdog is main-thread only and refuses before lifecycle mutation if
+`ITIMER_REAL` is already active or `SIGALRM` is pending, so it never consumes
+another subsystem's timer or pending signal. Otherwise it temporarily owns and
+unblocks `SIGALRM`. Restoration catches an owned expiry delivered immediately
+before its signal-block call and retries the block; after blocking, it cancels
+the timer and synchronously drains only an owned pending expiry while the
+watchdog handler remains installed. It then restores the prior handler and
+exact signal mask before reporting that expiry. A restoration failure takes
+precedence over an owned expiry, which takes precedence over any body error;
+without either watchdog condition, the original body error is preserved.
+
+Maintenance enable owns its previously empty marker slot before creation and
+rolls back a partial publication even if interruption occurs as the create call
+returns; recovery owns cleanup before enable begins and removes a successful
+marker directly without another fallible status probe. An absent cleanup marker
+is an idempotent no-op and does not wait on the launch lock. Cleanup receives the
+same absolute deadline and reuses the exact service UID/GID authenticated before
+maintenance enable; after expiry it performs no fresh NSS identity discovery.
+Launch-lock acquisition stays interruptible while the one-shot watchdog is
+armed and also uses nonblocking attempts bounded by the monotonic deadline after
+the watchdog has fired. It never arms a second timer. If the cached identity is
+unavailable or the lock remains unavailable at expiry, recovery reports failure
+and retains the valid marker fail-closed. After lock acquisition and marker
+metadata validation, `SIGALRM` delivery is deferred only across unlink plus
+parent-directory fsync; a timeout made pending there is reported immediately
+after that critical section.
+As with every userspace watchdog, the process cannot preempt a kernel task in
+uninterruptible I/O sleep; that host fault remains fail-closed in maintenance
+and requires host-level diagnosis rather than being reported as a completed
+recovery.
 
 Host inactivity accepts a receipt only while its bytes remain exact, its
-candidate differs from the source currently installed at every receipt use,
-and its payload remains absent from the live rotation. Unsafe metadata, a
+candidate differs from every current and prospective source at that receipt
+use, and its payload remains absent from the live rotation. Unsafe metadata, a
 referenced payload, concurrent drift, malformed canonical evidence, or an
-unknown receipt keeps the upgrade blocked. The receipt does not rewrite request
-history or claim that partial backup data was deleted.
+unknown receipt keeps install, reinstall, upgrade, and uninstall blocked. The
+receipt does not rewrite request history or claim that partial backup data was
+deleted.
 
 ## Failure behavior
 
