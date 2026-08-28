@@ -9,6 +9,7 @@ import pwd
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime
@@ -145,7 +146,12 @@ class FakeSystem:
         self.validated += 1
         return self.invocation_source_sha
 
-    def prepare_install_source(self) -> tuple[Path, str]:
+    def resolve_install_source_sha(self) -> str:
+        self.validated += 1
+        return self.remote_source_sha
+
+    def prepare_install_source(self, expected_sha: str) -> tuple[Path, str]:
+        assert expected_sha == self.remote_source_sha
         self.validated += 1
         if self.install_source_sha is None:
             self.install_source_sha = self.remote_source_sha
@@ -390,6 +396,12 @@ class FakeSystem:
 
     def ensure_root_directory(self, path: Path, *, mode: int) -> bool:
         return self.filesystem.ensure_directory(path, mode)
+
+    def root_directory_ready(self, path: Path, *, mode: int) -> bool:
+        mapped = self.filesystem.path(path)
+        return (
+            mapped.is_dir() and not mapped.is_symlink() and (mapped.stat().st_mode & 0o777) == mode
+        )
 
     def validate_install_record_authority(self, *, allow_absent: bool) -> None:
         if not allow_absent:
@@ -872,6 +884,16 @@ def test_plan_publishes_only_service_owned_protected_inputs(tmp_path: Path) -> N
     ]
 
 
+def test_plan_declares_every_retained_rollout_authority(tmp_path: Path) -> None:
+    installer, _ = _installer(tmp_path)
+
+    assert installer.plan()["preserves"] == [
+        str(host.STATE_ROOT),
+        str(host.ORPHANED_BACKUP_EVIDENCE_ROOT),
+        "/data/loom-staging/rollouts",
+    ]
+
+
 def test_first_install_bootstraps_worker_env_from_fixed_protected_input(
     tmp_path: Path,
 ) -> None:
@@ -1113,6 +1135,27 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/worker-pools/gb10/known_hosts",
         "scripts/ops/staging_rollout_gb10_trust.py",
     }
+
+
+@pytest.mark.parametrize("schema_literal", ["true", "1.0"])
+def test_rendered_config_requires_an_integer_schema_version(
+    tmp_path: Path,
+    schema_literal: str,
+) -> None:
+    installer, _system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    payload = installer.filesystem.read_bytes(host.CONFIG_PATH).replace(
+        b"schema_version = 1",
+        f"schema_version = {schema_literal}".encode("ascii"),
+        1,
+    )
+
+    with pytest.raises(host.InstallError, match="rendered staging config"):
+        host.HostInstaller._validate_rendered_config(
+            payload,
+            TEAM_ID,
+            source_sha="a" * 40,
+        )
 
 
 def test_install_plan_converges_legacy_service_shell_before_strict_readiness(
@@ -1707,6 +1750,94 @@ def test_orphaned_backup_deadline_drains_owned_alarm_when_arming_reports_failure
 
 
 @pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_never_restores_foreign_handler_with_armed_timer() -> None:
+    script = """
+import signal
+import time
+
+from scripts.ops import staging_rollout_host as host
+
+real_setitimer = signal.setitimer
+
+def fail_cancellation(which, seconds, interval=0.0):
+    if which == signal.ITIMER_REAL and seconds == 0.0:
+        raise OSError("injected persistent watchdog cancellation failure")
+    return real_setitimer(which, 0.05, interval)
+
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.setitimer = fail_cancellation
+try:
+    with host._orphaned_backup_deadline_guard(time.monotonic() + 1.0):
+        pass
+except host.InstallError as exc:
+    if "watchdog restoration failed" not in str(exc):
+        raise
+else:
+    raise SystemExit(2)
+
+# An unsafe implementation restores SIG_DFL and unblocks SIGALRM here; the
+# still-armed timer then terminates this process during the sleep.
+time.sleep(0.15)
+if signal.getsignal(signal.SIGALRM) is signal.SIG_DFL:
+    raise SystemExit(3)
+current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+if signal.SIGALRM not in current_mask:
+    raise SystemExit(4)
+raise SystemExit(0)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=host.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr, result.returncode)
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_deadline_trusts_verified_disarm_not_cancellation_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_handler = host.signal.getsignal(host.signal.SIGALRM)
+    previous_timer = host.signal.getitimer(host.signal.ITIMER_REAL)
+    real_setitimer = host.signal.setitimer
+    real_pthread_sigmask = host.signal.pthread_sigmask
+    previous_mask = real_pthread_sigmask(host.signal.SIG_BLOCK, set())
+    cancellation_calls = 0
+
+    def disarm_then_report_failure(which, seconds, interval=0.0):  # type: ignore[no-untyped-def]
+        nonlocal cancellation_calls
+        if which == host.signal.ITIMER_REAL and seconds == 0.0:
+            cancellation_calls += 1
+            real_setitimer(which, seconds, interval)
+            raise OSError("injected cancellation reporting failure")
+        return real_setitimer(which, seconds, interval)
+
+    try:
+        assert previous_timer == (0.0, 0.0)
+        monkeypatch.setattr(host.signal, "setitimer", disarm_then_report_failure)
+
+        with host._orphaned_backup_deadline_guard(host.time.monotonic() + 1.0):
+            pass
+
+        assert cancellation_calls == 1
+        assert host.signal.getsignal(host.signal.SIGALRM) is previous_handler
+        assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
+        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+    finally:
+        real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
+        real_setitimer(host.signal.ITIMER_REAL, 0.0)
+        if host.signal.SIGALRM in host.signal.sigpending():
+            host.signal.sigwait({host.signal.SIGALRM})
+        host.signal.signal(host.signal.SIGALRM, previous_handler)
+        real_pthread_sigmask(host.signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.timeout(0)
 def test_orphaned_backup_deadline_restores_after_preblock_owned_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1785,7 +1916,7 @@ def test_orphaned_backup_deadline_restoration_failure_outranks_body_error(
 
         assert isinstance(error.value.__cause__, OSError)
         assert host.signal.getitimer(host.signal.ITIMER_REAL) == previous_timer
-        assert real_pthread_sigmask(host.signal.SIG_BLOCK, set()) == previous_mask
+        assert host.signal.SIGALRM in real_pthread_sigmask(host.signal.SIG_BLOCK, set())
     finally:
         real_pthread_sigmask(host.signal.SIG_BLOCK, {host.signal.SIGALRM})
         host.signal.setitimer(host.signal.ITIMER_REAL, 0.0)
@@ -2338,6 +2469,21 @@ class SharedWorkerRepoRunner:
         ]:
             return host.CommandResult(0 if self.consumer_writable else 1)
         raise AssertionError(f"unexpected command: {call}")
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_shared_storage_reports_require_integer_schema_versions(schema_version: object) -> None:
+    runner = SharedWorkerRepoRunner()
+    result = runner.run([str(host.SYSTEM_PYTHON), str(host.SHARED_WORKER_REPO_HELPER), "check"])
+    report = json.loads(result.stdout)
+    mount_report = dict(report["mount"])
+    mount_report["schema_version"] = schema_version
+    with pytest.raises(host.InstallError, match="mount helper report is invalid"):
+        host.HostSystem._validate_shared_work2_mount_report(mount_report)
+
+    report["schema_version"] = schema_version
+    with pytest.raises(host.InstallError, match="repository helper report is invalid"):
+        host.HostSystem._validate_shared_worker_repo_report(report)
 
 
 def test_shared_worker_repo_root_capabilities_are_exact_and_read_only() -> None:
@@ -3919,6 +4065,26 @@ def test_fresh_reinstall_bootstraps_runtime_before_retained_activity_fence(
     assert not installer.filesystem.exists(host.INSTALL_RECORD)
 
 
+def test_truly_fresh_retained_state_fences_before_source_or_root_mutation(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.filesystem.ensure_directory(host.ORPHANED_BACKUP_EVIDENCE_ROOT, 0o700)
+    system.status = "busy"
+
+    with pytest.raises(host.InstallError, match="refusing update"):
+        installer.install(TEAM_ID)
+
+    assert system.active_status_source_shas == [frozenset({"a" * 40})]
+    assert system.install_source_sha is None
+    assert not installer.filesystem.path(host.RUNNER_ROOT).exists()
+    assert not installer.filesystem.path(host.CANDIDATE_RUNTIME_ROOT).exists()
+    assert not installer.filesystem.path(host._candidate_repo_path("a" * 40)).exists()
+    assert installer.filesystem.exists(host.RUNTIME_ROOT)
+    assert system.maintenance is False
+    assert not installer.filesystem.exists(host.INSTALL_RECORD)
+
+
 def test_uninstall_remote_revocation_failure_retains_key_tool_record_and_ledger(
     tmp_path: Path,
 ) -> None:
@@ -5362,16 +5528,16 @@ def test_active_status_treats_a_bounded_systemd_timeout_as_unknown(
 @pytest.mark.parametrize(
     ("phase", "expected"),
     [
-        ("backup_pending", "idle"),
-        ("backup_running", "idle"),
-        ("backup_cancel_requested", "idle"),
-        ("backup_verified", "idle"),
-        ("launch_pending", "idle"),
+        ("backup_pending", "busy"),
+        ("backup_running", "busy"),
+        ("backup_cancel_requested", "busy"),
+        ("backup_verified", "busy"),
+        ("launch_pending", "busy"),
         ("launch_running", "idle"),
         ("backup_failed", "idle"),
     ],
 )
-def test_active_status_treats_safe_durable_preflight_backup_without_live_unit_as_orphaned(
+def test_active_status_requires_receipt_for_nonterminal_backup_without_live_unit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
@@ -5566,65 +5732,9 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
     assert not any("/usr/bin/systemctl" in call for call in calls)
 
 
-@pytest.mark.parametrize(
-    ("unit_outcome", "expected"),
-    [
-        (
-            host.CommandResult(
-                0,
-                "loom-staging-rollout-request-1.service loaded active running rollout\n",
-            ),
-            "busy",
-        ),
-        (
-            host.CommandResult(
-                0,
-                "loom-staging-backup-request-1.service loaded active running backup\n",
-            ),
-            "busy",
-        ),
-        (
-            host.CommandResult(
-                0,
-                "loom-staging-mutation-guard-request-1.service loaded active running guard\n",
-            ),
-            "busy",
-        ),
-        (
-            host.CommandResult(
-                0,
-                "loom-staging-rollout-request-1.service loaded inactive future-state rollout\n",
-            ),
-            "unknown",
-        ),
-        (
-            host.CommandResult(
-                0,
-                "loom-staging-rollout-request-1.service loaded active running rollout\n"
-                "loom-staging-backup-request-1.service loaded inactive future-state backup\n",
-            ),
-            "unknown",
-        ),
-        (host.CommandResult(1, stderr="manager unavailable"), "unknown"),
-        (host.CommandResult(0, stderr="manager warning"), "unknown"),
-        (OSError("manager unavailable"), "unknown"),
-    ],
-    ids=(
-        "rollout",
-        "backup",
-        "mutation-guard",
-        "inactive-future-state",
-        "live-and-unknown-state",
-        "nonzero",
-        "stderr",
-        "runner-oserror",
-    ),
-)
-def test_active_status_queries_protected_units_after_schema_valid_active_durable_state(
+def test_active_status_does_not_query_units_before_unreceipted_durable_state_is_recovered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    unit_outcome: host.CommandResult | OSError,
-    expected: str,
 ) -> None:
     _prepare_durable_active_status(
         tmp_path,
@@ -5645,45 +5755,12 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
             )
             if identity is not None:
                 return identity
-            if isinstance(unit_outcome, OSError):
-                raise unit_outcome
-            return unit_outcome
+            raise AssertionError("unreceipted durable state must short-circuit unit inventory")
 
     assert (
-        host.HostSystem(StatusRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA}))
-        == expected
+        host.HostSystem(StatusRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA})) == "busy"
     )
-    assert [call for call in calls if "/usr/bin/systemctl" in call[0]] == [
-        (
-            [
-                "sudo",
-                "-n",
-                "-u",
-                host.SERVICE_USER,
-                "--",
-                "/usr/bin/env",
-                "-i",
-                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
-                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
-                "PATH=/usr/bin:/bin",
-                "LANG=C.UTF-8",
-                "LC_ALL=C.UTF-8",
-                "/usr/bin/systemctl",
-                "--user",
-                "list-units",
-                "--all",
-                "--plain",
-                "--full",
-                "--type=service",
-                "--no-legend",
-                "--no-pager",
-                "loom-staging-rollout-*.service",
-                "loom-staging-backup-*.service",
-                "loom-staging-mutation-guard-*.service",
-            ],
-            {"check": False, "timeout": host._HOST_SYSTEMD_INVENTORY_TIMEOUT_SECONDS},
-        )
-    ]
+    assert not any("/usr/bin/systemctl" in call[0] for call in calls)
 
 
 def test_active_status_keeps_legacy_request_directory_without_durable_state_traversable(
@@ -6074,6 +6151,251 @@ def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventor
         forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
     )
     assert [item["request_id"] for item in refreshed["items"]] == ["req-orphan001"]
+
+
+def test_active_status_revalidates_receipted_state_after_unit_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    marker = tmp_path / "maintenance"
+    marker.write_text("maintenance\n", encoding="ascii")
+    marker.chmod(0o600)
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", state_root / "active.json")
+    monkeypatch.setattr(host, "MAINTENANCE_MARKER", marker)
+    original_durable_status = host._durable_preflight_backup_status
+
+    def durable_status(
+        candidate_state_root: Path,
+        *,
+        service_uid: int,
+        service_gid: int,
+        forbidden_source_shas: frozenset[str],
+    ) -> str:
+        return original_durable_status(
+            candidate_state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=forbidden_source_shas,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+
+    monkeypatch.setattr(host, "_durable_preflight_backup_status", durable_status)
+    real_lstat = host.os.lstat
+
+    def root_marker_lstat(path: Path) -> os.stat_result:
+        metadata = real_lstat(path)
+        if Path(path) == marker:
+            values = list(metadata)
+            values[4] = 0
+            values[5] = 0
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(host.os, "lstat", root_marker_lstat)
+    state_path = state_root / "requests/req-orphan001/preflight-backup/state.json"
+    replaced = False
+
+    class ExitRaceRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal replaced
+            del kwargs
+            call = list(argv)
+            identity = _service_identity_result(call, uid=service_uid, gid=service_gid)
+            if identity is not None:
+                return identity
+            assert "/usr/bin/systemctl" in call
+            if not replaced:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["sequence"] = int(state["sequence"]) + 1
+                replacement = state_path.with_name("state.next.json")
+                replacement.write_text(
+                    json.dumps(state, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                replacement.chmod(0o600)
+                os.replace(replacement, state_path)
+                replaced = True
+            return host.CommandResult(0)
+
+    assert (
+        host.HostSystem(ExitRaceRunner()).active_status(frozenset({SUPERSEDING_SOURCE_SHA}))
+        == "busy"
+    )
+    assert replaced is True
+
+
+def test_orphaned_backup_plan_and_receipt_bind_candidate_tree(tmp_path: Path) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+
+    assert plan["items"][0]["candidate_tree"] == "b" * 40
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    receipt = json.loads((evidence_root / "req-orphan001.json").read_text(encoding="utf-8"))
+
+    assert receipt["candidate_tree"] == "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("document", "schema_version"),
+    [
+        ("state", True),
+        ("state", 1.0),
+        ("job", True),
+        ("job", 1.0),
+        ("receipt", True),
+        ("receipt", 1.0),
+        ("rotation", 3.0),
+        ("lease", True),
+        ("lease", 1.0),
+    ],
+)
+def test_orphaned_backup_evidence_requires_integer_schema_versions(
+    tmp_path: Path,
+    document: str,
+    schema_version: object,
+) -> None:
+    referenced = document == "lease"
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        referenced=referenced,
+    )
+    state_path = state_root / "requests/req-orphan001/preflight-backup/state.json"
+    job_path = state_path.with_name("job.json")
+    rotation_path = state_root / "backup-rotation.json"
+    if document in {"state", "job"}:
+        _rewrite_orphaned_backup_json(
+            state_path if document == "state" else job_path,
+            schema_version=schema_version,
+        )
+        if document == "job":
+            with pytest.raises(host.InstallError, match="backup job authority is invalid"):
+                host._orphaned_backup_recovery_plan(
+                    state_root,
+                    evidence_root=evidence_root,
+                    service_uid=service_uid,
+                    service_gid=service_gid,
+                    authority_uid=os.geteuid(),
+                    authority_gid=os.getegid(),
+                    forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+                )
+            return
+        assert (
+            host._durable_preflight_backup_status(
+                state_root,
+                service_uid=service_uid,
+                service_gid=service_gid,
+                forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+                evidence_root=evidence_root,
+                authority_uid=os.geteuid(),
+                authority_gid=os.getegid(),
+            )
+            == "unknown"
+        )
+        return
+    if document in {"rotation", "lease"}:
+        rotation = json.loads(rotation_path.read_text(encoding="utf-8"))
+        if document == "rotation":
+            rotation["schema_version"] = schema_version
+        else:
+            rotation["active"]["lease"]["schema_version"] = schema_version
+        rotation_path.write_text(
+            json.dumps(rotation, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(host.InstallError, match="backup rotation evidence is invalid"):
+            host._read_backup_rotation_references(
+                state_root,
+                service_uid=service_uid,
+                service_gid=service_gid,
+            )
+        return
+
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+    )
+    receipt_path = evidence_root / "req-orphan001.json"
+    _rewrite_orphaned_backup_json(receipt_path, schema_version=schema_version)
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            forbidden_source_shas=frozenset({SUPERSEDING_SOURCE_SHA}),
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
+    )
 
 
 def test_orphaned_backup_receipt_accepts_the_published_bundle_name_schema(
@@ -7421,6 +7743,10 @@ class NoopSourceRunner:
             return host.CommandResult(1)
         if call[:5] == ["git", "-C", str(self.source), "status", "--porcelain=v1"]:
             return host.CommandResult(0, "")
+        if str(host.SYSTEM_GIT) in call:
+            arguments = _root_git_arguments(call)
+            if "ls-remote" in arguments:
+                return host.CommandResult(0, f"{self.sha}\t{host.FETCH_REF}\n")
         if call[:2] == ["git", "ls-remote"]:
             return host.CommandResult(0, f"{self.sha}\t{host.FETCH_REF}\n")
         if call == ["git", "-C", str(self.source), "rev-parse", "HEAD"]:
@@ -8717,7 +9043,7 @@ def test_unchanged_root_source_performs_no_clone_fetch_checkout_or_install(
     monkeypatch.setattr(host, "_validate_root_authority_parent_chain", lambda path: None)
     monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *args, **kwargs: None)
 
-    assert host.HostSystem(runner).prepare_install_source() == (source, sha)
+    assert host.HostSystem(runner).prepare_install_source(sha) == (source, sha)
 
     flattened = [argument for call in runner.calls for argument in call]
     assert "clone" not in flattened
@@ -8741,7 +9067,7 @@ def test_new_root_source_is_fetched_but_not_checked_out_before_admission_gate(
     monkeypatch.setattr(host, "_validate_root_authority_parent_chain", lambda path: None)
     monkeypatch.setattr(host, "_validate_git_checkout_tree", lambda *args, **kwargs: None)
 
-    assert host.HostSystem(runner).prepare_install_source() == (source, new_sha)
+    assert host.HostSystem(runner).prepare_install_source(new_sha) == (source, new_sha)
     assert runner.head_sha == old_sha
 
     assert any(call[:4] == ["git", "-C", str(source), "fetch"] for call in runner.calls)
@@ -8790,14 +9116,39 @@ def test_invocation_checkout_rejects_replaceable_root_authority_before_git(
         host.HostSystem(NoGitRunner()).validate_invocation_checkout()
 
 
+_FAKE_GIT_HISTORY_DIR = Path("/nonexistent/loom-test-history-git")
+
+
+def _root_git_arguments(argv: object) -> list[str]:
+    call = list(argv)  # type: ignore[arg-type]
+    assert "GIT_CONFIG_NOSYSTEM=1" in call
+    assert "GIT_CONFIG_GLOBAL=/dev/null" in call
+    assert "GIT_NO_REPLACE_OBJECTS=1" in call
+    assert "GIT_OPTIONAL_LOCKS=0" in call
+    assert "GIT_TERMINAL_PROMPT=0" in call
+    git_index = call.index(str(host.SYSTEM_GIT))
+    return call[git_index + 1 :]
+
+
+def _git_history_directory_probe(arguments: list[str]) -> host.CommandResult | None:
+    if arguments[-1:] in (["--absolute-git-dir"], ["--git-common-dir"]):
+        return host.CommandResult(0, f"{_FAKE_GIT_HISTORY_DIR}\n")
+    return None
+
+
 def test_recovery_invocation_requires_the_exact_remote_dev_head() -> None:
     invocation_head = "a" * 40
 
     class StaleDevRunner:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
-            assert list(argv) == [
-                "git",
+            arguments = _root_git_arguments(argv)
+            history_directory = _git_history_directory_probe(arguments)
+            if history_directory is not None:
+                return history_directory
+            assert arguments == [
+                "-C",
+                "/",
                 "ls-remote",
                 "--exit-code",
                 host.REMOTE_URL,
@@ -8812,6 +9163,180 @@ def test_recovery_invocation_requires_the_exact_remote_dev_head() -> None:
         )
 
 
+def _replacement_history(repo: Path) -> tuple[str, str, str]:
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "loom-tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Loom Tests"],
+        check=True,
+    )
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        check=True,
+        capture_output=True,
+        input="",
+        text=True,
+    ).stdout.strip()
+
+    def commit(message: str, *parents: str) -> str:
+        argv = ["git", "-C", str(repo), "commit-tree", tree, "-m", message]
+        for parent in parents:
+            argv.extend(("-p", parent))
+        return subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    base = commit("base")
+    head = commit("head", base)
+    unrelated = commit("unrelated")
+    forged_head = commit("forged head", unrelated)
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/heads/main", head],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "replace", head, forged_head],
+        check=True,
+    )
+    assert (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                unrelated,
+                head,
+            ],
+            check=False,
+        ).returncode
+        == 0
+    )
+    hardened_environment = dict(os.environ)
+    hardened_environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    assert (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                unrelated,
+                head,
+            ],
+            check=False,
+            env=hardened_environment,
+        ).returncode
+        == 1
+    )
+    return base, head, unrelated
+
+
+class _ExactRemoteHeadRunner:
+    def __init__(self, remote_head: str) -> None:
+        self.remote_head = remote_head
+        self.subprocess = host.SubprocessRunner()
+
+    def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+        if "ls-remote" in argv:
+            return host.CommandResult(0, f"{self.remote_head}\t{host.FETCH_REF}\n")
+        return self.subprocess.run(argv, **kwargs)
+
+
+def test_recovery_invocation_rejects_replace_ref_history_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "invocation"
+    _base, head, unrelated = _replacement_history(repo)
+    monkeypatch.setattr(host, "REPO_ROOT", repo)
+
+    with pytest.raises(host.InstallError, match="Git history authority is unsafe"):
+        host.HostSystem(_ExactRemoteHeadRunner(head)).validate_invocation_dev_head(
+            head,
+            unrelated,
+        )
+
+
+def test_recovery_plan_rejects_replace_ref_history_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "candidate-history"
+    _base, head, unrelated = _replacement_history(repo)
+    monkeypatch.setattr(host, "REPO_ROOT", repo)
+
+    with pytest.raises(host.InstallError, match="Git history authority is unsafe"):
+        host.HostSystem(host.SubprocessRunner()).validate_recovery_plan_candidate_history(
+            {"items": [{"candidate_sha": unrelated}]},
+            recovery_head_sha=head,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "info/grafts",
+        "shallow",
+        "objects/info/alternates",
+        "objects/info/http-alternates",
+    ],
+)
+def test_recovery_plan_rejects_legacy_or_external_git_history_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    repo = tmp_path / "candidate-history"
+    base, head, _unrelated = _replacement_history(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "replace", "-d", head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    authority_path = repo / ".git" / relative_path
+    authority_path.parent.mkdir(parents=True, exist_ok=True)
+    authority_path.write_text("\n", encoding="ascii")
+    monkeypatch.setattr(host, "REPO_ROOT", repo)
+
+    with pytest.raises(host.InstallError, match="Git history authority is unsafe"):
+        host.HostSystem(host.SubprocessRunner()).validate_recovery_plan_candidate_history(
+            {"items": [{"candidate_sha": base}]},
+            recovery_head_sha=head,
+        )
+
+
+def test_recovery_plan_rejects_candidate_tree_not_owned_by_candidate_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "candidate-history"
+    base, head, _unrelated = _replacement_history(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "replace", "-d", head],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / ".git/refs/replace").rmdir()
+    monkeypatch.setattr(host, "REPO_ROOT", repo)
+
+    with pytest.raises(host.InstallError, match="candidate tree does not match"):
+        host.HostSystem(host.SubprocessRunner()).validate_recovery_plan_candidate_history(
+            {"items": [{"candidate_sha": base, "candidate_tree": "f" * 40}]},
+            recovery_head_sha=head,
+        )
+
+
 def test_recovery_invocation_proves_installed_source_is_its_ancestor() -> None:
     invocation_head = "a" * 40
     installed_source_sha = "c" * 40
@@ -8822,12 +9347,14 @@ def test_recovery_invocation_proves_installed_source_is_its_ancestor() -> None:
 
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
-            call = list(argv)
-            self.calls.append(call)
-            if call[:2] == ["git", "ls-remote"]:
+            arguments = _root_git_arguments(argv)
+            self.calls.append(arguments)
+            history_directory = _git_history_directory_probe(arguments)
+            if history_directory is not None:
+                return history_directory
+            if "ls-remote" in arguments:
                 return host.CommandResult(0, f"{invocation_head}\t{host.FETCH_REF}\n")
-            assert call == [
-                "git",
+            assert arguments == [
                 "-C",
                 str(host.REPO_ROOT),
                 "merge-base",
@@ -8843,12 +9370,30 @@ def test_recovery_invocation_proves_installed_source_is_its_ancestor() -> None:
         installed_source_sha,
     )
 
-    assert len(runner.calls) == 2
+    assert runner.calls[-2:] == [
+        [
+            "-C",
+            "/",
+            "ls-remote",
+            "--exit-code",
+            host.REMOTE_URL,
+            host.FETCH_REF,
+        ],
+        [
+            "-C",
+            str(host.REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            installed_source_sha,
+            invocation_head,
+        ],
+    ]
 
 
 def test_recovery_plan_candidates_must_be_ancestors_of_authenticated_dev_head() -> None:
     recovery_head_sha = "c" * 40
     candidates = ["a" * 40, "b" * 40, "a" * 40]
+    candidate_trees = {"a" * 40: "d" * 40, "b" * 40: "e" * 40}
 
     class HistoryRunner:
         def __init__(self) -> None:
@@ -8856,39 +9401,67 @@ def test_recovery_plan_candidates_must_be_ancestors_of_authenticated_dev_head() 
 
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
             del kwargs
-            call = list(argv)
-            self.calls.append(call)
+            arguments = _root_git_arguments(argv)
+            self.calls.append(arguments)
+            history_directory = _git_history_directory_probe(arguments)
+            if history_directory is not None:
+                return history_directory
+            if "rev-parse" in arguments:
+                candidate_sha = arguments[-1].removesuffix("^{tree}")
+                return host.CommandResult(0, candidate_trees[candidate_sha] + "\n")
             return host.CommandResult(0)
 
     runner = HistoryRunner()
     host.HostSystem(runner).validate_recovery_plan_candidate_history(
-        {"items": [{"candidate_sha": candidate} for candidate in candidates]},
+        {
+            "items": [
+                {
+                    "candidate_sha": candidate,
+                    "candidate_tree": candidate_trees[candidate],
+                }
+                for candidate in candidates
+            ]
+        },
         recovery_head_sha=recovery_head_sha,
     )
 
-    assert runner.calls == [
-        [
-            "git",
-            "-C",
-            str(host.REPO_ROOT),
-            "merge-base",
-            "--is-ancestor",
-            candidate,
-            recovery_head_sha,
-        ]
+    assert runner.calls[-4:] == [
+        call
         for candidate in sorted(set(candidates))
+        for call in (
+            [
+                "-C",
+                str(host.REPO_ROOT),
+                "rev-parse",
+                f"{candidate}^{{tree}}",
+            ],
+            [
+                "-C",
+                str(host.REPO_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                candidate,
+                recovery_head_sha,
+            ],
+        )
     ]
 
 
 def test_recovery_plan_refuses_an_unrelated_candidate() -> None:
     class UnrelatedRunner:
         def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
-            del argv, kwargs
+            del kwargs
+            arguments = _root_git_arguments(argv)
+            history_directory = _git_history_directory_probe(arguments)
+            if history_directory is not None:
+                return history_directory
+            if "rev-parse" in arguments:
+                return host.CommandResult(0, "c" * 40 + "\n")
             raise host.InstallError("command failed safely: git")
 
     with pytest.raises(host.InstallError, match="command failed safely"):
         host.HostSystem(UnrelatedRunner()).validate_recovery_plan_candidate_history(
-            {"items": [{"candidate_sha": "a" * 40}]},
+            {"items": [{"candidate_sha": "a" * 40, "candidate_tree": "c" * 40}]},
             recovery_head_sha="b" * 40,
         )
 

@@ -200,10 +200,13 @@ remains owned by normal recovery or `resume`. A superseded record that is
 absent from the current backup rotation is not silently ignored or edited.
 Root must run the recovery command from a clean, root-owned checkout whose only
 remote is the approved origin and whose HEAD is the exact current `dev` ref.
-The installed source must be its ancestor, every recovered candidate must be a
-strict ancestor of that authenticated head, and both the installed source and
-current head are forbidden recovery candidates after the checkout's rollout
-assets are validated and before maintenance or receipt publication.
+Recovery Git runs with sanitized system/global configuration and rejects replace
+refs, grafts, shallow history, and local or HTTP object alternates. The installed
+source must be an ancestor of the authenticated head, every recovered candidate
+must be a strict ancestor, and the candidate tree recorded by the immutable job
+must equal Git's exact `candidate^{tree}`. Both the installed source and current
+head are forbidden recovery candidates after the checkout's rollout assets are
+validated and before maintenance or receipt publication.
 
 `orphaned-backup-recovery inventory` validates the complete canonical v3
 rotation, preflight-job, job-state, lease, and nested timestamp contracts.
@@ -215,10 +218,13 @@ completed replay or a crash after publishing only some receipts. Apply enters
 the normal maintenance admission freeze, proves the active pointer is absent and
 no rollout, backup, or guard unit is live across two inventories, then
 recomputes the exact digest-approved plan and repeats candidate-history
-validation on that same plan before publishing a root-owned receipt. Receipt
-consumption carries the payload ID derived from the same immutable `job.json`
-bytes that validated the receipt into the live-rotation check; it never reopens
-the job and mixes identities from two reads.
+validation on that same plan before publishing a root-owned receipt. An idle
+host decision reads the complete retained authority, inventories every owner
+unit, and reads the complete retained authority again; a worker's final atomic
+state publication therefore cannot race receipt consumption. Receipt consumption
+carries the payload ID derived from the same immutable `job.json` bytes that
+validated the receipt into the live-rotation check; it never reopens the job and
+mixes identities from two reads.
 
 Each systemd inventory has a 30-second ceiling and request enumeration stops at
 10,000 entries. One real-time watchdog starts before lifecycle-lock acquisition
@@ -231,12 +237,19 @@ watchdog is main-thread only and refuses before lifecycle mutation if
 `ITIMER_REAL` is already active or `SIGALRM` is pending, so it never consumes
 another subsystem's timer or pending signal. Otherwise it temporarily owns and
 unblocks `SIGALRM`. Restoration catches an owned expiry delivered immediately
-before its signal-block call and retries the block; after blocking, it cancels
-the timer and synchronously drains only an owned pending expiry while the
-watchdog handler remains installed. It then restores the prior handler and
-exact signal mask before reporting that expiry. A restoration failure takes
-precedence over an owned expiry, which takes precedence over any body error;
-without either watchdog condition, the original body error is preserved.
+before its signal-block call and retries that block a bounded number of times.
+Only after independently verifying that `SIGALRM` is blocked does it make
+bounded cancellation attempts and independently verify that `ITIMER_REAL` is
+disarmed. While the watchdog handler is still installed, it synchronously drains
+and verifies absence of any owned pending expiry. Only that proven state may
+restore and verify the prior handler and exact signal mask. If blocking,
+disarming, draining, or handler restoration cannot be proven, restoration fails
+without unblocking the signal or exposing the prior handler to an owned timer.
+If exact mask restoration itself fails after the prior handler is restored, the
+already-disarmed timer and drained pending set still prevent owned delivery.
+A restoration failure takes precedence over an owned expiry, which takes
+precedence over any body error; without either watchdog condition, the original
+body error is preserved.
 
 Maintenance enable owns its previously empty marker slot before creation and
 rolls back a partial publication even if interruption occurs as the create call

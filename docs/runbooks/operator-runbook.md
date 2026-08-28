@@ -121,12 +121,14 @@ digest. It requires no active pointer or live rollout/backup/guard unit, rejects
 malformed canonical rotation/job/state/lease evidence at publication and again
 at every receipt use, rejects any payload still present in
 active/candidate/retirement rotation state, and refuses a request for either the
-installed candidate or the authenticated current-`dev` candidate. Every
-recovered candidate must also be a Git ancestor of that authenticated head;
-unknown or unrelated candidate history refuses recovery. Apply repeats this
-history check on the exact recomputed plan whose approved digest will be
-published. Inventory is capped at 10,000 requests and each of the two systemd
-inventories is capped at 30 seconds.
+installed candidate or the authenticated current-`dev` candidate. Recovery Git
+uses sanitized configuration and rejects replace refs, grafts, shallow history,
+and local or HTTP object alternates. Every recovered candidate must be a Git
+ancestor of that authenticated head and its immutable job tree must equal Git's
+exact candidate tree; unknown, unrelated, or tree-forged history refuses
+recovery. Apply repeats this history check on the exact recomputed plan whose
+approved digest will be published. Inventory is capped at 10,000 requests and
+each of the two systemd inventories is capped at 30 seconds.
 
 A process-level real-time watchdog starts before the lifecycle lock and enforces
 one 600-second monotonic deadline across authentication, external commands,
@@ -136,11 +138,16 @@ and refuses before lifecycle mutation when a foreign `ITIMER_REAL` is active or
 `SIGALRM` is pending; it never consumes or replaces another subsystem's timer
 or pending signal. With the timer otherwise unused, it temporarily owns and
 unblocks `SIGALRM`. During restoration, an owned expiry immediately before the
-block is recorded and the block retried; an owned expiry pending after the
-block is synchronously drained while the watchdog handler is still installed.
-Only then are the prior handler and exact mask restored and the deadline
-reported. Restoration failure outranks owned expiry, owned expiry outranks a
-body error, and an unrelated body error is otherwise preserved.
+block is recorded and blocking is retried within a fixed bound. Cancellation is
+also bounded and its return status is not trusted: the helper independently
+verifies the timer is disarmed, drains and verifies owned pending delivery while
+blocked with its handler installed, and only then restores and verifies the
+prior handler and exact mask. A pre-restoration proof failure leaves `SIGALRM`
+blocked rather than exposing a prior handler to Loom's timer; a later exact-mask
+restoration failure is also safe because the timer is already disarmed and its
+pending delivery drained.
+Restoration failure outranks owned expiry, owned expiry outranks a body error,
+and an unrelated body error is otherwise preserved.
 
 Maintenance enable owns and rolls back its previously empty marker slot across
 the create-return boundary, while recovery owns cleanup before enable begins
@@ -177,7 +184,10 @@ candidate, runtime, or admission convergence. Receipt-root and receipt-file
 semantics are checked only when an active durable request can consume the
 receipt; unsafe receipt metadata never authorizes it. This migration attests
 that the historical record no longer owns work; it does not mutate the
-service-owned history or clean backup data.
+service-owned history or clean backup data. Until that exact receipt exists, a
+nonterminal durable phase blocks the host even when its unit has disappeared.
+Host inactivity brackets the owner-unit inventory with two complete retained
+state reads so a worker's final atomic publication cannot race the decision.
 
 The broker enforces a single environment lifecycle owner. Broker unavailability
 does not grant authority for direct mutation. See

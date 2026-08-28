@@ -559,10 +559,13 @@ The maintenance marker is entered and left only by the exact installed root
 host helper. Entry is serialized with broker launch admission and proves that
 the active pointer and the exact backup, rollout, and mutation-guard unit sets
 are idle. The helper also validates every durable preflight-backup phase before
-that unit inventory. Because marker entry is serialized with launch admission,
-a valid durable phase with no live request-bound unit is orphaned history, not
-executable work; malformed durable state remains a hard refusal. The marker
-remains the authoritative admission freeze for the whole
+that unit inventory. An unreceipted nonterminal durable phase remains active even
+when no request-bound unit is visible; only the digest-approved root recovery
+receipt converts authenticated superseded history to idle. The helper brackets
+the unit inventory with two complete retained-authority reads, so a worker's
+final atomic state publication cannot race that decision. Malformed durable
+state remains a hard refusal. The marker remains the authoritative admission
+freeze for the whole
 inventory/apply/readback window; ordinary host health reports it explicitly
 instead of treating maintenance as a normal ready state. Exit repeats the idle
 proof before removing the marker.
