@@ -21,7 +21,7 @@ from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
 from loom_cli.rollout.preflight_contract import CheckOperation
 
-from .config import OperatorConfig
+from .config import OperatorConfig, candidate_sha_from_runner_repo, environment_authority
 from .final_browser_executor import FinalBrowserExecutor
 from .final_capacity_executor import FinalCapacityExecutor
 from .final_gate_plan import FinalGatePlan
@@ -44,6 +44,10 @@ from .protected_gb10_external_supervisor_transport import (
     build_fixed_gb10_external_supervisor_transport,
 )
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
+from .resume_runtime_upgrade import (
+    ResumeRuntimeUpgradeAuthority,
+    build_installed_resume_runtime_upgrade_authority,
+)
 from .staging_smoke_authority import staging_smoke_authority
 
 _CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
@@ -141,6 +145,7 @@ class InstalledFinalGateExecutor:
     service_uid: int
     service_gid: int
     verify_install: Callable[..., VerifiedRunnerInstall] = verify_runner_install
+    resume_runtime_upgrade: ResumeRuntimeUpgradeAuthority | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -160,7 +165,7 @@ class InstalledFinalGateExecutor:
         operation: CheckOperation,
         plan: FinalGatePlan,
     ) -> FinalGateResult:
-        installed = self._validate_plan(plan)
+        installed, effective_config = self._validate_plan(plan)
         if check_id in {"final.protected-apply", "final.convergence"}:
             gb10_controller = build_fixed_gb10_external_supervisor_transport(
                 candidate_sha=plan.candidate_sha,
@@ -168,16 +173,16 @@ class InstalledFinalGateExecutor:
                 run=self._supervisor_ssh_run,
             )
             container_registry = str(
-                load_cluster_config(self.config.cluster_config_path).container_registry
+                load_cluster_config(effective_config.cluster_config_path).container_registry
             )
             protected_runner = SubprocessProtectedApplyCommandRunner(
-                kubeconfig=self.config.kubeconfig_path
+                kubeconfig=effective_config.kubeconfig_path
             )
             gb10 = build_fixed_gb10_ssh_transport(
-                self.config.cluster_config_path,
+                effective_config.cluster_config_path,
                 expected_hosts=tuple(plan.gb10_boot_ids),
                 run=self._ssh_run,
-                max_concurrency=self.config.gb10_prep_concurrency,
+                max_concurrency=effective_config.gb10_prep_concurrency,
             )
             external_supervisors: dict[str, ProtectedExternalSupervisorTransport] = {
                 GB10_CONTROLLER_EXECUTION_HOST: gb10_controller,
@@ -186,23 +191,23 @@ class InstalledFinalGateExecutor:
                 ),
             }
             environment_state = HttpxProtectedEnvironmentStateTransport(
-                candidate_root=self.config.runner_repo,
-                admin_token_path=Path(self.config.admin_token_source.removeprefix("file:")),
-                worker_token_path=Path(self.config.worker_token_source.removeprefix("file:")),
+                candidate_root=effective_config.runner_repo,
+                admin_token_path=Path(effective_config.admin_token_source.removeprefix("file:")),
+                worker_token_path=Path(effective_config.worker_token_source.removeprefix("file:")),
                 expected_env_template_sha256=installed.attestation.asset_sha256[
                     "worker-env-template"
                 ],
-                cp_url=self.config.cp_url,
+                cp_url=effective_config.cp_url,
                 service_uid=self.service_uid,
             )
         if check_id == "final.protected-apply":
             return MigrationEpochProtectedApplyExecutor(
-                state_root=self.config.state_root,
+                state_root=effective_config.state_root,
                 service_uid=self.service_uid,
                 runner=protected_runner,
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
-                candidate_root=self.config.runner_repo,
+                candidate_root=effective_config.runner_repo,
                 external_supervisor_transports=external_supervisors,
                 container_registry=container_registry,
             )(check_id, operation, plan)
@@ -212,7 +217,7 @@ class InstalledFinalGateExecutor:
                 runner=protected_runner,
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
-                candidate_root=self.config.runner_repo,
+                candidate_root=effective_config.runner_repo,
                 external_supervisor_transports=external_supervisors,
                 container_registry=container_registry,
             )(check_id, operation, plan)
@@ -227,32 +232,67 @@ class InstalledFinalGateExecutor:
         if check_id == "final.smoke":
             return FinalSmokeExecutor(
                 service_uid=self.service_uid,
-                token_path=Path(self.config.admin_token_source.removeprefix("file:")),
-                expected_token_fingerprint=self.config.expect_admin_token_fingerprint,
-                authority=staging_smoke_authority(self.config),
+                token_path=Path(effective_config.admin_token_source.removeprefix("file:")),
+                expected_token_fingerprint=effective_config.expect_admin_token_fingerprint,
+                authority=staging_smoke_authority(effective_config),
                 request=BoundedStagingSmokeTransport(plan.route),
             )(check_id, operation, plan)
         if check_id == "final.browser":
             return FinalBrowserExecutor(
-                state_root=self.config.state_root,
+                state_root=effective_config.state_root,
                 service_uid=self.service_uid,
                 service_gid=self.service_gid,
-                token_path=Path(self.config.admin_token_source.removeprefix("file:")),
-                expected_token_fingerprint=self.config.expect_admin_token_fingerprint,
+                token_path=Path(effective_config.admin_token_source.removeprefix("file:")),
+                expected_token_fingerprint=effective_config.expect_admin_token_fingerprint,
                 run=self._browser_run,
             )(check_id, operation, plan)
         if check_id == "final.summary":
-            return FinalSummaryExecutor(self.config.state_root, self.service_uid)(
+            return FinalSummaryExecutor(effective_config.state_root, self.service_uid)(
                 check_id, operation, plan
             )
         raise ValueError("installed final gate check has no fixed executor")
 
-    def _validate_plan(self, plan: FinalGatePlan) -> VerifiedRunnerInstall:
+    def _validate_plan(
+        self,
+        plan: FinalGatePlan,
+    ) -> tuple[VerifiedRunnerInstall, OperatorConfig]:
         try:
             installed = self.verify_install(service_uid=self.service_uid)
         except (OSError, ValueError) as exc:
             raise ValueError("installed final gate runner install drifted") from exc
         statement = installed.attestation
+        effective_config = self.config
+        runtime_upgraded = plan.runner_config_hash != self.config.config_sha256
+        if runtime_upgraded:
+            if self.resume_runtime_upgrade is None or plan.source_mode != "merged-dev":
+                raise ValueError("installed final gate plan drifted from runner config")
+            authority = environment_authority(self.config.short_name)
+            historical_repo = authority.candidate_runtime_root / plan.candidate_sha / "repo"
+            historical_cluster_config = historical_repo / authority.candidate_cluster_config
+            try:
+                effective_config = self.resume_runtime_upgrade.resolve(
+                    self.config,
+                    candidate_sha=plan.candidate_sha,
+                    candidate_tree=plan.candidate_tree,
+                    runner_config_sha256=plan.runner_config_hash,
+                    cluster_config_path=str(historical_cluster_config),
+                )
+                current_sha = candidate_sha_from_runner_repo(
+                    self.config.runner_repo,
+                    authority=authority,
+                )
+            except Exception as exc:
+                raise ValueError("installed final gate plan drifted from runner config") from exc
+            if (
+                effective_config.runner_repo != historical_repo
+                or effective_config.cluster_config_path != historical_cluster_config
+                or statement.asset_sha256["config"] != self.config.config_sha256
+                or statement.source_mode != self.config.source_mode
+                or statement.source_sha != current_sha
+                or statement.source_tree_sha != "none"
+                or statement.source_base_sha != "none"
+            ):
+                raise ValueError("installed final gate plan drifted from runner config")
         expected_tree = (
             plan.runner_source_tree if plan.source_mode == "sealed-cumulative" else "none"
         )
@@ -260,30 +300,36 @@ class InstalledFinalGateExecutor:
             plan.approved_base_sha if plan.source_mode == "sealed-cumulative" else "none"
         )
         if (
-            plan.runner_config_hash != self.config.config_sha256
-            or plan.environment != self.config.environment
-            or plan.namespace != self.config.namespace
-            or plan.source_mode != self.config.source_mode
+            plan.runner_config_hash != effective_config.config_sha256
+            or plan.environment != effective_config.environment
+            or plan.namespace != effective_config.namespace
+            or plan.source_mode != effective_config.source_mode
+            or plan.runner_source_sha != plan.candidate_sha
+            or plan.runner_source_tree != plan.candidate_tree
             or not installed.ready
-            or statement.payload_digest != plan.runner_install_hash
-            or statement.source_mode != plan.source_mode
-            or statement.source_sha != plan.runner_source_sha
-            or statement.source_sha != plan.candidate_sha
-            or statement.source_tree_sha != expected_tree
-            or statement.source_base_sha != expected_base
-            or statement.asset_sha256["config"] != self.config.config_sha256
+            or (
+                not runtime_upgraded
+                and (
+                    statement.payload_digest != plan.runner_install_hash
+                    or statement.source_mode != plan.source_mode
+                    or statement.source_sha != plan.runner_source_sha
+                    or statement.source_tree_sha != expected_tree
+                    or statement.source_base_sha != expected_base
+                    or statement.asset_sha256["config"] != effective_config.config_sha256
+                )
+            )
             or (
                 plan.source_mode == "sealed-cumulative"
                 and (
-                    plan.runner_source_sha != self.config.source_commit_sha
-                    or plan.runner_source_tree != self.config.source_tree_sha
-                    or plan.approved_base_sha != self.config.source_base_sha
+                    plan.runner_source_sha != effective_config.source_commit_sha
+                    or plan.runner_source_tree != effective_config.source_tree_sha
+                    or plan.approved_base_sha != effective_config.source_base_sha
                     or plan.runner_source_tree != plan.candidate_tree
                 )
             )
         ):
             raise ValueError("installed final gate plan drifted from runner config")
-        return installed
+        return installed, effective_config
 
     @staticmethod
     def _ssh_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -375,10 +421,20 @@ def build_installed_final_gate_executor() -> InstalledFinalGateExecutor:
     if configured != str(_CONFIG_PATH):
         raise ValueError("installed final gate config path is invalid")
     config = OperatorConfig.load(_CONFIG_PATH)
+    resume_runtime_upgrade = (
+        build_installed_resume_runtime_upgrade_authority(
+            config,
+            service_uid=os.geteuid(),
+            run=lambda argv: _run_command(argv, timeout=60, capture_output=True),
+        )
+        if config.source_mode == "merged-dev"
+        else None
+    )
     return InstalledFinalGateExecutor(
         config=config,
         service_uid=os.geteuid(),
         service_gid=os.getegid(),
+        resume_runtime_upgrade=resume_runtime_upgrade,
     )
 
 

@@ -903,6 +903,7 @@ def test_default_dependencies_wire_backup_maintenance_for_merged_dev(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    resume_runtime_upgrade = SimpleNamespace(resolve=lambda *_args, **_kwargs: None)
     authority = SimpleNamespace(
         assess=lambda _candidate, _epoch: None,
         current_mutation_epoch=lambda: 0,
@@ -927,11 +928,21 @@ def test_default_dependencies_wire_backup_maintenance_for_merged_dev(
         "build_installed_deep_preflight_composition",
         lambda *_args, **_kwargs: SimpleNamespace(authority=lambda: authority),
     )
+    monkeypatch.setattr(
+        broker_module,
+        "build_installed_resume_runtime_upgrade_authority",
+        lambda _config, *, service_uid, run: (
+            resume_runtime_upgrade
+            if service_uid == os.geteuid() and callable(run)
+            else None
+        ),
+    )
 
     dependencies = broker_module._default_dependencies(make_config(tmp_path))
 
     assert dependencies.backup_retention is not None
     assert dependencies.backup_recovery is not None
+    assert dependencies.resume_runtime_upgrade is resume_runtime_upgrade
 
 
 @pytest.mark.parametrize(
@@ -2210,6 +2221,65 @@ def test_resume_accepts_exact_advanced_epoch_recovery_journal(
     assert guard.released == []
     assert deps.store.read_active() is not None
     assert deps.store.read_active().attempt_number == 2
+    assert deps.store.read_attempt_envelope(REQUEST_ID, 2).resume is True
+
+
+def test_resume_accepts_exact_forward_runner_upgrade_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = fakes(tmp_path)
+    original_config = deps.dependencies.config
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    current_repo = tmp_path / ("c" * 40) / "repo"
+    deps.dependencies.config = replace(
+        original_config,
+        runner_repo=current_repo,
+        cluster_config_path=current_repo / "deploy/environments/staging.cluster.toml",
+        config_sha256="2" * 64,
+    )
+    resolved: list[dict[str, object]] = []
+
+    def resolve_runtime(config: OperatorConfig, **bindings: object) -> OperatorConfig:
+        resolved.append({"config": config, **bindings})
+        return original_config
+
+    deps.dependencies.resume_runtime_upgrade = SimpleNamespace(resolve=resolve_runtime)
+    guard = _enable_guarded_resume(deps, mutation_epoch=8)
+    deps.dependencies.read_mutation_epoch = lambda: 8
+    monkeypatch.setattr(
+        broker_module,
+        "find_advanced_epoch_attempt",
+        lambda *_args, **_kwargs: 1,
+    )
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    first = deps.store.read_attempt_envelope(REQUEST_ID, 1)
+    assert resolved == [
+        {
+            "config": deps.dependencies.config,
+            "candidate_sha": SHA,
+            "candidate_tree": "b" * 40,
+            "runner_config_sha256": original_config.config_sha256,
+            "cluster_config_path": first.cluster_config_path,
+        }
+    ]
+    assert guard.acquired == [REQUEST_ID]
     assert deps.store.read_attempt_envelope(REQUEST_ID, 2).resume is True
 
 

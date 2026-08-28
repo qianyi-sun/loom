@@ -24,6 +24,7 @@ from loom_cli.rollout.final_attestation_admission import (
     FinalAttestationAdmissionError,
 )
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
+from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import (
     CheckOperation,
     PreflightAttestation,
@@ -39,7 +40,11 @@ from .backup_job import (
 )
 from .backup_retirement import BackupPayloadActivator
 from .config import OperatorConfig
-from .envelope import fixed_operator_config_path, load_validated_envelope
+from .envelope import (
+    fixed_operator_config_path,
+    load_validated_envelope,
+    load_validated_envelope_with_config,
+)
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_admission_store import FinalAdmissionStore
 from .final_gate_store import FinalGateExecutionStore
@@ -57,6 +62,7 @@ from .model import (
 from .policy import sanitized_child_environment
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
+from .resume_runtime_upgrade import build_installed_resume_runtime_upgrade_authority
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore
 from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
@@ -1082,7 +1088,13 @@ def _run(
     )
 
 
-def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> WorkerDependencies:
+def _default_dependencies(
+    config: OperatorConfig,
+    *,
+    service_uid: int,
+    installed_config: OperatorConfig | None = None,
+    runner_install_digest: str | None = None,
+) -> WorkerDependencies:
     from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 
     from .deep_preflight_authority import RuntimePurpose
@@ -1091,16 +1103,17 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
     from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
     from .installed_detached_preflight import build_installed_detached_preflight_runner
 
+    control_config = config if installed_config is None else installed_config
     store = RequestStore(config.state_root)
-    child_environment = sanitized_child_environment(config, service_uid=service_uid)
+    child_environment = sanitized_child_environment(control_config, service_uid=service_uid)
     systemd = SystemdUserManager(
-        config,
+        control_config,
         service_uid=service_uid,
         run=lambda argv: _run(argv, environment=child_environment),
     )
-    lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+    lifecycle = LifecycleCoordinator(control_config, store=store, systemd=systemd)
     mutation_guard = MutationGuardManager(
-        config=config,
+        config=control_config,
         service_uid=service_uid,
         systemd=systemd,
     )
@@ -1118,6 +1131,8 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         service_gid=service_gid,
         store=store,
         now=clock,
+        rollout_runner_install_digest=runner_install_digest,
+        installed_config=control_config,
     )
     deep_preflight = composition.authority()
     detached_preflight = build_installed_detached_preflight_runner(
@@ -1232,6 +1247,88 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
     )
 
 
+def _default_attempt_dependencies(
+    installed_config: OperatorConfig,
+    envelope_path: Path,
+    *,
+    service_uid: int,
+) -> WorkerDependencies:
+    """Compose historical execution inputs under the current installed guard."""
+    request_id = _worker_path_request_id(
+        envelope_path,
+        state_root=installed_config.state_root,
+        command="run-attempt",
+    )
+    child_environment = sanitized_child_environment(
+        installed_config,
+        service_uid=service_uid,
+    )
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return _run(argv, environment=child_environment)
+
+    systemd = SystemdUserManager(
+        installed_config,
+        service_uid=service_uid,
+        run=run,
+    )
+    mutation_guard = MutationGuardManager(
+        config=installed_config,
+        service_uid=service_uid,
+        systemd=systemd,
+    )
+    try:
+        guard_evidence = mutation_guard.assert_ready(request_id)
+        resume_runtime_upgrade = (
+            build_installed_resume_runtime_upgrade_authority(
+                installed_config,
+                service_uid=service_uid,
+                run=run,
+            )
+            if installed_config.source_mode == "merged-dev"
+            else None
+        )
+        envelope, effective_config = load_validated_envelope_with_config(
+            envelope_path,
+            installed_config,
+            effective_uid=service_uid,
+            resume_runtime_upgrade=resume_runtime_upgrade,
+        )
+        if (
+            guard_evidence.request_id != request_id
+            or guard_evidence.candidate_sha != envelope.resolved_sha
+            or guard_evidence.candidate_tree != envelope.resolved_tree
+            or guard_evidence.state != "ready"
+        ):
+            raise ValueError("staging mutation guard binding drifted")
+        attestation = PreflightAttestationStore(installed_config.state_root).read(
+            envelope.preflight_attestation_sha256
+        )
+        bindings = attestation.bindings
+        if (
+            attestation.attestation_digest != envelope.preflight_attestation_sha256
+            or attestation.registry_digest != envelope.preflight_registry_sha256
+            or attestation.coverage_digest != envelope.preflight_coverage_sha256
+            or bindings.candidate_sha != envelope.resolved_sha
+            or bindings.candidate_tree != envelope.resolved_tree
+            or bindings.runner_config_hash != envelope.runner_config_sha256
+            or bindings.environment != envelope.environment
+            or bindings.namespace != envelope.namespace
+        ):
+            raise ValueError("worker resume attestation binding drifted")
+        return _default_dependencies(
+            effective_config,
+            service_uid=service_uid,
+            installed_config=installed_config,
+            runner_install_digest=bindings.runner_install_hash,
+        )
+    except BaseException:
+        released = mutation_guard.release(request_id)
+        if released.request_id != request_id or released.state != "released":
+            raise ValueError("staging mutation guard release drifted") from None
+        raise
+
+
 def _read_driver_failure(
     config: OperatorConfig,
     envelope: DriverEnvelope,
@@ -1260,7 +1357,15 @@ def main(
             service_uid = pwd.getpwnam(config.service_user).pw_uid
             if os.geteuid() != service_uid:
                 raise ValueError("worker effective UID does not match service account")
-            dependencies = _default_dependencies(config, service_uid=service_uid)
+            dependencies = (
+                _default_attempt_dependencies(
+                    config,
+                    args.envelope,
+                    service_uid=service_uid,
+                )
+                if args.command == "run-attempt"
+                else _default_dependencies(config, service_uid=service_uid)
+            )
         if args.command == "run-attempt":
             if dependencies.load_envelope is None:
                 raise ValueError("worker envelope loader is unavailable")

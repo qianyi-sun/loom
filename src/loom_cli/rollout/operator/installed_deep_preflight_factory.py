@@ -585,13 +585,22 @@ def build_installed_deep_preflight_composition(
     service_gid: int,
     store: RequestStore,
     now: Callable[[], datetime],
+    rollout_runner_install_digest: str | None = None,
+    installed_config: OperatorConfig | None = None,
 ) -> InstalledDeepPreflightComposition:
     """Return one fail-closed production graph shared by broker and worker."""
     if service_uid < 0 or service_gid < 0:
         raise ValueError("installed preflight service identity is invalid")
-    child_environment = sanitized_child_environment(config, service_uid=service_uid)
+    child_environment = sanitized_child_environment(
+        config if installed_config is None else installed_config,
+        service_uid=service_uid,
+    )
     commands = InstalledPreflightCommands(config, child_environment)
-    inputs = InstalledPreflightInputs.load(config, service_uid=service_uid)
+    inputs = InstalledPreflightInputs.load(
+        config,
+        service_uid=service_uid,
+        rollout_runner_install_digest=rollout_runner_install_digest,
+    )
     database_evidence = InstalledReadonlyDatabaseEvidenceSource(
         service_uid=service_uid,
         probe=probe_installed_readonly_database_baseline,

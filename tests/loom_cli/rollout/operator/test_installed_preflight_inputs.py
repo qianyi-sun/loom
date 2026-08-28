@@ -54,6 +54,7 @@ def test_loader_binds_installed_static_authorities_without_secret_values(tmp_pat
     inputs = InstalledPreflightInputs.load(
         config,
         service_uid=501,
+        rollout_runner_install_digest="e" * 64,
         verify_install=lambda **_kwargs: SimpleNamespace(
             ready=True,
             attestation=SimpleNamespace(payload_digest="d" * 64),
@@ -69,7 +70,7 @@ def test_loader_binds_installed_static_authorities_without_secret_values(tmp_pat
         migration_policy_path=policy,
     )
 
-    assert inputs.runner_install_digest == "d" * 64
+    assert inputs.runner_install_digest == "e" * 64
     assert inputs.kubeconfig_metadata_digest == "c" * 64
     assert inputs.gb10_identity_metadata_fingerprint == "b" * 64
     assert inputs.browser_token_path == Path(config.admin_token_source.removeprefix("file:"))
@@ -123,6 +124,7 @@ def test_loader_uses_exact_candidate_policy_path_in_packaged_runtime(tmp_path: P
         shared_binding_loader=lambda **_kwargs: _binding(),
     )
 
+    assert inputs.runner_install_digest == "d" * 64
     assert inputs.migration_policy_path == policy
     assert inputs.migration_policy_digest == hashlib.sha256(policy.read_bytes()).hexdigest()
 

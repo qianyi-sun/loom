@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ TrustedReader = Callable[..., TrustedFileRead]
 CatalogPathLoader = Callable[..., Path | None]
 GB10InputsLoader = Callable[..., GB10PreflightInputs | None]
 SharedBindingLoader = Callable[..., dict[str, int] | None]
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,7 @@ class InstalledPreflightInputs:
         config: OperatorConfig,
         *,
         service_uid: int,
+        rollout_runner_install_digest: str | None = None,
         verify_install: InstallVerifier = verify_runner_install,
         read_file: TrustedReader = read_trusted_file,
         catalog_path_loader: CatalogPathLoader = load_catalog_environment_path,
@@ -90,7 +93,10 @@ class InstalledPreflightInputs:
         migration_policy_path: Path | None = None,
     ) -> InstalledPreflightInputs:
         """Fail closed while reading all static installed authorities."""
-        if service_uid < 0:
+        if service_uid < 0 or (
+            rollout_runner_install_digest is not None
+            and _SHA256_RE.fullmatch(rollout_runner_install_digest) is None
+        ):
             raise ValueError("installed preflight service identity is invalid")
         verified = verify_install(service_uid=service_uid)
         if not verified.ready:
@@ -140,7 +146,11 @@ class InstalledPreflightInputs:
         except OSError as exc:
             raise ValueError("installed preflight migration policy is unavailable") from exc
         return cls(
-            runner_install_digest=verified.attestation.payload_digest,
+            runner_install_digest=(
+                verified.attestation.payload_digest
+                if rollout_runner_install_digest is None
+                else rollout_runner_install_digest
+            ),
             credential_sources=credentials,
             kubeconfig_metadata_digest=kubeconfig.metadata_fingerprint,
             gb10_targets=gb10.targets,
