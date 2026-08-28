@@ -23,8 +23,8 @@ from loom_cli.rollout.external_supervisor_readiness import (
     STAGING_GB10_CONTROLLER_EXECUTION_HOST,
     ExternalSupervisorArtifact,
 )
-from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 from loom_cli.rollout.gb10_slurm_acceptance import (
+    GB10_SLURM_WORKER_HOSTS,
     GB10SlurmAcceptanceEvidence,
     validate_gb10_slurm_acceptance,
 )
@@ -470,7 +470,7 @@ class FixedGB10ExternalSupervisorTransport:
         nodes: Sequence[str],
     ) -> GB10SlurmAcceptanceEvidence:
         expected_nodes = tuple(nodes)
-        if expected_nodes != FULL_GB10_HOSTS:
+        if expected_nodes != GB10_SLURM_WORKER_HOSTS:
             raise ValueError("GB10 controller capacity request is invalid")
         request = _encode_helper_request(
             operation="accept_capacity",

@@ -4,6 +4,13 @@ The GB10 inventory is the exact set `trt-gb10-1` through `trt-gb10-15`.
 Inventory membership is stable; health, workload safety, and allocatable
 resources vary independently.
 
+Inventory membership is broader than normal-worker allocation eligibility.
+The normal `gb10` worker pool uses node 1 and nodes 3-15 for 140 slots. Node 2
+remains in readiness, trust, mount, and retired node-agent evidence, but its
+active `loom-task-image-builder` reservation assigns it exclusively to the
+separate scale-to-zero ARM64 builder pool. A normal worker or capacity probe
+must never claim that reserved node.
+
 Each node heartbeat reports bounded health and resource observations. A
 healthy node may advertise zero capacity while foreign or Loom work consumes
 its resources. A stale or unhealthy node is ineligible for new work but

@@ -34,13 +34,31 @@ def _active_node(hostname: str, worker_id: str) -> dict[str, object]:
     }
 
 
-def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
+def _stopped_node(hostname: str) -> dict[str, object]:
+    return {
+        "hostname": hostname,
+        "environment": ENVIRONMENT,
+        "pool_name": POOL_NAME,
+        "desired_intent": "stopped",
+        "current_intent": "stopped",
+        "desired_max_concurrent": 10,
+        "current_max_concurrent": 10,
+        "apply_state": "stopped",
+        "current_image_tag": "staging-abc1234",
+        "current_env_config_version": "staging-abc1234",
+        "worker_fresh": False,
+        "worker_backend_names": [],
+    }
+
+
+def test_active_payload_excludes_builder_capacity_and_sets_140_slots() -> None:
     current = {
         "image_tag": "staging-abc1234",
         "max_concurrent": 10,
         "env_config_version": "staging-abc1234",
         "source_git_commit": "a" * 40,
         "host_intents": {
+            "trt-gb10-2": "active",
             "trt-gb10-7": "active",
             "trt-gb10-8": "active",
         },
@@ -50,24 +68,21 @@ def test_active_payload_sets_host_intents_slots_and_idle_ttl() -> None:
 
     payload = runner.desired_state_payload(
         current,
-        hosts=("trt-gb10-1", "trt-gb10-2"),
+        hosts=runner.DEFAULT_HOSTS,
         intent="active",
         ttl_seconds=14400,
         adjust_idle_exit=True,
     )
 
-    assert payload["target_slots"] == 20
-    assert payload["host_intents"] == {
-        "trt-gb10-1": "active",
-        "trt-gb10-2": "active",
-        "trt-gb10-7": "active",
-        "trt-gb10-8": "active",
-    }
+    assert payload["target_slots"] == 140
+    assert set(payload["host_intents"]) == set(runner.FULL_GB10_HOSTS)
+    assert payload["host_intents"]["trt-gb10-2"] == "stopped"
+    assert all(payload["host_intents"][host] == "active" for host in runner.DEFAULT_HOSTS)
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
     assert payload["env"]["LOOM_WORKER_BLOCKING_IO_MAX_WORKERS"] == "40"
 
 
-def test_release_payload_zeroes_slots_and_does_not_extend_idle_ttl() -> None:
+def test_release_payload_stops_full_inventory_and_does_not_extend_idle_ttl() -> None:
     current = {
         "image_tag": "staging-abc1234",
         "max_concurrent": 10,
@@ -77,16 +92,14 @@ def test_release_payload_zeroes_slots_and_does_not_extend_idle_ttl() -> None:
 
     payload = runner.desired_state_payload(
         current,
-        hosts=("trt-gb10-1",),
+        hosts=runner.DEFAULT_HOSTS,
         intent="stopped",
         ttl_seconds=14400,
         adjust_idle_exit=False,
     )
 
     assert payload["target_slots"] == 0
-    assert payload["host_intents"] == {
-        "trt-gb10-1": "stopped",
-    }
+    assert payload["host_intents"] == {host: "stopped" for host in runner.FULL_GB10_HOSTS}
     assert payload["env"]["LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS"] == "14400"
 
 
@@ -140,6 +153,85 @@ def test_status_mismatches_require_fresh_active_docker_worker() -> None:
     )
 
     assert errors == ["trt-gb10-1: worker_fresh=False"]
+
+
+def test_wait_for_status_requires_builder_host_stopped_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    args = argparse.Namespace(
+        environment=ENVIRONMENT,
+        pool_name=POOL_NAME,
+        status_timeout=0.0,
+        status_poll_interval=0.0,
+    )
+    monkeypatch.setattr(
+        runner,
+        "fetch_status",
+        lambda *_args: {"nodes": [_active_node("trt-gb10-1", "worker-1")], "unlinked_workers": []},
+    )
+
+    result = runner.wait_for_status(
+        args,
+        "test-admin-token",
+        hosts=("trt-gb10-1",),
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+        source_git_commit=SOURCE_SHA,
+        evidence_dir=tmp_path,
+        phase="active",
+    )
+
+    assert result.ok is False
+    assert result.detail == "trt-gb10-2: missing exclusive stopped node report"
+
+
+def test_status_mismatches_rejects_active_builder_host_report() -> None:
+    errors = runner.status_mismatches(
+        {
+            "nodes": [
+                _active_node("trt-gb10-1", "worker-1"),
+                _active_node("trt-gb10-2", "worker-builder"),
+            ],
+            "unlinked_workers": [],
+        },
+        hosts=("trt-gb10-1",),
+        environment=ENVIRONMENT,
+        pool_name=POOL_NAME,
+        intent="active",
+        image_tag="staging-abc1234",
+        env_config_version="staging-abc1234",
+        source_git_commit=SOURCE_SHA,
+        require_exclusive_reports=True,
+    )
+
+    assert "trt-gb10-2: excluded desired_intent='active'" in errors
+    assert "trt-gb10-2: excluded current_intent='active'" in errors
+    assert "trt-gb10-2: exclusive host still has a fresh worker" in errors
+
+
+def test_status_mismatches_accepts_stopped_builder_host_report() -> None:
+    assert (
+        runner.status_mismatches(
+            {
+                "nodes": [
+                    _active_node("trt-gb10-1", "worker-1"),
+                    _stopped_node("trt-gb10-2"),
+                ],
+                "unlinked_workers": [],
+            },
+            hosts=("trt-gb10-1",),
+            environment=ENVIRONMENT,
+            pool_name=POOL_NAME,
+            intent="active",
+            image_tag="staging-abc1234",
+            env_config_version="staging-abc1234",
+            source_git_commit=SOURCE_SHA,
+            require_exclusive_reports=True,
+        )
+        == []
+    )
 
 
 def test_status_mismatches_accept_stopped_nonfresh_worker() -> None:
@@ -286,13 +378,53 @@ def test_parse_ttl_suffixes() -> None:
         runner._parse_ttl("forever")
 
 
-def test_default_hosts_are_the_exact_full_inventory() -> None:
+def test_default_hosts_are_the_normal_slurm_worker_inventory() -> None:
     assert len(runner.FULL_GB10_HOSTS) == 15
-    assert len(runner.DEFAULT_HOSTS) == 15
+    assert len(runner.DEFAULT_HOSTS) == 14
     assert "trt-gb10-7" in runner.DEFAULT_HOSTS
-    assert runner.DEFAULT_HOSTS == runner.FULL_GB10_HOSTS
-    assert runner.TEMPORARILY_EXCLUDED_HOSTS == frozenset()
+    assert "trt-gb10-2" not in runner.DEFAULT_HOSTS
+    assert runner.EXCLUSIVE_GB10_HOSTS == frozenset({"trt-gb10-2"})
     assert runner.EXPECTED_MAX_CONCURRENT == 10
+
+
+def test_payload_rejects_activation_request_containing_builder_host() -> None:
+    current = {
+        "image_tag": "staging-abc1234",
+        "max_concurrent": 10,
+        "env_config_version": "staging-abc1234",
+    }
+
+    with pytest.raises(ValueError, match="exclusive GB10 hosts"):
+        runner.desired_state_payload(
+            current,
+            hosts=runner.FULL_GB10_HOSTS,
+            intent="active",
+            ttl_seconds=14400,
+            adjust_idle_exit=False,
+        )
+
+
+def test_payload_forces_builder_host_stopped_during_full_inventory_reconciliation() -> None:
+    current = {
+        "image_tag": "staging-abc1234",
+        "max_concurrent": 10,
+        "env_config_version": "staging-abc1234",
+        "host_intents": {"trt-gb10-2": "active"},
+    }
+
+    payload = runner.desired_state_payload(
+        current,
+        hosts=runner.FULL_GB10_HOSTS,
+        intent="draining",
+        ttl_seconds=14400,
+        adjust_idle_exit=False,
+    )
+
+    assert payload["target_slots"] == 0
+    assert payload["host_intents"]["trt-gb10-2"] == "stopped"
+    assert all(
+        payload["host_intents"][host] == "draining" for host in runner.DEFAULT_HOSTS
+    )
 
 
 @pytest.mark.parametrize("max_concurrent", [8, 11, 0, None, "invalid"])
@@ -478,7 +610,7 @@ def test_status_mismatches_rejects_active_candidate_or_identity_drift(
 
 def test_status_mismatches_rejects_reused_or_unlinked_active_worker_ids() -> None:
     first = _active_node("trt-gb10-1", "worker-shared")
-    second = _active_node("trt-gb10-2", "worker-shared")
+    second = _active_node("trt-gb10-3", "worker-shared")
     status = {
         "nodes": [first, second],
         "unlinked_workers": [
@@ -493,7 +625,7 @@ def test_status_mismatches_rejects_reused_or_unlinked_active_worker_ids() -> Non
 
     errors = runner.status_mismatches(
         status,
-        hosts=("trt-gb10-1", "trt-gb10-2"),
+        hosts=("trt-gb10-1", "trt-gb10-3"),
         environment=ENVIRONMENT,
         pool_name=POOL_NAME,
         intent="active",
@@ -504,9 +636,9 @@ def test_status_mismatches_rejects_reused_or_unlinked_active_worker_ids() -> Non
 
     assert "trt-gb10-1: worker_id='worker-shared' also appears unlinked" in errors
     assert (
-        "trt-gb10-2: worker_id='worker-shared' is already linked to trt-gb10-1" in errors
+        "trt-gb10-3: worker_id='worker-shared' is already linked to trt-gb10-1" in errors
     )
-    assert "trt-gb10-2: worker_id='worker-shared' also appears unlinked" in errors
+    assert "trt-gb10-3: worker_id='worker-shared' also appears unlinked" in errors
 
 
 @pytest.mark.parametrize(
@@ -594,6 +726,8 @@ def test_runner_rejects_invalid_candidate_before_any_desired_state_mutation(
 @pytest.mark.parametrize(
     "value",
     [
+        ",".join(runner.FULL_GB10_HOSTS),
+        "trt-gb10-2",
         "trt-gb10-7",
         "trt-gb10-1,trt-gb10-7",
         "trt-gb10-1,trt-gb10-1",
@@ -635,11 +769,11 @@ def test_payload_preserves_other_inventory_intents() -> None:
     )
 
     assert payload["target_slots"] == 10
-    assert payload["host_intents"] == {
-        "trt-gb10-1": "active",
-        "trt-gb10-7": "active",
-        "trt-gb10-8": "draining",
-    }
+    assert set(payload["host_intents"]) == set(runner.FULL_GB10_HOSTS)
+    assert payload["host_intents"]["trt-gb10-1"] == "active"
+    assert payload["host_intents"]["trt-gb10-2"] == "stopped"
+    assert payload["host_intents"]["trt-gb10-7"] == "active"
+    assert payload["host_intents"]["trt-gb10-8"] == "draining"
 
 
 def _node_agent_args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
@@ -701,3 +835,142 @@ def test_node_agent_start_times_out_per_host(
     log = next((Path(result.artifact or "")).glob("trt-gb10-8.log")).read_text()
     assert "timed_out_after_seconds=0.01" in log
     assert "exit_code=timeout" in log
+
+
+def test_runner_activates_workers_only_but_reconciles_full_inventory_on_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("RUNNER_ADMIN_TOKEN", "loom_admin_test_only")
+    args = runner._parse_args(
+        [
+            "--cp-url",
+            "http://127.0.0.1:18081",
+            "--admin-token",
+            "env:RUNNER_ADMIN_TOKEN",
+            "--ssh-config",
+            str(tmp_path / "ssh_config"),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+        ]
+    )
+    current = {
+        "image_tag": "staging-abc1234",
+        "env_config_version": "staging-abc1234",
+        "source_git_commit": SOURCE_SHA,
+        "max_concurrent": 10,
+        "host_intents": {host: "stopped" for host in runner.FULL_GB10_HOSTS},
+    }
+    mutations: list[dict[str, object]] = []
+    starts: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(runner, "fetch_desired_state", lambda *_args: current)
+    monkeypatch.setattr(
+        runner,
+        "put_desired_state",
+        lambda _args, _token, payload: mutations.append(payload) or payload,
+    )
+    monkeypatch.setattr(
+        runner,
+        "start_node_agents",
+        lambda _args, *, hosts, phase, evidence_dir: starts.append((phase, tuple(hosts)))
+        or runner.PhaseResult(phase, True, str(evidence_dir)),
+    )
+    monkeypatch.setattr(
+        runner,
+        "wait_for_status",
+        lambda *_args, phase, evidence_dir, **_kwargs: runner.PhaseResult(
+            phase, True, str(evidence_dir)
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_validation_command",
+        lambda _args, evidence_dir: runner.PhaseResult(
+            "validation-command", True, str(evidence_dir)
+        ),
+    )
+
+    assert runner.run(args) == 0
+    assert starts == [
+        ("activate", runner.DEFAULT_HOSTS),
+        ("stopped", runner.FULL_GB10_HOSTS),
+    ]
+    assert mutations[0]["target_slots"] == 140
+    assert mutations[0]["host_intents"]["trt-gb10-2"] == "stopped"
+    assert mutations[1]["host_intents"] == {
+        host: "stopped" for host in runner.FULL_GB10_HOSTS
+    }
+
+
+@pytest.mark.parametrize("cleanup_failure", ["start", "wait"])
+def test_runner_returns_nonzero_when_full_inventory_cleanup_fails(
+    cleanup_failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("RUNNER_ADMIN_TOKEN", "loom_admin_test_only")
+    args = runner._parse_args(
+        [
+            "--cp-url",
+            "http://127.0.0.1:18081",
+            "--admin-token",
+            "env:RUNNER_ADMIN_TOKEN",
+            "--ssh-config",
+            str(tmp_path / "ssh_config"),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+            "--wait-for-release",
+        ]
+    )
+    current = {
+        "image_tag": "staging-abc1234",
+        "env_config_version": "staging-abc1234",
+        "source_git_commit": SOURCE_SHA,
+        "max_concurrent": 10,
+        "host_intents": {host: "stopped" for host in runner.FULL_GB10_HOSTS},
+    }
+    monkeypatch.setattr(runner, "fetch_desired_state", lambda *_args: current)
+    monkeypatch.setattr(runner, "put_desired_state", lambda _args, _token, payload: payload)
+
+    def _start(
+        _args: argparse.Namespace,
+        *,
+        hosts: object,
+        phase: str,
+        evidence_dir: Path,
+    ) -> runner.PhaseResult:
+        del hosts
+        return runner.PhaseResult(
+            phase,
+            not (cleanup_failure == "start" and phase == "stopped"),
+            str(evidence_dir),
+        )
+
+    def _wait(
+        *_args: object,
+        phase: str,
+        evidence_dir: Path,
+        **_kwargs: object,
+    ) -> runner.PhaseResult:
+        return runner.PhaseResult(
+            phase,
+            not (cleanup_failure == "wait" and phase == "stopped"),
+            str(evidence_dir),
+        )
+
+    monkeypatch.setattr(runner, "start_node_agents", _start)
+    monkeypatch.setattr(runner, "wait_for_status", _wait)
+    monkeypatch.setattr(
+        runner,
+        "run_validation_command",
+        lambda _args, evidence_dir: runner.PhaseResult(
+            "validation-command", True, str(evidence_dir)
+        ),
+    )
+
+    assert runner.run(args) == 1
+    summary = json.loads(
+        (args.evidence_dir / "staging-validation-capacity-runner-summary.json").read_text()
+    )
+    assert summary["ok"] is False
+    assert any(phase["ok"] is False for phase in summary["phases"])

@@ -12,6 +12,11 @@ from types import MappingProxyType
 
 from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 
+_EXCLUSIVE_GB10_BUILDER_HOST = "trt-gb10-2"
+GB10_SLURM_WORKER_HOSTS = tuple(
+    host for host in FULL_GB10_HOSTS if host != _EXCLUSIVE_GB10_BUILDER_HOST
+)
+
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXPECTED_FIELDS = {
@@ -75,7 +80,7 @@ def validate_gb10_slurm_acceptance(
 
     expected_nodes = tuple(nodes)
     if (
-        expected_nodes != FULL_GB10_HOSTS
+        expected_nodes != GB10_SLURM_WORKER_HOSTS
         or any(type(node) is not str for node in expected_nodes)
         or type(candidate_sha) is not str
         or _SHA_RE.fullmatch(candidate_sha) is None
@@ -151,6 +156,7 @@ def validate_gb10_slurm_acceptance(
 
 
 __all__ = [
+    "GB10_SLURM_WORKER_HOSTS",
     "GB10SlurmAcceptanceEvidence",
     "validate_gb10_slurm_acceptance",
 ]

@@ -27,15 +27,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.secret_source import (
     SecretSourceError,
     resolve_secret_source,
     secret_source_argparse_type,
 )
 
-FULL_GB10_HOSTS = tuple(f"trt-gb10-{i}" for i in range(1, 16))
-TEMPORARILY_EXCLUDED_HOSTS: frozenset[str] = frozenset()
-DEFAULT_HOSTS = tuple(host for host in FULL_GB10_HOSTS if host not in TEMPORARILY_EXCLUDED_HOSTS)
+EXCLUSIVE_GB10_HOSTS = frozenset(set(FULL_GB10_HOSTS) - set(GB10_SLURM_WORKER_HOSTS))
+DEFAULT_HOSTS = GB10_SLURM_WORKER_HOSTS
 EXPECTED_MAX_CONCURRENT = 10
 FULL_GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 STAGING_IMAGE_TAG_RE = re.compile(r"staging-([0-9a-f]{7,40})")
@@ -124,10 +125,10 @@ def _host_list(value: str | None) -> tuple[str, ...]:
         raise argparse.ArgumentTypeError(
             f"--hosts contains hosts outside the fixed GB10 inventory: {', '.join(unknown)}"
         )
-    excluded = sorted(set(hosts) & TEMPORARILY_EXCLUDED_HOSTS)
+    excluded = sorted(set(hosts) & EXCLUSIVE_GB10_HOSTS)
     if excluded:
         raise argparse.ArgumentTypeError(
-            "--hosts contains temporarily excluded hosts that require merged re-admission: "
+            "--hosts contains exclusive GB10 hosts that are not normal worker capacity: "
             + ", ".join(excluded)
         )
     if hosts != DEFAULT_HOSTS:
@@ -182,23 +183,25 @@ def desired_state_payload(
     raw_host_intents = current.get("host_intents") or {}
     if not isinstance(raw_host_intents, Mapping):
         raise ValueError("current desired state host_intents must be an object")
-    host_intents = {str(host): str(value) for host, value in raw_host_intents.items()}
-    unknown_intents = sorted(set(host_intents) - set(FULL_GB10_HOSTS))
+    current_host_intents = {str(host): str(value) for host, value in raw_host_intents.items()}
+    unknown_intents = sorted(set(current_host_intents) - set(FULL_GB10_HOSTS))
     if unknown_intents:
         raise ValueError(
             "current desired state contains hosts outside the fixed GB10 inventory: "
             + ", ".join(unknown_intents)
         )
     selected = set(hosts)
-    excluded_selected = sorted(selected & TEMPORARILY_EXCLUDED_HOSTS)
-    if excluded_selected:
+    excluded_selected = sorted(selected & EXCLUSIVE_GB10_HOSTS)
+    if intent == "active" and excluded_selected:
         raise ValueError(
-            "temporarily excluded hosts require merged re-admission: "
+            "exclusive GB10 hosts are not normal worker capacity: "
             + ", ".join(excluded_selected)
         )
-    for host in TEMPORARILY_EXCLUDED_HOSTS:
-        host_intents[host] = "stopped"
+    host_intents = {host: "stopped" for host in FULL_GB10_HOSTS}
+    host_intents.update(current_host_intents)
     host_intents.update({host: intent for host in hosts})
+    for host in EXCLUSIVE_GB10_HOSTS:
+        host_intents[host] = "stopped"
     return {
         "image_tag": current["image_tag"],
         "max_concurrent": max_concurrent,
@@ -355,6 +358,7 @@ def status_mismatches(
     image_tag: str,
     env_config_version: str,
     source_git_commit: str | None,
+    require_exclusive_reports: bool = False,
 ) -> list[str]:
     nodes, errors = _nodes_by_host(status, environment=environment, pool_name=pool_name)
     if intent == "active":
@@ -394,7 +398,7 @@ def status_mismatches(
             errors.append(f"unlinked_workers[{index}]: invalid worker_fresh")
         elif worker_fresh:
             errors.append(f"{hostname or '-'}: unlinked fresh worker {worker_id or '-'}")
-    allowed_hosts = set(hosts) | set(TEMPORARILY_EXCLUDED_HOSTS)
+    allowed_hosts = set(hosts) | set(EXCLUSIVE_GB10_HOSTS)
     for host in sorted(set(nodes) - allowed_hosts):
         node = nodes[host]
         self_reported_intent = node.get("desired_intent") or node.get("current_intent")
@@ -405,21 +409,24 @@ def status_mismatches(
             or node.get("apply_state") == "applied"
         ):
             errors.append(f"{host}: undeclared host reports active worker state")
-    for host in sorted(TEMPORARILY_EXCLUDED_HOSTS):
+    for host in sorted(EXCLUSIVE_GB10_HOSTS):
         excluded_node = nodes.get(host)
-        if excluded_node is not None:
-            if excluded_node.get("desired_intent") != "stopped":
-                errors.append(
-                    f"{host}: excluded desired_intent={excluded_node.get('desired_intent')!r}"
-                )
-            if excluded_node.get("current_intent") != "stopped":
-                errors.append(
-                    f"{host}: excluded current_intent={excluded_node.get('current_intent')!r}"
-                )
-            if excluded_node.get("apply_state") != "stopped":
-                errors.append(f"{host}: excluded apply_state={excluded_node.get('apply_state')!r}")
-            if excluded_node.get("worker_fresh") is True:
-                errors.append(f"{host}: temporarily excluded host still has a fresh worker")
+        if excluded_node is None:
+            if require_exclusive_reports:
+                errors.append(f"{host}: missing exclusive stopped node report")
+            continue
+        if excluded_node.get("desired_intent") != "stopped":
+            errors.append(
+                f"{host}: excluded desired_intent={excluded_node.get('desired_intent')!r}"
+            )
+        if excluded_node.get("current_intent") != "stopped":
+            errors.append(
+                f"{host}: excluded current_intent={excluded_node.get('current_intent')!r}"
+            )
+        if excluded_node.get("apply_state") != "stopped":
+            errors.append(f"{host}: excluded apply_state={excluded_node.get('apply_state')!r}")
+        if excluded_node.get("worker_fresh") is True:
+            errors.append(f"{host}: exclusive host still has a fresh worker")
     active_worker_hosts: dict[str, str] = {}
     for host in hosts:
         selected_node = nodes.get(host)
@@ -605,6 +612,7 @@ def wait_for_status(
             image_tag=image_tag,
             env_config_version=env_config_version,
             source_git_commit=source_git_commit,
+            require_exclusive_reports=True,
         )
         if not last_mismatches:
             path = evidence_dir / f"gb10-status-{phase}.json"
@@ -720,33 +728,29 @@ def run(args: argparse.Namespace) -> int:
         phases.append(phase)
         if not phase.ok:
             validation_rc = 1
-            return 1
-
-        phase = wait_for_status(
-            args,
-            admin_token,
-            hosts=hosts,
-            intent="active",
-            image_tag=str(active_payload["image_tag"]),
-            env_config_version=str(active_payload["env_config_version"]),
-            source_git_commit=active_source_git_commit,
-            evidence_dir=evidence_dir,
-            phase="active",
-        )
-        phases.append(phase)
-        if not phase.ok:
-            validation_rc = 1
-            return 1
-
-        validation = run_validation_command(args, evidence_dir)
-        phases.append(validation)
-        validation_rc = 0 if validation.ok else 1
-        return validation_rc
+        else:
+            phase = wait_for_status(
+                args,
+                admin_token,
+                hosts=hosts,
+                intent="active",
+                image_tag=str(active_payload["image_tag"]),
+                env_config_version=str(active_payload["env_config_version"]),
+                source_git_commit=active_source_git_commit,
+                evidence_dir=evidence_dir,
+                phase="active",
+            )
+            phases.append(phase)
+            if not phase.ok:
+                validation_rc = 1
+            else:
+                validation = run_validation_command(args, evidence_dir)
+                phases.append(validation)
+                validation_rc = 0 if validation.ok else 1
     except Exception as exc:
         validation_rc = 1
         phases.append(PhaseResult("runner-error", False, detail=redact_text(str(exc))))
         print(f"error: {redact_text(str(exc))}", file=sys.stderr)
-        return 1
     finally:
         try:
             if not activation_mutation_started:
@@ -775,7 +779,7 @@ def run(args: argparse.Namespace) -> int:
                 )
                 phase = start_node_agents(
                     args,
-                    hosts=hosts,
+                    hosts=FULL_GB10_HOSTS,
                     phase=release_intent,
                     evidence_dir=evidence_dir,
                 )
@@ -818,6 +822,7 @@ def run(args: argparse.Namespace) -> int:
                 },
             )
             print(f"summary={summary_path}")
+    return 0 if validation_rc == 0 and all(phase.ok for phase in phases) else 1
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:

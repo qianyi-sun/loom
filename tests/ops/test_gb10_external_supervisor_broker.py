@@ -19,9 +19,25 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transiti
     _artifact,
 )
 
-from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
     _encode_helper_request,
+)
+
+NORMAL_GB10_WORKER_HOSTS = (
+    "trt-gb10-1",
+    "trt-gb10-3",
+    "trt-gb10-4",
+    "trt-gb10-5",
+    "trt-gb10-6",
+    "trt-gb10-7",
+    "trt-gb10-8",
+    "trt-gb10-9",
+    "trt-gb10-10",
+    "trt-gb10-11",
+    "trt-gb10-12",
+    "trt-gb10-13",
+    "trt-gb10-14",
+    "trt-gb10-15",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -156,7 +172,7 @@ def test_broker_parses_only_canonical_typed_protocol_identity(tmp_path: Path) ->
         candidate_sha=artifact.candidate_sha,
         candidate_tree=artifact.candidate_tree,
         profile_sha256="c" * 64,
-        nodes=FULL_GB10_HOSTS,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
     )
     assert broker.parse_request_identity(capacity_request.encode()) == (
         artifact.candidate_sha,
@@ -192,10 +208,10 @@ def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
             "account": "loom-staging",
             "qos": "loom-staging",
         },
-        "nodes": list(FULL_GB10_HOSTS),
-        "node_count": 15,
-        "probed_nodes": list(FULL_GB10_HOSTS),
-        "probed_node_count": 15,
+        "nodes": list(NORMAL_GB10_WORKER_HOSTS),
+        "node_count": 14,
+        "probed_nodes": list(NORMAL_GB10_WORKER_HOSTS),
+        "probed_node_count": 14,
         "deferred_busy_nodes": [],
         "trial_cache_registry": {
             "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
@@ -210,7 +226,7 @@ def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
         candidate_sha=artifact.candidate_sha,
         candidate_tree=artifact.candidate_tree,
         profile_sha256="c" * 64,
-        nodes=FULL_GB10_HOSTS,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
     ).encode()
     checked_paths: list[Path] = []
     calls: list[dict[str, object]] = []
@@ -1378,7 +1394,7 @@ def test_broker_main_dispatches_capacity_without_candidate_runtime(
         candidate_sha=artifact.candidate_sha,
         candidate_tree=artifact.candidate_tree,
         profile_sha256="c" * 64,
-        nodes=FULL_GB10_HOSTS,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
     ).encode()
     response = b'{"operation":"accept_capacity","schema_version":1,"status":"ok"}\n'
     output = SimpleNamespace(buffer=io.BytesIO())

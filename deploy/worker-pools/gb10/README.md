@@ -8,13 +8,16 @@ units are kept stopped by environment-state reconciliation.
 
 ## Current staging policy
 
-The policy scales from zero to 150 slots across the canonical 15 Slurm nodes,
-`trt-gb10-1` through `trt-gb10-15`. `trt-gb10-16` remains outside Loom's
-accepted allocation boundary. Each job requests 20 CPUs, 115000 MiB, and
-concurrency 10.
+The normal worker policy scales from zero to 140 slots across 14 Slurm nodes:
+`trt-gb10-1` and `trt-gb10-3` through `trt-gb10-15`. The full readiness and
+retired node-agent inventory still covers `trt-gb10-1` through
+`trt-gb10-15`; node 2 is excluded only from normal workers because its active
+year-long reservation is the separate exclusive ARM64 task-image-builder
+capacity. `trt-gb10-16` remains outside Loom's accepted allocation boundary.
+Each normal worker job requests 20 CPUs, 115000 MiB, and concurrency 10.
 Every trial container is capped at 2 CPUs, 11500 MiB, and 512 PIDs. Jobs are
 non-exclusive, resource-aware, limited to the partition's one-day maximum, and
-bounded by `max_jobs=15` and `pending_job_cap=2`.
+bounded by `max_jobs=14` and `pending_job_cap=2`.
 
 ## Task-image builders
 

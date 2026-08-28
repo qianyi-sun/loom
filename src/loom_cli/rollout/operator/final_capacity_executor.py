@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
@@ -49,7 +50,7 @@ class FinalCapacityExecutor:
                 raise RuntimeError("final capacity transport is unavailable")
             acceptance = transport.accept_capacity(
                 profile_sha256=plan.supervisor_profile_sha256,
-                nodes=FULL_GB10_HOSTS,
+                nodes=GB10_SLURM_WORKER_HOSTS,
             )
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             evidence_digest = hashlib.sha256(
@@ -58,7 +59,7 @@ class FinalCapacityExecutor:
                         "accepted": False,
                         "candidate_sha": plan.candidate_sha,
                         "candidate_tree": plan.candidate_tree,
-                        "nodes": FULL_GB10_HOSTS,
+                        "nodes": GB10_SLURM_WORKER_HOSTS,
                         "profile_sha256": plan.supervisor_profile_sha256,
                     },
                     sort_keys=True,

@@ -15,12 +15,14 @@ environment = "staging"
 # while the allocation-scoped rootless backend remains fail-closed.
 [[worker_pool_autoscaler_policies]]
 # GB10 is managed only by the controller-local Slurm supervisor. Per-node
-# worker agents below remain stopped so there is one capacity authority.
+# worker agents below remain stopped so there is one capacity authority. Node
+# 2 is reserved for the separate exclusive task-image-builder pool, so normal
+# workers use node 1 and nodes 3-15 while full-host readiness still covers 1-15.
 pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 150
+max_slots = 140
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -36,7 +38,6 @@ slurm_controller_host = "gx10-01c7"
 partition = "loom-staging"
 allowed_nodes = [
   "trt-gb10-1",
-  "trt-gb10-2",
   "trt-gb10-3",
   "trt-gb10-4",
   "trt-gb10-5",
@@ -67,7 +68,7 @@ container_cpus = 2.0
 container_memory_mib = 11500
 container_pids = 512
 job_pids_max = 5120
-max_jobs = 15
+max_jobs = 14
 pending_job_cap = 2
 # The dedicated GB10 staging partition advertises MaxTime=1-00:00:00. Slurm rejects
 # longer requests before allocation, so keep every autoscaled worker lease at

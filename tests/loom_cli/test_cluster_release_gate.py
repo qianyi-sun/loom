@@ -27,7 +27,23 @@ from loom_cli.cluster_release_gate import (
 from loom_cli.cluster_release_manifest import build_release_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STAGING_GB10_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
+FULL_STAGING_GB10_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
+STAGING_GB10_NODES = [
+    "trt-gb10-1",
+    "trt-gb10-3",
+    "trt-gb10-4",
+    "trt-gb10-5",
+    "trt-gb10-6",
+    "trt-gb10-7",
+    "trt-gb10-8",
+    "trt-gb10-9",
+    "trt-gb10-10",
+    "trt-gb10-11",
+    "trt-gb10-12",
+    "trt-gb10-13",
+    "trt-gb10-14",
+    "trt-gb10-15",
+]
 TRIAL_CACHE_REGISTRY = {
     "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
     "canary_digest": "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
@@ -320,23 +336,7 @@ def test_release_gate_rejects_gb10_supervisor_activation_without_policy() -> Non
 def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None:
     manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
     manifest["external_workers"]["environment_state_file"] = {"sha256": "b" * 64}
-    partition_nodes = [
-        "trt-gb10-1",
-        "trt-gb10-2",
-        "trt-gb10-3",
-        "trt-gb10-4",
-        "trt-gb10-5",
-        "trt-gb10-6",
-        "trt-gb10-7",
-        "trt-gb10-8",
-        "trt-gb10-9",
-        "trt-gb10-10",
-        "trt-gb10-11",
-        "trt-gb10-12",
-        "trt-gb10-13",
-        "trt-gb10-14",
-        "trt-gb10-15",
-    ]
+    partition_nodes = STAGING_GB10_NODES
     manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = partition_nodes
     generated_at = datetime.now(UTC)
 
@@ -359,9 +359,9 @@ def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None
                 "qos": "loom-staging",
             },
             "nodes": partition_nodes,
-            "node_count": 15,
+            "node_count": 14,
             "probed_nodes": partition_nodes[1:],
-            "probed_node_count": 14,
+            "probed_node_count": 13,
             "deferred_busy_nodes": ["trt-gb10-1"],
             "trial_cache_registry": dict(TRIAL_CACHE_REGISTRY),
             "generated_at": generated_at.isoformat(),
@@ -415,8 +415,8 @@ def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
     ("field", "value"),
     [
         ("schema_version", True),
-        ("node_count", 15.0),
-        ("probed_node_count", 14.0),
+        ("node_count", 14.0),
+        ("probed_node_count", 13.0),
     ],
 )
 def test_release_gate_rejects_non_integer_authority_counts(
@@ -476,9 +476,9 @@ def test_release_gate_rejects_authority_with_forged_node_inventory() -> None:
             "qos": "loom-staging",
         },
         "nodes": [*STAGING_GB10_NODES[:-1], "trt-gb10-16"],
-        "node_count": 15,
+        "node_count": 14,
         "probed_nodes": STAGING_GB10_NODES[:-1],
-        "probed_node_count": 14,
+        "probed_node_count": 13,
         "deferred_busy_nodes": ["trt-gb10-16"],
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
@@ -512,7 +512,7 @@ def test_release_gate_rejects_unprobed_or_malformed_authority_coverage() -> None
             "qos": "loom-staging",
         },
         "nodes": STAGING_GB10_NODES,
-        "node_count": 15,
+        "node_count": 14,
         "probed_nodes": [],
         "probed_node_count": 0,
         "deferred_busy_nodes": [{"node": "trt-gb10-1"}],
@@ -755,8 +755,11 @@ def _external_workers_manifest_section() -> dict[str, Any]:
                 "max_concurrent": 10,
                 "env_config_version": "staging-abc123",
                 "source_git_commit": "a" * 40,
-                "target_slots": 150,
-                "host_intents": {f"trt-gb10-{index}": "active" for index in range(1, 16)},
+                "target_slots": 140,
+                "host_intents": {
+                    host: "stopped" if host == "trt-gb10-2" else "active"
+                    for host in FULL_STAGING_GB10_NODES
+                },
             },
         ],
     }
@@ -782,14 +785,17 @@ def _catalog_manifest_section() -> dict[str, Any]:
     }
 
 
-_ACTIVE_GB10_HOSTS = [f"trt-gb10-{index}" for index in range(1, 16)]
+_ACTIVE_GB10_HOSTS = STAGING_GB10_NODES
 
 
 def _hf_external_workers_manifest_section() -> dict[str, Any]:
     external_workers = _external_workers_manifest_section()
     desired = external_workers["gb10_desired_states"][0]
-    desired["target_slots"] = 150
-    desired["host_intents"] = {host: "active" for host in _ACTIVE_GB10_HOSTS}
+    desired["target_slots"] = 140
+    desired["host_intents"] = {
+        host: "stopped" if host == "trt-gb10-2" else "active"
+        for host in FULL_STAGING_GB10_NODES
+    }
     return external_workers
 
 
@@ -907,7 +913,7 @@ def _hf_boundary_evidence(
             "direct_hf_egress_required": False,
             "materialized_from_internal_source": True,
             "gb10_hf_token_check_summary": {
-                "checked_hosts": 15,
+                "checked_hosts": 14,
                 "checked_host_names": _ACTIVE_GB10_HOSTS,
                 "ssh_failed_hosts": [],
                 "docker_ps_failed_hosts": [],
@@ -915,7 +921,7 @@ def _hf_boundary_evidence(
                 "env_file_missing_hosts": [],
                 "env_file_hf_token_present_hosts": [],
                 "hosts_with_container_hf_token_present": [],
-                "containers_checked": 15,
+                "containers_checked": 14,
                 "inspect_failed": [],
             },
         },
@@ -1628,7 +1634,7 @@ def test_release_gate_accepts_secret_safe_hf_mirror_boundary_evidence() -> None:
     assert check.evidence["canary_workers_match_current_candidate"] is True
     assert check.evidence["canary_trial_worker_ids"] == [
         "worker-trt-gb10-1",
-        "worker-trt-gb10-2",
+        "worker-trt-gb10-3",
     ]
 
 
@@ -1707,9 +1713,9 @@ def test_release_gate_rejects_hf_boundary_when_gb10_checks_do_not_run() -> None:
 @pytest.mark.parametrize(
     "drift",
     [
-        "fourteen-hosts",
-        "sixteen-hosts",
-        "wrong-fifteen-host-set",
+        "thirteen-hosts",
+        "fifteen-hosts",
+        "wrong-fourteen-host-set",
         "missing-failure-list",
         "non-list-failure-field",
     ],
@@ -1721,15 +1727,15 @@ def test_hf_boundary_rejects_inexact_or_incomplete_gb10_coverage(drift: str) -> 
     gb10_status = _gb10_status_for_external_workers(external_workers)
     artifact = _hf_boundary_evidence(gb10_status=gb10_status)
     summary = artifact["worker_boundary"]["gb10_hf_token_check_summary"]
-    if drift == "fourteen-hosts":
-        summary["checked_hosts"] = 14
+    if drift == "thirteen-hosts":
+        summary["checked_hosts"] = 13
         summary["checked_host_names"] = _ACTIVE_GB10_HOSTS[:-1]
-        summary["containers_checked"] = 14
-    elif drift == "sixteen-hosts":
-        summary["checked_hosts"] = 16
+        summary["containers_checked"] = 13
+    elif drift == "fifteen-hosts":
+        summary["checked_hosts"] = 15
         summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS, "trt-gb10-7"]
-        summary["containers_checked"] = 16
-    elif drift == "wrong-fifteen-host-set":
+        summary["containers_checked"] = 15
+    elif drift == "wrong-fourteen-host-set":
         summary["checked_host_names"] = [*_ACTIVE_GB10_HOSTS[:-1], "trt-gb10-14"]
     elif drift == "missing-failure-list":
         summary.pop("docker_ps_failed_hosts")

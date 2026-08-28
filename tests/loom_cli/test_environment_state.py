@@ -2252,13 +2252,12 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
     assert profile.control_plane_environment == environment
     assert gb10_policy["environment"] == environment
     assert gb10_policy["actuator"] == "slurm"
-    assert gb10_policy["max_slots"] == 150
+    assert gb10_policy["max_slots"] == 140
     assert gb10_policy["actuator_config"]["backend"] == "docker"
     assert gb10_policy["actuator_config"]["cpu_arch"] == "arm64"
     assert gb10_policy["actuator_config"]["partition"] == "loom-staging"
     assert gb10_policy["actuator_config"]["allowed_nodes"] == [
         "trt-gb10-1",
-        "trt-gb10-2",
         "trt-gb10-3",
         "trt-gb10-4",
         "trt-gb10-5",
@@ -2273,7 +2272,7 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         "trt-gb10-14",
         "trt-gb10-15",
     ]
-    assert gb10_policy["actuator_config"]["max_jobs"] == 15
+    assert gb10_policy["actuator_config"]["max_jobs"] == 14
     assert (
         gb10_policy["actuator_config"]["env_file"]
         == "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-staging-test.env"
@@ -2844,13 +2843,12 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
     gb10 = policies["gb10"]
     assert gb10["enabled"] is True
     assert gb10["min_slots"] == 0
-    assert gb10["max_slots"] == 150
+    assert gb10["max_slots"] == 140
     assert gb10["actuator_config"]["candidate_sha"] == "a" * 40
     assert gb10["actuator_config"]["slurm_account"] == "loom-staging"
     assert gb10["actuator_config"]["qos_normal"] == "loom-staging"
     assert gb10["actuator_config"]["allowed_nodes"] == [
         "trt-gb10-1",
-        "trt-gb10-2",
         "trt-gb10-3",
         "trt-gb10-4",
         "trt-gb10-5",
@@ -2865,7 +2863,7 @@ def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() ->
         "trt-gb10-14",
         "trt-gb10-15",
     ]
-    assert gb10["actuator_config"]["max_jobs"] == 15
+    assert gb10["actuator_config"]["max_jobs"] == 14
     oldlab = policies["oldlab"]
     assert oldlab["enabled"] is True
     assert oldlab["min_slots"] == 0
