@@ -321,7 +321,7 @@ def _requirements(
         cpu_millis=1000,
         memory_mib=1024,
         ephemeral_storage_mib=2048,
-        isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+        isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=NetworkAccess.GATEWAY_ONLY,
         image_materialization=ImageMaterialization.IMMUTABLE_OCI,
         image_ref="registry.example/loom/task@sha256:" + "a" * 64,

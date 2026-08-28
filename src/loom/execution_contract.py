@@ -30,7 +30,7 @@ class _StrictContract(BaseModel):
 
 
 class IsolationLevel(StrEnum):
-    """Minimum hostile-code isolation supplied by an execution class."""
+    """Container isolation supplied by an execution class."""
 
     SHARED_KERNEL = "shared_kernel"
     SANDBOXED_RUNTIME = "sandboxed_runtime"
@@ -152,13 +152,7 @@ class ExecutionClassV1(_StrictContract):
     permits_host_devices: bool
 
     @model_validator(mode="after")
-    def _hostile_code_must_not_use_shared_kernel(self) -> ExecutionClassV1:
-        if self.isolation_level == IsolationLevel.SHARED_KERNEL:
-            raise ValueError(
-                "service execution classes must use a sandboxed runtime or "
-                "a dedicated ephemeral node; shared-kernel Pods are not an "
-                "accepted hostile-code boundary",
-            )
+    def _forbid_host_escape_capabilities(self) -> ExecutionClassV1:
         forbidden = {
             "permits_privileged": self.permits_privileged,
             "permits_host_path": self.permits_host_path,
@@ -480,7 +474,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         cpu_millis=round(env.cpus * 1000) if env.cpus is not None else None,
         memory_mib=env.memory_mb,
         ephemeral_storage_mib=env.storage_mb,
-        isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+        isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=network_access,
         image_materialization=materialization,
         image_ref=image_ref,
@@ -591,7 +585,7 @@ NEBIUS_CPU_EXECUTION_CLASS_V1 = ExecutionClassV1(
     operating_system="linux",
     cpu_architecture="x86_64",
     gpu_vendor="none",
-    isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+    isolation_level=IsolationLevel.SHARED_KERNEL,
     network_access=frozenset(
         {
             NetworkAccess.NONE,

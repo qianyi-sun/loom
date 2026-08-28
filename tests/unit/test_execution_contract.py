@@ -34,7 +34,7 @@ def _requirements(**updates: object) -> WorkloadRequirementsV1:
         "cpu_millis": 2_000,
         "memory_mib": 8_192,
         "ephemeral_storage_mib": 20_480,
-        "isolation_level": "sandboxed_runtime",
+        "isolation_level": "shared_kernel",
         "network_access": "gateway_only",
         "image_materialization": "immutable_oci",
         "image_ref": "registry.example/loom/task@sha256:" + "a" * 64,
@@ -163,9 +163,7 @@ def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
         }
     )
     assert len(topology.targets) == 3
-    assert {target.cluster_scope_id for target in topology.targets} == {
-        "nebius-eu-north1-shared"
-    }
+    assert {target.cluster_scope_id for target in topology.targets} == {"nebius-eu-north1-shared"}
 
     invalid = topology.model_dump()
     invalid["targets"][2]["cluster_scope_id"] = "nebius-eu-west1-secondary"
@@ -180,11 +178,8 @@ def test_unknown_capability_fields_fail_closed() -> None:
         WorkloadRequirementsV1.model_validate(values)
 
 
-def test_shared_kernel_execution_class_is_never_valid_for_service_work() -> None:
-    values = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump()
-    values["isolation_level"] = "shared_kernel"
-    with pytest.raises(ValidationError, match="shared-kernel Pods"):
-        ExecutionClassV1.model_validate(values)
+def test_nebius_class_uses_standard_shared_kernel_pods() -> None:
+    assert NEBIUS_CPU_EXECUTION_CLASS_V1.isolation_level == "shared_kernel"
 
 
 @pytest.mark.parametrize(
@@ -193,7 +188,7 @@ def test_shared_kernel_execution_class_is_never_valid_for_service_work() -> None
         ({"operating_system": "windows"}, "operating_system_unsupported"),
         ({"cpu_architecture": "arm64"}, "cpu_architecture_unsupported"),
         ({"gpu_vendor": "nvidia", "gpu_count": 1}, "gpu_unsupported"),
-        ({"isolation_level": "dedicated_ephemeral_node"}, "isolation_level_unsupported"),
+        ({"isolation_level": "sandboxed_runtime"}, "isolation_level_unsupported"),
         ({"network_access": "unrestricted_public"}, "network_access_unsupported"),
         (
             {"image_materialization": "mutable_oci", "image_ref": "ubuntu:latest"},

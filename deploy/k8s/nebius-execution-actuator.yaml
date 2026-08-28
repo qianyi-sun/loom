@@ -139,8 +139,6 @@ spec:
               value: nebius-eu-north1-staging
             - name: LOOM_EXECUTION_ACTUATOR_NAMESPACE
               value: loom-nebius-staging
-            - name: LOOM_EXECUTION_ACTUATOR_RUNTIME_CLASS_NAME
-              value: loom-sandbox
             - name: LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL
               value: http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution
           ports:

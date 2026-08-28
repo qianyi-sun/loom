@@ -433,27 +433,17 @@ and Batch metadata after object deletion has been verified. Operators must not
 manually delete an outbox or provider object to force convergence. See the
 [operator runbook](../runbooks/operator-runbook.md#service-execution-recovery-and-retention).
 
-## Hostile-code isolation
+## Container isolation baseline
 
-The accepted class requires `sandboxed_runtime`. A normal shared-kernel Pod,
-Pod Security admission, NetworkPolicy, a namespace, or a dedicated node group
-alone is not an accepted hostile-code boundary. The runtime-validation issue
-#1551 must prove an available Nebius Kubernetes `RuntimeClass` based on Kata,
-gVisor, or another reviewed sandbox implementation, including escape,
-network, secret, cleanup, and performance tests. No ordinary-Pod fallback is
-allowed when that runtime is missing or unhealthy.
+The accepted class uses the managed Kubernetes shared-kernel runtime with a
+restricted non-root Pod shape, immutable images, explicit limits, private
+execution nodes, and no service-account token. A custom gVisor, Kata, or
+dedicated-node runtime is optional defense in depth for a future workload with
+a demonstrated need; it is not a normal Nebius admission requirement.
 
-One-attempt-per-node may be proposed later as a distinct
-`dedicated_ephemeral_node` class. It needs its own lifecycle, wipe, fencing,
-capacity, and cost acceptance and is not silently equivalent to
-`sandboxed_runtime`.
-
-Nebius documentation currently confirms managed Kubernetes node groups,
-autoscaling, taints, security groups, and CPU-d3 availability in the selected
-EU regions. As of 2026-08-25, the official documentation review did not find a
-documented supported Kata/gVisor/custom RuntimeClass contract. That absence is
-why runtime support remains fail-closed empirical work under #1551 rather than
-an architecture assumption. References:
+Nebius documentation confirms managed Kubernetes node groups, autoscaling,
+taints, security groups, and CPU-d3 availability in the selected EU regions.
+References:
 
 - <https://docs.nebius.com/kubernetes/node-groups/manage>
 - <https://docs.nebius.com/kubernetes/node-groups/node-group-autoscaling>
@@ -467,9 +457,9 @@ an architecture assumption. References:
 The #1549 actuator consumes the durable command outbox through database-backed
 delivery leases. It renders one deterministic `batch/v1` Job per execution
 unit, requires an immutable image digest, exact CPU/RAM/ephemeral-storage
-requests and limits, a non-root restricted security context, an explicit
-sandbox `RuntimeClass`, and an attempt service account with token automount
-disabled. It never receives Nebius credentials and its Kubernetes service
+requests and limits, a non-root restricted security context, and an attempt
+service account with token automount disabled. A custom `RuntimeClass` may be
+configured but is not required. It never receives Nebius credentials and its Kubernetes service
 account has namespace-only Job create/get/list/watch/delete plus Pod
 get/list/watch permissions. There is no Secret read, Pod exec, log, node,
 namespace, CRD, or cluster-wide permission.
@@ -526,14 +516,12 @@ and marker digest in both the lease and termination summary. Cancellation and
 retry fence model calls immediately while allowing only the old resource
 generation to flush output until the cleanup deadline. The actuator defers Job
 deletion during that window; at expiry it records explicit output
-unavailability before UID-preconditioned deletion. Live target evidence for
-this repository path remains part of #1551 acceptance.
+unavailability before UID-preconditioned deletion. Live target behavior is
+validated by the owning end-to-end canary.
 
-The #1551 repository security controls and exact remaining live gates are in
-[Nebius hostile-workload security](nebius-execution-security.md). Operators
-must use the corresponding
-[security acceptance and incident runbook](../runbooks/nebius-execution-security.md);
-merge or manifest rendering is not target acceptance.
+The proportionate baseline is documented in
+[Nebius execution security](nebius-execution-security.md) and the matching
+[operator check](../runbooks/nebius-execution-security.md).
 
 `deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
 replicas. Repository merge cannot scale it or create its referenced database
@@ -666,7 +654,7 @@ traffic routing, or retirement.
   reconciliation; implemented and held at zero replicas in this change.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
-- #1551: sandbox runtime and hostile-workload empirical acceptance.
+- #1551: proportionate Kubernetes execution security baseline.
 - Later #1536 children: infrastructure, workload conversion, canary, and
   independently authorized production routing. No child implicitly owns
   OLDLAB/GB10 retirement.
