@@ -13,6 +13,7 @@ import pytest
 
 import loom_cli.rollout.operator.installed_final_gate_executor as installed_module
 from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.operator.config import environment_authority
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from loom_cli.rollout.operator.installed_final_gate_executor import (
     BoundedStagingSmokeTransport,
@@ -186,6 +187,112 @@ def test_installed_executor_rechecks_live_runner_install(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="plan drifted"):
         executor("final.drift", CheckOperation.VERIFY, _bound_plan(tmp_path))
+
+
+def test_installed_executor_uses_current_helper_with_historical_rollout_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    historical_executor = _executor(tmp_path)
+    plan = _bound_plan(tmp_path)
+    historical_repo = (
+        environment_authority("staging").candidate_runtime_root / plan.candidate_sha / "repo"
+    )
+    historical_config = replace(
+        historical_executor.config,
+        runner_repo=historical_repo,
+        cluster_config_path=(
+            historical_repo / environment_authority("staging").candidate_cluster_config
+        ),
+    )
+    current_sha = "c" * 40
+    current_repo = environment_authority("staging").candidate_runtime_root / current_sha / "repo"
+    current_config = replace(
+        historical_config,
+        runner_repo=current_repo,
+        cluster_config_path=current_repo / environment_authority("staging").candidate_cluster_config,
+        config_sha256="f" * 64,
+    )
+    current_install = SimpleNamespace(
+        ready=True,
+        attestation=SimpleNamespace(
+            asset_sha256={
+                "config": current_config.config_sha256,
+                "worker-env-template": "e" * 64,
+            },
+            payload_digest="d" * 64,
+            source_base_sha="none",
+            source_mode="merged-dev",
+            source_sha=current_sha,
+            source_tree_sha="none",
+        ),
+    )
+    resolved: list[dict[str, object]] = []
+
+    def resolve_runtime(config: object, **bindings: object) -> object:
+        resolved.append({"config": config, **bindings})
+        return historical_config
+
+    executor = replace(
+        historical_executor,
+        config=current_config,
+        verify_install=lambda **_kwargs: current_install,
+        resume_runtime_upgrade=SimpleNamespace(resolve=resolve_runtime),
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        installed_module,
+        "load_cluster_config",
+        lambda _path: SimpleNamespace(container_registry="registry.invalid"),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_external_supervisor_transport",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_external_supervisor_transport",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_ssh_transport",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    class ProtectedExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def __call__(self, *_args: object) -> str:
+            return "dispatched"
+
+    monkeypatch.setattr(installed_module, "MigrationEpochProtectedApplyExecutor", ProtectedExecutor)
+
+    assert (
+        executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"
+    )  # type: ignore[comparison-overlap]
+    expected_cluster_path = (
+        environment_authority("staging").candidate_runtime_root
+        / plan.candidate_sha
+        / "repo"
+        / environment_authority("staging").candidate_cluster_config
+    )
+    assert resolved == [
+        {
+            "config": current_config,
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "runner_config_sha256": plan.runner_config_hash,
+            "cluster_config_path": str(expected_cluster_path),
+        }
+    ]
+    assert captured["candidate_root"] == historical_config.runner_repo
+    environment_state = captured["environment_state_transport"]
+    assert isinstance(environment_state, HttpxProtectedEnvironmentStateTransport)
+    assert environment_state.candidate_root == historical_config.runner_repo
+    assert environment_state.expected_env_template_sha256 == "e" * 64
 
 
 def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:

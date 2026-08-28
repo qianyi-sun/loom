@@ -1290,6 +1290,145 @@ def test_default_worker_run_uses_exact_sanitized_environment(
     assert timeouts[0] > service_stop_timeout + 3 * 30
 
 
+def test_default_attempt_dependencies_compose_historical_runtime_under_current_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_config = make_config(tmp_path)
+    historical_config = replace(
+        installed_config,
+        runner_repo=tmp_path / "historical" / "repo",
+        cluster_config_path=tmp_path
+        / "historical"
+        / "repo"
+        / "deploy/environments/staging.cluster.toml",
+        config_sha256="1" * 64,
+    )
+    envelope = replace(valid_envelope(), attempt_number=2, resume=True)
+    path = (
+        installed_config.state_root
+        / "requests"
+        / envelope.request_id
+        / "attempts/2/envelope.json"
+    )
+    order: list[str] = []
+
+    class Guard:
+        def assert_ready(self, request_id: str) -> object:
+            order.append("guard")
+            return SimpleNamespace(
+                request_id=request_id,
+                candidate_sha=envelope.resolved_sha,
+                candidate_tree=envelope.resolved_tree,
+                state="ready",
+            )
+
+        def release(self, _request_id: str) -> object:
+            raise AssertionError("successful composition must retain the transferred guard")
+
+    guard = Guard()
+    monkeypatch.setattr(worker_module, "SystemdUserManager", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        worker_module,
+        "MutationGuardManager",
+        lambda **_kwargs: guard,
+    )
+    authority = object()
+    monkeypatch.setattr(
+        worker_module,
+        "build_installed_resume_runtime_upgrade_authority",
+        lambda *_args, **_kwargs: authority,
+    )
+
+    def load_runtime(
+        found_path: Path,
+        config: object,
+        **kwargs: object,
+    ) -> tuple[DriverEnvelope, object]:
+        order.append("resolve")
+        assert found_path == path
+        assert config == installed_config
+        assert kwargs["resume_runtime_upgrade"] is authority
+        return envelope, historical_config
+
+    monkeypatch.setattr(worker_module, "load_validated_envelope_with_config", load_runtime)
+    attestation = SimpleNamespace(
+        attestation_digest=envelope.preflight_attestation_sha256,
+        registry_digest=envelope.preflight_registry_sha256,
+        coverage_digest=envelope.preflight_coverage_sha256,
+        bindings=SimpleNamespace(
+            candidate_sha=envelope.resolved_sha,
+            candidate_tree=envelope.resolved_tree,
+            runner_config_hash=envelope.runner_config_sha256,
+            runner_install_hash="9" * 64,
+            environment=envelope.environment,
+            namespace=envelope.namespace,
+        ),
+    )
+
+    class AttestationStore:
+        def __init__(self, root: Path) -> None:
+            assert root == installed_config.state_root
+
+        def read(self, digest: str) -> object:
+            order.append("attestation")
+            assert digest == envelope.preflight_attestation_sha256
+            return attestation
+
+    monkeypatch.setattr(worker_module, "PreflightAttestationStore", AttestationStore)
+    composed = object()
+
+    def compose(config: object, **kwargs: object) -> object:
+        order.append("compose")
+        assert config == historical_config
+        assert kwargs["installed_config"] == installed_config
+        assert kwargs["runner_install_digest"] == "9" * 64
+        return composed
+
+    monkeypatch.setattr(worker_module, "_default_dependencies", compose)
+
+    dependencies = worker_module._default_attempt_dependencies(
+        installed_config,
+        path,
+        service_uid=os.geteuid(),
+    )
+
+    assert dependencies is composed
+    assert order == ["guard", "resolve", "attestation", "compose"]
+
+
+def test_default_attempt_dependencies_release_guard_when_bootstrap_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_config = make_config(tmp_path)
+    path = (
+        installed_config.state_root
+        / "requests/req-alpha/attempts/2/envelope.json"
+    )
+    released: list[str] = []
+
+    class Guard:
+        def assert_ready(self, _request_id: str) -> object:
+            raise ValueError("guard evidence drifted")
+
+        def release(self, request_id: str) -> object:
+            released.append(request_id)
+            return SimpleNamespace(request_id=request_id, state="released")
+
+    monkeypatch.setattr(worker_module, "SystemdUserManager", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(worker_module, "MutationGuardManager", lambda **_kwargs: Guard())
+
+    with pytest.raises(ValueError, match="guard evidence drifted"):
+        worker_module._default_attempt_dependencies(
+            installed_config,
+            path,
+            service_uid=os.geteuid(),
+        )
+
+    assert released == [REQUEST_ID]
+
+
 @pytest.mark.parametrize(
     ("attempt_number", "resume", "apply_attempt"),
     ((2, True, 1), (1, False, 1)),
