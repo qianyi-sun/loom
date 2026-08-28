@@ -137,6 +137,32 @@ def test_server_observed_authority_accepts_select_only_database_digest() -> None
     assert evidence.http_methods == ()
 
 
+def test_server_observed_authority_digest_ignores_rule_order() -> None:
+    first_rules = _rules()
+    reordered_rules = _rules()
+    reordered_status = cast(dict[str, object], reordered_rules["status"])
+    resource_rules = cast(list[dict[str, object]], reordered_status["resourceRules"])
+    reordered_status["resourceRules"] = list(reversed(resource_rules))
+
+    first_run, _first_calls = _run_for(first_rules)
+    reordered_run, _reordered_calls = _run_for(reordered_rules)
+    first = probe_readonly_authority(
+        cast(JsonCommandRunner, first_run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+        database_authority_digest="a" * 64,
+    )
+    reordered = probe_readonly_authority(
+        cast(JsonCommandRunner, reordered_run),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/readonly-kubeconfig"),
+        namespace="loom-staging",
+        database_authority_digest="a" * 64,
+    )
+
+    assert reordered.capability_source_digest == first.capability_source_digest
+    assert reordered.evidence_digest == first.evidence_digest
+
+
 def test_server_observed_authority_rejects_ambiguous_data_authority() -> None:
     run, _calls = _run_for(_rules())
 

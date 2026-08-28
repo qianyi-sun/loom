@@ -168,6 +168,9 @@ def _protected_rules(payload: bytes) -> tuple[tuple[str, ...], tuple[str, ...], 
         if "*" in urls:
             protected_resources.add("*")
         canonical_rules.append({"nonResourceURLs": sorted(urls), "verbs": sorted(verbs)})
+    canonical_rules.sort(
+        key=lambda rule: json.dumps(rule, sort_keys=True, separators=(",", ":"))
+    )
     digest = hashlib.sha256(
         json.dumps(canonical_rules, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
