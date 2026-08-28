@@ -40,6 +40,16 @@ output "node_groups" {
   }
 }
 
+output "runtime_profile" {
+  description = "Pinned execution RuntimeClass contract; apply its manifest only after node install and Pod smoke evidence pass."
+  value = {
+    name           = local.runtime_profile.runtime_class.name
+    handler        = local.runtime_profile.runtime.handler
+    platform       = local.runtime_profile.runtime.platform
+    profile_sha256 = local.runtime_profile_sha256
+  }
+}
+
 output "registry" {
   value = {
     id   = nebius_registry_v1_registry.target.id

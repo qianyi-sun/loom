@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NEBIUS_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
 TOPOLOGY_PATH = REPO_ROOT / "config" / "service-execution-topology.json"
+
 
 class ContractError(RuntimeError):
     pass
@@ -50,8 +52,14 @@ def check_nebius_iac(
     }
 
     target_paths = sorted((root / "targets").glob("*.tfvars.json.example"))
-    _require(len(target_paths) == 1, f"expected exactly 1 shared-cluster example, found {len(target_paths)}")
-    _require(len(topology_targets) == 3, f"expected exactly 3 environment bindings, found {len(topology_targets)}")
+    _require(
+        len(target_paths) == 1,
+        f"expected exactly 1 shared-cluster example, found {len(target_paths)}",
+    )
+    _require(
+        len(topology_targets) == 3,
+        f"expected exactly 3 environment bindings, found {len(topology_targets)}",
+    )
     path = target_paths[0]
     _require(
         path.name == "development-eu-north1.tfvars.json.example",
@@ -65,19 +73,36 @@ def check_nebius_iac(
         target.get("target_id") == "nebius-eu-north1-development",
         f"{path}: target_id must retain the live state/resource anchor",
     )
-    cluster_scope_ids = {str(item.get("cluster_scope_id", "")) for item in topology_targets.values()}
-    _require(len(cluster_scope_ids) == 1 and "" not in cluster_scope_ids, "topology targets must share one cluster_scope_id")
+    cluster_scope_ids = {
+        str(item.get("cluster_scope_id", "")) for item in topology_targets.values()
+    }
+    _require(
+        len(cluster_scope_ids) == 1 and "" not in cluster_scope_ids,
+        "topology targets must share one cluster_scope_id",
+    )
     cluster_scope_id = next(iter(cluster_scope_ids))
-    _require(target.get("cluster_scope_id") == cluster_scope_id, f"{path}: cluster_scope_id must match topology")
+    _require(
+        target.get("cluster_scope_id") == cluster_scope_id,
+        f"{path}: cluster_scope_id must match topology",
+    )
     regions = {str(item.get("region", "")) for item in topology_targets.values()}
     failure_domains = {str(item.get("failure_domain", "")) for item in topology_targets.values()}
-    _require(regions == {target.get("region")}, f"{path}: all bindings must use the shared cluster region")
-    _require(failure_domains == {target.get("failure_domain")}, f"{path}: all bindings must use one failure domain")
+    _require(
+        regions == {target.get("region")},
+        f"{path}: all bindings must use the shared cluster region",
+    )
+    _require(
+        failure_domains == {target.get("failure_domain")},
+        f"{path}: all bindings must use one failure domain",
+    )
 
     bindings = target.get("environment_bindings")
     if not isinstance(bindings, dict):
         raise ContractError(f"{path}: environment_bindings must be an object")
-    _require(set(bindings) == {"development", "staging", "production"}, f"{path}: all three environment bindings are required")
+    _require(
+        set(bindings) == {"development", "staging", "production"},
+        f"{path}: all three environment bindings are required",
+    )
     for environment, binding in bindings.items():
         if not isinstance(binding, dict):
             raise ContractError(f"{path}: {environment} binding must be an object")
@@ -85,11 +110,23 @@ def check_nebius_iac(
         topology_target = topology_targets.get(target_id)
         if topology_target is None:
             raise ContractError(f"{path}: target_id {target_id!r} is absent from topology")
-        _require(topology_target.get("environment") == environment, f"{path}: {environment} target environment must match topology")
-        _require(binding.get("namespace_name") == topology_target.get("namespace_name"), f"{path}: {environment} namespace_name must match topology")
-        _require(binding.get("evidence_prefix") == target_id, f"{path}: {environment} evidence prefix must equal target_id")
+        _require(
+            topology_target.get("environment") == environment,
+            f"{path}: {environment} target environment must match topology",
+        )
+        _require(
+            binding.get("namespace_name") == topology_target.get("namespace_name"),
+            f"{path}: {environment} namespace_name must match topology",
+        )
+        _require(
+            binding.get("evidence_prefix") == target_id,
+            f"{path}: {environment} evidence prefix must equal target_id",
+        )
 
-    _require(document.get("tenant_id") == "tenant-REPLACE", f"{path}: example tenant must remain a placeholder")
+    _require(
+        document.get("tenant_id") == "tenant-REPLACE",
+        f"{path}: example tenant must remain a placeholder",
+    )
     _require(
         str(document.get("project_id", "")).startswith("project-REPLACE-"),
         f"{path}: example project must remain a placeholder",
@@ -102,10 +139,16 @@ def check_nebius_iac(
     if not isinstance(cidrs, list):
         raise ContractError(f"{path}: public_control_plane_cidrs must be a list")
     _require("0.0.0.0/0" not in cidrs, f"{path}: public control plane may never allow 0.0.0.0/0")
-    _require(int(target.get("execution_min_nodes", -1)) == 0, f"{path}: shared execution baseline must scale to zero")
+    _require(
+        int(target.get("execution_min_nodes", -1)) == 0,
+        f"{path}: shared execution baseline must scale to zero",
+    )
 
     backend_paths = sorted((root / "backends").glob("*.s3.tfbackend.example"))
-    _require(len(backend_paths) == 1, f"expected exactly 1 shared-cluster backend, found {len(backend_paths)}")
+    _require(
+        len(backend_paths) == 1,
+        f"expected exactly 1 shared-cluster backend, found {len(backend_paths)}",
+    )
     _require(
         backend_paths[0].name == "development-eu-north1.s3.tfbackend.example",
         "the existing development backend anchor must be reused, not forked",
@@ -113,9 +156,18 @@ def check_nebius_iac(
     for path in backend_paths:
         text = path.read_text(encoding="utf-8")
         key = _backend_value(text, "key", path)
-        _require(key == "nebius/development/eu-north1/terraform.tfstate", f"{path}: existing remote state key must be retained")
-        _require(re.search(r"^\s*use_lockfile\s*=\s*true\s*$", text, re.MULTILINE) is not None, f"{path}: use_lockfile must be true")
-        _require(re.search(r"(?i)(access_key|secret_key|token)\s*=", text) is None, f"{path}: credentials may not be stored in backend files")
+        _require(
+            key == "nebius/development/eu-north1/terraform.tfstate",
+            f"{path}: existing remote state key must be retained",
+        )
+        _require(
+            re.search(r"^\s*use_lockfile\s*=\s*true\s*$", text, re.MULTILINE) is not None,
+            f"{path}: use_lockfile must be true",
+        )
+        _require(
+            re.search(r"(?i)(access_key|secret_key|token)\s*=", text) is None,
+            f"{path}: credentials may not be stored in backend files",
+        )
 
     versions = (root / "modules" / "execution-target" / "versions.tf").read_text(encoding="utf-8")
     stack_versions = (root / "stack" / "versions.tf").read_text(encoding="utf-8")
@@ -123,30 +175,110 @@ def check_nebius_iac(
         (root / "modules" / "execution-target" / "versions.tf", versions),
         (root / "stack" / "versions.tf", stack_versions),
     ):
-        _require('required_version = "= 1.16.0"' in text, f"{path}: Terraform must be pinned to 1.16.0")
-        _require('source  = "nebius/nebius"' in text, f"{path}: provider source must be nebius/nebius")
-        _require('version = "= 0.6.46"' in text, f"{path}: Nebius provider must be pinned to 0.6.46")
-        _require(path.with_name(".terraform.lock.hcl").is_file(), f"{path}: provider lock file is required")
+        _require(
+            'required_version = "= 1.16.0"' in text, f"{path}: Terraform must be pinned to 1.16.0"
+        )
+        _require(
+            'source  = "nebius/nebius"' in text, f"{path}: provider source must be nebius/nebius"
+        )
+        _require(
+            'version = "= 0.6.46"' in text, f"{path}: Nebius provider must be pinned to 0.6.46"
+        )
+        _require(
+            path.with_name(".terraform.lock.hcl").is_file(),
+            f"{path}: provider lock file is required",
+        )
 
     module = (root / "modules" / "execution-target" / "main.tf").read_text(encoding="utf-8")
-    _require("public_ip_address" not in module, "execution target must not assign node public IP addresses")
-    _require(module.count('policy = "FORBID"') == 2, "both node groups must forbid capacity reservations")
+    _require(
+        "public_ip_address" not in module,
+        "execution target must not assign node public IP addresses",
+    )
+    _require(
+        module.count('policy = "FORBID"') == 2, "both node groups must forbid capacity reservations"
+    )
     _require('key    = "loom.nebius/execution"' in module, "execution node taint is required")
     _require("audit_logs        = {}" in module, "managed control-plane audit logging is required")
-    _require('role        = "viewer"' in module, "registry pull access must remain resource-scoped viewer")
+    _require(
+        'role        = "viewer"' in module,
+        "registry pull access must remain resource-scoped viewer",
+    )
     _require(
         "for_each = var.environment_bindings" in module,
         "evidence writer groups must remain environment-local",
     )
     _require(
-        'nebius_iam_v1_group.evidence_writers[environment].id' in module,
+        "nebius_iam_v1_group.evidence_writers[environment].id" in module,
         "every evidence prefix must bind its environment-local writer group",
     )
-    _require('roles    = ["storage.object-editor"]' in module, "evidence writers need object-only access")
+    _require(
+        'roles    = ["storage.object-editor"]' in module, "evidence writers need object-only access"
+    )
+
+    runtime_root = root / "modules" / "execution-target" / "runtime"
+    profile_path = runtime_root / "loom-sandbox-profile.json"
+    profile_bytes = profile_path.read_bytes()
+    profile = _load_json(profile_path)
+    profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
+    _require(
+        profile.get("schema") == "loom.nebius-runtime-profile.v1",
+        f"{profile_path}: schema must remain pinned",
+    )
+    _require(
+        profile.get("host", {}).get("containerd_version") == "v2.2.6",
+        f"{profile_path}: live-measured containerd version must remain exact",
+    )
+    _require(
+        profile.get("runtime", {}).get("platform") == "systrap",
+        f"{profile_path}: cpu-e2 requires systrap",
+    )
+    _require(
+        profile.get("runtime", {}).get("network") == "sandbox",
+        f"{profile_path}: host networking is forbidden",
+    )
+    _require(
+        profile.get("runtime_class", {}).get("name") == "loom-sandbox",
+        f"{profile_path}: RuntimeClass name must remain canonical",
+    )
+    runtime_class_path = runtime_root / "loom-sandbox-runtime-class.yaml"
+    runtime_class = runtime_class_path.read_text(encoding="utf-8")
+    _require(
+        profile_sha256 in runtime_class,
+        f"{runtime_class_path}: annotation must bind the exact profile digest",
+    )
+    _require(
+        profile_sha256[:32] in runtime_class and profile_sha256[32:] in runtime_class,
+        f"{runtime_class_path}: selector must bind both digest halves",
+    )
+    _require(
+        "handler: runsc-loom-sandbox" in runtime_class,
+        f"{runtime_class_path}: handler must fail closed to gVisor",
+    )
+    template_path = (
+        root / "modules" / "execution-target" / "templates" / "execution-runtime.cloud-config.tftpl"
+    )
+    template = template_path.read_text(encoding="utf-8")
+    for marker in (
+        "LOOM_NEBIUS_RUNTIME_INSTALL_OK",
+        'platform = "systrap"',
+        'network = "sandbox"',
+        "containerd config dump",
+    ):
+        _require(marker in template, f"{template_path}: missing runtime safety marker {marker!r}")
+    _require(
+        "cloud_init_user_data = local.execution_runtime_cloud_init" in module,
+        "execution nodes must consume the pinned runtime installer",
+    )
+    _require(
+        module.count('"loom.nebius/runtime-profile-') == 2,
+        "execution nodes must carry both profile digest labels",
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate the repository-owned Nebius IaC contract.")
+    parser = argparse.ArgumentParser(
+        description="Validate the repository-owned Nebius IaC contract."
+    )
     parser.parse_args()
     try:
         check_nebius_iac()
