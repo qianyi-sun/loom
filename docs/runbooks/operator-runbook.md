@@ -116,8 +116,12 @@ sudo -n python3 scripts/ops/staging_rollout_host.py \
 
 The command authenticates that checkout as the exact current merged `dev` head,
 proves the installed source is its ancestor, and validates its rollout assets
-before entering maintenance. Apply is authorized only by the exact inventory
-digest. It requires no active pointer or live rollout/backup/guard unit, rejects
+before entering maintenance. This includes a ready `sealed-cumulative`
+installation only when its exact recorded commit has since landed in current
+`dev`; an unmerged sealed source refuses, and recovery does not change the
+installation mode. Run the normal merged-dev installer after recovery. Apply is
+authorized only by the exact inventory digest. It requires no active pointer or
+live rollout/backup/guard unit, rejects
 malformed canonical rotation/job/state/lease evidence at publication and again
 at every receipt use, rejects any payload still present in
 active/candidate/retirement rotation state, and refuses a request for either the

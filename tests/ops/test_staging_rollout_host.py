@@ -97,6 +97,7 @@ class FakeSystem:
         self.orphan_recovery_delay_seconds = 0.0
         self.orphan_recovery_error_after_delay = False
         self.orphan_recovery_auth_calls: list[tuple[str, str, bool]] = []
+        self.orphan_recovery_auth_error: str | None = None
         self.asset_validation_calls: list[tuple[Path, str, bool]] = []
 
     def _observe_runtime_venv(self, venv: Path) -> None:
@@ -183,6 +184,8 @@ class FakeSystem:
             (invocation_head, installed_source_sha, self.maintenance)
         )
         self.validated += 1
+        if self.orphan_recovery_auth_error is not None:
+            raise host.InstallError(self.orphan_recovery_auth_error)
 
     def validate_assets(self, source_root: Path, source_sha: str) -> None:
         assert source_root in {host.REPO_ROOT, host.INSTALL_SOURCE}
@@ -1328,6 +1331,72 @@ def test_orphaned_backup_recovery_forbids_installed_and_exact_merged_dev_sources
 
     assert system.orphan_recovery_source_shas == [frozenset({"a" * 40, "b" * 40})]
     assert system.orphan_recovery_heads == ["b" * 40]
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_accepts_a_sealed_source_merged_into_current_dev(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(
+        TEAM_ID,
+        sealed_source=host.SealedSource(
+            path=host.REPO_ROOT,
+            commit_sha="a" * 40,
+            tree_sha="b" * 40,
+            base_sha="c" * 40,
+        ),
+    )
+    system.invocation_source_sha = "d" * 40
+    system.remote_source_sha = "d" * 40
+    system.orphan_recovery_auth_calls.clear()
+    system.asset_validation_calls.clear()
+
+    inventory = installer.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+    )
+
+    assert inventory["plan_sha256"] == "f" * 64
+    assert system.orphan_recovery_auth_calls == [("d" * 40, "a" * 40, False)]
+    assert system.asset_validation_calls == [(host.REPO_ROOT, "d" * 40, False)]
+    assert system.orphan_recovery_source_shas == [frozenset({"a" * 40, "d" * 40})]
+    assert system.orphan_recovery_calls == [("inventory", None, True)]
+    assert system.maintenance is False
+
+
+@pytest.mark.timeout(0)
+def test_orphaned_backup_recovery_rejects_an_unmerged_sealed_source_before_maintenance(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(
+        TEAM_ID,
+        sealed_source=host.SealedSource(
+            path=host.REPO_ROOT,
+            commit_sha="a" * 40,
+            tree_sha="b" * 40,
+            base_sha="c" * 40,
+        ),
+    )
+    system.invocation_source_sha = "d" * 40
+    system.remote_source_sha = "d" * 40
+    system.orphan_recovery_auth_calls.clear()
+    system.asset_validation_calls.clear()
+    system.orphan_recovery_auth_error = "installed sealed source is not merged into dev"
+    maintenance_begins = system.maintenance_begins
+
+    with pytest.raises(host.InstallError, match="sealed source is not merged"):
+        installer.orphaned_backup_recovery(
+            action="inventory",
+            approved_plan_sha256=None,
+        )
+
+    assert system.orphan_recovery_auth_calls == [("d" * 40, "a" * 40, False)]
+    assert system.asset_validation_calls == []
+    assert system.maintenance_begins == maintenance_begins
+    assert system.orphan_recovery_calls == []
+    assert system.maintenance is False
 
 
 @pytest.mark.timeout(0)
