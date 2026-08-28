@@ -54,7 +54,6 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
         source_base_sha="c" * 40,
     )
 
-
     store = RequestStore(config.state_root)
     backups = config.rollout_root / "backups"
     backups.mkdir(mode=0o700)
@@ -219,6 +218,19 @@ def _verified_candidate_recovery_service(
                 status="pending",
             )
 
+    class RecoveryMutationGuard:
+        def assert_ready(self, _request_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                request_id=job.request_id,
+                candidate_sha=job.candidate_sha,
+                candidate_tree=job.candidate_tree,
+                mutation_epoch=job.mutation_epoch,
+                state="ready",
+            )
+
+        def release(self, _request_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(request_id=job.request_id, state="released")
+
     verified = VerifiedBackupJob(
         manifest_path=tmp_path / job.bundle_name / "backup-manifest.json",
         manifest_sha256=manifest_sha256,
@@ -236,11 +248,14 @@ def _verified_candidate_recovery_service(
             found,
             result,
         ),
+        mutation_guard=RecoveryMutationGuard(),
         now=lambda: "2026-07-13T20:06:00Z",
         stderr=SimpleNamespace(write=lambda _value: None),
     )
     assert run_backup_job(job, dependencies) == 0
-    assert store.read_preflight_backup_job_state(job.request_id).phase is LifecyclePhase.LAUNCH_RUNNING
+    assert (
+        store.read_preflight_backup_job_state(job.request_id).phase is LifecyclePhase.LAUNCH_RUNNING
+    )
     assert store.read_backup_rotation() == manifested
 
     activated: list[str] = []
@@ -278,9 +293,7 @@ def test_verified_candidate_recovery_promotes_without_deleting_payloads(
     state = service.store.read_backup_rotation()
     assert state.active == recovered
     assert state.candidate is None
-    assert tuple(record.payload_id for record in state.retirements) == (
-        old_active.payload_id,
-    )
+    assert tuple(record.payload_id for record in state.retirements) == (old_active.payload_id,)
     assert activated == [recovered.payload_id, recovered.payload_id]
     assert service.store.read_backup_retention_claim() is None
     assert not service.store.has_backup_retirement_receipt(old_active.payload_id)
@@ -304,9 +317,7 @@ def test_worker_convergence_promotes_verified_candidate_before_launch(tmp_path: 
     state = service.store.read_backup_rotation()
     assert state.active == recovered
     assert state.candidate is None
-    assert tuple(record.payload_id for record in state.retirements) == (
-        old_active.payload_id,
-    )
+    assert tuple(record.payload_id for record in state.retirements) == (old_active.payload_id,)
     assert activated == [recovered.payload_id]
 
 
@@ -317,11 +328,7 @@ def test_verified_candidate_recovery_rejects_cross_ledger_attestation_drift(
     request_id = service.inventory().candidate_before.request_id
     attempt = service.store.read_attempt_envelope(request_id, 1)
     attempt_path = (
-        service.store.requests_root
-        / attempt.request_id
-        / "attempts"
-        / "1"
-        / "envelope.json"
+        service.store.requests_root / attempt.request_id / "attempts" / "1" / "envelope.json"
     )
     payload = attempt.to_dict()
     payload["preflight_attestation_sha256"] = "0" * 64
@@ -344,11 +351,7 @@ def test_verified_candidate_recovery_plan_binds_entire_attempt_envelope(
     plan = service.inventory()
     attempt = service.store.read_attempt_envelope(plan.candidate_before.request_id, 1)
     attempt_path = (
-        service.store.requests_root
-        / attempt.request_id
-        / "attempts"
-        / "1"
-        / "envelope.json"
+        service.store.requests_root / attempt.request_id / "attempts" / "1" / "envelope.json"
     )
     payload = attempt.to_dict()
     payload["attempt_uid"] = 2003
@@ -384,9 +387,7 @@ def test_verified_candidate_recovery_resumes_after_promotion_before_activation(
     stranded = service.store.read_backup_rotation()
     assert stranded.active == recovered
     assert stranded.candidate is None
-    assert tuple(record.payload_id for record in stranded.retirements) == (
-        old_active.payload_id,
-    )
+    assert tuple(record.payload_id for record in stranded.retirements) == (old_active.payload_id,)
     assert service.store.read_backup_retention_claim() == (plan.plan_digest, ())
 
     result = service.apply(service.load_claim(plan.plan_digest))

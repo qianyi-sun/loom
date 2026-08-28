@@ -806,6 +806,12 @@ def test_plan_rejects_missing_exact_image_before_executor() -> None:
         )
 
 
+def test_database_pod_manifest_uses_bounded_termination_grace() -> None:
+    manifest = _database_pod_manifest(_plan())
+
+    assert manifest["spec"]["terminationGracePeriodSeconds"] == 10
+
+
 def test_registry_rehearsal_uses_preflight_published_digest_without_republish() -> None:
     manifest_digests = {
         name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
@@ -2260,7 +2266,7 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
             namespace_present = False
             return subprocess.CompletedProcess(argv, 0, "{}", "")
         if "wait" in command:
-            return subprocess.CompletedProcess(argv, 0, "deleted\n", "")
+            raise AssertionError("cleanup must use authoritative namespace readback")
         raise AssertionError(argv)
 
     outcome = IsolatedRehearsalExecutor(
@@ -2275,6 +2281,114 @@ def test_cleanup_deletes_only_exact_unit_and_namespace_with_preconditions() -> N
     delete = next(command for command, _payload in calls if "--raw" in command)
     assert delete[-2:] == ("-f", "-")
     assert plan.resources.namespace in delete[-3]
+
+
+def test_cleanup_polls_exact_namespace_until_authoritative_absence() -> None:
+    plan = _plan()
+    namespace = _namespace_manifest(plan)
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["resourceVersion"] = "42"
+    metadata["uid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    namespace_reads = 0
+    sleeps: list[float] = []
+
+    def run(argv, _payload, _timeout):
+        nonlocal namespace_reads
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in command and "namespace" in command:
+            namespace_reads += 1
+            if namespace_reads <= 3:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "delete" in command and "--raw" in command:
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        if "wait" in command:
+            raise AssertionError("cleanup must not delegate namespace observation to kubectl wait")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        sleep=sleeps.append,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.passed and outcome.cleanup_verified
+    assert namespace_reads == 4
+    assert sleeps == [1.0, 1.0]
+
+
+def test_cleanup_namespace_polling_has_absolute_timeout() -> None:
+    plan = _plan()
+    namespace = _namespace_manifest(plan)
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["resourceVersion"] = "42"
+    metadata["uid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    clock = iter((1.0, 2.0, 302.0))
+
+    def run(argv, _payload, _timeout):
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in command and "namespace" in command:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
+        if "delete" in command and "--raw" in command:
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        if "wait" in command:
+            raise AssertionError("cleanup must enforce its own observation deadline")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        monotonic=lambda: next(clock),
+        sleep=lambda _seconds: None,
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.blockers == {"cleanup": "namespace-delete-timeout"}
+
+
+def test_cleanup_does_not_follow_a_recreated_namespace_after_delete() -> None:
+    plan = _plan()
+    namespace = _namespace_manifest(plan)
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["resourceVersion"] = "42"
+    metadata["uid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    namespace_reads = 0
+    clock = iter((1.0, 2.0, 302.0))
+
+    def run(argv, _payload, _timeout):
+        nonlocal namespace_reads
+        command = tuple(argv)
+        if command[:3] == ("systemctl", "--user", "show"):
+            if command[-1] == "--value":
+                return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+            return subprocess.CompletedProcess(argv, 4, "", "")
+        if "get" in command and "namespace" in command:
+            namespace_reads += 1
+            if namespace_reads == 2:
+                metadata["uid"] = "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb"
+            return subprocess.CompletedProcess(argv, 0, json.dumps(namespace), "")
+        if "delete" in command and "--raw" in command:
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        raise AssertionError(command)
+
+    outcome = IsolatedRehearsalExecutor(
+        run=run,
+        monotonic=lambda: next(clock),
+        gb10_transport_factory=passing_gb10_transport_factory,
+    ).execute("rehearsal.cleanup", plan)
+
+    assert outcome.blockers == {"cleanup": "namespace-identity-drift"}
+    assert namespace_reads == 2
 
 
 def test_cleanup_retires_only_exact_external_supervisor_validation_units() -> None:
@@ -2368,6 +2482,7 @@ def test_cleanup_classifies_wait_race_with_exact_final_namespace_readback(
     metadata["resourceVersion"] = "42"
     metadata["uid"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     get_count = 0
+    clock = iter((1.0, 2.0, 302.0))
 
     def run(argv, _payload, _timeout):
         nonlocal get_count
@@ -2391,11 +2506,13 @@ def test_cleanup_classifies_wait_race_with_exact_final_namespace_readback(
         if "delete" in command and "--raw" in command:
             return subprocess.CompletedProcess(argv, 0, "{}", "")
         if "wait" in command:
-            return subprocess.CompletedProcess(argv, 1, "", "timed out")
+            raise AssertionError("cleanup must use exact namespace readback")
         raise AssertionError(command)
 
     outcome = IsolatedRehearsalExecutor(
         run=run,
+        monotonic=lambda: next(clock),
+        sleep=lambda _seconds: None,
         gb10_transport_factory=passing_gb10_transport_factory,
     ).execute("rehearsal.cleanup", plan)
 

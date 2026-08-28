@@ -652,6 +652,24 @@ def test_launch_reserves_finalized_envelope_immediately_before_systemd_start(
     assert store.read_active() == expected_pointer
 
 
+def test_attempt_launch_rechecks_maintenance_admission_under_launch_lock(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    store = RequestStore(config.state_root)
+    _, envelope = persist_attempt(config, store, "req-alpha", sha_char="a")
+    systemd = FakeSystemd()
+    marker = config.runtime_root / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+
+    with pytest.raises(LifecycleBusyError, match="maintenance"):
+        make_coordinator(config, store=store, systemd=systemd).launch(envelope)
+
+    assert systemd.started == []
+    assert store.read_active() is None
+
+
 def test_launch_rejects_an_envelope_that_was_not_immutably_published(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     store = RequestStore(config.state_root)

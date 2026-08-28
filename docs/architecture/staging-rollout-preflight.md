@@ -318,6 +318,67 @@ checkpoint. Registry and implementation digests must be byte-identical across
 both processes; no in-memory pending plan or cached live probe is rollout
 authority.
 
+## Guarded launch boundary
+
+The Tier 0–2 assessment remains outside the lifecycle mutation guard. For a
+non-preview launch, the broker binds the exact candidate and epoch first, then
+acquires the request-bound guard before publishing the detached backup job.
+The guard's ready evidence must agree with the request ID, candidate SHA and
+tree, original mutation epoch, database backend PID, and entry-anchored
+absolute deadline at broker admission, backup-worker continuation, and detached
+attempt execution. This prevents an in-memory handoff, a stale request, or a
+different candidate from turning a valid assessment into mutation authority.
+
+The guard suspends the legacy lifecycle CronJob and requires a stable empty
+inventory of exact owner-UID nonterminal Jobs before and after taking the
+shared PostgreSQL advisory lock. A dedicated autocommit session continuously
+proves the same backend owns that exact lock. The request-bound backup and
+attempt units each declare `After=` on the exact guard, without `BindsTo=`, and
+the guard independently checks their exact owner liveness. This lets the owner
+synchronously complete verified guard release before publishing its terminal
+event and clearing the active pointer. A fixed request-bound guard
+`ExecStopPost` is a no-op only for exact released evidence; ready, missing, or
+unsafe evidence instead requires a fully validated exact owner inventory and
+hard-kills each live backup or attempt control group with `SIGKILL`. Exact unit
+names, never wildcard kill targets or graceful owner stops, prevent recursive
+release deadlock and cross-request fencing. If that stop-post action cannot
+prove dispatch, the minute reconciler retries the same fence while keeping the
+CronJob suspended. Even a successful kill is followed by two fresh, complete,
+stable-empty exact-owner inventories and an unchanged-evidence read before
+restoration; any live/deactivating owner or uncertainty defers restoration to a
+later timer run. Released evidence plus surviving annotations is rejected as a
+normal-release contradiction. The guard uses `Restart=no` and one
+entry-anchored absolute lifetime. Once the backup worker has started the
+detached rollout attempt, it hands that same guard to the attempt; guard
+ownership ends only through the verified release path or guarded orphan
+reconciliation. Thus preflight evidence, backup, protected apply, and final
+admission have one continuous candidate- and request-bound mutation exclusion
+window, while the regular lifecycle lock still governs the broader rollout
+lifecycle. Resume reloads the immutable original preflight request, reacquires
+the guard, and refuses original-epoch or current-epoch drift before launch.
+
+The guard CLI keeps fixed Kubernetes subprocesses at 120 seconds and caps each
+fixed systemd inventory or kill at 30 seconds. A stop arriving just after a
+false stop check can wait through one 30-second owner inventory, the one-second
+poll sleep, and the next 15-second lock-health query. CronJob restoration,
+advisory unlock, database-tunnel teardown, and the evidence-publication margin
+raise the complete normal-release bound to 342 seconds, so the guard emits
+`TimeoutStopSec=343s`. Its largest immediate unsafe fence is one inventory plus
+two exact kills, or 90 seconds; broker and worker systemd clients use 434
+seconds, strictly above the service stop plus that stop-post fence. The
+reconciliation service allows 12 minutes for its conservative 571-second
+sequence: three Kubernetes commands, two 15-second candidate-identity
+commands, six systemd commands, and the stable-absence poll. Any timeout still
+preserves the freeze for the next minute-timer retry.
+
+Preview is deliberately narrower. `start --dry-run` performs normal admission,
+candidate resolution, assessment, and final epoch-drift checking, then writes a
+preliminary preview request and immutable assessment to the service ledger. It
+does not acquire the guard or advisory lock, suspend the CronJob, reserve a
+backup payload, or start any detached unit. The preview is therefore
+mutation-free for the staging cluster, backup state, and lifecycle data, but
+it is not an assertion that no service-owned evidence record is written.
+
 `DetachedPreflightBackupRunner` is the worker-side composition root. It first
 revalidates the persisted assessment against the immutable request, then owns
 the checkpoint, rehearsal, restore proof, lease, attestation, rotation and
@@ -703,9 +764,13 @@ it, the reset error is accepted only after a separate exact load-state readback
 proves `not-found`; loaded or unavailable state still fails closed.
 Namespace absence is likewise read through `kubectl get
 --ignore-not-found=true`: only a successful empty response proves absence.
-After deletion, a nonzero `kubectl wait` is accepted only when that independent
-readback proves the exact namespace is already gone; a present namespace stays
-a timeout and any transport or parse failure remains unavailable.
+After the UID/resourceVersion-preconditioned delete, cleanup polls that same
+authoritative readback for at most 300 seconds instead of delegating the wait to
+`kubectl wait`. Every still-present response must retain the exact rehearsal
+identity and original namespace UID; name reuse or identity drift fails closed.
+A successful empty response completes cleanup immediately, a still-present
+namespace at the absolute deadline is a timeout, and transport or parse failure
+remains unavailable.
 
 The restored database snapshot necessarily contains frozen worker heartbeat
 timestamps. Before the isolated API admission probe, the rehearsal inserts or
@@ -876,7 +941,21 @@ effect is recorded without repetition, a still-ready precondition may be applied
 partial or ambiguous effect fails closed. Reused terminal records are also
 reclassified and must retain the same evidence digest and epoch. The chain is
 serialized by a private attempt-scoped lock and neither the plan nor a
-component implementation/fingerprint may change underneath an intent.
+component implementation/fingerprint may change underneath an intent. A
+classifier exception before apply, after apply, or while revalidating a terminal
+publishes one immutable coded, secret-safe diagnostic beside the intent before
+the original exception propagates; exception messages and response bodies are
+never recorded.
+
+The protected environment-state component treats only bounded HTTP transport
+failures and readiness responses (`408`, `425`, `429`, `500`, `502`, `503`, or
+`504`) as transient. It makes at most 13 observations or idempotent PUT
+attempts with five seconds between attempts. The mutation epoch is rechecked
+before every observation and again immediately before each PUT sequence. After
+a lost mutation response, the next attempt first re-observes desired state and
+returns without another PUT when this candidate is already exact. Epoch drift,
+credential or authority failures, malformed successful responses, and local
+runner-prerequisite failures remain immediately fail-closed.
 
 The final plan also carries one canonical protected baseline extracted from
 exactly the six passing Tier 2 executions. It binds their common readonly

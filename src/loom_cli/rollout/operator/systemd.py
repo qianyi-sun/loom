@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import secrets
+import shlex
 import subprocess
 import time
 from collections.abc import Callable, Generator, Iterator
@@ -16,6 +19,16 @@ from ..systemd_readiness import parse_systemctl_properties
 from .config import OperatorConfig
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
+from .staging_mutation_guard import (
+    MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS,
+    MUTATION_GUARD_RUNTIME_SECONDS,
+    MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS,
+    MutationGuardError,
+    MutationGuardEvidence,
+    guard_evidence_path,
+    read_mutation_guard_evidence,
+    validate_mutation_guard_generation,
+)
 
 
 class CommandResult(Protocol):
@@ -75,8 +88,16 @@ _RESULT_TOKEN_RE = re.compile(r"^[a-z0-9-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _TRANSIENT_UNIT_RE = re.compile(
     r"(?:loom-staging-backup-[a-z0-9][a-z0-9-]{7,79}"
+    r"|loom-staging-mutation-guard-[a-z0-9][a-z0-9-]{7,79}"
     r"|loom-staging-rollout-[a-z0-9][a-z0-9-]{7,79}-[1-9][0-9]*"
     r"|loom-preflight-lifecycle-[0-9a-f]{16})[.]service\Z"
+)
+_MUTATION_GUARD_READINESS_TIMEOUT_SECONDS = 1_500
+_MUTATION_GUARD_STOP_WAIT_SECONDS = 60
+MUTATION_GUARD_STOP_POST_BOUND_SECONDS = 3 * MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS
+MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS = MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS + 1
+MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS = (
+    MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS + MUTATION_GUARD_STOP_POST_BOUND_SECONDS + 1
 )
 _SHOW_PROPERTIES = (
     "ActiveState",
@@ -87,6 +108,39 @@ _SHOW_PROPERTIES = (
     "ExecMainStartTimestamp",
     "ExecMainExitTimestamp",
 )
+
+
+def _new_mutation_guard_generation() -> str:
+    return secrets.token_hex(16)
+
+
+def _same_mutation_guard_acquisition(
+    ready: MutationGuardEvidence,
+    released: MutationGuardEvidence,
+) -> bool:
+    return (
+        ready.request_id,
+        ready.candidate_sha,
+        ready.candidate_tree,
+        ready.generation,
+        ready.mutation_epoch,
+        ready.guard_pid,
+        ready.database_backend_pid,
+        ready.deadline_unix_seconds,
+        ready.cronjob_uid,
+        ready.suspended_resource_version,
+    ) == (
+        released.request_id,
+        released.candidate_sha,
+        released.candidate_tree,
+        released.generation,
+        released.mutation_epoch,
+        released.guard_pid,
+        released.database_backend_pid,
+        released.deadline_unix_seconds,
+        released.cronjob_uid,
+        released.suspended_resource_version,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +434,39 @@ def _backup_identity(
     return request_id
 
 
+def mutation_guard_unit_name(request_id: str) -> str:
+    try:
+        validate_safe_identifier(request_id, "request_id")
+    except ValueError as exc:
+        raise UnitLaunchError("mutation guard request identity is invalid") from exc
+    unit_name = f"loom-staging-mutation-guard-{request_id}.service"
+    if _TRANSIENT_UNIT_RE.fullmatch(unit_name) is None:
+        raise UnitLaunchError("mutation guard unit identity is invalid")
+    return unit_name
+
+
+def _mutation_guard_request_id(
+    unit_name: str,
+    *,
+    error_type: type[RuntimeError],
+) -> str:
+    prefix = "loom-staging-mutation-guard-"
+    suffix = ".service"
+    if (
+        len(unit_name) > 255
+        or not unit_name.startswith(prefix)
+        or not unit_name.endswith(suffix)
+        or _TRANSIENT_UNIT_RE.fullmatch(unit_name) is None
+    ):
+        raise error_type("unit name is not an approved mutation guard")
+    request_id = unit_name[len(prefix) : -len(suffix)]
+    try:
+        validate_safe_identifier(request_id, "request_id")
+    except ValueError as exc:
+        raise error_type("mutation guard unit contains an invalid request id") from exc
+    return request_id
+
+
 def _parse_nonnegative_int(value: str, property_name: str) -> int:
     if not value.isascii() or not value.isdecimal():
         raise SystemdQueryError(f"{property_name} is malformed")
@@ -504,20 +591,34 @@ class SystemdUserManager:
         service_uid: int,
         run: CommandRunner,
         stream: JournalStreamRunner | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        guard_readiness_timeout_seconds: int = _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS,
+        guard_generation: Callable[[], str] = _new_mutation_guard_generation,
     ) -> None:
+        if not 1 <= guard_readiness_timeout_seconds <= 1_800:
+            raise ValueError("mutation guard readiness timeout is invalid")
+        if not callable(guard_generation):
+            raise ValueError("mutation guard generation source is invalid")
         self.config = config
         self.service_uid = service_uid
         self._run = run
         self._stream = stream
+        self._sleep = sleep
+        self._guard_readiness_timeout_seconds = guard_readiness_timeout_seconds
+        self._guard_generation = guard_generation
 
     def start_argv(self, envelope_path: Path, unit_name: str) -> list[str]:
-        _attempt_identity(self.config, envelope_path, unit_name)
+        request_id, _attempt_number = _attempt_identity(
+            self.config,
+            envelope_path,
+            unit_name,
+        )
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
         )
         python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
-        return transient_service_argv(
+        argv = transient_service_argv(
             unit_name=unit_name,
             working_directory=self.config.runner_repo,
             command=(
@@ -532,6 +633,12 @@ class SystemdUserManager:
                 str(envelope_path),
             ),
         )
+        guard_unit = mutation_guard_unit_name(request_id)
+        argv[10:10] = [
+            "--property",
+            f"After={guard_unit}",
+        ]
+        return argv
 
     def start_attempt(self, envelope_path: Path, unit_name: str) -> None:
         argv = self.start_argv(envelope_path, unit_name)
@@ -543,13 +650,13 @@ class SystemdUserManager:
             raise UnitLaunchError("transient rollout unit launch failed")
 
     def start_backup_argv(self, job_path: Path, unit_name: str) -> list[str]:
-        _backup_identity(self.config, job_path, unit_name)
+        request_id = _backup_identity(self.config, job_path, unit_name)
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
         )
         python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
-        return transient_service_argv(
+        argv = transient_service_argv(
             unit_name=unit_name,
             working_directory=self.config.runner_repo,
             command=(
@@ -564,6 +671,12 @@ class SystemdUserManager:
                 str(job_path),
             ),
         )
+        guard_unit = mutation_guard_unit_name(request_id)
+        argv[10:10] = [
+            "--property",
+            f"After={guard_unit}",
+        ]
+        return argv
 
     def start_backup(self, job_path: Path, unit_name: str) -> None:
         argv = self.start_backup_argv(job_path, unit_name)
@@ -573,6 +686,326 @@ class SystemdUserManager:
             raise UnitLaunchError("transient backup unit could not be started") from exc
         if result.returncode != 0:
             raise UnitLaunchError("transient backup unit launch failed")
+
+    def _new_guard_generation(self) -> str:
+        try:
+            generation = self._guard_generation()
+            return validate_mutation_guard_generation(generation)
+        except Exception as exc:
+            raise UnitLaunchError("mutation guard generation is unavailable") from exc
+
+    def start_mutation_guard_argv(
+        self,
+        request_id: str,
+        generation: str,
+    ) -> list[str]:
+        unit_name = mutation_guard_unit_name(request_id)
+        try:
+            validate_mutation_guard_generation(generation)
+        except MutationGuardError as exc:
+            raise UnitLaunchError("mutation guard generation is invalid") from exc
+        environment = sanitized_child_environment(
+            self.config,
+            service_uid=self.service_uid,
+        )
+        python_path = self.config.runner_repo.parent / "venv" / "bin" / "python"
+        argv = transient_service_argv(
+            unit_name=unit_name,
+            working_directory=self.config.runner_repo,
+            command=(
+                "/usr/bin/env",
+                "-i",
+                *(f"{key}={value}" for key, value in environment.items()),
+                str(python_path),
+                "-m",
+                "loom_cli.rollout.operator.staging_mutation_guard",
+                "hold",
+                "--request-id",
+                request_id,
+                "--generation",
+                generation,
+            ),
+        )
+        fence_command = (
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in environment.items()),
+            str(python_path),
+            "-m",
+            "loom_cli.rollout.operator.staging_mutation_guard",
+            "fence",
+            "--request-id",
+            request_id,
+            "--generation",
+            generation,
+        )
+        argv[10:10] = [
+            "--property",
+            "Restart=no",
+            "--property",
+            "KillMode=mixed",
+            "--property",
+            f"TimeoutStopSec={MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS}s",
+            "--property",
+            f"RuntimeMaxSec={MUTATION_GUARD_RUNTIME_SECONDS}s",
+            "--property",
+            f"ExecStopPost={shlex.join(fence_command)}",
+        ]
+        return argv
+
+    def _mutation_guard_owner_units(self, request_id: str) -> tuple[str, ...]:
+        """Return a fully validated inventory of exact live request owners."""
+
+        try:
+            mutation_guard_unit_name(request_id)
+        except UnitLaunchError as exc:
+            raise SystemdQueryError("mutation guard owner identity is invalid") from exc
+        backup_unit = f"loom-staging-backup-{request_id}.service"
+        attempt_pattern = f"loom-staging-rollout-{request_id}-*.service"
+        argv = [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--full",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+            backup_unit,
+            attempt_pattern,
+        ]
+        try:
+            result = self._run(argv)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemdQueryError("mutation guard owner query failed") from exc
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, str)
+            or not isinstance(result.stderr, str)
+            or result.stderr.strip()
+            or "\x00" in result.stdout
+            or "\x00" in result.stderr
+            or len(result.stdout.encode()) > 1024 * 1024
+            or len(result.stderr.encode()) > 1024 * 1024
+        ):
+            raise SystemdQueryError("mutation guard owner query failed")
+        live_units: list[str] = []
+        live_attempts: set[int] = set()
+        seen: set[str] = set()
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=4)
+            if len(fields) < 4:
+                raise SystemdQueryError("mutation guard owner output is malformed")
+            unit_name, load_state, active_state, sub_state = fields[:4]
+            if (
+                unit_name in seen
+                or load_state != "loaded"
+                or _STATUS_TOKEN_RE.fullmatch(active_state) is None
+                or _STATUS_TOKEN_RE.fullmatch(sub_state) is None
+            ):
+                raise SystemdQueryError("mutation guard owner output is malformed")
+            seen.add(unit_name)
+            if unit_name == backup_unit:
+                unit_kind = "backup"
+            else:
+                try:
+                    unit_request_id, attempt_number = _parse_unit_name(
+                        unit_name,
+                        error_type=SystemdQueryError,
+                    )
+                except SystemdQueryError as exc:
+                    raise SystemdQueryError("mutation guard owner is foreign") from exc
+                if unit_request_id != request_id:
+                    raise SystemdQueryError("mutation guard owner is foreign")
+                unit_kind = "attempt"
+            if (active_state, sub_state) in {
+                ("inactive", "dead"),
+                ("failed", "failed"),
+            }:
+                continue
+            if active_state != "deactivating" and (active_state, sub_state) not in {
+                ("active", "running"),
+                ("activating", "start"),
+            }:
+                raise SystemdQueryError("mutation guard owner status is unsafe")
+            if unit_kind == "backup":
+                live_units.append(unit_name)
+            else:
+                live_attempts.add(attempt_number)
+                live_units.append(unit_name)
+        if len(live_attempts) > 1:
+            raise SystemdQueryError("mutation guard owner attempts are ambiguous")
+        return tuple(live_units)
+
+    def mutation_guard_owner_running(self, request_id: str) -> bool:
+        """Return whether one exact backup/attempt owns the request guard."""
+
+        return bool(self._mutation_guard_owner_units(request_id))
+
+    def fence_mutation_guard_owners(
+        self,
+        request_id: str,
+        generation: str | None = None,
+    ) -> None:
+        """Hard-fence exact owners unless normal guard release was verified."""
+
+        if generation is not None:
+            try:
+                validate_mutation_guard_generation(generation)
+            except MutationGuardError as exc:
+                raise SystemdOperationError("mutation guard fence generation is invalid") from exc
+        evidence_path = guard_evidence_path(self.config, request_id)
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError:
+            evidence = None
+        if (
+            evidence is not None
+            and generation is not None
+            and evidence.request_id == request_id
+            and evidence.candidate_sha == self.config.runner_repo.parent.name
+            and evidence.generation == generation
+            and evidence.state == "released"
+        ):
+            return
+        live_units = self._mutation_guard_owner_units(request_id)
+        fence_failed = False
+        for unit_name in live_units:
+            try:
+                result = self._run(
+                    [
+                        "systemctl",
+                        "--user",
+                        "kill",
+                        "--kill-whom=all",
+                        "--signal=SIGKILL",
+                        unit_name,
+                    ]
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                fence_failed = True
+                continue
+            if result.returncode != 0:
+                fence_failed = True
+        if fence_failed:
+            raise SystemdOperationError("mutation guard owner fence failed")
+
+    def _retire_released_mutation_guard_evidence(
+        self,
+        evidence_path: Path,
+        *,
+        request_id: str,
+        next_generation: str,
+    ) -> None:
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError as exc:
+            raise UnitLaunchError("mutation guard evidence identity is already occupied") from exc
+        if (
+            evidence.request_id != request_id
+            or evidence.candidate_sha != self.config.runner_repo.parent.name
+            or evidence.generation == next_generation
+            or evidence.state != "released"
+        ):
+            raise UnitLaunchError("mutation guard evidence identity is already occupied")
+        try:
+            directory_fd = os.open(
+                evidence_path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise UnitLaunchError("mutation guard evidence authority is unavailable") from exc
+        try:
+            if (
+                read_mutation_guard_evidence(
+                    evidence_path,
+                    service_uid=self.service_uid,
+                )
+                != evidence
+            ):
+                raise UnitLaunchError("mutation guard evidence changed during retirement")
+            os.unlink(evidence_path.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except UnitLaunchError:
+            raise
+        except (MutationGuardError, OSError) as exc:
+            raise UnitLaunchError("mutation guard evidence retirement failed safely") from exc
+        finally:
+            os.close(directory_fd)
+
+    def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+        mutation_guard_unit_name(request_id)
+        if self.show_mutation_guard(request_id) is not None:
+            raise UnitLaunchError("mutation guard unit identity is already occupied")
+        generation = self._new_guard_generation()
+        evidence_path = guard_evidence_path(self.config, request_id)
+        try:
+            os.lstat(evidence_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise UnitLaunchError("mutation guard evidence authority is unavailable") from exc
+        else:
+            self._retire_released_mutation_guard_evidence(
+                evidence_path,
+                request_id=request_id,
+                next_generation=generation,
+            )
+        try:
+            result = self._run(self.start_mutation_guard_argv(request_id, generation))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise UnitLaunchError("transient mutation guard could not be started") from exc
+        if result.returncode != 0:
+            raise UnitLaunchError("transient mutation guard launch failed")
+        failure: UnitLaunchError | None = None
+        for _attempt in range(self._guard_readiness_timeout_seconds):
+            status = self.show_mutation_guard(request_id)
+            if status is None or not status.is_running:
+                failure = UnitLaunchError("transient mutation guard exited before readiness")
+                break
+            try:
+                os.lstat(evidence_path)
+            except FileNotFoundError:
+                self._sleep(1.0)
+                continue
+            except OSError:
+                failure = UnitLaunchError("mutation guard readiness evidence is unavailable")
+                break
+            try:
+                evidence = read_mutation_guard_evidence(
+                    evidence_path,
+                    service_uid=self.service_uid,
+                )
+            except MutationGuardError:
+                failure = UnitLaunchError("mutation guard readiness evidence is invalid")
+                break
+            if (
+                evidence.request_id != request_id
+                or evidence.candidate_sha != self.config.runner_repo.parent.name
+                or evidence.generation != generation
+                or evidence.guard_pid != status.main_pid
+                or evidence.state != "ready"
+            ):
+                failure = UnitLaunchError("mutation guard readiness evidence drifted")
+                break
+            return evidence
+        if failure is None:
+            failure = UnitLaunchError("mutation guard readiness timed out")
+        try:
+            self.stop_mutation_guard(request_id)
+        except SystemdOperationError:
+            pass
+        raise failure
 
     def _show_validated(self, unit_name: str) -> SystemdUnitStatus | None:
         argv = [
@@ -605,6 +1038,92 @@ class SystemdUserManager:
             error_type=SystemdQueryError,
         )
         return self._show_validated(unit_name)
+
+    def show_mutation_guard(self, request_id: str) -> SystemdUnitStatus | None:
+        try:
+            unit_name = mutation_guard_unit_name(request_id)
+        except UnitLaunchError as exc:
+            raise SystemdQueryError("mutation guard request identity is invalid") from exc
+        _mutation_guard_request_id(unit_name, error_type=SystemdQueryError)
+        return self._show_validated(unit_name)
+
+    def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence | None:
+        try:
+            unit_name = mutation_guard_unit_name(request_id)
+            _mutation_guard_request_id(unit_name, error_type=SystemdOperationError)
+        except UnitLaunchError as exc:
+            raise SystemdOperationError("mutation guard request identity is invalid") from exc
+        evidence_path = guard_evidence_path(self.config, request_id)
+        status = self._show_validated(unit_name)
+        if status is None:
+            try:
+                os.lstat(evidence_path)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise SystemdOperationError(
+                    "mutation guard release evidence is unavailable"
+                ) from exc
+            try:
+                evidence = read_mutation_guard_evidence(
+                    evidence_path,
+                    service_uid=self.service_uid,
+                )
+            except MutationGuardError as exc:
+                raise SystemdOperationError("mutation guard release evidence is invalid") from exc
+            if (
+                evidence.request_id != request_id
+                or evidence.candidate_sha != self.config.runner_repo.parent.name
+                or evidence.state != "released"
+            ):
+                raise SystemdOperationError("absent mutation guard was not released")
+            return evidence
+        ready_evidence: MutationGuardEvidence | None = None
+        try:
+            observed_ready = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError:
+            pass
+        else:
+            if (
+                observed_ready.request_id == request_id
+                and observed_ready.candidate_sha == self.config.runner_repo.parent.name
+                and observed_ready.guard_pid == status.main_pid
+                and observed_ready.state == "ready"
+            ):
+                ready_evidence = observed_ready
+        try:
+            stopped = self._run(["systemctl", "--user", "stop", unit_name])
+            reset = self._run(["systemctl", "--user", "reset-failed", unit_name])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SystemdOperationError("mutation guard stop could not be verified") from exc
+        if stopped.returncode != 0 or reset.returncode not in {0, 1}:
+            raise SystemdOperationError("mutation guard stop failed")
+        for attempt in range(_MUTATION_GUARD_STOP_WAIT_SECONDS):
+            if self._show_validated(unit_name) is None:
+                break
+            if attempt + 1 < _MUTATION_GUARD_STOP_WAIT_SECONDS:
+                self._sleep(1.0)
+        else:
+            raise SystemdOperationError("mutation guard unit remains present after stop")
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError as exc:
+            raise SystemdOperationError("mutation guard release evidence is invalid") from exc
+        if (
+            ready_evidence is None
+            or evidence.request_id != request_id
+            or evidence.candidate_sha != self.config.runner_repo.parent.name
+            or evidence.state != "released"
+            or not _same_mutation_guard_acquisition(ready_evidence, evidence)
+        ):
+            raise SystemdOperationError("mutation guard release was not verified")
+        return evidence
 
     def terminate(self, unit_name: str) -> None:
         _parse_unit_name(unit_name, error_type=SystemdOperationError)
@@ -659,6 +1178,9 @@ class SystemdUserManager:
 
 
 __all__ = [
+    "MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS",
+    "MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS",
+    "MUTATION_GUARD_STOP_POST_BOUND_SECONDS",
     "ActiveState",
     "CommandResult",
     "CommandRunner",
@@ -669,4 +1191,5 @@ __all__ = [
     "SystemdUnitStatus",
     "SystemdUserManager",
     "UnitLaunchError",
+    "mutation_guard_unit_name",
 ]

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.operator import readonly_database_client
 from loom_cli.rollout.operator.readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
     InstalledReadonlyMutationEpochSource,
@@ -67,6 +68,7 @@ class Connection:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.closed = False
+        self.autocommit = False
 
     def execute(self, query: str, params=None) -> Cursor:
         assert params is None
@@ -149,6 +151,29 @@ def test_client_binds_exact_transport_and_keeps_password_out_of_process(tmp_path
     ]
     assert connection.closed
     assert process.terminated and not process.killed
+
+
+def test_guard_client_uses_one_autocommit_backend_without_a_long_transaction(
+    tmp_path: Path,
+) -> None:
+    kubeconfig, credential_path, _credential = _paths(tmp_path)
+    process = Process()
+    connection = Connection()
+
+    with readonly_database_client.open_readonly_database_guard_query(
+        service_uid=os.getuid(),
+        kubeconfig_path=kubeconfig,
+        credential_path=credential_path,
+        spawn=lambda _argv, _env: process,
+        connect=lambda _host, _port, _exact: connection,
+        allocate_port=lambda: 15434,
+        wait_ready=lambda _process, _port: None,
+    ) as query:
+        assert query("SELECT 1 AS value") == ({"value": 1},)
+        assert connection.autocommit is True
+
+    assert connection.calls == ["SELECT 1 AS value"]
+    assert connection.closed and process.terminated
 
 
 def test_client_rolls_back_and_stops_exact_tunnel_on_query_failure(tmp_path: Path) -> None:
