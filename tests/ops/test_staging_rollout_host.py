@@ -4296,6 +4296,20 @@ def _status_metadata(mode: int, *, uid: int, gid: int) -> os.stat_result:
                 0,
                 "loom-staging-rollout-request-1.service loaded maintenance dead rollout\n",
             ),
+            "unknown",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded activating start rollout\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded deactivating stop rollout\n",
+            ),
             "busy",
         ),
         (
@@ -4478,36 +4492,43 @@ def _prepare_durable_active_status(
     *,
     request_id: str = "req-alpha",
     job_id: str = "job-alpha000",
+    phase: object = "backup_pending",
     updated_at: str | None = None,
+    create_backup: bool = True,
 ) -> None:
     state_root = tmp_path / "state"
-    backup_root = state_root / "requests" / request_id / "preflight-backup"
-    backup_root.mkdir(parents=True)
-    for directory in (
+    request_root = state_root / "requests" / request_id
+    backup_root = request_root / "preflight-backup"
+    request_root.mkdir(parents=True)
+    directories = [
         state_root,
         state_root / "requests",
-        backup_root.parent,
-        backup_root,
-    ):
+        request_root,
+    ]
+    if create_backup:
+        backup_root.mkdir()
+        directories.append(backup_root)
+    for directory in directories:
         directory.chmod(0o700)
-    (backup_root / "state.json").write_text(
-        json.dumps(
-            {
-                "failure_code": None,
-                "job_id": job_id,
-                "lease_digest": None,
-                "manifest_sha256": None,
-                "preflight_attestation_sha256": None,
-                "phase": "backup_pending",
-                "request_id": request_id,
-                "schema_version": 1,
-                "sequence": 0,
-                "updated_at": updated_at,
-            }
+    if create_backup:
+        (backup_root / "state.json").write_text(
+            json.dumps(
+                {
+                    "failure_code": None,
+                    "job_id": job_id,
+                    "lease_digest": None,
+                    "manifest_sha256": None,
+                    "preflight_attestation_sha256": None,
+                    "phase": phase,
+                    "request_id": request_id,
+                    "schema_version": 1,
+                    "sequence": 0,
+                    "updated_at": updated_at,
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    (backup_root / "state.json").chmod(0o600)
+        (backup_root / "state.json").chmod(0o600)
     marker = tmp_path / "maintenance"
     marker.write_text("maintenance\n")
     marker.chmod(0o600)
@@ -4529,18 +4550,22 @@ def _prepare_durable_active_status(
 
 
 @pytest.mark.parametrize(
-    ("request_id", "job_id", "updated_at"),
+    ("request_id", "job_id", "updated_at", "phase"),
     [
-        ("Req-alpha", "job-alpha000", None),
-        ("req-alpha", "Job-alpha000", None),
-        ("req-alpha", "job-alpha000", "not-a-timestamp"),
-        ("req-alpha", "job-alpha000", "2026-01-01T00:00:00"),
+        ("Req-alpha", "job-alpha000", None, "backup_pending"),
+        ("req-alpha", "Job-alpha000", None, "backup_pending"),
+        ("req-alpha", "job-alpha000", "not-a-timestamp", "backup_pending"),
+        ("req-alpha", "job-alpha000", "2026-01-01T00:00:00", "backup_pending"),
+        ("req-alpha", "job-alpha000", None, ["backup_pending"]),
+        ("req-alpha", "job-alpha000", None, {"phase": "backup_pending"}),
     ],
     ids=(
         "legacy-traversable-request-id",
         "job-id",
         "invalid-timestamp",
         "timezone-naive-timestamp",
+        "list-phase",
+        "object-phase",
     ),
 )
 def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
@@ -4549,6 +4574,7 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
     request_id: str,
     job_id: str,
     updated_at: str | None,
+    phase: object,
 ) -> None:
     _prepare_durable_active_status(
         tmp_path,
@@ -4556,6 +4582,7 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
         request_id=request_id,
         job_id=job_id,
         updated_at=updated_at,
+        phase=phase,
     )
     calls: list[list[str]] = []
 
@@ -4578,7 +4605,7 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
 
 
 @pytest.mark.parametrize(
-    ("unit_result", "expected"),
+    ("unit_outcome", "expected"),
     [
         (
             host.CommandResult(
@@ -4601,18 +4628,47 @@ def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
             ),
             "busy",
         ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded inactive future-state rollout\n",
+            ),
+            "unknown",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded active running rollout\n"
+                "loom-staging-backup-request-1.service loaded inactive future-state backup\n",
+            ),
+            "unknown",
+        ),
         (host.CommandResult(1, stderr="manager unavailable"), "unknown"),
         (host.CommandResult(0, stderr="manager warning"), "unknown"),
+        (OSError("manager unavailable"), "unknown"),
     ],
-    ids=("rollout", "backup", "mutation-guard", "nonzero", "stderr"),
+    ids=(
+        "rollout",
+        "backup",
+        "mutation-guard",
+        "inactive-future-state",
+        "live-and-unknown-state",
+        "nonzero",
+        "stderr",
+        "runner-oserror",
+    ),
 )
 def test_active_status_queries_protected_units_after_schema_valid_active_durable_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    unit_result: host.CommandResult,
+    unit_outcome: host.CommandResult | OSError,
     expected: str,
 ) -> None:
-    _prepare_durable_active_status(tmp_path, monkeypatch)
+    _prepare_durable_active_status(
+        tmp_path,
+        monkeypatch,
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
     service_uid = os.geteuid()
     calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -4627,7 +4683,9 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
             )
             if identity is not None:
                 return identity
-            return unit_result
+            if isinstance(unit_outcome, OSError):
+                raise unit_outcome
+            return unit_outcome
 
     assert host.HostSystem(StatusRunner()).active_status() == expected
     assert [call for call in calls if "/usr/bin/systemctl" in call[0]] == [
@@ -4661,6 +4719,36 @@ def test_active_status_queries_protected_units_after_schema_valid_active_durable
             {"check": False},
         )
     ]
+
+
+def test_active_status_keeps_legacy_request_directory_without_durable_state_traversable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_durable_active_status(
+        tmp_path,
+        monkeypatch,
+        request_id="Req-alpha",
+        create_backup=False,
+    )
+    calls: list[list[str]] = []
+
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            calls.append(call)
+            identity = _service_identity_result(
+                call,
+                uid=os.geteuid(),
+                gid=os.getegid(),
+            )
+            if identity is not None:
+                return identity
+            return host.CommandResult(0)
+
+    assert host.HostSystem(StatusRunner()).active_status() == "idle"
+    assert any("/usr/bin/systemctl" in call for call in calls)
 
 
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(

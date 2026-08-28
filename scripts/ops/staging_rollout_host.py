@@ -1572,7 +1572,8 @@ def _durable_preflight_backup_status(
             value.get("preflight_attestation_sha256"),
         )
         if (
-            phase not in known_phases
+            not isinstance(phase, str)
+            or phase not in known_phases
             or value.get("schema_version") != 1
             or type(value.get("schema_version")) is not int
             or type(sequence) is not int
@@ -4335,37 +4336,41 @@ class HostSystem:
         # work.  Keep validating the history so malformed state fails closed,
         # then let the fixed unit inventory decide whether execution is live.
 
-        result = self.runner.run(
-            [
-                "sudo",
-                "-n",
-                "-u",
-                SERVICE_USER,
-                "--",
-                "/usr/bin/env",
-                "-i",
-                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
-                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
-                "PATH=/usr/bin:/bin",
-                "LANG=C.UTF-8",
-                "LC_ALL=C.UTF-8",
-                "/usr/bin/systemctl",
-                "--user",
-                "list-units",
-                "--all",
-                "--plain",
-                "--full",
-                "--type=service",
-                "--no-legend",
-                "--no-pager",
-                "loom-staging-rollout-*.service",
-                "loom-staging-backup-*.service",
-                "loom-staging-mutation-guard-*.service",
-            ],
-            check=False,
-        )
+        try:
+            result = self.runner.run(
+                [
+                    "sudo",
+                    "-n",
+                    "-u",
+                    SERVICE_USER,
+                    "--",
+                    "/usr/bin/env",
+                    "-i",
+                    f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                    f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                    "PATH=/usr/bin:/bin",
+                    "LANG=C.UTF-8",
+                    "LC_ALL=C.UTF-8",
+                    "/usr/bin/systemctl",
+                    "--user",
+                    "list-units",
+                    "--all",
+                    "--plain",
+                    "--full",
+                    "--type=service",
+                    "--no-legend",
+                    "--no-pager",
+                    "loom-staging-rollout-*.service",
+                    "loom-staging-backup-*.service",
+                    "loom-staging-mutation-guard-*.service",
+                ],
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "unknown"
         if result.returncode != 0 or result.stderr.strip():
             return "unknown"
+        live = False
         for line in result.stdout.splitlines():
             fields = line.split(maxsplit=4)
             if len(fields) < 4:
@@ -4386,9 +4391,19 @@ class HostSystem:
                 or _SYSTEMD_STATE_TOKEN_RE.fullmatch(sub_state) is None
             ):
                 return "unknown"
-            if active_state not in {"inactive", "failed"}:
-                return "busy"
-        return "idle"
+            if (active_state, sub_state) in {
+                ("inactive", "dead"),
+                ("failed", "failed"),
+            }:
+                continue
+            if active_state == "deactivating" or (active_state, sub_state) in {
+                ("active", "running"),
+                ("activating", "start"),
+            }:
+                live = True
+                continue
+            return "unknown"
+        return "busy" if live else "idle"
 
     def begin_maintenance(self) -> None:
         uid, gid = self._service_ids()
