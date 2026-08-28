@@ -835,8 +835,7 @@ class _AcceptanceWindowInput(_StrictModel):
         return _canonical_timestamp(value)
 
 
-class _AcceptancePlanInput(_StrictModel):
-    schema_version: Literal[1]
+class _AcceptancePlanCommonInput(_StrictModel):
     source: _AcceptanceSourceInput
     release: _AcceptanceReleaseInput
     storage: _AcceptanceStorageInput
@@ -845,8 +844,37 @@ class _AcceptancePlanInput(_StrictModel):
     manager: _AcceptanceManagerInput
     principals: _AcceptancePrincipalsInput
     quotas: _AcceptanceQuotasInput
-    acceptance_owner: _AcceptanceOwnerInput
     window: _AcceptanceWindowInput
+
+
+class _AcceptancePlanV1Input(_AcceptancePlanCommonInput):
+    schema_version: Literal[1]
+    acceptance_owner: _AcceptanceOwnerInput
+
+
+class _AcceptancePlanV2Input(_AcceptancePlanCommonInput):
+    schema_version: Literal[2]
+    acceptance_owners: tuple[_AcceptanceOwnerInput, _AcceptanceOwnerInput]
+
+    @field_validator("acceptance_owners", mode="before")
+    @classmethod
+    def _owners_are_json_array(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, list):
+            raise ValueError("acceptance owners must be a JSON array")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _owners_and_quotas_are_exact(self) -> _AcceptancePlanV2Input:
+        owners = self.acceptance_owners
+        if (
+            owners != tuple(sorted(owners, key=lambda owner: (owner.team_id, owner.user_id)))
+            or len({owner.team_id for owner in owners}) != 2
+            or len({owner.user_id for owner in owners}) != 2
+            or self.quotas.global_live_instances < 2
+            or self.quotas.builder_global_concurrency < 2
+        ):
+            raise ValueError("two-owner acceptance plan contract is invalid")
+        return self
 
 
 class _OperationalApprovalInput(_StrictModel):
@@ -1158,15 +1186,19 @@ class PersonalDevAcceptancePlan:
     manager: PersonalDevAcceptanceManager
     principals: PersonalDevAcceptancePrincipals
     quotas: PersonalDevControlPlaneLimits
-    acceptance_owner: PersonalDevAcceptanceOwner
+    acceptance_owners: tuple[PersonalDevAcceptanceOwner, ...]
     window: PersonalDevAcceptanceWindow
 
+    @property
+    def acceptance_owner(self) -> PersonalDevAcceptanceOwner:
+        if self.schema_version != 1:
+            raise PersonalDevAcceptancePlanError(
+                "two-owner acceptance plans have no singular owner"
+            )
+        return self.acceptance_owners[0]
+
     def canonical_value(self) -> dict[str, Any]:
-        return {
-            "acceptance_owner": {
-                "team_id": str(self.acceptance_owner.team_id),
-                "user_id": str(self.acceptance_owner.user_id),
-            },
+        value = {
             "activation": _dataclass_value(self.activation),
             "builder": _dataclass_value(self.builder),
             "manager": {
@@ -1190,6 +1222,17 @@ class PersonalDevAcceptancePlan:
                 "started_at": _format_timestamp(self.window.started_at),
             },
         }
+        if self.schema_version == 1:
+            value["acceptance_owner"] = {
+                "team_id": str(self.acceptance_owner.team_id),
+                "user_id": str(self.acceptance_owner.user_id),
+            }
+        else:
+            value["acceptance_owners"] = [
+                {"team_id": str(owner.team_id), "user_id": str(owner.user_id)}
+                for owner in self.acceptance_owners
+            ]
+        return value
 
     def canonical_bytes(self) -> bytes:
         return _canonical_json(self.canonical_value())
@@ -1603,8 +1646,18 @@ def load_personal_dev_acceptance_plan(
         )
         if not isinstance(value, dict) or _canonical_json(value) != payload:
             raise ValueError("acceptance plan JSON is not canonical")
-        parsed = _AcceptancePlanInput.model_validate(value)
-        owner = parsed.acceptance_owner
+        schema_version = value.get("schema_version")
+        owners: tuple[_AcceptanceOwnerInput, ...]
+        if schema_version == 1:
+            parsed_v1 = _AcceptancePlanV1Input.model_validate(value)
+            parsed: _AcceptancePlanV1Input | _AcceptancePlanV2Input = parsed_v1
+            owners = (parsed_v1.acceptance_owner,)
+        elif schema_version == 2:
+            parsed_v2 = _AcceptancePlanV2Input.model_validate(value)
+            parsed = parsed_v2
+            owners = parsed_v2.acceptance_owners
+        else:
+            raise ValueError("acceptance plan schema version is invalid")
         plan = PersonalDevAcceptancePlan(
             schema_version=parsed.schema_version,
             source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
@@ -1626,9 +1679,12 @@ def load_personal_dev_acceptance_plan(
             ),
             principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
             quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
-            acceptance_owner=PersonalDevAcceptanceOwner(
-                team_id=UUID(owner.team_id),
-                user_id=UUID(owner.user_id),
+            acceptance_owners=tuple(
+                PersonalDevAcceptanceOwner(
+                    team_id=UUID(owner.team_id),
+                    user_id=UUID(owner.user_id),
+                )
+                for owner in owners
             ),
             window=PersonalDevAcceptanceWindow(
                 started_at=_parse_acceptance_timestamp(parsed.window.started_at),

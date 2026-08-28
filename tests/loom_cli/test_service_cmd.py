@@ -24,6 +24,15 @@ import pytest
 from loom_cli.__main__ import main
 from loom_cli.service_cmd import _compose_args, _mutable_dev_images
 
+_GENERIC_EXPECTED_DENIAL_ERROR = (
+    "error: expected hidden-resource denial was not observed\n"
+)
+_UPDATE_DENIAL_RECEIPT = (
+    '{"error_code":"resource_hidden","http_method":"PUT",'
+    '"schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,'
+    '"target_phase":"target_update"}\n'
+)
+
 
 def _read_admin_token(secret_file: Path) -> str:
     data = tomllib.loads(secret_file.read_text(encoding="utf-8"))
@@ -234,13 +243,607 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
 
     assert rc == 0
     output = capsys.readouterr().out
-    assert "Development environment: dev-alice" in output
-    assert "Status: provisioning" in output
+    assert output == (
+        f"→ resolving owned ready candidate {candidate_sha}\n"
+        "→ applying dev-alice at expected operation epoch 0\n"
+        "Development environment: dev-alice\n"
+        "Status: provisioning\n"
+        f"Candidate: {candidate_sha}\n"
+        "Capacity: min 0 · max 2 shared slots\n"
+        "URL: https://alice.dev.example\n"
+    )
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/v1/dev-instances/alice"),
         ("GET", "/api/v1/personal-dev-candidates"),
         ("PUT", "/api/v1/dev-instances/alice"),
     ]
+
+
+def test_personal_service_up_redeploys_a_deleted_retained_name_with_explicit_epoch(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    candidate_id = "00000000-0000-0000-0000-000000000001"
+    operation_id = "00000000-0000-0000-0000-000000000002"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": candidate_id,
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            payload = json.loads(request.content)
+            assert payload["candidate_id"] == candidate_id
+            assert payload["candidate_sha"] == candidate_sha
+            assert payload["expected_operation_epoch"] == 4
+            return httpx.Response(
+                202,
+                json={
+                    "environment": {
+                        "name": "alice",
+                        "status": "provisioning",
+                        "operation_epoch": 5,
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "identity": {},
+                    },
+                    "operation": {
+                        "id": operation_id,
+                        "environment_name": "alice",
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "expected_operation_epoch": 4,
+                        "operation_epoch": 5,
+                        "state": "running",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "4",
+                    "--no-wait",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    assert rc == 0
+    assert capsys.readouterr().err == ""
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+def test_personal_update_expected_hidden_denial_binds_candidate_then_target_put(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    candidate_id = "00000000-0000-0000-0000-000000000001"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": candidate_id,
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            payload = json.loads(request.content)
+            assert payload["candidate_id"] == candidate_id
+            assert payload["candidate_sha"] == candidate_sha
+            assert payload["expected_operation_epoch"] == 1
+            assert payload["min_slots"] == 0
+            return httpx.Response(
+                404,
+                json={"detail": "dev-private-target must not escape"},
+                headers={
+                    "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_update",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "1",
+                    "--min-slots",
+                    "0",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert captured.err == _UPDATE_DENIAL_RECEIPT
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+@pytest.mark.parametrize("phase", [None, "target_read", "target_update "])
+def test_personal_update_expected_hidden_denial_requires_exact_put_404_marker(
+    capsys: pytest.CaptureFixture[str],
+    phase: str | None,
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "00000000-0000-0000-0000-000000000001",
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(
+                404,
+                json={"detail": "candidate disappeared before apply"},
+                headers=(
+                    {}
+                    if phase is None
+                    else {
+                        "X-Loom-Personal-Dev-Hidden-Denial-Phase": phase,
+                    }
+                ),
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "1",
+                    "--min-slots",
+                    "0",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "candidate disappeared" not in captured.err
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+def test_personal_update_expected_hidden_denial_cannot_certify_candidate_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+        )
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "1",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates")
+    ]
+
+
+def test_personal_update_expected_hidden_denial_hides_malformed_candidate_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"dev-private-target is not JSON")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "1",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "dev-private-target" not in captured.err
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates")
+    ]
+
+
+@pytest.mark.parametrize("status", [200, 401, 403, 409, 500])
+def test_personal_update_expected_hidden_denial_rejects_non_404_target_response(
+    capsys: pytest.CaptureFixture[str],
+    status: int,
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "00000000-0000-0000-0000-000000000001",
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            status,
+            json={"detail": "dev-private-target must not escape"},
+        )
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--expected-operation-epoch",
+                    "1",
+                    "--quiet",
+                    "--expected-hidden-denial",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "dev-private-target" not in captured.err
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+@pytest.mark.parametrize("missing", ["candidate", "epoch", "quiet"])
+def test_personal_update_expected_hidden_denial_requires_probe_boundaries_before_auth(
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+) -> None:
+    command = [
+        "service",
+        "up",
+        "--environment",
+        "dev-alice",
+        "--candidate",
+        "c" * 64,
+        "--expected-operation-epoch",
+        "1",
+        "--quiet",
+        "--expected-hidden-denial",
+    ]
+    removals = {
+        "candidate": ("--candidate", "c" * 64),
+        "epoch": ("--expected-operation-epoch", "1"),
+        "quiet": ("--quiet",),
+    }
+    for value in removals[missing]:
+        command.remove(value)
+
+    with patch(
+        "loom_cli.server_client.require_logged_in",
+        side_effect=AssertionError("invalid expected-denial mode must fail before auth"),
+    ):
+        rc = main(command)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+
+
+def test_personal_update_expected_hidden_denial_rejects_zero_epoch_before_auth(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch(
+        "loom_cli.server_client.require_logged_in",
+        side_effect=AssertionError("zero-epoch denial probe must fail before auth"),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--environment",
+                "dev-alice",
+                "--candidate",
+                "c" * 64,
+                "--expected-operation-epoch",
+                "0",
+                "--quiet",
+                "--expected-hidden-denial",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+
+
+def test_personal_service_up_quiet_suppresses_stdout_but_not_lifecycle_requests(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(404, json={})
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(200, json={"items": [{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "candidate_sha": candidate_sha,
+                "attestation_scope": "personal-dev-only", "promotable": False,
+                "status": "ready",
+            }]})
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(202, json={
+                "environment": {
+                    "name": "alice", "status": "provisioning", "operation_epoch": 1,
+                    "candidate_sha": candidate_sha, "min_slots": 0, "max_slots": 2,
+                    "identity": {},
+                },
+                "operation": {
+                    "id": "00000000-0000-0000-0000-000000000002",
+                    "environment_name": "alice", "candidate_sha": candidate_sha,
+                    "min_slots": 0, "max_slots": 2, "expected_operation_epoch": 0,
+                    "operation_epoch": 1, "state": "running",
+                },
+            })
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler))
+    try:
+        with (
+            patch("loom_cli.server_client.require_logged_in", return_value=SimpleNamespace(server_url="https://loom.example")),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(["service", "up", "--environment", "dev-alice", "--candidate", candidate_sha,
+                       "--no-wait", "--quiet"])
+    finally:
+        http_client.close()
+
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/dev-instances/alice"),
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
+def test_personal_service_up_quiet_keeps_denial_on_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(404, json={})
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(403, json={"detail": "denied"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(base_url="https://loom.example", transport=httpx.MockTransport(handler))
+    try:
+        with (
+            patch("loom_cli.server_client.require_logged_in", return_value=SimpleNamespace(server_url="https://loom.example")),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(["service", "up", "--environment", "dev-alice", "--candidate", candidate_sha,
+                       "--quiet"])
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert captured.err.startswith("error:")
+
+
+@pytest.mark.parametrize("environment", ["local", "staging", "production"])
+def test_service_up_quiet_rejected_before_nonpersonal_action(
+    environment: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with (
+        patch("loom_cli.service_cmd._up_local", side_effect=AssertionError("must not start Compose")),
+        patch("loom_cli.service_cmd._up_protected", side_effect=AssertionError("must not deploy protected")),
+    ):
+        rc = main(["service", "up", "--environment", environment, "--quiet"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "--quiet is only valid" in captured.err
 
 
 def test_up_errors_when_compose_file_missing(

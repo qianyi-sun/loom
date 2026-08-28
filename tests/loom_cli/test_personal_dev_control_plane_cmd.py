@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib
 import io
@@ -10,6 +11,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -37,6 +39,12 @@ from loom.personal_dev_control_plane_status import (
 )
 from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
+from tests.unit.test_personal_dev_acceptance_evidence import (
+    _result_plan,
+    _result_value,
+    _rollback_shadow_manifest_payload,
+    _rollback_shadow_status_value,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
@@ -114,8 +122,10 @@ def _acceptance_plan(
     tmp_path: Path,
     release_path: Path,
     release_digest: str,
+    *,
+    profile_path: Path = _PROFILE,
 ):
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
     shadow = render_shadow_personal_dev_control_plane(profile, release)
     protocol_sha256 = hashlib.sha256(
@@ -368,12 +378,14 @@ def _acceptance_argv(
     digest: str,
     plan: Path,
     plan_digest: str,
+    *,
+    profile: Path = _PROFILE,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
         "render-acceptance",
         "--file",
-        str(_PROFILE),
+        str(profile),
         "--trusted-release-file",
         str(release),
         "--trusted-release-sha256",
@@ -491,6 +503,321 @@ def _operational_status_argv(
         "--backup-restore-evidence-file",
         str(plan.parent / "backup-restore-evidence.json"),
     ]
+
+
+def _verify_acceptance_result_argv(
+    plan_path: Path,
+    plan_sha256: str,
+    result_path: Path,
+    result_sha256: str,
+    manifest_sha256: str,
+    rollback_shadow_manifest_path: Path,
+    rollback_shadow_status_path: Path,
+) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "verify-acceptance-result",
+        "--acceptance-plan-file",
+        str(plan_path),
+        "--acceptance-plan-sha256",
+        plan_sha256,
+        "--acceptance-result-file",
+        str(result_path),
+        "--acceptance-result-sha256",
+        result_sha256,
+        "--acceptance-manifest-sha256",
+        manifest_sha256,
+        "--rollback-shadow-manifest-file",
+        str(rollback_shadow_manifest_path),
+        "--rollback-shadow-status-file",
+        str(rollback_shadow_status_path),
+    ]
+
+
+def _write_canonical_owner_only(path: Path, value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _rewrite_acceptance_result_rollback_digest(
+    result_path: Path,
+    rollback_sha256: str,
+) -> str:
+    value = json.loads(result_path.read_text(encoding="ascii"))
+    value["status_sha256s"]["rollback_shadow"] = rollback_sha256
+    return _write_canonical_owner_only(result_path, value)
+
+
+def _acceptance_result_files(
+    tmp_path: Path,
+) -> tuple[Path, str, Path, str, Path, Path, str]:
+    plan, _v1_plan = _result_plan(tmp_path)
+    plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
+    rollback_input_sha256 = "1" * 64
+    rollback_manifest_path = tmp_path / "rollback-shadow.yaml"
+    rollback_manifest_payload = _rollback_shadow_manifest_payload(
+        input_sha256=rollback_input_sha256,
+        release_sha256=plan.release.trusted_release_sha256,
+    )
+    rollback_manifest_path.write_bytes(rollback_manifest_payload)
+    rollback_manifest_path.chmod(0o600)
+    plan_value = plan.canonical_value()
+    plan_value["release"]["shadow_manifest_sha256"] = hashlib.sha256(  # type: ignore[index]
+        rollback_manifest_payload
+    ).hexdigest()
+    plan_sha256 = _write_canonical_owner_only(plan_path, plan_value)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
+    rollback_value = _rollback_shadow_status_value()
+    rollback_value["input_sha256"] = rollback_input_sha256
+    rollback_value["release_sha256"] = plan.release.trusted_release_sha256
+    rollback_path = tmp_path / "rollback-shadow.status.json"
+    rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
+    result_value = _result_value(plan)
+    result_value["status_sha256s"]["rollback_shadow"] = rollback_sha256
+    result_path = tmp_path / "acceptance-result.json"
+    result_sha256 = _write_canonical_owner_only(result_path, result_value)
+    return (
+        plan_path,
+        plan.sha256,
+        result_path,
+        result_sha256,
+        rollback_manifest_path,
+        rollback_path,
+        rollback_sha256,
+    )
+
+
+def test_verify_acceptance_result_emits_canonical_secret_free_projection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (
+        plan_path,
+        plan_sha256,
+        result_path,
+        result_sha256,
+        rollback_manifest_path,
+        rollback_path,
+        rollback_sha256,
+    ) = _acceptance_result_files(tmp_path)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
+
+    rc = dispatch(
+        _verify_acceptance_result_argv(
+            plan_path,
+            plan_sha256,
+            result_path,
+            result_sha256,
+            "a" * 64,
+            rollback_manifest_path,
+            rollback_path,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+    record = json.loads(captured.out)
+    assert captured.out == json.dumps(
+        record, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ) + "\n"
+    assert record == {
+        "acceptance_manifest_sha256": "a" * 64,
+        "acceptance_plan_sha256": plan_sha256,
+        "acceptance_result_sha256": result_sha256,
+        "cross_owner_denial_count": 6,
+        "owner_count": 2,
+        "release_sha256": plan.release.trusted_release_sha256,
+        "rollback_shadow_status_sha256": rollback_sha256,
+        "schema": "loom-personal-dev-zero-capacity-acceptance-verification-v1",
+        "shadow_manifest_sha256": plan.release.shadow_manifest_sha256,
+        "verified": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    [
+        "unsafe-plan",
+        "unsafe-result",
+        "unsafe-rollback-manifest",
+        "unsafe-rollback",
+        "v1-plan",
+        "wrong-plan-sha",
+        "wrong-result-sha",
+        "wrong-manifest",
+        "wrong-rollback-manifest-digest",
+        "wrong-rollback-digest",
+        "rollback-status-input-drift",
+        "invalid-rollback",
+        "wrong-rollback-release",
+        "invalid-result",
+    ],
+)
+def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runner(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    invalid_input: str,
+) -> None:
+    (
+        plan_path,
+        plan_sha256,
+        result_path,
+        result_sha256,
+        rollback_manifest_path,
+        rollback_path,
+        _rollback_sha256,
+    ) = _acceptance_result_files(tmp_path)
+    manifest_sha256 = "a" * 64
+    if invalid_input == "unsafe-plan":
+        plan_path.chmod(0o644)
+    elif invalid_input == "unsafe-result":
+        result_path.chmod(0o644)
+    elif invalid_input == "unsafe-rollback-manifest":
+        rollback_manifest_path.chmod(0o644)
+    elif invalid_input == "unsafe-rollback":
+        rollback_path.chmod(0o644)
+    elif invalid_input == "v1-plan":
+        plan, v1_plan = _result_plan(tmp_path / "v1")
+        del plan
+        payload = json.dumps(
+            v1_plan.canonical_value(), sort_keys=True, separators=(",", ":"),
+        ).encode("ascii")
+        plan_path = tmp_path / "v1-plan.json"
+        plan_path.write_bytes(payload)
+        plan_path.chmod(0o600)
+        plan_sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_input == "wrong-plan-sha":
+        plan_sha256 = "b" * 64
+    elif invalid_input == "wrong-result-sha":
+        result_sha256 = "b" * 64
+    elif invalid_input == "wrong-manifest":
+        manifest_sha256 = "b" * 64
+    elif invalid_input == "wrong-rollback-manifest-digest":
+        rollback_manifest_path.write_bytes(rollback_manifest_path.read_bytes() + b"\n")
+    elif invalid_input == "wrong-rollback-digest":
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        value["input_sha256"] = "3" * 64
+        _write_canonical_owner_only(rollback_path, value)
+    elif invalid_input == "rollback-status-input-drift":
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        value["input_sha256"] = "3" * 64
+        rollback_sha256 = _write_canonical_owner_only(rollback_path, value)
+        result_sha256 = _rewrite_acceptance_result_rollback_digest(
+            result_path,
+            rollback_sha256,
+        )
+    elif invalid_input in {"invalid-rollback", "wrong-rollback-release"}:
+        value = json.loads(rollback_path.read_text(encoding="ascii"))
+        if invalid_input == "invalid-rollback":
+            value["ready"] = False
+        else:
+            value["release_sha256"] = "f" * 64
+        rollback_sha256 = _write_canonical_owner_only(rollback_path, value)
+        result_sha256 = _rewrite_acceptance_result_rollback_digest(
+            result_path,
+            rollback_sha256,
+        )
+    else:
+        value = json.loads(result_path.read_text(encoding="ascii"))
+        value["owners"][0]["initial"]["worker_available"] = True
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+        result_path.write_bytes(payload)
+        result_path.chmod(0o600)
+        result_sha256 = hashlib.sha256(payload).hexdigest()
+
+    with patch(
+        "loom_cli.personal_dev_control_plane_cmd._SubprocessKubectlRunner",
+        side_effect=AssertionError("verification must not construct a Kubernetes runner"),
+    ), patch(
+        "loom_cli.personal_dev_control_plane_cmd.subprocess.run",
+        side_effect=AssertionError("verification must not create a subprocess"),
+    ):
+        rc = dispatch(
+            _verify_acceptance_result_argv(
+                plan_path,
+                plan_sha256,
+                result_path,
+                result_sha256,
+                manifest_sha256,
+                rollback_manifest_path,
+                rollback_path,
+            )
+        )
+
+    assert rc == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_verify_acceptance_result_parser_has_no_mutation_options() -> None:
+    from loom_cli import personal_dev_control_plane_cmd
+
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(required=True)
+    personal_dev_control_plane_cmd.add_personal_dev_control_plane_subparser(subparsers)
+    verify = next(
+        action for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ).choices["personal-dev-control-plane"]
+    operations = next(
+        action for action in verify._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    option_names = {
+        option for action in operations.choices["verify-acceptance-result"]._actions
+        for option in action.option_strings
+    }
+    forbidden = {"--apply", "--activate", "--kubeconfig", "--database", "--secret", "--slurm",
+                 "--capacity"}
+    assert option_names.isdisjoint(forbidden)
+    assert "--rollback-shadow-manifest-file" in option_names
+
+
+def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None:
+    with pytest.raises(SystemExit) as exc:
+        dispatch([
+            "personal-dev-control-plane",
+            "verify-acceptance-result",
+            "--acceptance-plan-file",
+            "plan.json",
+        ])
+
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("present_option", "present_value"),
+    [
+        ("--rollback-shadow-manifest-file", "shadow.yaml"),
+        ("--rollback-shadow-status-file", "shadow-status.json"),
+    ],
+)
+def test_verify_acceptance_result_requires_both_rollback_shadow_files(
+    present_option: str,
+    present_value: str,
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        dispatch(
+            [
+                "personal-dev-control-plane",
+                "verify-acceptance-result",
+                "--acceptance-plan-file",
+                "plan.json",
+                "--acceptance-plan-sha256",
+                "1" * 64,
+                "--acceptance-result-file",
+                "result.json",
+                "--acceptance-result-sha256",
+                "2" * 64,
+                "--acceptance-manifest-sha256",
+                "3" * 64,
+                present_option,
+                present_value,
+            ]
+        )
+
+    assert exc.value.code == 2
 
 
 def test_render_emits_exact_yaml_and_canonical_evidence(
@@ -770,6 +1097,78 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "yaml_sha256": hashlib.sha256(expected.yaml_text.encode("utf-8")).hexdigest(),
+    }
+
+
+def test_render_acceptance_loads_v2_two_owner_local_input_without_shape_change(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    profile_path = tmp_path / "personal-dev-control-plane-v2.toml"
+    profile_path.write_text(
+        _PROFILE.read_text(encoding="utf-8")
+        .replace("global_live_instances = 16", "global_live_instances = 2")
+        .replace("builder_global_concurrency = 4", "builder_global_concurrency = 2"),
+        encoding="utf-8",
+    )
+    profile_path.chmod(0o600)
+    plan_path, _plan_digest, v1_plan = _acceptance_plan(
+        tmp_path,
+        release_path,
+        release_digest,
+        profile_path=profile_path,
+    )
+    profile = load_personal_dev_control_plane_profile(profile_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    v1_expected = render_acceptance_personal_dev_control_plane(
+        profile,
+        release,
+        v1_plan,
+        now=_NOW,
+    )
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    owner_1 = {
+        "team_id": "00000000-0000-0000-0000-000000000006",
+        "user_id": "00000000-0000-0000-0000-000000000005",
+    }
+    value["acceptance_owners"] = sorted(
+        [owner_0, owner_1],
+        key=lambda item: (item["team_id"], item["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    plan_path.write_bytes(payload)
+    plan_path.chmod(0o600)
+    plan_digest = hashlib.sha256(payload).hexdigest()
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_digest)
+    expected = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
+
+    result = dispatch(
+        _acceptance_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            profile=profile_path,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == expected.yaml_text
+    assert expected.resource_count == v1_expected.resource_count
+    assert {
+        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
+        for item in yaml.safe_load_all(expected.yaml_text)
+        if item and item["kind"] != "Job"
+    } == {
+        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
+        for item in yaml.safe_load_all(v1_expected.yaml_text)
+        if item and item["kind"] != "Job"
     }
 
 

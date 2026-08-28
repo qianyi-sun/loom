@@ -19,6 +19,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import httpx
 
 from loom.dev_instance import PER_INSTANCE_CAP, InvalidDevInstanceNameError, validate_name
+from loom.personal_dev_expected_denial import (
+    EXPECTED_HIDDEN_DENIAL_ERROR,
+    EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
+    expected_hidden_denial_phase,
+    expected_hidden_denial_receipt,
+)
 from loom_cli.server_client import (
     HttpStatusError,
     NotLoggedInError,
@@ -44,6 +50,16 @@ def _positive_float(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be positive")
     return parsed
@@ -124,19 +140,49 @@ def _wait_for_status(
         sleep(min(poll_interval, max(0.0, deadline - monotonic())))
 
 
-def _with_client(action: Callable[[httpx.Client], int], *, timeout: float = 30.0) -> int:
+def _write_expected_hidden_denial_result(
+    response: httpx.Response,
+    *,
+    operation: str,
+) -> int:
+    if (
+        response.status_code == 404
+        and response.headers.get(EXPECTED_HIDDEN_DENIAL_PHASE_HEADER)
+        == expected_hidden_denial_phase(operation)
+    ):
+        sys.stderr.write(expected_hidden_denial_receipt(operation).decode("ascii"))
+        return 1
+    sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+    return 2
+
+
+def _with_client(
+    action: Callable[[httpx.Client], int],
+    *,
+    timeout: float = 30.0,
+    expected_hidden_denial: bool = False,
+) -> int:
     try:
         cfg = require_logged_in()
     except NotLoggedInError as exc:
+        if expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 2
     try:
         with authed_client(cfg, timeout=timeout) as client:
             return action(client)
     except HttpStatusError as exc:
+        if expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 1
     except httpx.RequestError as exc:
+        if expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: could not reach {cfg.server_url}: {exc}\n")
         return 2
 
@@ -188,36 +234,48 @@ def _list(args: argparse.Namespace) -> int:
 
 def _status(args: argparse.Namespace) -> int:
     def action(client: httpx.Client) -> int:
+        response = client.get(f"/api/v1/dev-instances/{args.name}")
+        if args.expected_hidden_denial:
+            return _write_expected_hidden_denial_result(response, operation="read")
         body = assert_2xx(
-            client.get(f"/api/v1/dev-instances/{args.name}"),
+            response,
             action=f"fetch development environment {args.name!r}",
         )
         _print_instance(body, output_format=args.format)
         return 0
 
-    return _with_client(action)
+    return _with_client(
+        action,
+        expected_hidden_denial=args.expected_hidden_denial,
+    )
 
 
 def _destroy(args: argparse.Namespace) -> int:
+    if args.expected_hidden_denial and args.expected_operation_epoch is None:
+        sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+        return 2
+
     def action(client: httpx.Client) -> int:
-        current = assert_2xx(
-            client.get(f"/api/v1/dev-instances/{args.name}"),
-            action=f"fetch development environment {args.name!r} before destroy",
-        )
-        expected_epoch = current.get("operation_epoch")
-        if type(expected_epoch) is not int or expected_epoch <= 0:
-            raise HttpStatusError(
-                f"development environment {args.name!r} has no valid operation epoch"
+        expected_epoch = args.expected_operation_epoch
+        if expected_epoch is None:
+            current = assert_2xx(
+                client.get(f"/api/v1/dev-instances/{args.name}"),
+                action=f"fetch development environment {args.name!r} before destroy",
             )
-        if args.idempotency_key is not None and current.get("status") in {
-            "deleting",
-            "deleted",
-        }:
-            expected_epoch -= 1
-            if expected_epoch <= 0:
+            expected_epoch = current.get("operation_epoch")
+            if type(expected_epoch) is not int or expected_epoch <= 0:
                 raise HttpStatusError(
-                    f"development environment {args.name!r} has no retryable destroy epoch"
+                    f"development environment {args.name!r} has no valid operation epoch"
                 )
+            if args.idempotency_key is not None and current.get("status") in {
+                "deleting",
+                "deleted",
+            }:
+                expected_epoch -= 1
+                if expected_epoch <= 0:
+                    raise HttpStatusError(
+                        f"development environment {args.name!r} has no retryable destroy epoch"
+                    )
         idempotency_key = args.idempotency_key or uuid5(
             NAMESPACE_URL,
             (
@@ -225,15 +283,18 @@ def _destroy(args: argparse.Namespace) -> int:
                 f"{args.name}\0{expected_epoch}\0{str(args.keep_data).lower()}"
             ),
         )
+        response = client.delete(
+            f"/api/v1/dev-instances/{args.name}",
+            params={
+                "keep_data": str(args.keep_data).lower(),
+                "expected_operation_epoch": str(expected_epoch),
+                "idempotency_key": str(idempotency_key),
+            },
+        )
+        if args.expected_hidden_denial:
+            return _write_expected_hidden_denial_result(response, operation="destroy")
         body = assert_2xx(
-            client.delete(
-                f"/api/v1/dev-instances/{args.name}",
-                params={
-                    "keep_data": str(args.keep_data).lower(),
-                    "expected_operation_epoch": str(expected_epoch),
-                    "idempotency_key": str(idempotency_key),
-                },
-            ),
+            response,
             action=f"destroy development environment {args.name!r}",
         )
         if not args.no_wait and body.get("status") != "deleted":
@@ -247,7 +308,11 @@ def _destroy(args: argparse.Namespace) -> int:
         _print_instance(body, output_format=args.format)
         return 0
 
-    return _with_client(action, timeout=max(30.0, args.timeout))
+    return _with_client(
+        action,
+        timeout=max(30.0, args.timeout),
+        expected_hidden_denial=args.expected_hidden_denial,
+    )
 
 
 def _add_format(parser: argparse.ArgumentParser) -> None:
@@ -316,6 +381,14 @@ def dispatch(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="Show one development environment.")
     status.add_argument("name", type=_dev_instance_name)
+    status.add_argument(
+        "--expected-hidden-denial",
+        action="store_true",
+        help=(
+            "Probe one target GET and emit only the canonical receipt when it "
+            "returns hidden-resource HTTP 404."
+        ),
+    )
     _add_format(status)
     status.set_defaults(handler=_status)
 
@@ -334,6 +407,23 @@ def dispatch(argv: list[str]) -> int:
         "--idempotency-key",
         type=UUID,
         help="Use a stable UUID so an accepted destroy can be retried exactly.",
+    )
+    destroy.add_argument(
+        "--expected-operation-epoch",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Send DELETE directly with this positive compare-and-set epoch; "
+            "omit to preserve automatic GET-based epoch resolution."
+        ),
+    )
+    destroy.add_argument(
+        "--expected-hidden-denial",
+        action="store_true",
+        help=(
+            "With an explicit epoch, probe one target DELETE and emit only the "
+            "canonical receipt when it returns hidden-resource HTTP 404."
+        ),
     )
     _add_wait(destroy)
     _add_format(destroy)

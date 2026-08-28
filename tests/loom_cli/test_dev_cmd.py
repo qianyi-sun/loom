@@ -10,6 +10,21 @@ import pytest
 
 from loom_cli.__main__ import main
 
+_GENERIC_EXPECTED_DENIAL_ERROR = (
+    "error: expected hidden-resource denial was not observed\n"
+)
+_READ_DENIAL_RECEIPT = (
+    '{"error_code":"resource_hidden","http_method":"GET",'
+    '"schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,'
+    '"target_phase":"target_read"}\n'
+)
+_DESTROY_DENIAL_RECEIPT = (
+    '{"error_code":"resource_hidden","http_method":"DELETE",'
+    '"schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,'
+    '"target_phase":"target_destroy"}\n'
+)
+_DENIAL_PHASE_HEADER = "X-Loom-Personal-Dev-Hidden-Denial-Phase"
+
 
 def _instance(name: str = "alice", status: str = "ready") -> dict[str, Any]:
     return {
@@ -173,6 +188,8 @@ def test_destroy_help_advertises_candidate_backed_teardown(
     assert "candidate-backed" in output
     assert "ready" in output
     assert "--keep-data" in output
+    assert "--expected-operation-epoch" in output
+    assert "--expected-hidden-denial" in output
 
 
 def test_dev_help_distinguishes_candidate_create_and_destroy(
@@ -185,6 +202,168 @@ def test_dev_help_distinguishes_candidate_create_and_destroy(
     output = capsys.readouterr().out
     assert "candidate-less create" in output
     assert "candidate-backed destroy" in output
+
+
+def test_status_expected_hidden_denial_emits_only_the_canonical_target_get_receipt(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    server.replies.append(
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers={_DENIAL_PHASE_HEADER: "target_read"},
+        )
+    )
+
+    assert main(["dev", "status", "alice", "--expected-hidden-denial"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _READ_DENIAL_RECEIPT
+    assert [(request.method, request.url.path) for request in server.requests] == [
+        ("GET", "/api/v1/dev-instances/alice")
+    ]
+
+
+def test_destroy_expected_hidden_denial_sends_delete_first_with_exact_fencing(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    idempotency_key = "00000000-0000-0000-0000-000000000099"
+    server.replies.append(
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers={_DENIAL_PHASE_HEADER: "target_destroy"},
+        )
+    )
+
+    assert (
+        main(
+            [
+                "dev",
+                "destroy",
+                "alice",
+                "--expected-operation-epoch",
+                "7",
+                "--idempotency-key",
+                idempotency_key,
+                "--expected-hidden-denial",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _DESTROY_DENIAL_RECEIPT
+    assert [(request.method, request.url.path) for request in server.requests] == [
+        ("DELETE", "/api/v1/dev-instances/alice")
+    ]
+    assert server.requests[0].url.params == httpx.QueryParams(
+        {
+            "keep_data": "false",
+            "expected_operation_epoch": "7",
+            "idempotency_key": idempotency_key,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "status"),
+    [
+        ("read", 200),
+        ("read", 401),
+        ("read", 403),
+        ("read", 500),
+        ("destroy", 202),
+        ("destroy", 401),
+        ("destroy", 403),
+        ("destroy", 500),
+    ],
+)
+def test_expected_hidden_denial_modes_reject_every_non_404_target_response(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    status: int,
+) -> None:
+    server.replies.append(
+        httpx.Response(status, json={"detail": "dev-private-target must not escape"})
+    )
+    command = ["dev", "status", "alice", "--expected-hidden-denial"]
+    if operation == "destroy":
+        command = [
+            "dev",
+            "destroy",
+            "alice",
+            "--expected-operation-epoch",
+            "7",
+            "--expected-hidden-denial",
+        ]
+
+    assert main(command) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "dev-private-target" not in captured.err
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("operation", "headers"),
+    [
+        ("read", {}),
+        ("read", {_DENIAL_PHASE_HEADER: "target_destroy"}),
+        ("destroy", {}),
+        ("destroy", {_DENIAL_PHASE_HEADER: "target_read"}),
+    ],
+)
+def test_expected_hidden_denial_modes_reject_unmarked_or_wrong_phase_404(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    headers: dict[str, str],
+) -> None:
+    server.replies.append(
+        httpx.Response(
+            404,
+            json={"detail": "dev-private-target must not escape"},
+            headers=headers,
+        )
+    )
+    command = ["dev", "status", "alice", "--expected-hidden-denial"]
+    if operation == "destroy":
+        command = [
+            "dev",
+            "destroy",
+            "alice",
+            "--expected-operation-epoch",
+            "7",
+            "--expected-hidden-denial",
+        ]
+
+    assert main(command) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert "dev-private-target" not in captured.err
+    assert len(server.requests) == 1
+
+
+def test_destroy_expected_hidden_denial_requires_an_explicit_epoch_before_http(
+    server: _Server,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["dev", "destroy", "alice", "--expected-hidden-denial"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == _GENERIC_EXPECTED_DENIAL_ERROR
+    assert server.requests == []
 
 
 def test_destroy_preserves_data_only_when_explicit(

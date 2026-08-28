@@ -735,7 +735,9 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or candidate.candidate_sha != requested.candidate_sha
             or candidate.artifact_state != "retained"
         ):
-            raise PersonalDevEnvironmentNotFoundError("personal-dev candidate not found")
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev candidate is invalid for the requested apply",
+            )
         candidate.artifact_gc_unreferenced_at = None
         candidate.updated_at = now
 
@@ -752,8 +754,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
         capacity_supported_architectures: list[str] | None = None
         if environment is None:
             if requested.expected_operation_epoch != 0:
-                raise PersonalDevEnvironmentEpochFencedError(
-                    "personal-dev environment does not exist at the expected epoch",
+                raise PersonalDevEnvironmentNotFoundError(
+                    "personal-dev environment not found",
                 )
             await self._assert_limits(requested, replacing_name=None)
             subject_id = uuid4()

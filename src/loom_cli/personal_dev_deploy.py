@@ -10,6 +10,10 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from loom.personal_dev_expected_denial import (
+    EXPECTED_HIDDEN_DENIAL_PHASE_HEADER,
+    expected_hidden_denial_phase,
+)
 from loom.personal_dev_source import PersonalDevSourceSnapshotV1
 from loom_cli.server_client import assert_2xx
 
@@ -203,6 +207,65 @@ class PersonalDevDeployClient:
             )
         return int(environment["operation_epoch"])
 
+    def _request_apply(
+        self,
+        *,
+        name: str,
+        candidate: Mapping[str, Any],
+        min_slots: int,
+        max_slots: int,
+        expected_operation_epoch: int,
+        idempotency_key: UUID | None = None,
+    ) -> httpx.Response:
+        return self._client.put(
+            f"/api/v1/dev-instances/{name}",
+            json={
+                "candidate_id": str(candidate["id"]),
+                "candidate_sha": candidate["candidate_sha"],
+                "min_slots": min_slots,
+                "max_slots": max_slots,
+                "expected_operation_epoch": expected_operation_epoch,
+                "idempotency_key": str(idempotency_key or uuid4()),
+            },
+        )
+
+    def apply_expected_hidden_denial(
+        self,
+        *,
+        name: str,
+        candidate: Mapping[str, Any],
+        min_slots: int,
+        max_slots: int,
+        expected_operation_epoch: int,
+        idempotency_key: UUID | None = None,
+    ) -> bool:
+        """Return whether the exact target PUT was hidden with HTTP 404.
+
+        The response body is intentionally never parsed or copied into output.
+        """
+
+        if (
+            type(expected_operation_epoch) is not int
+            or expected_operation_epoch <= 0
+        ):
+            raise PersonalDevDeployError(
+                "expected hidden-denial operation epoch must be positive",
+            )
+
+        response = self._request_apply(
+            name=name,
+            candidate=candidate,
+            min_slots=min_slots,
+            max_slots=max_slots,
+            expected_operation_epoch=expected_operation_epoch,
+            idempotency_key=idempotency_key,
+        )
+        return (
+            response.status_code == 404
+            and response.headers.get(EXPECTED_HIDDEN_DENIAL_PHASE_HEADER)
+            == expected_hidden_denial_phase("update")
+        )
+
     def apply(
         self,
         *,
@@ -213,16 +276,13 @@ class PersonalDevDeployClient:
         expected_operation_epoch: int,
         idempotency_key: UUID | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        response = self._client.put(
-            f"/api/v1/dev-instances/{name}",
-            json={
-                "candidate_id": str(candidate["id"]),
-                "candidate_sha": candidate["candidate_sha"],
-                "min_slots": min_slots,
-                "max_slots": max_slots,
-                "expected_operation_epoch": expected_operation_epoch,
-                "idempotency_key": str(idempotency_key or uuid4()),
-            },
+        response = self._request_apply(
+            name=name,
+            candidate=candidate,
+            min_slots=min_slots,
+            max_slots=max_slots,
+            expected_operation_epoch=expected_operation_epoch,
+            idempotency_key=idempotency_key,
         )
         body = assert_2xx(response, action=f"apply development environment {name!r}")
         environment = _environment(

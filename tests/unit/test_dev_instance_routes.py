@@ -27,6 +27,10 @@ from loom.personal_dev_environment import (
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
+from loom.personal_dev_environment_store import (
+    PersonalDevEnvironmentConflictError,
+    PersonalDevEnvironmentNotFoundError,
+)
 from loom.personal_dev_runtime import (
     PersonalDevAcceptanceInterlockError,
     PersonalDevOperationalInterlockError,
@@ -325,7 +329,7 @@ async def test_create_list_get_destroy_owner_lifecycle() -> None:
     assert response.status_code == 202
 
 
-async def test_cross_owner_detail_is_hidden() -> None:
+async def test_cross_owner_detail_is_hidden_with_exact_read_phase() -> None:
     store = _Store()
     request = _request(store)
     await create_dev_instance(
@@ -340,6 +344,63 @@ async def test_cross_owner_detail_is_hidden() -> None:
             (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_read",
+    }
+
+
+async def test_missing_detail_is_indistinguishable_from_cross_owner_detail() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await get_dev_instance(
+            "absent",
+            _request(_Store()),
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_read",
+    }
+
+
+async def test_cross_owner_destroy_is_hidden_with_exact_destroy_phase() -> None:
+    store = _Store()
+    request = _request(store)
+    await create_dev_instance(
+        DevInstanceCreateRequest(name="alice"),
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await delete_dev_instance(
+            "alice",
+            request,
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+            Response(),
+            keep_data=False,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_destroy",
+    }
+
+
+async def test_missing_destroy_is_indistinguishable_from_cross_owner_destroy() -> None:
+    with pytest.raises(HTTPException) as exc:
+        await delete_dev_instance(
+            "absent",
+            _request(_Store()),
+            (object(), _ctx(_OTHER)),  # type: ignore[arg-type]
+            Response(),
+            keep_data=False,
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_destroy",
+    }
 
 
 async def test_mutation_fails_closed_when_runtime_is_not_configured() -> None:
@@ -533,6 +594,72 @@ async def test_personal_apply_fails_before_mutation_when_builder_is_inert() -> N
         )
 
     assert exc.value.status_code == 503
+
+
+async def test_personal_apply_marks_only_hidden_target_not_found_response() -> None:
+    class _Authority:
+        async def apply(self, requested, *, access_binding, now=None):
+            raise PersonalDevEnvironmentNotFoundError(
+                "personal-dev environment not found",
+            )
+
+    request = _request(_Store(), configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_builder_available = True
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_personal_dev_environment(
+            "alice",
+            PersonalDevEnvironmentApplyPayload(
+                candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=0,
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000011"),
+            ),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.headers == {
+        "X-Loom-Personal-Dev-Hidden-Denial-Phase": "target_update",
+    }
+
+
+async def test_personal_apply_maps_candidate_conflict_to_unmarked_409() -> None:
+    class _Authority:
+        async def apply(self, requested, *, access_binding, now=None):
+            raise PersonalDevEnvironmentConflictError(
+                "personal-dev candidate is invalid for the requested apply",
+            )
+
+    request = _request(_Store(), configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_builder_available = True
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_personal_dev_environment(
+            "alice",
+            PersonalDevEnvironmentApplyPayload(
+                candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=2,
+                expected_operation_epoch=0,
+                idempotency_key=UUID("00000000-0000-0000-0000-000000000011"),
+            ),
+            request,
+            (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+            Response(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.headers is None
 
 
 async def test_personal_destroy_requires_epoch_and_submits_durable_authority() -> None:

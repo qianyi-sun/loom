@@ -1687,7 +1687,7 @@ class IsolatedRehearsalExecutor:
                     controller_artifact,
                     observation,
                     unit_dir=GB10_CONTROLLER_UNIT_DIR,
-                ) not in {"ready", "exact"}:
+                ) not in {"ready", "exact", "repairable"}:
                     raise ValueError("GB10 controller observation is invalid")
                 controller_proof_digests[STAGING_GB10_CONTROLLER_EXECUTION_HOST] = hashlib.sha256(
                     _json_bytes(

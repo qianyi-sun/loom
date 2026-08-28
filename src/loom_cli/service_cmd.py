@@ -608,6 +608,10 @@ def _print_personal_summary(environment: dict[str, object]) -> None:
 
 
 def _up_personal(args: argparse.Namespace) -> int:
+    from loom.personal_dev_expected_denial import (
+        EXPECTED_HIDDEN_DENIAL_ERROR,
+        expected_hidden_denial_receipt,
+    )
     from loom.personal_dev_source import (
         PersonalDevSourceError,
         create_personal_dev_source_snapshot,
@@ -657,30 +661,48 @@ def _up_personal(args: argparse.Namespace) -> int:
                 else deploy.expected_operation_epoch(name)
             )
             if args.candidate is not None:
-                print(f"→ resolving owned ready candidate {args.candidate}")
+                if not args.quiet:
+                    print(f"→ resolving owned ready candidate {args.candidate}")
                 candidate = deploy.resolve_ready_candidate(args.candidate)
             else:
                 contexts = tuple(args.source_context or (".",))
                 with tempfile.TemporaryDirectory(prefix="loom-personal-dev-source-") as directory:
                     archive = Path(directory) / "source.tar"
-                    print(
-                        f"→ sealing source from {source_root} "
-                        f"for {args.environment}"
-                    )
+                    if not args.quiet:
+                        print(
+                            f"→ sealing source from {source_root} "
+                            f"for {args.environment}"
+                        )
                     snapshot = create_personal_dev_source_snapshot(
                         source_root,
                         archive,
                         contexts=contexts,
                     )
-                    print(
-                        "→ uploading immutable personal-dev source "
-                        f"{snapshot.source_digest}"
-                    )
+                    if not args.quiet:
+                        print(
+                            "→ uploading immutable personal-dev source "
+                            f"{snapshot.source_digest}"
+                        )
                     candidate = deploy.upload_snapshot(archive, snapshot)
-            print(
-                f"→ applying {args.environment} at expected operation epoch "
-                f"{expected_epoch}"
-            )
+            if not args.quiet:
+                print(
+                    f"→ applying {args.environment} at expected operation epoch "
+                    f"{expected_epoch}"
+                )
+            if args.expected_hidden_denial:
+                if deploy.apply_expected_hidden_denial(
+                    name=name,
+                    candidate=candidate,
+                    min_slots=min_slots,
+                    max_slots=max_slots,
+                    expected_operation_epoch=expected_epoch,
+                ):
+                    sys.stderr.write(
+                        expected_hidden_denial_receipt("update").decode("ascii")
+                    )
+                    return 1
+                sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+                return 2
             environment, operation = deploy.apply(
                 name=name,
                 candidate=candidate,
@@ -699,15 +721,30 @@ def _up_personal(args: argparse.Namespace) -> int:
                     timeout=timeout,
                     poll_interval=poll_interval,
                 )
-            _print_personal_summary(environment)
+            if not args.quiet:
+                _print_personal_summary(environment)
             return 0
     except NotLoggedInError as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 2
     except (PersonalDevSourceError, PersonalDevDeployError, HttpStatusError) as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: {exc}\n")
         return 1
+    except (KeyError, TypeError, ValueError):
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
+        raise
     except httpx.RequestError as exc:
+        if args.expected_hidden_denial:
+            sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+            return 2
         sys.stderr.write(f"error: could not reach {server}: {exc}\n")
         return 2
 
@@ -743,7 +780,7 @@ def _personal_options_present(args: argparse.Namespace) -> bool:
             args.timeout,
             args.poll_interval,
         )
-    ) or bool(args.no_wait)
+    ) or bool(args.no_wait or args.expected_hidden_denial)
 
 
 def _local_options_present(args: argparse.Namespace) -> bool:
@@ -773,6 +810,20 @@ def _populate_local_defaults(args: argparse.Namespace) -> None:
 
 
 def _up(args: argparse.Namespace) -> int:
+    if args.expected_hidden_denial and (
+        not args.environment.startswith("dev-")
+        or args.candidate is None
+        or args.expected_operation_epoch is None
+        or args.expected_operation_epoch <= 0
+        or not args.quiet
+    ):
+        from loom.personal_dev_expected_denial import EXPECTED_HIDDEN_DENIAL_ERROR
+
+        sys.stderr.write(EXPECTED_HIDDEN_DENIAL_ERROR)
+        return 2
+    if args.quiet and not args.environment.startswith("dev-"):
+        sys.stderr.write("error: --quiet is only valid for personal dev-<name> deployments\n")
+        return 2
     if args.environment == "local":
         if args.candidate is not None:
             sys.stderr.write("error: --candidate is not valid for --environment local\n")
@@ -1047,6 +1098,19 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         ),
     )
     personal_options = p_up.add_argument_group("personal-development options")
+    personal_options.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress personal deployment progress and success output.",
+    )
+    personal_options.add_argument(
+        "--expected-hidden-denial",
+        action="store_true",
+        help=(
+            "With --candidate, a positive explicit epoch, and --quiet, emit only the "
+            "canonical receipt when the target PUT returns hidden-resource HTTP 404."
+        ),
+    )
     personal_options.add_argument(
         "--source-root",
         type=Path,

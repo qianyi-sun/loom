@@ -867,6 +867,55 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
+def test_acceptance_status_v2_two_owners_preserves_observed_resource_shape(
+    tmp_path: Path,
+) -> None:
+    v1_expected, v1_plan = _acceptance_inputs(tmp_path)
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    owner_1 = {
+        "team_id": "00000000-0000-0000-0000-000000000006",
+        "user_id": "00000000-0000-0000-0000-000000000005",
+    }
+    value["acceptance_owners"] = sorted(
+        [owner_0, owner_1],
+        key=lambda item: (item["team_id"], item["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = replace(
+        profile,
+        limits=replace(
+            profile.limits,
+            global_live_instances=2,
+            builder_global_concurrency=2,
+        ),
+    )
+    release_path = tmp_path / "acceptance-trusted-release.json"
+    release_payload = release_path.read_bytes()
+    release = load_personal_dev_trusted_release(
+        release_path,
+        hashlib.sha256(release_payload).hexdigest(),
+    )
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    value["release"]["shadow_manifest_sha256"] = hashlib.sha256(
+        shadow.yaml_text.encode("utf-8")
+    ).hexdigest()
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "acceptance-plan-v2.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    plan = load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
+    expected = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
+
+    result = _observe_acceptance(expected, plan, _enabled_healthy_runner(expected, plan))
+
+    assert result.ready is True
+    assert expected.resource_count == v1_expected.resource_count
+
+
 def test_healthy_operational_is_durable_and_zero_capacity(tmp_path: Path) -> None:
     expected, plan, runner = _operational_healthy_fixture(tmp_path)
 
