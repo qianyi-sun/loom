@@ -298,6 +298,15 @@ zero-capacity observations, and cleanup proof. It rejects Secret values and
 cannot be substituted by readiness, object counts alone, or an operator-authored
 claim.
 
+An incompatible service/schema boundary uses the separate
+[personal-development schema-transition procedure](../runbooks/personal-dev-schema-transition.md).
+It binds one exact forward migration to the predecessor dump and database
+fingerprint, rehearses both forward migration and full restore in isolation,
+quiesces all management writers before live migration, and restores the full
+predecessor database before restarting the predecessor shadow on any failed
+post-quiesce transition. Reapplying an old manifest or attempting Alembic
+downgrade is not authoritative recovery.
+
 Repository implementation does not establish the live prerequisites by
 itself. DNS and TLS, provisioned Secret inventories, the measured gVisor
 RuntimeClass, candidate GHCR publication, backup/restore evidence, the

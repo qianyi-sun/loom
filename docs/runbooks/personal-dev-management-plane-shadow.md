@@ -12,6 +12,12 @@ rollback artifact, and global-capacity zero-ceiling shadow already approved.
 This runbook contains no personal application deployment or physical-capacity
 transition.
 
+When the reviewed release advances to a schema on which the predecessor
+service cannot start, use the
+[incompatible-schema transition](personal-dev-schema-transition.md). Reapplying
+this shadow runbook alone is not a database rollback and must not cross an
+incompatible schema boundary.
+
 ## Stop conditions
 
 Before rendering, and again immediately before apply or rollback:

@@ -50,10 +50,15 @@ from loom.personal_dev_control_plane_status import (
     observe_personal_dev_operational_status,
     observe_personal_dev_shadow_status,
 )
+from loom.personal_dev_schema_transition import (
+    prepare_personal_dev_schema_transition,
+    validate_personal_dev_schema_transition_source_root,
+)
 
 _RENDER_ERROR = "error: personal-dev control-plane render inputs are invalid\n"
 _STATUS_ERROR = "error: personal-dev control-plane status inputs are invalid\n"
 _EVIDENCE_ERROR = "error: personal-dev acceptance evidence inputs are invalid\n"
+_SCHEMA_TRANSITION_ERROR = "error: personal-dev schema transition inputs are invalid\n"
 _VERIFICATION_ERROR = "error: personal-dev acceptance result inputs are invalid\n"
 _KUBECTL_READ_BYTES = 64 * 1024
 _MAX_KUBECONFIG_BYTES = 1024 * 1024
@@ -241,6 +246,62 @@ def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
         )
         + "\n"
     )
+    return 0
+
+
+def _render_schema_transition(args: argparse.Namespace) -> int:
+    try:
+        source_root = args.source_root.resolve(strict=True)
+        if (
+            args.source_root != source_root
+            or args.file != source_root / "deploy/dev-fleet/personal-dev-control-plane.toml"
+            or Path(__file__).resolve(strict=True)
+            != source_root / "src/loom_cli/personal_dev_control_plane_cmd.py"
+        ):
+            raise ValueError
+        profile = load_personal_dev_control_plane_profile(args.file)
+        current_release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        predecessor_release = load_personal_dev_trusted_release(
+            args.predecessor_trusted_release_file,
+            args.predecessor_trusted_release_sha256,
+        )
+        validate_personal_dev_schema_transition_source_root(
+            args.source_root,
+            release=current_release,
+            alembic_ini_path=args.alembic_config_file,
+        )
+        prepared = prepare_personal_dev_schema_transition(
+            profile=profile,
+            current_release=current_release,
+            current_release_sha256=args.trusted_release_sha256,
+            predecessor_release=predecessor_release,
+            predecessor_release_sha256=args.predecessor_trusted_release_sha256,
+            backup_evidence_path=args.backup_restore_evidence_file,
+            backup_evidence_sha256=args.backup_restore_evidence_sha256,
+            postgres_dump_path=args.postgres_dump_file,
+            postgres_source_state_path=args.postgres_source_state_file,
+            predecessor_shadow_path=args.predecessor_shadow_manifest_file,
+            predecessor_shadow_sha256=args.predecessor_shadow_manifest_sha256,
+            alembic_ini_path=args.alembic_config_file,
+            expected_predecessor_head=args.expected_predecessor_schema_head,
+            expected_target_head=args.expected_target_schema_head,
+        )
+        validate_personal_dev_schema_transition_source_root(
+            args.source_root,
+            release=current_release,
+            alembic_ini_path=args.alembic_config_file,
+        )
+    except (OSError, TypeError, ValueError):
+        sys.stderr.write(_SCHEMA_TRANSITION_ERROR)
+        return 2
+    try:
+        sys.stdout.write(prepared.migration_job_json.decode("ascii"))
+    except BrokenPipeError:
+        return 0
+    sys.stderr.write(prepared.plan_json.decode("ascii") + "\n")
     return 0
 
 
@@ -994,6 +1055,44 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
     backup.add_argument("--isolated-minio-name", required=True)
     backup.add_argument("--isolated-network-name", required=True)
     backup.set_defaults(handler=_render_backup_restore_evidence)
+
+    transition = operations.add_parser(
+        "render-schema-transition",
+        allow_abbrev=False,
+        help="Bind an exact migration Job to a proven predecessor restore boundary.",
+    )
+    transition.add_argument("--file", type=Path, required=True)
+    transition.add_argument("--trusted-release-file", type=Path, required=True)
+    transition.add_argument("--trusted-release-sha256", required=True)
+    transition.add_argument("--source-root", type=Path, required=True)
+    transition.add_argument(
+        "--predecessor-trusted-release-file",
+        type=Path,
+        required=True,
+    )
+    transition.add_argument("--predecessor-trusted-release-sha256", required=True)
+    transition.add_argument(
+        "--backup-restore-evidence-file",
+        type=Path,
+        required=True,
+    )
+    transition.add_argument("--backup-restore-evidence-sha256", required=True)
+    transition.add_argument("--postgres-dump-file", type=Path, required=True)
+    transition.add_argument(
+        "--postgres-source-state-file",
+        type=Path,
+        required=True,
+    )
+    transition.add_argument(
+        "--predecessor-shadow-manifest-file",
+        type=Path,
+        required=True,
+    )
+    transition.add_argument("--predecessor-shadow-manifest-sha256", required=True)
+    transition.add_argument("--alembic-config-file", type=Path, required=True)
+    transition.add_argument("--expected-predecessor-schema-head", required=True)
+    transition.add_argument("--expected-target-schema-head", required=True)
+    transition.set_defaults(handler=_render_schema_transition)
 
     render_acceptance = operations.add_parser(
         "render-acceptance",
