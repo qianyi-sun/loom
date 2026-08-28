@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 MAX_OBSERVATION_CHARS = 65536
@@ -230,7 +230,8 @@ class OpenHandsEventMapper:
         if tool_call_id:
             self._pending[tool_call_id] = pending
             return out
-        return out + [
+        return [
+            *out,
             self._tool_use_envelope(
                 tool_name=tool_name,
                 args=args,
@@ -239,7 +240,7 @@ class OpenHandsEventMapper:
                 reasoning_content=_think_tool_reasoning(tool_name, args, reasoning_content),
                 thought=thought,
                 summary=summary,
-            )
+            ),
         ]
 
     def _map_observation_event(self, event: object) -> list[dict[str, object]]:

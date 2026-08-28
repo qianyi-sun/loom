@@ -32,7 +32,6 @@ from loom.trajectory.object_identity import (
     resolve_trajectory_object_key,
 )
 from loom_service.delivery_export_openhands import (
-    OpenHandsExportError,
     build_per_trial_openhands_bundle,
 )
 from loom_service.delivery_export_tb2_v2 import (

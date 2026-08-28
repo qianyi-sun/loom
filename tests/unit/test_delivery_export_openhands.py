@@ -10,7 +10,6 @@ import pytest
 
 from loom.db.schema import Trial
 from loom.models.trajectory import (
-    EventKind,
     OpenHandsSdkArtifactRefEvent,
     OpenHandsSdkRuntimeProvenanceEvent,
 )
@@ -71,7 +70,7 @@ class _FakeS3:
     def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
         self.objects = objects
 
-    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:  # noqa: N803
         return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
 
 

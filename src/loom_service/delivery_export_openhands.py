@@ -7,8 +7,6 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from botocore.exceptions import ClientError
-
 from loom.agent.openhands_sdk.mapper import OpenHandsSdkTrajectoryMapper
 from loom.agent.openhands_sdk.provenance import LOOM_BRIDGE_REVISION
 from loom.db.schema import LlmCall, Trial
