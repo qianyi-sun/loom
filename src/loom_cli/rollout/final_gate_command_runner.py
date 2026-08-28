@@ -33,6 +33,7 @@ _TIMEOUTS = {
     "final.browser": 900,
     "final.summary": 300,
 }
+FINAL_GATE_MAX_ELAPSED_SECONDS = sum(_TIMEOUTS.values())
 
 
 class CommandResult(Protocol):
@@ -187,6 +188,7 @@ def _strict_json_object(payload: str) -> dict[str, object]:
 
 __all__ = [
     "FINAL_GATE_HELPER_PATH",
+    "FINAL_GATE_MAX_ELAPSED_SECONDS",
     "CommandResult",
     "CommandRunner",
     "InstalledFinalGateStepRunner",

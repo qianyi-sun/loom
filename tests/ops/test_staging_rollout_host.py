@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import threading
 from pathlib import Path
 from typing import ClassVar
@@ -72,6 +73,7 @@ class FakeSystem:
         self.shared_work2_mounted = False
         self.preflight_credentials = False
         self.credential_refresh_timer = False
+        self.mutation_guard_reconcile_timer = False
         self.preflight_candidate_source = False
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
@@ -307,6 +309,17 @@ class FakeSystem:
 
     def disable_credential_refresh_timer(self) -> None:
         self.credential_refresh_timer = False
+
+    def mutation_guard_reconcile_timer_ready(self) -> bool:
+        return self.mutation_guard_reconcile_timer
+
+    def ensure_mutation_guard_reconcile_timer(self, *, reload_units: bool) -> bool:
+        changed = reload_units or not self.mutation_guard_reconcile_timer
+        self.mutation_guard_reconcile_timer = True
+        return changed
+
+    def disable_mutation_guard_reconcile_timer(self) -> None:
+        self.mutation_guard_reconcile_timer = False
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -1016,6 +1029,9 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh",
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh.service",
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh.timer",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile.service",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile.timer",
         "deploy/staging-rollout/loom-staging-rollout-final-gate",
         "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
@@ -1778,6 +1794,35 @@ def test_upgrade_from_legacy_attestation_reimports_only_protected_worker_env(
     assert installer.filesystem.read_bytes(host.GENERATED_GB10_ENV_SEED) == protected
     upgraded = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
     assert upgraded["asset_sha256"]["worker-env-template"] == hashlib.sha256(protected).hexdigest()
+
+
+@pytest.mark.parametrize("without_worker_env", [False, True])
+def test_upgrade_accepts_only_exact_pre_mutation_guard_asset_schemas(
+    tmp_path: Path,
+    without_worker_env: bool,
+) -> None:
+    installer, _ = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    statement = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    for label in {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    }:
+        statement["asset_sha256"].pop(label)
+    if without_worker_env:
+        statement["asset_sha256"].pop("worker-env-template")
+    installer.filesystem.atomic_write(
+        host.INSTALL_ATTESTATION,
+        (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        0o640,
+        expected_nlink=1,
+    )
+
+    assert installer.install(TEAM_ID)["ok"] is True
+
+    upgraded = json.loads(installer.filesystem.read_bytes(host.INSTALL_ATTESTATION))
+    assert set(upgraded["asset_sha256"]) == host._INSTALL_ATTESTATION_ASSETS
 
 
 def test_reinstall_rejects_worker_env_drift_before_attestation_publication(
@@ -2688,6 +2733,95 @@ def test_check_rejects_disabled_credential_refresh_timer(tmp_path: Path) -> None
 
     assert result["ok"] is False
     assert "credential-refresh-timer" in result["failures"]
+
+
+def test_mutation_guard_reconcile_assets_converge_and_uninstall_cleanly(tmp_path: Path) -> None:
+    helper_source = host.DEPLOY_ROOT / "loom-staging-rollout-mutation-guard-reconcile"
+    service_source = helper_source.with_name(
+        "loom-staging-rollout-mutation-guard-reconcile.service"
+    )
+    timer_source = helper_source.with_name("loom-staging-rollout-mutation-guard-reconcile.timer")
+    helper_text = helper_source.read_text(encoding="utf-8")
+    service_text = service_source.read_text(encoding="utf-8")
+    timer_text = timer_source.read_text(encoding="utf-8")
+
+    syntax = subprocess.run(
+        ["bash", "-n", str(helper_source)], check=False, capture_output=True, text=True
+    )
+
+    assert syntax.returncode == 0, syntax.stderr
+    assert "__CANDIDATE_VENV__" in helper_text
+    assert "loom_cli.rollout.operator.staging_mutation_guard reconcile" in helper_text
+    assert "-u loom-rollout -- /usr/bin/env -i" in helper_text
+    assert '"$@"' not in helper_text
+    assert "User=root" in service_text
+    assert "Group=root" in service_text
+    timeout_line = next(
+        line for line in service_text.splitlines() if line.startswith("TimeoutStartSec=")
+    )
+    timeout_minutes = int(timeout_line.removeprefix("TimeoutStartSec=").removesuffix("min"))
+    timeout_seconds = timeout_minutes * 60
+    full_reconcile_bound = (
+        3 * 120  # initial GET plus restore GET/PATCH
+        + 2 * 15  # candidate SHA/tree resolution
+        + 6 * 30  # guard show, fence list/two kills, two absence inventories
+        + 1  # stable-absence poll
+    )
+    assert timeout_seconds >= full_reconcile_bound + 60
+    assert f"ExecStart={host.MUTATION_GUARD_RECONCILE_PATH}" in service_text
+    assert "OnBootSec=1min" in timer_text
+    assert "OnUnitActiveSec=1min" in timer_text
+    assert "Persistent=true" in timer_text
+    assert f"Unit={host.MUTATION_GUARD_RECONCILE_SERVICE}" in timer_text
+
+    installer, system = _installer(tmp_path)
+    first = installer.install(TEAM_ID)
+    second = installer.install(TEAM_ID)
+
+    candidate_venv = host._candidate_venv_path("a" * 40)
+    installed_helper = installer.filesystem.path(host.MUTATION_GUARD_RECONCILE_PATH)
+    assert str(candidate_venv / "bin/python") in installed_helper.read_text(encoding="utf-8")
+    assert "__CANDIDATE_VENV__" not in installed_helper.read_text(encoding="utf-8")
+    for path in (
+        host.MUTATION_GUARD_RECONCILE_PATH,
+        host.MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+        host.MUTATION_GUARD_RECONCILE_TIMER_PATH,
+    ):
+        assert installer.filesystem.exists(path)
+        assert (
+            path,
+            "root",
+            "root",
+            0o755 if path == host.MUTATION_GUARD_RECONCILE_PATH else 0o644,
+        ) in (system.install_owner_calls)
+    assert system.mutation_guard_reconcile_timer is True
+    assert "mutation-guard-reconcile-timer" in first["changed"]
+    assert second["changed"] == []
+    assert installer.check()["ok"] is True
+    attestation = json.loads(
+        installer.filesystem.path(host.INSTALL_ATTESTATION).read_text(encoding="utf-8")
+    )
+    assert {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    } <= set(attestation["asset_sha256"])
+
+    system.mutation_guard_reconcile_timer = False
+    assert "mutation-guard-reconcile-timer" in installer.check()["failures"]
+
+    result = installer.uninstall(retain_ledger=True)
+
+    assert result["ok"] is True
+    assert system.mutation_guard_reconcile_timer is False
+    assert not any(
+        installer.filesystem.exists(path)
+        for path in (
+            host.MUTATION_GUARD_RECONCILE_PATH,
+            host.MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+            host.MUTATION_GUARD_RECONCILE_TIMER_PATH,
+        )
+    )
 
 
 def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
@@ -4146,6 +4280,20 @@ def _status_metadata(mode: int, *, uid: int, gid: int) -> os.stat_result:
         (
             host.CommandResult(
                 0,
+                "loom-staging-backup-request-1.service loaded active running backup\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-mutation-guard-request-1.service loaded active running guard\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
                 "loom-staging-rollout-request-1.service loaded maintenance dead rollout\n",
             ),
             "busy",
@@ -4196,6 +4344,8 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
                 uid=service_uid,
                 gid=service_gid,
             )
+        if path == host.STATE_ROOT / "requests":
+            raise FileNotFoundError(path)
         assert path == host.ACTIVE_POINTER
         raise FileNotFoundError(path)
 
@@ -4230,10 +4380,96 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
                 "--no-legend",
                 "--no-pager",
                 "loom-staging-rollout-*.service",
+                "loom-staging-backup-*.service",
+                "loom-staging-mutation-guard-*.service",
             ],
             {"check": False},
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("backup_pending", "busy"),
+        ("backup_running", "busy"),
+        ("backup_cancel_requested", "busy"),
+        ("backup_verified", "busy"),
+        ("launch_pending", "busy"),
+        ("launch_running", "idle"),
+        ("backup_failed", "idle"),
+    ],
+)
+def test_active_status_includes_safe_durable_preflight_backup_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    expected: str,
+) -> None:
+    service_uid = os.geteuid()
+    service_gid = os.getegid()
+    state_root = tmp_path / "state"
+    requests_root = state_root / "requests"
+    request_root = requests_root / "req-alpha"
+    backup_root = request_root / "preflight-backup"
+    backup_root.mkdir(parents=True)
+    for directory in (state_root, requests_root, request_root, backup_root):
+        directory.chmod(0o700)
+    state: dict[str, object] = {
+        "failure_code": None,
+        "job_id": "job-alpha000",
+        "lease_digest": None,
+        "manifest_sha256": None,
+        "preflight_attestation_sha256": None,
+        "phase": phase,
+        "request_id": "req-alpha",
+        "schema_version": 1,
+        "sequence": 0,
+        "updated_at": None,
+    }
+    if phase in {"backup_verified", "launch_pending", "launch_running"}:
+        state.update(
+            {
+                "lease_digest": "d" * 64,
+                "manifest_sha256": "e" * 64,
+                "preflight_attestation_sha256": "f" * 64,
+            }
+        )
+    if phase == "backup_failed":
+        state["failure_code"] = "backup_failed"
+    state_path = backup_root / "state.json"
+    state_path.write_text(json.dumps(state) + "\n")
+    state_path.chmod(0o600)
+    marker = tmp_path / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    active_pointer = state_root / "active.json"
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", active_pointer)
+    monkeypatch.setattr(host, "MAINTENANCE_MARKER", marker)
+    real_lstat = host.os.lstat
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        metadata = real_lstat(path)
+        if Path(path) == marker:
+            values = list(metadata)
+            values[4] = 0
+            values[5] = 0
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            identity = _service_identity_result(call, uid=service_uid, gid=service_gid)
+            if identity is not None:
+                return identity
+            return host.CommandResult(0)
+
+    assert host.HostSystem(StatusRunner()).active_status() == expected
 
 
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
