@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +32,22 @@ def _text_from_content(raw: object) -> str:
                 parts.append(str(item))
         return "\n".join(parts)
     return str(raw)
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _text_from_thought(thought: Sequence[object]) -> str:
+    parts: list[str] = []
+    for item in thought:
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def _parse_tool_arguments(raw: object) -> dict[str, Any]:
@@ -68,6 +85,22 @@ def _action_arguments(event: object) -> dict[str, Any]:
                 if key != "kind" and value is not None
             }
     return {}
+
+
+def _action_metadata(event: object) -> dict[str, str | None]:
+    return {
+        "reasoning_content": _optional_str(getattr(event, "reasoning_content", None)),
+        "thought": _optional_str(_text_from_thought(getattr(event, "thought", []) or [])),
+        "summary": _optional_str(getattr(event, "summary", None)),
+    }
+
+
+def _think_tool_reasoning(tool_name: str, args: dict[str, Any], reasoning_content: str | None) -> str | None:
+    if reasoning_content:
+        return reasoning_content
+    if tool_name == "think":
+        return _optional_str(args.get("thought"))
+    return None
 
 
 class OpenHandsEventMapper:
@@ -121,12 +154,22 @@ class OpenHandsEventMapper:
     def flush_pending(self) -> list[dict[str, object]]:
         out: list[dict[str, object]] = []
         for tool_call_id, pending in list(self._pending.items()):
+            tool_name = str(pending["tool_name"])
+            args = dict(pending["args"])
+            reasoning_content = _think_tool_reasoning(
+                tool_name,
+                args,
+                _optional_str(pending.get("reasoning_content")),
+            )
             out.append(
                 self._tool_use_envelope(
-                    tool_name=str(pending["tool_name"]),
-                    args=dict(pending["args"]),
+                    tool_name=tool_name,
+                    args=args,
                     result=None,
                     tool_call_id=tool_call_id,
+                    reasoning_content=reasoning_content,
+                    thought=_optional_str(pending.get("thought")),
+                    summary=_optional_str(pending.get("summary")),
                 )
             )
         self._pending.clear()
@@ -136,26 +179,68 @@ class OpenHandsEventMapper:
         source = getattr(event, "source", "")
         llm_message = getattr(event, "llm_message", None)
         content = _text_from_content(getattr(llm_message, "content", None) if llm_message else None)
-        if not content.strip():
-            return []
-        if source == "user":
-            content = f"user: {content}"
-        return [self._envelope("agent_thought", content=content, tokens=None)]
+        reasoning_content = _optional_str(
+            getattr(llm_message, "reasoning_content", None) if llm_message else None,
+        )
+        out: list[dict[str, object]] = []
+        if content.strip():
+            if source == "user":
+                content = f"user: {content}"
+            out.append(self._envelope("agent_thought", content=content, tokens=None))
+        if reasoning_content:
+            out.append(
+                self._envelope(
+                    "agent_thought",
+                    content=reasoning_content,
+                    reasoning_content=reasoning_content,
+                    sdk_event_type="MessageEvent",
+                    tokens=None,
+                )
+            )
+        return out
 
     def _map_action_event(self, event: object) -> list[dict[str, object]]:
         tool_call_id = str(getattr(event, "tool_call_id", "") or "")
         tool_name = str(getattr(event, "tool_name", "") or "unknown")
         args = _action_arguments(event)
+        metadata = _action_metadata(event)
+        reasoning_content = metadata["reasoning_content"]
+        thought = metadata["thought"]
+        summary = metadata["summary"]
+
+        out: list[dict[str, object]] = []
+        primary = reasoning_content or thought
+        if primary:
+            thought_fields: dict[str, object] = {
+                "content": primary,
+                "tokens": None,
+                "sdk_event_type": "ActionEvent",
+            }
+            if reasoning_content:
+                thought_fields["reasoning_content"] = reasoning_content
+            if thought:
+                thought_fields["thought"] = thought
+            if summary:
+                thought_fields["summary"] = summary
+            if tool_call_id:
+                thought_fields["tool_call_id"] = tool_call_id
+            out.append(self._envelope("agent_thought", **thought_fields))
+
+        pending = {"tool_name": tool_name, "args": args, **metadata}
         if tool_call_id:
-            self._pending[tool_call_id] = {"tool_name": tool_name, "args": args}
-            return []
+            self._pending[tool_call_id] = pending
+            return out
         return [
+            *out,
             self._tool_use_envelope(
                 tool_name=tool_name,
                 args=args,
                 result=None,
                 tool_call_id=None,
-            )
+                reasoning_content=_think_tool_reasoning(tool_name, args, reasoning_content),
+                thought=thought,
+                summary=summary,
+            ),
         ]
 
     def _map_observation_event(self, event: object) -> list[dict[str, object]]:
@@ -169,8 +254,14 @@ class OpenHandsEventMapper:
 
         pending = self._pending.pop(tool_call_id, None) if tool_call_id else None
         args = dict(pending["args"]) if pending else {}
+        reasoning_content: str | None = None
+        thought: str | None = None
+        summary: str | None = None
         if pending:
             tool_name = str(pending["tool_name"])
+            reasoning_content = _optional_str(pending.get("reasoning_content"))
+            thought = _optional_str(pending.get("thought"))
+            summary = _optional_str(pending.get("summary"))
 
         result: dict[str, Any] = {"content": content}
         if tool_call_id:
@@ -184,6 +275,9 @@ class OpenHandsEventMapper:
                 args=args,
                 result=result,
                 tool_call_id=tool_call_id or None,
+                reasoning_content=_think_tool_reasoning(tool_name, args, reasoning_content),
+                thought=thought,
+                summary=summary,
             )
         ]
 
@@ -194,14 +288,23 @@ class OpenHandsEventMapper:
         args: dict[str, Any],
         result: dict[str, Any] | None,
         tool_call_id: str | None,
+        reasoning_content: str | None = None,
+        thought: str | None = None,
+        summary: str | None = None,
     ) -> dict[str, object]:
         if tool_call_id and result is not None and "tool_call_id" not in result:
             result = {**result, "tool_call_id": tool_call_id}
-        return self._envelope(
-            "tool_use",
-            tool_name=tool_name,
-            args=args,
-            result=result,
-            error=None,
-            duration_sec=0.0,
-        )
+        fields: dict[str, object] = {
+            "tool_name": tool_name,
+            "args": args,
+            "result": result,
+            "error": None,
+            "duration_sec": 0.0,
+        }
+        if reasoning_content:
+            fields["reasoning_content"] = reasoning_content
+        if thought:
+            fields["thought"] = thought
+        if summary:
+            fields["summary"] = summary
+        return self._envelope("tool_use", **fields)

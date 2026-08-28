@@ -410,6 +410,19 @@ Use `raw-harbor-tb2-v2` only when selected trials contain typed checkpoint
 events and hash-verified native artifacts. Use `raw-harbor-tb2-v1` when the
 source trial has only provider-log-based execution data.
 
+Use `--mode openhands-export` when selected trials ran with the `openhands-sdk`
+agent and the trajectory contains `openhands_sdk_*` typed events plus a
+hash-verified native artifact at `native/openhands_sdk_events.json`. This mode
+projects execution history from the post-run SDK event dump (not global ATIF),
+keeps model input in `model_input_trajectory.json`, and preserves the live audit
+spine as `loom_trajectory.jsonl`:
+
+```bash
+loom eval batch delivery-bundle <batch-id> \
+  --mode openhands-export \
+  --output openhands-export-delivery.tar.gz
+```
+
 `delivery-bundle` asks the service to choose the final trial for each
 task/sample/combination coordinate across the main batch and any explicit
 supplemental rerun batches. Later linked reruns replace earlier failed attempts

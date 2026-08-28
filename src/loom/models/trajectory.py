@@ -65,6 +65,9 @@ class EventKind(StrEnum):
     TERMINUS2_LLM_CALL_FAILED = "terminus2_llm_call_failed"
     TERMINUS2_EPISODE_CHECKPOINT = "terminus2_episode_checkpoint"
     TERMINUS2_RECOVERY_FAILED = "terminus2_recovery_failed"
+    # OpenHands SDK native runtime (#1590)
+    OPENHANDS_SDK_RUNTIME_PROVENANCE = "openhands_sdk_runtime_provenance"
+    OPENHANDS_SDK_ARTIFACT_REF = "openhands_sdk_artifact_ref"
 
 
 class _EventBase(BaseModel):
@@ -485,6 +488,28 @@ class Terminus2RecoveryFailedEvent(_EventBase):
     last_episode: int | None = None
 
 
+# OpenHands SDK native runtime (#1590) ──────────────────────────────────────────
+
+class OpenHandsSdkRuntimeProvenanceEvent(_EventBase):
+    kind: Literal[EventKind.OPENHANDS_SDK_RUNTIME_PROVENANCE] = (
+        EventKind.OPENHANDS_SDK_RUNTIME_PROVENANCE
+    )
+    sdk_version: str
+    openhands_tools_version: str
+    loom_bridge_revision: str
+
+
+class OpenHandsSdkArtifactRefEvent(_EventBase):
+    kind: Literal[EventKind.OPENHANDS_SDK_ARTIFACT_REF] = (
+        EventKind.OPENHANDS_SDK_ARTIFACT_REF
+    )
+    artifact_kind: Literal["openhands_sdk.events"]
+    sandbox_path: str
+    content_hash: str
+    size_bytes: int = Field(ge=0)
+    share_policy: Literal["restricted", "shared"]
+
+
 TrajectoryEvent = Annotated[
     TrialStartEvent | TrialEndEvent | TrialErrorEvent | TrialCancelledEvent
     | StepStartEvent | StepEndEvent
@@ -501,6 +526,7 @@ TrajectoryEvent = Annotated[
     | Terminus2ModelMixPlannedEvent
     | Terminus2LlmCallStartedEvent | Terminus2LlmCallCompletedEvent
     | Terminus2LlmCallFailedEvent | Terminus2EpisodeCheckpointEvent
-    | Terminus2RecoveryFailedEvent,
+    | Terminus2RecoveryFailedEvent
+    | OpenHandsSdkRuntimeProvenanceEvent | OpenHandsSdkArtifactRefEvent,
     Field(discriminator="kind"),
 ]
