@@ -15,6 +15,8 @@ import pytest
 from loom_cli.rollout.operator.readonly_database_client import DatabaseQuery
 from loom_cli.rollout.operator.staging_mutation_guard import (
     MutationGuardError,
+    MutationGuardEvidence,
+    MutationGuardManager,
     guard_evidence_path,
     hold_request_guard,
     read_mutation_guard_evidence,
@@ -434,3 +436,104 @@ def test_guard_evidence_is_private_regular_service_state(tmp_path: Path) -> None
     assert stat.S_IMODE(metadata.st_mode) == 0o600
     assert metadata.st_uid == os.getuid()
     assert metadata.st_nlink == 1
+
+
+def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    ready = MutationGuardEvidence.build(
+        request_id=_REQUEST_ID,
+        candidate_sha=_CANDIDATE_SHA,
+        candidate_tree=_CANDIDATE_TREE,
+        mutation_epoch=100,
+        guard_pid=4321,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="ready",
+    )
+    directory = guard_evidence_path(config, _REQUEST_ID).parent
+    directory.mkdir(mode=0o700)
+    path = guard_evidence_path(config, _REQUEST_ID)
+    path.write_text(json.dumps(ready.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
+    path.chmod(0o600)
+
+    class Systemd:
+        def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+            assert request_id == _REQUEST_ID
+            return ready
+
+        def show_mutation_guard(self, request_id: str):  # type: ignore[no-untyped-def]
+            assert request_id == _REQUEST_ID
+            return type("Status", (), {"is_running": True, "main_pid": 4321})()
+
+        def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+            assert request_id == _REQUEST_ID
+            return MutationGuardEvidence.build(
+                request_id=ready.request_id,
+                candidate_sha=ready.candidate_sha,
+                candidate_tree=ready.candidate_tree,
+                mutation_epoch=ready.mutation_epoch,
+                guard_pid=ready.guard_pid,
+                cronjob_uid=ready.cronjob_uid,
+                suspended_resource_version=ready.suspended_resource_version,
+                state="released",
+            )
+
+    manager = MutationGuardManager(
+        config=config,
+        service_uid=os.getuid(),
+        systemd=Systemd(),
+        resolve_candidate=lambda _config: (_CANDIDATE_SHA, _CANDIDATE_TREE),
+    )
+
+    assert manager.acquire(_REQUEST_ID) == ready
+    assert manager.assert_ready(_REQUEST_ID) == ready
+    assert manager.release(_REQUEST_ID).state == "released"
+
+
+def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_drifts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    drifted = MutationGuardEvidence.build(
+        request_id=_REQUEST_ID,
+        candidate_sha=_CANDIDATE_SHA,
+        candidate_tree="c" * 40,
+        mutation_epoch=100,
+        guard_pid=4321,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="ready",
+    )
+    stopped: list[str] = []
+
+    class Systemd:
+        def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+            return drifted
+
+        def show_mutation_guard(self, request_id: str):  # type: ignore[no-untyped-def]
+            raise AssertionError(request_id)
+
+        def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+            stopped.append(request_id)
+            return MutationGuardEvidence.build(
+                request_id=drifted.request_id,
+                candidate_sha=drifted.candidate_sha,
+                candidate_tree=drifted.candidate_tree,
+                mutation_epoch=drifted.mutation_epoch,
+                guard_pid=drifted.guard_pid,
+                cronjob_uid=drifted.cronjob_uid,
+                suspended_resource_version=drifted.suspended_resource_version,
+                state="released",
+            )
+
+    manager = MutationGuardManager(
+        config=config,
+        service_uid=os.getuid(),
+        systemd=Systemd(),
+        resolve_candidate=lambda _config: (_CANDIDATE_SHA, _CANDIDATE_TREE),
+    )
+
+    with pytest.raises(MutationGuardError, match="binding drifted"):
+        manager.acquire(_REQUEST_ID)
+
+    assert stopped == [_REQUEST_ID]

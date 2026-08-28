@@ -159,6 +159,48 @@ class Bundle:
     order: list[str]
 
 
+class FakeMutationGuard:
+    def __init__(
+        self,
+        order: list[str],
+        *,
+        candidate_sha: str = "a" * 40,
+        mutation_epoch: int = 7,
+        release_error: Exception | None = None,
+        record: bool = True,
+    ) -> None:
+        self.order = order
+        self.candidate_sha = candidate_sha
+        self.mutation_epoch = mutation_epoch
+        self.release_error = release_error
+        self.record = record
+        self.ready: list[str] = []
+        self.released: list[str] = []
+
+    def acquire(self, request_id: str):  # type: ignore[no-untyped-def]
+        raise AssertionError(f"worker must not acquire guard for {request_id}")
+
+    def assert_ready(self, request_id: str):  # type: ignore[no-untyped-def]
+        if self.record:
+            self.order.append("guard-ready")
+        self.ready.append(request_id)
+        return SimpleNamespace(
+            request_id=request_id,
+            candidate_sha=self.candidate_sha,
+            candidate_tree="b" * 40,
+            mutation_epoch=self.mutation_epoch,
+            state="ready",
+        )
+
+    def release(self, request_id: str):  # type: ignore[no-untyped-def]
+        if self.record:
+            self.order.append("guard-release")
+        self.released.append(request_id)
+        if self.release_error is not None:
+            raise self.release_error
+        return SimpleNamespace(request_id=request_id, state="released")
+
+
 def worker_fakes(*, driver_rc: int = 0) -> Bundle:
     envelope = valid_envelope()
     order: list[str] = []
@@ -182,8 +224,35 @@ def worker_fakes(*, driver_rc: int = 0) -> Bundle:
         run_driver=run_driver,
         now=lambda: "2026-07-14T12:00:00Z",
         stderr=io.StringIO(),
+        mutation_guard=FakeMutationGuard(order, record=False),
     )
     return Bundle(deps, store, order)
+
+
+@pytest.mark.parametrize("driver_rc", [0, 1])
+def test_attempt_releases_guard_before_every_terminal_event(driver_rc: int) -> None:
+    bundle = worker_fakes(driver_rc=driver_rc)
+    guard = FakeMutationGuard(bundle.order)
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    assert run_attempt(valid_envelope(), dependencies) == driver_rc
+
+    terminal = "attempt_done" if driver_rc == 0 else "attempt_failed"
+    assert bundle.order.index("guard-ready") < bundle.order.index("driver-run")
+    assert bundle.order.index("guard-release") < bundle.order.index(terminal)
+    assert guard.released == [REQUEST_ID]
+
+
+def test_attempt_release_failure_prevents_apparent_success_terminal_event() -> None:
+    bundle = worker_fakes()
+    guard = FakeMutationGuard(bundle.order, release_error=RuntimeError("release failed"))
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        run_attempt(valid_envelope(), dependencies)
+
+    assert "attempt_done" not in bundle.order
+    assert bundle.store.active is not None
 
 
 def test_worker_holds_lifecycle_lock_and_runs_only_finalized_envelope() -> None:
@@ -384,6 +453,15 @@ def _backup_worker_store(tmp_path: Path) -> tuple[RequestStore, PreflightBackupJ
     return store, job
 
 
+def _backup_mutation_guard(job: PreflightBackupJobEnvelope) -> FakeMutationGuard:
+    return FakeMutationGuard(
+        [],
+        candidate_sha=job.candidate_sha,
+        mutation_epoch=job.mutation_epoch,
+        record=False,
+    )
+
+
 def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None:
     store, job = _backup_worker_store(tmp_path)
     deps = WorkerDependencies(
@@ -396,6 +474,7 @@ def test_backup_worker_publishes_only_verified_cas_state(tmp_path: Path) -> None
             lease_digest="e" * 64,
             preflight_attestation_sha256="f" * 64,
         ),
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -430,6 +509,11 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
             )
 
     lifecycle = LaunchLifecycle()
+    guard = FakeMutationGuard(
+        order,
+        candidate_sha=job.candidate_sha,
+        mutation_epoch=job.mutation_epoch,
+    )
 
     def reconcile(
         envelope: PreflightBackupJobEnvelope,
@@ -463,6 +547,7 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
         ),
         finalize_backup=finalize,
         reconcile_verified_backup=reconcile,
+        mutation_guard=guard,
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -477,12 +562,19 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
     assert envelope.backup_manifest_sha256 == "d" * 64
     assert envelope.preflight_attestation_sha256 == "f" * 64
     assert lifecycle.launched == [envelope]
-    assert order == ["reconcile", "finalize", "launch"]
+    assert order == ["guard-ready", "reconcile", "finalize", "launch"]
+    assert guard.released == []
 
 
 def test_backup_worker_recovery_failure_blocks_publish_and_launch(tmp_path: Path) -> None:
     store, job = _backup_worker_store(tmp_path)
     finalized = False
+    order: list[str] = []
+    guard = FakeMutationGuard(
+        order,
+        candidate_sha=job.candidate_sha,
+        mutation_epoch=job.mutation_epoch,
+    )
 
     def finalize(_request, _verified):  # type: ignore[no-untyped-def]
         nonlocal finalized
@@ -503,6 +595,7 @@ def test_backup_worker_recovery_failure_blocks_publish_and_launch(tmp_path: Path
         reconcile_verified_backup=lambda _envelope, _verified: (_ for _ in ()).throw(
             RuntimeError("rotation convergence failed")
         ),
+        mutation_guard=guard,
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -511,8 +604,54 @@ def test_backup_worker_recovery_failure_blocks_publish_and_launch(tmp_path: Path
     state = store.read_preflight_backup_job_state(REQUEST_ID)
     assert state.phase is LifecyclePhase.BACKUP_FAILED
     assert finalized is False
+    assert order == ["guard-ready", "guard-release"]
     with pytest.raises(RequestStoreError):
         store.read_request(REQUEST_ID)
+
+
+def test_backup_worker_releases_guard_when_attempt_launch_fails(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    config = make_config(tmp_path)
+    order: list[str] = []
+    guard = FakeMutationGuard(
+        order,
+        candidate_sha=job.candidate_sha,
+        mutation_epoch=job.mutation_epoch,
+    )
+
+    class FailingLifecycle:
+        def launch(self, _envelope: DriverEnvelope) -> ActivePointer:
+            order.append("launch")
+            raise RuntimeError("attempt launch failed")
+
+    def finalize(request, verified):  # type: ignore[no-untyped-def]
+        return worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
+            config,
+            store,
+            request,
+            verified,
+        )
+
+    dependencies = WorkerDependencies(
+        store=store,
+        lifecycle=FailingLifecycle(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        finalize_backup=finalize,
+        mutation_guard=guard,
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    with pytest.raises(RuntimeError, match="attempt launch failed"):
+        run_backup_job(job, dependencies)
+
+    assert order == ["guard-ready", "launch", "guard-release"]
 
 
 def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:
@@ -541,6 +680,7 @@ def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=cancel_during_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -562,6 +702,7 @@ def test_backup_worker_persists_secret_safe_backup_stage_code(tmp_path: Path) ->
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=fail_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -602,6 +743,7 @@ def test_inventory_tunnel_failure_reaches_private_diagnostic_and_public_status(
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=run_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=stderr,
     )
@@ -659,6 +801,7 @@ def test_private_diagnostic_write_failure_does_not_drop_durable_event(tmp_path: 
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=fail_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=FailingStderr(),
     )
@@ -681,6 +824,7 @@ def test_backup_worker_redacts_unclassified_failure_text(tmp_path: Path) -> None
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=fail_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=stderr,
     )
@@ -712,6 +856,7 @@ def test_backup_worker_unclassified_failure_pinpoints_raise_site(tmp_path: Path)
         lifecycle=object(),
         run_driver=lambda _path, _resume: 0,
         run_backup=fail_backup,
+        mutation_guard=_backup_mutation_guard(job),
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=stderr,
     )

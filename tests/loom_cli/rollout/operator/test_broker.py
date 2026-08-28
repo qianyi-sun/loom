@@ -296,6 +296,33 @@ class FakeSystemd:
         return iter(self.journal)
 
 
+class FakeMutationGuard:
+    def __init__(self, order: list[str], *, mutation_epoch: int = 7) -> None:
+        self.order = order
+        self.mutation_epoch = mutation_epoch
+        self.acquired: list[str] = []
+        self.released: list[str] = []
+
+    def acquire(self, request_id: str):  # type: ignore[no-untyped-def]
+        self.order.append("guard-acquire")
+        self.acquired.append(request_id)
+        return SimpleNamespace(
+            request_id=request_id,
+            candidate_sha=SHA,
+            candidate_tree="b" * 40,
+            mutation_epoch=self.mutation_epoch,
+            state="ready",
+        )
+
+    def assert_ready(self, request_id: str):  # type: ignore[no-untyped-def]
+        raise AssertionError(f"broker must not assert worker readiness for {request_id}")
+
+    def release(self, request_id: str):  # type: ignore[no-untyped-def]
+        self.order.append("guard-release")
+        self.released.append(request_id)
+        return SimpleNamespace(request_id=request_id, state="released")
+
+
 class FakeLifecycle:
     def __init__(self, store: FakeStore, systemd: FakeSystemd, order: list[str]) -> None:
         self.store = store
@@ -1293,6 +1320,7 @@ def test_staged_start_rejects_malformed_artifact_evidence_before_publication(
         ),
         assess_preflight=lambda _candidate, _epoch: malformed,
         read_mutation_epoch=lambda: 7,
+        mutation_guard=FakeMutationGuard(deps.order),
         new_request_id=lambda: "req-malformed01",
         new_backup_job_id=lambda: "job-malformed01",
         new_payload_id=lambda: "payload-malform01",
@@ -1466,6 +1494,7 @@ def test_devansh_staged_start_publishes_short_lock_detached_checkpoint_job(
         bind_candidate=lambda: candidate,
         assess_preflight=assess,
         read_mutation_epoch=lambda: 7,
+        mutation_guard=FakeMutationGuard(deps.order),
         new_request_id=lambda: "req-staged0001",
         new_backup_job_id=lambda: "job-staged0001",
         new_payload_id=lambda: "payload-staged01",
@@ -1621,6 +1650,137 @@ def test_devansh_staged_start_publishes_short_lock_detached_checkpoint_job(
     )
     assert failed_rotation.retirements[0].reason == "failed"
     assert failed_store.read_active() is None
+
+
+def _guarded_staged_start(
+    tmp_path: Path,
+    *,
+    epochs: tuple[int, ...] = (7, 7),
+    store: RequestStore | None = None,
+) -> tuple[FakeBundle, BrokerDependencies, RequestStore, FakeMutationGuard]:
+    bundle = fakes(tmp_path)
+    staged_store = store or RequestStore(tmp_path / "guarded-staged-state")
+    assessment = _published_assessment(tmp_path)
+    candidate = replace(bundle.candidate.bind(), resolved_tree="b" * 40)
+    bundle.order.clear()
+    observed_epochs = iter(epochs)
+    guard = FakeMutationGuard(bundle.order)
+
+    class StagedLifecycle:
+        depth = 0
+
+        @contextmanager
+        def launch_guard(self):  # type: ignore[no-untyped-def]
+            self.depth += 1
+            bundle.order.append("launch-guard-acquire")
+            try:
+                yield
+            finally:
+                bundle.order.append("launch-guard-release")
+                self.depth -= 1
+
+        def assert_admission_open(self) -> None:
+            assert self.depth == 1
+
+        def reconcile_active(self) -> ReconciliationResult:
+            return ReconciliationResult(
+                outcome="idle",
+                pointer=None,
+                cleared=False,
+                safe_status={},
+            )
+
+    def assess(found: CandidateBinding, epoch: int) -> PreflightAssessment:
+        assert found == candidate
+        assert epoch == 7
+        bundle.order.append("tier-0-2")
+        return assessment
+
+    def read_epoch() -> int:
+        value = next(observed_epochs)
+        bundle.order.append(f"epoch-{value}")
+        return value
+
+    dependencies = replace(
+        bundle.dependencies,
+        store=staged_store,
+        lifecycle=StagedLifecycle(),
+        bind_candidate=lambda: candidate,
+        assess_preflight=assess,
+        read_mutation_epoch=read_epoch,
+        mutation_guard=guard,
+        new_request_id=lambda: "req-guarded001",
+        new_backup_job_id=lambda: "job-guarded001",
+        new_payload_id=lambda: "payload-guarded1",
+    )
+    return bundle, dependencies, staged_store, guard
+
+
+def test_staged_start_acquires_guard_after_tier_0_2_and_hands_off_to_backup(
+    tmp_path: Path,
+) -> None:
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path)
+
+    assert broker_main(["start"], dependencies=dependencies) == 0
+
+    assert guard.acquired == ["req-guarded001"]
+    assert guard.released == []
+    assert bundle.order.index("tier-0-2") < bundle.order.index("guard-acquire")
+    second_epoch = [index for index, value in enumerate(bundle.order) if value == "epoch-7"][1]
+    assert bundle.order.index("guard-acquire") < second_epoch
+    assert store.read_preflight_request("req-guarded001").mutation_epoch == 7
+    assert bundle.systemd.backup_starts[-1][1] == ("loom-staging-backup-req-guarded001.service")
+
+
+def test_staged_dry_run_never_acquires_mutation_guard(tmp_path: Path) -> None:
+    bundle, dependencies, store, guard = _guarded_staged_start(tmp_path)
+
+    assert broker_main(["start", "--dry-run"], dependencies=dependencies) == 0
+
+    assert guard.acquired == []
+    assert guard.released == []
+    assert bundle.systemd.backup_starts == []
+    assert store.read_preflight_request("req-guarded001").status == "preview"
+
+
+def test_staged_start_releases_guard_on_post_readiness_epoch_drift_without_publication(
+    tmp_path: Path,
+) -> None:
+    _bundle, dependencies, store, guard = _guarded_staged_start(tmp_path, epochs=(7, 8))
+
+    assert broker_main(["start"], dependencies=dependencies) == 1
+
+    assert guard.acquired == ["req-guarded001"]
+    assert guard.released == ["req-guarded001"]
+    with pytest.raises(RequestStoreError, match="does not exist"):
+        store.read_preflight_request("req-guarded001")
+
+
+@pytest.mark.parametrize("failure", ["persistence", "launch"])
+def test_staged_start_releases_guard_on_every_pre_handoff_failure(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    class FailingRequestStore(RequestStore):
+        def create_preflight_request(self, request):  # type: ignore[no-untyped-def]
+            raise RequestStoreError("injected request persistence failure")
+
+    staged_store = (
+        FailingRequestStore(tmp_path / "guarded-staged-state")
+        if failure == "persistence"
+        else RequestStore(tmp_path / "guarded-staged-state")
+    )
+    bundle, dependencies, _store, guard = _guarded_staged_start(
+        tmp_path,
+        store=staged_store,
+    )
+    if failure == "launch":
+        bundle.systemd.backup_start_error = RuntimeError("injected backup launch failure")
+
+    assert broker_main(["start"], dependencies=dependencies) == 1
+
+    assert guard.acquired == ["req-guarded001"]
+    assert guard.released == ["req-guarded001"]
 
 
 def test_backup_failure_never_publishes_envelope_or_starts_unit(tmp_path: Path) -> None:

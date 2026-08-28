@@ -52,6 +52,7 @@ from .model import (
 from .policy import sanitized_child_environment
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
+from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore
 from .systemd import SystemdUserManager
 
@@ -197,6 +198,7 @@ class WorkerDependencies:
     run_driver: Callable[[Path, bool], int]
     now: Callable[[], str]
     stderr: TextIO
+    mutation_guard: Any | None = None
     envelope_path: Callable[[DriverEnvelope], Path] | None = None
     load_envelope: Callable[[Path], DriverEnvelope] | None = None
     load_backup_job: Callable[[Path], PreflightBackupJobEnvelope] | None = None
@@ -214,6 +216,37 @@ class WorkerDependencies:
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
     final_admission: Callable[[DriverEnvelope], FinalAttestationAdmission] | None = None
     run_final_gates: Callable[[DriverEnvelope, FinalAttestationAdmission], int] | None = None
+
+
+def _mutation_guard(dependencies: WorkerDependencies) -> Any:
+    if dependencies.mutation_guard is None:
+        raise ValueError("staging mutation guard is unavailable")
+    return dependencies.mutation_guard
+
+
+def _assert_mutation_guard_ready(
+    dependencies: WorkerDependencies,
+    *,
+    request_id: str,
+    candidate_sha: str,
+    candidate_tree: str | None = None,
+    mutation_epoch: int | None = None,
+) -> None:
+    evidence = _mutation_guard(dependencies).assert_ready(request_id)
+    if (
+        evidence.request_id != request_id
+        or evidence.candidate_sha != candidate_sha
+        or evidence.state != "ready"
+        or (candidate_tree is not None and evidence.candidate_tree != candidate_tree)
+        or (mutation_epoch is not None and evidence.mutation_epoch != mutation_epoch)
+    ):
+        raise ValueError("staging mutation guard binding drifted")
+
+
+def _release_mutation_guard(dependencies: WorkerDependencies, request_id: str) -> None:
+    evidence = _mutation_guard(dependencies).release(request_id)
+    if evidence.request_id != request_id or evidence.state != "released":
+        raise ValueError("staging mutation guard release drifted")
 
 
 class _FinalAdmissionAuthority(Protocol):
@@ -450,11 +483,13 @@ def _worker_now(dependencies: WorkerDependencies) -> datetime:
     return value.astimezone(UTC)
 
 
-def run_attempt(
+def _run_attempt_owned(
     envelope: DriverEnvelope,
     dependencies: WorkerDependencies,
     *,
     signals: _SignalController | None = None,
+    assert_guard_ready: Callable[[], None],
+    release_guard: Callable[[], None],
 ) -> int:
     """Run one immutable attempt while holding the full-driver lifecycle lock."""
     pointer = ActivePointer(
@@ -484,8 +519,11 @@ def run_attempt(
             pointer.unit_name,
         ):
             raise ValueError("worker attempt does not own the active staging pointer")
+        assert_guard_ready()
         final_admission: FinalAttestationAdmission | None = None
         if dependencies.final_admission is None and dependencies.run_final_gates is not None:
+            signal_controller.seal_terminal(event_cancelled=False)
+            release_guard()
             dependencies.store.append_event(
                 _event(
                     envelope,
@@ -496,13 +534,14 @@ def run_attempt(
                     current_step="00-final-admission",
                 )
             )
-            signal_controller.seal_terminal(event_cancelled=False)
             dependencies.lifecycle.release_active(pointer)
             return 1
         if dependencies.final_admission is not None:
             try:
                 final_admission = dependencies.final_admission(envelope)
             except Exception:
+                signal_controller.seal_terminal(event_cancelled=False)
+                release_guard()
                 dependencies.store.append_event(
                     _event(
                         envelope,
@@ -513,10 +552,11 @@ def run_attempt(
                         current_step="00-final-admission",
                     )
                 )
-                signal_controller.seal_terminal(event_cancelled=False)
                 dependencies.lifecycle.release_active(pointer)
                 return 1
             if dependencies.run_final_gates is None:
+                signal_controller.seal_terminal(event_cancelled=False)
+                release_guard()
                 dependencies.store.append_event(
                     _event(
                         envelope,
@@ -527,7 +567,6 @@ def run_attempt(
                         current_step="00-final-gate-runner",
                     )
                 )
-                signal_controller.seal_terminal(event_cancelled=False)
                 dependencies.lifecycle.release_active(pointer)
                 return 1
         dependencies.store.set_active(running_pointer)
@@ -600,9 +639,49 @@ def run_attempt(
                 ),
             )
             return_code = 1
+        release_guard()
         dependencies.store.append_event(terminal_event)
         dependencies.lifecycle.release_active(running_pointer)
         return return_code
+
+
+def run_attempt(
+    envelope: DriverEnvelope,
+    dependencies: WorkerDependencies,
+    *,
+    signals: _SignalController | None = None,
+) -> int:
+    """Run one immutable attempt while retaining request-bound guard ownership."""
+
+    _mutation_guard(dependencies)
+    guard_owned = False
+    release_attempted = False
+
+    def assert_guard_ready() -> None:
+        nonlocal guard_owned
+        guard_owned = True
+        _assert_mutation_guard_ready(
+            dependencies,
+            request_id=envelope.request_id,
+            candidate_sha=envelope.resolved_sha,
+        )
+
+    def release_guard() -> None:
+        nonlocal release_attempted
+        release_attempted = True
+        _release_mutation_guard(dependencies, envelope.request_id)
+
+    try:
+        return _run_attempt_owned(
+            envelope,
+            dependencies,
+            signals=signals,
+            assert_guard_ready=assert_guard_ready,
+            release_guard=release_guard,
+        )
+    finally:
+        if guard_owned and not release_attempted:
+            release_guard()
 
 
 def _seal_backup_failure(
@@ -624,11 +703,12 @@ def _seal_backup_failure(
     )
 
 
-def run_backup_job(
+def _run_backup_job_owned(
     envelope: PreflightBackupJobEnvelope,
     dependencies: WorkerDependencies,
     *,
     signals: _SignalController | None = None,
+    handoff_guard: Callable[[], None],
 ) -> int:
     """Run one detached backup and publish only verified CAS state."""
     if dependencies.run_backup is None:
@@ -790,6 +870,7 @@ def run_backup_job(
         expected_sequence=completed.sequence,
     )
     dependencies.lifecycle.launch(driver_envelope)
+    handoff_guard()
     launch_running = transition_backup_job(
         launch_pending,
         LifecycleAction.START_LAUNCH,
@@ -800,6 +881,52 @@ def run_backup_job(
         expected_sequence=launch_pending.sequence,
     )
     return 0
+
+
+def run_backup_job(
+    envelope: PreflightBackupJobEnvelope,
+    dependencies: WorkerDependencies,
+    *,
+    signals: _SignalController | None = None,
+) -> int:
+    """Run one backup while retaining guard ownership through attempt launch."""
+
+    if dependencies.run_backup is None:
+        raise ValueError("backup worker implementation is unavailable")
+    persisted = dependencies.store.read_preflight_backup_job(envelope.request_id)
+    if persisted != envelope:
+        raise ValueError("worker backup envelope does not match immutable job")
+    dependencies.store.read_preflight_request(envelope.request_id)
+    dependencies.store.read_preflight_assessment(envelope.request_id)
+    state = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+    if state.phase is not LifecyclePhase.BACKUP_PENDING:
+        raise ValueError("backup worker job is not pending")
+    guard = _mutation_guard(dependencies)
+    guard_transferred = False
+    try:
+        evidence = guard.assert_ready(envelope.request_id)
+        if (
+            evidence.request_id != envelope.request_id
+            or evidence.candidate_sha != envelope.candidate_sha
+            or evidence.candidate_tree != envelope.candidate_tree
+            or evidence.mutation_epoch != envelope.mutation_epoch
+            or evidence.state != "ready"
+        ):
+            raise ValueError("staging mutation guard binding drifted")
+
+        def handoff_guard() -> None:
+            nonlocal guard_transferred
+            guard_transferred = True
+
+        return _run_backup_job_owned(
+            envelope,
+            dependencies,
+            signals=signals,
+            handoff_guard=handoff_guard,
+        )
+    finally:
+        if not guard_transferred:
+            _release_mutation_guard(dependencies, envelope.request_id)
 
 
 def _finalize_verified_backup(
@@ -898,6 +1025,11 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         run=lambda argv: _run(argv, environment=child_environment),
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+    mutation_guard = MutationGuardManager(
+        config=config,
+        service_uid=service_uid,
+        systemd=systemd,
+    )
 
     def clock() -> datetime:
         return datetime.now(UTC)
@@ -988,6 +1120,7 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         run_driver=run_driver,
         now=lambda: clock().isoformat().replace("+00:00", "Z"),
         stderr=sys.stderr,
+        mutation_guard=mutation_guard,
         envelope_path=lambda envelope: (
             config.state_root
             / "requests"

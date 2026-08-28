@@ -87,6 +87,7 @@ from .readonly_database_client import (
     probe_installed_readonly_database_baseline,
 )
 from .redaction import known_secrets_from_sources, redact_rollout_text
+from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore, RequestStoreError
 from .systemd import (
     JournalLineStream,
@@ -265,6 +266,7 @@ class BrokerDependencies:
     stdout: TextIO
     stderr: TextIO
     known_secrets: Callable[[], Iterable[str]]
+    mutation_guard: Any | None = None
     authorize_preflight: Callable[[CandidateBinding], PreflightPipelineResult] | None = None
     assess_preflight: Callable[[CandidateBinding, int], PreflightAssessment] | None = None
     read_mutation_epoch: Callable[[], int] | None = None
@@ -713,6 +715,8 @@ def _start_staged(
     """Publish one short-lock detached checkpoint job after Tier 0-2."""
     assert dependencies.assess_preflight is not None
     assert dependencies.read_mutation_epoch is not None
+    if dependencies.mutation_guard is None and not dry_run:
+        return _safe_error(dependencies, "staging mutation guard is not configured")
     report = dependencies.preflight()
     if not report.passed:
         _write_json(dependencies.stderr, report.to_dict())
@@ -750,29 +754,29 @@ def _start_staged(
     with dependencies.lifecycle.launch_guard():
         dependencies.lifecycle.assert_admission_open()
         _assert_available(dependencies)
-        if dependencies.read_mutation_epoch() != mutation_epoch:
-            raise LifecycleBusyError(
-                "staging mutation epoch changed during preflight",
-                {"reason": "mutation_epoch_drift"},
-            )
         rotation = dependencies.store.read_backup_rotation()
         if backup_rotation_admission_blockers(rotation):
             raise LifecycleBusyError(
                 "detached backup storage is already at the transient limit",
                 {"reason": "backup_lifecycle_busy"},
             )
-        dependencies.store.create_preflight_request(request)
-        dependencies.store.publish_preflight_assessment(request.request_id, assessment)
-        dependencies.store.append_event(
-            _event(
-                request.request_id,
-                caller,
-                now=lambda: created_at,
-                event="requested",
-                status="preview" if dry_run else "pending",
-            )
-        )
         if dry_run:
+            if dependencies.read_mutation_epoch() != mutation_epoch:
+                raise LifecycleBusyError(
+                    "staging mutation epoch changed during preflight",
+                    {"reason": "mutation_epoch_drift"},
+                )
+            dependencies.store.create_preflight_request(request)
+            dependencies.store.publish_preflight_assessment(request.request_id, assessment)
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="requested",
+                    status="preview",
+                )
+            )
             dependencies.store.append_event(
                 _event(
                     request.request_id,
@@ -793,98 +797,132 @@ def _start_staged(
                 },
             )
             return 0
-
-        job_id = validate_safe_identifier(
-            (
-                dependencies.new_backup_job_id()
-                if dependencies.new_backup_job_id is not None
-                else f"job-{uuid4().hex[:16]}"
-            ),
-            "job_id",
-        )
-        payload_id = validate_safe_identifier(
-            (
-                dependencies.new_payload_id()
-                if dependencies.new_payload_id is not None
-                else f"payload-{uuid4().hex[:16]}"
-            ),
-            "payload_id",
-        )
-        bundle_name = BackupCreator.bundle_name(request.request_id, created_at)
-        job = PreflightBackupJobEnvelope(
-            job_id=job_id,
-            request_id=request.request_id,
-            payload_id=payload_id,
-            candidate_sha=candidate.resolved_sha,
-            candidate_tree=request.candidate_tree,
-            preflight_assessment_sha256=assessment.assessment_digest,
-            preflight_registry_sha256=assessment.registry_digest,
-            preflight_coverage_sha256=assessment.coverage_digest,
-            mutation_epoch=mutation_epoch,
-            environment=request.environment,
-            namespace=request.namespace,
-            bundle_name=bundle_name,
-            created_at=created_at,
-        )
-        job_path = dependencies.store.publish_preflight_backup_job(job)
-        reservation = begin_candidate(
-            rotation,
-            payload_id=payload_id,
-            request_id=request.request_id,
-            bundle_name=bundle_name,
-            created_at=created_at,
-        )
-        dependencies.store.replace_backup_rotation(
-            reservation.state,
-            expected_generation=rotation.generation,
-        )
-        dependencies.store.append_event(
-            _event(
-                request.request_id,
-                caller,
-                now=lambda: created_at,
-                event="backup_started",
-                status="pending",
-                current_step=bundle_name,
-            )
-        )
-        unit_name = f"loom-staging-backup-{request.request_id}.service"
+        mutation_guard = dependencies.mutation_guard
+        assert mutation_guard is not None
+        guard_acquired = False
+        guard_transferred = False
         try:
-            dependencies.systemd.start_backup(job_path, unit_name)
-        except Exception:
-            public_reason = backup_public_reason_for_code("backup_launch_failed")
-            current_job = dependencies.store.read_preflight_backup_job_state(request.request_id)
-            failed_job = transition_backup_job(
-                current_job,
-                LifecycleAction.FAIL_BACKUP,
-                updated_at=created_at,
-                failure_code="backup_launch_failed",
+            guard_evidence = mutation_guard.acquire(request.request_id)
+            guard_acquired = True
+            observed_epoch = dependencies.read_mutation_epoch()
+            if (
+                type(observed_epoch) is not int
+                or guard_evidence.request_id != request.request_id
+                or guard_evidence.candidate_sha != candidate.resolved_sha
+                or guard_evidence.candidate_tree != request.candidate_tree
+                or guard_evidence.mutation_epoch != mutation_epoch
+                or observed_epoch != mutation_epoch
+            ):
+                raise LifecycleBusyError(
+                    "staging mutation epoch changed during guard acquisition",
+                    {"reason": "mutation_epoch_drift"},
+                )
+            dependencies.store.create_preflight_request(request)
+            dependencies.store.publish_preflight_assessment(request.request_id, assessment)
+            dependencies.store.append_event(
+                _event(
+                    request.request_id,
+                    caller,
+                    now=lambda: created_at,
+                    event="requested",
+                    status="pending",
+                )
             )
-            dependencies.store.replace_preflight_backup_job_state(
-                failed_job,
-                expected_sequence=current_job.sequence,
+            job_id = validate_safe_identifier(
+                (
+                    dependencies.new_backup_job_id()
+                    if dependencies.new_backup_job_id is not None
+                    else f"job-{uuid4().hex[:16]}"
+                ),
+                "job_id",
             )
-            current_rotation = dependencies.store.read_backup_rotation()
-            failed_rotation = fail_candidate(
-                current_rotation,
+            payload_id = validate_safe_identifier(
+                (
+                    dependencies.new_payload_id()
+                    if dependencies.new_payload_id is not None
+                    else f"payload-{uuid4().hex[:16]}"
+                ),
+                "payload_id",
+            )
+            bundle_name = BackupCreator.bundle_name(request.request_id, created_at)
+            job = PreflightBackupJobEnvelope(
+                job_id=job_id,
+                request_id=request.request_id,
                 payload_id=payload_id,
-                failure_code="backup_launch_failed",
+                candidate_sha=candidate.resolved_sha,
+                candidate_tree=request.candidate_tree,
+                preflight_assessment_sha256=assessment.assessment_digest,
+                preflight_registry_sha256=assessment.registry_digest,
+                preflight_coverage_sha256=assessment.coverage_digest,
+                mutation_epoch=mutation_epoch,
+                environment=request.environment,
+                namespace=request.namespace,
+                bundle_name=bundle_name,
+                created_at=created_at,
+            )
+            job_path = dependencies.store.publish_preflight_backup_job(job)
+            reservation = begin_candidate(
+                rotation,
+                payload_id=payload_id,
+                request_id=request.request_id,
+                bundle_name=bundle_name,
+                created_at=created_at,
             )
             dependencies.store.replace_backup_rotation(
-                failed_rotation.state,
-                expected_generation=current_rotation.generation,
+                reservation.state,
+                expected_generation=rotation.generation,
             )
             dependencies.store.append_event(
                 _event(
                     request.request_id,
                     caller,
                     now=lambda: created_at,
-                    event="backup_failed",
-                    status="failed",
-                    reason=public_reason,
+                    event="backup_started",
+                    status="pending",
+                    current_step=bundle_name,
                 )
             )
-            raise
+            unit_name = f"loom-staging-backup-{request.request_id}.service"
+            try:
+                dependencies.systemd.start_backup(job_path, unit_name)
+            except Exception:
+                public_reason = backup_public_reason_for_code("backup_launch_failed")
+                current_job = dependencies.store.read_preflight_backup_job_state(request.request_id)
+                failed_job = transition_backup_job(
+                    current_job,
+                    LifecycleAction.FAIL_BACKUP,
+                    updated_at=created_at,
+                    failure_code="backup_launch_failed",
+                )
+                dependencies.store.replace_preflight_backup_job_state(
+                    failed_job,
+                    expected_sequence=current_job.sequence,
+                )
+                current_rotation = dependencies.store.read_backup_rotation()
+                failed_rotation = fail_candidate(
+                    current_rotation,
+                    payload_id=payload_id,
+                    failure_code="backup_launch_failed",
+                )
+                dependencies.store.replace_backup_rotation(
+                    failed_rotation.state,
+                    expected_generation=current_rotation.generation,
+                )
+                dependencies.store.append_event(
+                    _event(
+                        request.request_id,
+                        caller,
+                        now=lambda: created_at,
+                        event="backup_failed",
+                        status="failed",
+                        reason=public_reason,
+                    )
+                )
+                raise
+            guard_transferred = True
+        finally:
+            if guard_acquired and not guard_transferred:
+                mutation_guard.release(request.request_id)
     _write_json(
         dependencies.stdout,
         {
@@ -1974,6 +2012,11 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         stream=stream,
     )
     lifecycle = LifecycleCoordinator(config, store=store, systemd=systemd)
+    mutation_guard = MutationGuardManager(
+        config=config,
+        service_uid=service_uid,
+        systemd=systemd,
+    )
     backup_runner = SubprocessBackupCommandRunner()
     inventory_provider = ReadonlyLifecycleInventoryProvider(
         config,
@@ -2147,6 +2190,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
             config,
             service_uid=service_uid,
         ),
+        mutation_guard=mutation_guard,
         assess_preflight=deep_preflight.assess,
         read_mutation_epoch=deep_preflight.current_mutation_epoch,
         manifest_ownership=manifest_ownership,

@@ -220,6 +220,22 @@ class _CronJob:
     active_jobs: tuple[_ActiveJob, ...]
 
 
+class _MutationGuardUnitStatus(Protocol):
+    @property
+    def is_running(self) -> bool: ...
+
+    @property
+    def main_pid(self) -> int: ...
+
+
+class _MutationGuardSystemd(Protocol):
+    def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence: ...
+
+    def show_mutation_guard(self, request_id: str) -> _MutationGuardUnitStatus | None: ...
+
+    def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence | None: ...
+
+
 def _validate_config(config: OperatorConfig) -> None:
     if (
         config.short_name != "staging"
@@ -715,6 +731,75 @@ def _resolve_candidate(config: OperatorConfig) -> tuple[str, str]:
     return observed_sha, observed_tree
 
 
+@dataclass(slots=True)
+class MutationGuardManager:
+    """Bind broker and worker guard operations to one installed candidate."""
+
+    config: OperatorConfig
+    service_uid: int
+    systemd: _MutationGuardSystemd
+    resolve_candidate: CandidateResolver = _resolve_candidate
+
+    def _validate(
+        self,
+        evidence: MutationGuardEvidence,
+        *,
+        request_id: str,
+        state: GuardState,
+    ) -> MutationGuardEvidence:
+        _validate_config(self.config)
+        if self.service_uid < 1:
+            raise MutationGuardError("mutation guard manager authority is invalid")
+        candidate_sha, candidate_tree = self.resolve_candidate(self.config)
+        if (
+            evidence.request_id != request_id
+            or evidence.candidate_sha != candidate_sha
+            or evidence.candidate_tree != candidate_tree
+            or evidence.state != state
+        ):
+            raise MutationGuardError("mutation guard evidence binding drifted")
+        return evidence
+
+    def acquire(self, request_id: str) -> MutationGuardEvidence:
+        evidence = self.systemd.start_mutation_guard(request_id)
+        try:
+            return self._validate(evidence, request_id=request_id, state="ready")
+        except Exception as validation_error:
+            try:
+                released = self.systemd.stop_mutation_guard(request_id)
+            except Exception as release_error:
+                raise MutationGuardError(
+                    "drifted mutation guard could not be released safely"
+                ) from release_error
+            if (
+                released is None
+                or released.request_id != request_id
+                or released.state != "released"
+            ):
+                raise MutationGuardError(
+                    "drifted mutation guard release was not verified"
+                ) from validation_error
+            raise
+
+    def assert_ready(self, request_id: str) -> MutationGuardEvidence:
+        status = self.systemd.show_mutation_guard(request_id)
+        if status is None or not status.is_running or status.main_pid < 1:
+            raise MutationGuardError("mutation guard unit is not ready")
+        evidence = read_mutation_guard_evidence(
+            guard_evidence_path(self.config, request_id),
+            service_uid=self.service_uid,
+        )
+        if evidence.guard_pid != status.main_pid:
+            raise MutationGuardError("mutation guard process identity drifted")
+        return self._validate(evidence, request_id=request_id, state="ready")
+
+    def release(self, request_id: str) -> MutationGuardEvidence:
+        evidence = self.systemd.stop_mutation_guard(request_id)
+        if evidence is None:
+            raise MutationGuardError("mutation guard release evidence is absent")
+        return self._validate(evidence, request_id=request_id, state="released")
+
+
 def hold_request_guard(
     *,
     config: OperatorConfig,
@@ -934,6 +1019,7 @@ if __name__ == "__main__":  # pragma: no cover - service entrypoint
 __all__ = [
     "MutationGuardError",
     "MutationGuardEvidence",
+    "MutationGuardManager",
     "guard_evidence_path",
     "hold_request_guard",
     "main",
