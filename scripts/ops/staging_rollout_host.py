@@ -28,6 +28,7 @@ import tomllib
 import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
@@ -168,6 +169,7 @@ _ROLLOUT_UNIT_RE = re.compile(r"^loom-staging-rollout-[A-Za-z0-9_.@:-]+-[1-9][0-
 _BACKUP_UNIT_RE = re.compile(r"^loom-staging-backup-[A-Za-z0-9_.@:-]+[.]service$")
 _MUTATION_GUARD_UNIT_RE = re.compile(r"^loom-staging-mutation-guard-[A-Za-z0-9_.@:-]+[.]service$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,128}$")
+_DURABLE_SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{7,79}$")
 _SYSTEMD_STATE_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RUNTIME_IMPORT_RENDER = (
     "import loom_cli.rollout.operator.broker; "
@@ -1576,15 +1578,25 @@ def _durable_preflight_backup_status(
             or type(sequence) is not int
             or sequence < 0
             or value.get("request_id") != request.name
+            or not isinstance(value.get("request_id"), str)
+            or _DURABLE_SAFE_ID_RE.fullmatch(value["request_id"]) is None
             or not isinstance(value.get("job_id"), str)
-            or _REQUEST_ID_RE.fullmatch(value["job_id"]) is None
-            or (updated_at is not None and not isinstance(updated_at, str))
+            or _DURABLE_SAFE_ID_RE.fullmatch(value["job_id"]) is None
             or (
                 phase == "backup_failed" and (not isinstance(failure_code, str) or not failure_code)
             )
             or (phase != "backup_failed" and failure_code is not None)
         ):
             return "unknown"
+        if updated_at is not None:
+            if not isinstance(updated_at, str):
+                return "unknown"
+            try:
+                parsed_updated_at = datetime.fromisoformat(updated_at)
+            except ValueError:
+                return "unknown"
+            if parsed_updated_at.tzinfo is None or parsed_updated_at.utcoffset() is None:
+                return "unknown"
         verified = phase in {"backup_verified", "launch_pending", "launch_running"}
         valid_digests = all(
             isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None

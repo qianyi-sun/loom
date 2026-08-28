@@ -4472,6 +4472,197 @@ def test_active_status_treats_safe_durable_preflight_backup_without_live_unit_as
     assert host.HostSystem(StatusRunner()).active_status() == expected
 
 
+def _prepare_durable_active_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    request_id: str = "req-alpha",
+    job_id: str = "job-alpha000",
+    updated_at: str | None = None,
+) -> None:
+    state_root = tmp_path / "state"
+    backup_root = state_root / "requests" / request_id / "preflight-backup"
+    backup_root.mkdir(parents=True)
+    for directory in (
+        state_root,
+        state_root / "requests",
+        backup_root.parent,
+        backup_root,
+    ):
+        directory.chmod(0o700)
+    (backup_root / "state.json").write_text(
+        json.dumps(
+            {
+                "failure_code": None,
+                "job_id": job_id,
+                "lease_digest": None,
+                "manifest_sha256": None,
+                "preflight_attestation_sha256": None,
+                "phase": "backup_pending",
+                "request_id": request_id,
+                "schema_version": 1,
+                "sequence": 0,
+                "updated_at": updated_at,
+            }
+        )
+        + "\n"
+    )
+    (backup_root / "state.json").chmod(0o600)
+    marker = tmp_path / "maintenance"
+    marker.write_text("maintenance\n")
+    marker.chmod(0o600)
+    monkeypatch.setattr(host, "STATE_ROOT", state_root)
+    monkeypatch.setattr(host, "ACTIVE_POINTER", state_root / "active.json")
+    monkeypatch.setattr(host, "MAINTENANCE_MARKER", marker)
+    real_lstat = host.os.lstat
+
+    def fake_lstat(path: Path) -> os.stat_result:
+        metadata = real_lstat(path)
+        if Path(path) == marker:
+            values = list(metadata)
+            values[4] = 0
+            values[5] = 0
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(host.os, "lstat", fake_lstat)
+
+
+@pytest.mark.parametrize(
+    ("request_id", "job_id", "updated_at"),
+    [
+        ("Req-alpha", "job-alpha000", None),
+        ("req-alpha", "Job-alpha000", None),
+        ("req-alpha", "job-alpha000", "not-a-timestamp"),
+        ("req-alpha", "job-alpha000", "2026-01-01T00:00:00"),
+    ],
+    ids=(
+        "legacy-traversable-request-id",
+        "job-id",
+        "invalid-timestamp",
+        "timezone-naive-timestamp",
+    ),
+)
+def test_active_status_rejects_malformed_durable_state_without_querying_systemd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_id: str,
+    job_id: str,
+    updated_at: str | None,
+) -> None:
+    _prepare_durable_active_status(
+        tmp_path,
+        monkeypatch,
+        request_id=request_id,
+        job_id=job_id,
+        updated_at=updated_at,
+    )
+    calls: list[list[str]] = []
+
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            del kwargs
+            call = list(argv)
+            calls.append(call)
+            identity = _service_identity_result(
+                call,
+                uid=os.geteuid(),
+                gid=os.getegid(),
+            )
+            if identity is not None:
+                return identity
+            return host.CommandResult(0)
+
+    assert host.HostSystem(StatusRunner()).active_status() == "unknown"
+    assert not any("/usr/bin/systemctl" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("unit_result", "expected"),
+    [
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-rollout-request-1.service loaded active running rollout\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-backup-request-1.service loaded active running backup\n",
+            ),
+            "busy",
+        ),
+        (
+            host.CommandResult(
+                0,
+                "loom-staging-mutation-guard-request-1.service loaded active running guard\n",
+            ),
+            "busy",
+        ),
+        (host.CommandResult(1, stderr="manager unavailable"), "unknown"),
+        (host.CommandResult(0, stderr="manager warning"), "unknown"),
+    ],
+    ids=("rollout", "backup", "mutation-guard", "nonzero", "stderr"),
+)
+def test_active_status_queries_protected_units_after_schema_valid_active_durable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unit_result: host.CommandResult,
+    expected: str,
+) -> None:
+    _prepare_durable_active_status(tmp_path, monkeypatch)
+    service_uid = os.geteuid()
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class StatusRunner:
+        def run(self, argv, **kwargs):  # type: ignore[no-untyped-def]
+            call = list(argv)
+            calls.append((call, kwargs))
+            identity = _service_identity_result(
+                call,
+                uid=service_uid,
+                gid=os.getegid(),
+            )
+            if identity is not None:
+                return identity
+            return unit_result
+
+    assert host.HostSystem(StatusRunner()).active_status() == expected
+    assert [call for call in calls if "/usr/bin/systemctl" in call[0]] == [
+        (
+            [
+                "sudo",
+                "-n",
+                "-u",
+                host.SERVICE_USER,
+                "--",
+                "/usr/bin/env",
+                "-i",
+                f"XDG_RUNTIME_DIR=/run/user/{service_uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{service_uid}/bus",
+                "PATH=/usr/bin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "/usr/bin/systemctl",
+                "--user",
+                "list-units",
+                "--all",
+                "--plain",
+                "--full",
+                "--type=service",
+                "--no-legend",
+                "--no-pager",
+                "loom-staging-rollout-*.service",
+                "loom-staging-backup-*.service",
+                "loom-staging-mutation-guard-*.service",
+            ],
+            {"check": False},
+        )
+    ]
+
+
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
