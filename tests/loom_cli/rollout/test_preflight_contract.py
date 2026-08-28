@@ -17,6 +17,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
 )
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    AdmissionPhase,
     AttestationBindings,
     CheckContext,
     CheckExecution,
@@ -24,6 +25,7 @@ from loom_cli.rollout.preflight_contract import (
     CheckOutcome,
     CheckProbe,
     CheckSpec,
+    EvidenceClass,
     EvidenceField,
     MutationClass,
     PreflightAttestation,
@@ -33,6 +35,7 @@ from loom_cli.rollout.preflight_contract import (
     StageCapability,
     external_supervisor_transition_digest,
     external_supervisor_unit_set_digest,
+    identity_evidence_hash,
 )
 
 NOW = datetime(2026, 7, 19, 16, tzinfo=UTC)
@@ -75,6 +78,23 @@ def test_external_supervisor_transition_digest_binds_validated_controller_unit_d
     )
 
     assert gb10 != oldlab
+    assert gb10 == external_supervisor_transition_digest(
+        **{**arguments, "predecessor_live_evidence_digest": "0" * 64},
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+    )
+    assert gb10 != external_supervisor_transition_digest(
+        **{**arguments, "predecessor_digest": "0" * 64},
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+    )
+    assert external_supervisor_transition_digest(
+        **arguments,
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+        transition_schema_version=1,
+    ) != external_supervisor_transition_digest(
+        **{**arguments, "predecessor_live_evidence_digest": "0" * 64},
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+        transition_schema_version=1,
+    )
     with pytest.raises(ValueError, match="transition identity"):
         external_supervisor_transition_digest(
             **arguments,
@@ -147,6 +167,38 @@ def _context() -> CheckContext:
 def test_check_spec_rejects_mutation_before_isolated_stage() -> None:
     with pytest.raises(ValueError, match="mutation class"):
         _spec("unsafe.check", mutation_class=MutationClass.PROTECTED_STAGING)
+
+
+def test_evidence_class_and_admission_phase_are_reviewed_contract() -> None:
+    base = _spec("identity.contract")
+    observation = replace(
+        base,
+        evidence_schema=(EvidenceField("status.value", "string", EvidenceClass.OBSERVATION),),
+    )
+    pre_apply = replace(base, admission_phases=(AdmissionPhase.PRE_APPLY,))
+
+    assert base.contract_digest != observation.contract_digest
+    assert base.contract_digest != pre_apply.contract_digest
+
+
+def test_identity_evidence_hash_ignores_only_declared_observations() -> None:
+    spec = replace(
+        _spec("identity.projection"),
+        evidence_schema=(
+            EvidenceField("authority", "string"),
+            EvidenceField("runtime", "string", EvidenceClass.OBSERVATION),
+        ),
+    )
+    original = {"authority": "candidate-a", "runtime": "ready"}
+
+    assert identity_evidence_hash(spec, original) == identity_evidence_hash(
+        spec,
+        {**original, "runtime": "repairable"},
+    )
+    assert identity_evidence_hash(spec, original) != identity_evidence_hash(
+        spec,
+        {**original, "authority": "candidate-b"},
+    )
 
 
 def test_final_only_requires_technical_justification() -> None:
@@ -1048,6 +1100,7 @@ def test_attestation_binds_all_evidence_and_invalidates_drift() -> None:
     attestation = PreflightAttestation.issue(
         bindings=_bindings(),
         executions=result,
+        checks=(_check("candidate.identity"),),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -1068,6 +1121,7 @@ def test_attestation_round_trip_preserves_exact_digest_and_immutable_maps() -> N
     attestation = PreflightAttestation.issue(
         bindings=_bindings(),
         executions=result,
+        checks=(_check("candidate.identity"),),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -1083,6 +1137,30 @@ def test_attestation_round_trip_preserves_exact_digest_and_immutable_maps() -> N
         decoded.bindings.supervisor_predecessor_unit_sha256[  # type: ignore[index]
             "loom-autoscaler-gb10-staging.service"
         ] = "0" * 64
+
+
+def test_attestation_v2_remains_readable_without_becoming_v3_authority() -> None:
+    check = _check("candidate.identity")
+    result = PreflightDag([check]).run(_context(), now=lambda: NOW)
+    current = PreflightAttestation.issue(
+        bindings=_bindings(),
+        executions=result,
+        checks=(check,),
+        issued_at=NOW,
+        registry_digest="9" * 64,
+        coverage_digest="a" * 64,
+    )
+    payload = current.to_dict()
+    payload["schema_version"] = 2
+    payload.pop("identity_evidence_hashes")
+    payload.pop("attestation_digest")
+    payload["attestation_digest"] = preflight_contract._hash_json(payload)
+
+    legacy = PreflightAttestation.from_dict(payload)
+
+    assert legacy.schema_version == 2
+    assert legacy.identity_evidence_hashes == {}
+    assert PreflightAttestation.from_dict(legacy.to_dict()) == legacy
 
 
 def test_attestation_v2_rejects_absent_predecessor_or_v1_schema() -> None:
@@ -1102,6 +1180,7 @@ def test_attestation_v2_rejects_absent_predecessor_or_v1_schema() -> None:
     attestation = PreflightAttestation.issue(
         bindings=_bindings(),
         executions=result,
+        checks=(_check("candidate.identity"),),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -1118,6 +1197,7 @@ def test_attestation_round_trip_rejects_payload_and_digest_tampering() -> None:
     attestation = PreflightAttestation.issue(
         bindings=_bindings(),
         executions=result,
+        checks=(_check("candidate.identity"),),
         issued_at=NOW,
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -1145,6 +1225,7 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
         PreflightAttestation.issue(
             bindings=_bindings(),
             executions=failed,
+            checks=(_check("candidate.identity", passed=False),),
             issued_at=NOW,
             registry_digest="9" * 64,
             coverage_digest="a" * 64,
@@ -1158,6 +1239,7 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
         PreflightAttestation.issue(
             bindings=_bindings(),
             executions=passed,
+            checks=(_check("candidate.identity"),),
             issued_at=NOW + timedelta(minutes=11),
             registry_digest="9" * 64,
             coverage_digest="a" * 64,
@@ -1165,22 +1247,22 @@ def test_attestation_rejects_incomplete_or_expired_results() -> None:
 
 
 def test_attestation_uses_non_rechecked_evidence_as_freshness_authority() -> None:
-    executions = PreflightDag(
-        [
-            _check("candidate.identity", freshness_ttl_seconds=60),
-            _check(
-                "rehearsal.cleanup",
-                dependencies=("candidate.identity",),
-                tier=3,
-                stage=StageCapability.ISOLATED_REHEARSAL,
-                freshness_ttl_seconds=3600,
-            ),
-        ]
-    ).run(_context(), through_tier=3, now=lambda: NOW)
+    checks = (
+        _check("candidate.identity", freshness_ttl_seconds=60),
+        _check(
+            "rehearsal.cleanup",
+            dependencies=("candidate.identity",),
+            tier=3,
+            stage=StageCapability.ISOLATED_REHEARSAL,
+            freshness_ttl_seconds=3600,
+        ),
+    )
+    executions = PreflightDag(checks).run(_context(), through_tier=3, now=lambda: NOW)
 
     attestation = PreflightAttestation.issue(
         bindings=_bindings(),
         executions=executions,
+        checks=checks,
         issued_at=NOW + timedelta(minutes=2),
         registry_digest="9" * 64,
         coverage_digest="a" * 64,
@@ -1191,6 +1273,7 @@ def test_attestation_uses_non_rechecked_evidence_as_freshness_authority() -> Non
         PreflightAttestation.issue(
             bindings=_bindings(),
             executions=executions,
+            checks=checks,
             issued_at=NOW + timedelta(hours=1, seconds=1),
             registry_digest="9" * 64,
             coverage_digest="a" * 64,

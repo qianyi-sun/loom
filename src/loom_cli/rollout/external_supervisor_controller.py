@@ -175,6 +175,22 @@ class ExternalSupervisorControllerBinding:
             },
         }
 
+    def predecessor_identity_flat_map(self) -> dict[str, str]:
+        """Return only durable predecessor authority for admission comparison."""
+        prefix = f"{self.execution_host}/"
+        return {
+            f"{prefix}authority-kind": self.predecessor_kind,
+            f"{prefix}authority-digest": self.predecessor_digest,
+            f"{prefix}pointer-digest": self.predecessor_pointer_digest,
+            f"{prefix}unit-set-digest": self.predecessor_unit_set_digest,
+            f"{prefix}pending-transition-digest": (self.predecessor_pending_transition_digest),
+            f"{prefix}unit-directory": self.unit_directory,
+            **{
+                f"{prefix}{_UNIT_PREFIX}{name}": digest
+                for name, digest in self.predecessor_unit_sha256.items()
+            },
+        }
+
 
 def encode_external_supervisor_controller_bindings(
     bindings: Mapping[str, ExternalSupervisorControllerBinding],
@@ -188,6 +204,23 @@ def encode_external_supervisor_controller_bindings(
         for key, value in bindings[host].to_flat_map().items():
             if key in encoded:
                 raise ValueError("external supervisor controller binding fields overlap")
+            encoded[key] = value
+    return encoded
+
+
+def encode_external_supervisor_predecessor_identities(
+    bindings: Mapping[str, ExternalSupervisorControllerBinding],
+) -> dict[str, str]:
+    """Encode the durable identity projection of a complete controller set."""
+    if set(bindings) != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS or any(
+        host != binding.execution_host for host, binding in bindings.items()
+    ):
+        raise ValueError("external supervisor controller binding set is invalid")
+    encoded: dict[str, str] = {}
+    for host in sorted(bindings):
+        for key, value in bindings[host].predecessor_identity_flat_map().items():
+            if key in encoded:
+                raise ValueError("external supervisor predecessor identity fields overlap")
             encoded[key] = value
     return encoded
 
@@ -241,5 +274,6 @@ def parse_external_supervisor_controller_bindings(
 __all__ = [
     "ExternalSupervisorControllerBinding",
     "encode_external_supervisor_controller_bindings",
+    "encode_external_supervisor_predecessor_identities",
     "parse_external_supervisor_controller_bindings",
 ]

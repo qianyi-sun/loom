@@ -15,11 +15,13 @@ from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBindin
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    AdmissionPhase,
     AttestationBindings,
     CheckContext,
     CheckOperation,
     CheckProbe,
     CheckSpec,
+    EvidenceClass,
     EvidenceField,
     MutationClass,
     PreflightAttestation,
@@ -53,6 +55,11 @@ def _check(
     schema: tuple[EvidenceField, ...],
     *,
     policy: SecretRedactionPolicy = SecretRedactionPolicy.NO_SECRET_INPUTS,
+    passed: bool = True,
+    admission_phases: tuple[AdmissionPhase, ...] = (
+        AdmissionPhase.PRE_APPLY,
+        AdmissionPhase.POST_APPLY,
+    ),
 ) -> RegisteredCheck:
     return RegisteredCheck(
         spec=CheckSpec(
@@ -68,11 +75,12 @@ def _check(
             freshness_ttl_seconds=120,
             remediation=f"restore {check_id}",
             secret_redaction_policy=policy,
+            admission_phases=admission_phases,
         ),
         implementation_version="v1",
         operations={
             CheckOperation.PROBE: lambda _context: CheckProbe(
-                passed=True,
+                passed=passed,
                 evidence=evidence,  # type: ignore[arg-type]
             )
         },
@@ -97,16 +105,17 @@ def _baseline_check(
             mutation_class=MutationClass.NONE,
             input_keys=("candidate.sha",),
             evidence_schema=(
-                EvidenceField("ready", "boolean"),
+                EvidenceField("ready", "boolean", EvidenceClass.OBSERVATION),
                 EvidenceField("observed-epoch", "integer"),
                 EvidenceField("readonly-principal", "string"),
-                EvidenceField("resource-digest", "sha256"),
-                EvidenceField("blockers", "string-map"),
+                EvidenceField("resource-digest", "sha256", EvidenceClass.OBSERVATION),
+                EvidenceField("blockers", "string-map", EvidenceClass.OBSERVATION),
             ),
             timeout_seconds=5,
             freshness_ttl_seconds=120,
             remediation=f"restore {check_id}",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY,),
         ),
         implementation_version="v1",
         operations={
@@ -129,15 +138,16 @@ def _checks(
     boot_id: str = "boot-1",
     baseline_digest: str = "6" * 64,
     credential_metadata: dict[str, str] | None = None,
-    predecessor_kind: str = "legacy-manifest",
-    predecessor_pointer_digest: str = EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    rotating_credential_metadata: dict[str, str] | None = None,
     predecessor_live_digest: str = "d" * 64,
     predecessor_runtime_state: str = "ready",
     predecessor_pending_transition_digest: str = "1" * 64,
     predecessor_transition_clear: bool = True,
     predecessor_runtime_ready: bool = True,
     oldlab_predecessor_live_digest: str = "7" * 64,
-    controller_binding_overrides: dict[str, str] | None = None,
+    oldlab_predecessor_runtime_state: str = "ready",
+    oldlab_predecessor_authority_digest: str = "6" * 64,
+    controller_identity_overrides: dict[str, str] | None = None,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
     baseline_ready: bool = True,
@@ -165,11 +175,19 @@ def _checks(
         _check(
             "credentials.metadata",
             {
-                "metadata-fingerprints": (
+                "stable-metadata-fingerprints": (
                     {"admin": "abcd"} if credential_metadata is None else credential_metadata
-                )
+                ),
+                "rotating-metadata-fingerprints": rotating_credential_metadata or {},
             },
-            (EvidenceField("metadata-fingerprints", "string-map"),),
+            (
+                EvidenceField("stable-metadata-fingerprints", "string-map"),
+                EvidenceField(
+                    "rotating-metadata-fingerprints",
+                    "string-map",
+                    EvidenceClass.OBSERVATION,
+                ),
+            ),
             policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
         ),
         _check(
@@ -185,14 +203,17 @@ def _checks(
         _check(
             "gb10.host-readiness",
             {"inventory-digest": gb10_inventory_digest, "boot-ids": {"gb10-1": boot_id}},
-            (EvidenceField("inventory-digest", "sha256"), EvidenceField("boot-ids", "string-map")),
+            (
+                EvidenceField("inventory-digest", "sha256", EvidenceClass.OBSERVATION),
+                EvidenceField("boot-ids", "string-map"),
+            ),
         ),
         _check(
             "external-supervisor.predecessor",
             {
-                "authority-kind": predecessor_kind,
+                "authority-kind": "legacy-manifest",
                 "authority-digest": "c" * 64,
-                "pointer-digest": predecessor_pointer_digest,
+                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
                 "unit-digests": predecessor_units,
                 "unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
                 "live-evidence-digest": predecessor_live_digest,
@@ -200,30 +221,26 @@ def _checks(
                 "transition-clear": predecessor_transition_clear,
                 "runtime-ready": predecessor_runtime_ready,
                 "pool-identity-digest": predecessor_pool_digest,
-                "controller-bindings": {
-                    "gx10-01c7/authority-kind": predecessor_kind,
+                "controller-identity-bindings": {
+                    "gx10-01c7/authority-kind": "legacy-manifest",
                     "gx10-01c7/authority-digest": "c" * 64,
-                    "gx10-01c7/pointer-digest": predecessor_pointer_digest,
+                    "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
                     "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
                         predecessor_units
                     ),
-                    "gx10-01c7/live-evidence-digest": predecessor_live_digest,
                     "gx10-01c7/pending-transition-digest": (predecessor_pending_transition_digest),
-                    "gx10-01c7/runtime-state": predecessor_runtime_state,
                     "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
                     **{
                         f"gx10-01c7/unit/{name}": digest
                         for name, digest in predecessor_units.items()
                     },
                     "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
-                    "TRT-EAI-OLDLAB-1/authority-digest": "6" * 64,
+                    "TRT-EAI-OLDLAB-1/authority-digest": (oldlab_predecessor_authority_digest),
                     "TRT-EAI-OLDLAB-1/pointer-digest": (EXTERNAL_SUPERVISOR_ABSENT_DIGEST),
                     "TRT-EAI-OLDLAB-1/unit-set-digest": (
                         external_supervisor_unit_set_digest(oldlab_predecessor_units)
                     ),
-                    "TRT-EAI-OLDLAB-1/live-evidence-digest": (oldlab_predecessor_live_digest),
                     "TRT-EAI-OLDLAB-1/pending-transition-digest": "1" * 64,
-                    "TRT-EAI-OLDLAB-1/runtime-state": "ready",
                     "TRT-EAI-OLDLAB-1/unit-directory": (
                         "/var/lib/loom-staging-rollout/.config/systemd/user"
                     ),
@@ -232,8 +249,16 @@ def _checks(
                         for name, digest in oldlab_predecessor_units.items()
                     },
                     **(
-                        {} if controller_binding_overrides is None else controller_binding_overrides
+                        {}
+                        if controller_identity_overrides is None
+                        else controller_identity_overrides
                     ),
+                },
+                "controller-runtime-observations": {
+                    "gx10-01c7/live-evidence-digest": predecessor_live_digest,
+                    "gx10-01c7/runtime-state": predecessor_runtime_state,
+                    "TRT-EAI-OLDLAB-1/live-evidence-digest": (oldlab_predecessor_live_digest),
+                    "TRT-EAI-OLDLAB-1/runtime-state": (oldlab_predecessor_runtime_state),
                 },
             },
             (
@@ -242,13 +267,28 @@ def _checks(
                 EvidenceField("pointer-digest", "sha256"),
                 EvidenceField("unit-digests", "string-map"),
                 EvidenceField("unit-set-digest", "sha256"),
-                EvidenceField("live-evidence-digest", "sha256"),
+                EvidenceField(
+                    "live-evidence-digest",
+                    "sha256",
+                    EvidenceClass.OBSERVATION,
+                ),
                 EvidenceField("pending-transition-digest", "sha256"),
-                EvidenceField("transition-clear", "boolean"),
-                EvidenceField("runtime-ready", "boolean"),
-                EvidenceField("pool-identity-digest", "sha256"),
-                EvidenceField("controller-bindings", "string-map"),
+                EvidenceField("transition-clear", "boolean", EvidenceClass.OBSERVATION),
+                EvidenceField("runtime-ready", "boolean", EvidenceClass.OBSERVATION),
+                EvidenceField(
+                    "pool-identity-digest",
+                    "sha256",
+                    EvidenceClass.OBSERVATION,
+                ),
+                EvidenceField("controller-identity-bindings", "string-map"),
+                EvidenceField(
+                    "controller-runtime-observations",
+                    "string-map",
+                    EvidenceClass.OBSERVATION,
+                ),
             ),
+            passed=predecessor_transition_clear and predecessor_runtime_ready,
+            admission_phases=(AdmissionPhase.PRE_APPLY,),
         ),
     )
     tier2 = (
@@ -403,20 +443,16 @@ def _plan(checks: tuple[RegisteredCheck, ...]) -> CandidatePreflightPlan:
 
 
 def _attestation(plan: CandidatePreflightPlan) -> PreflightAttestation:
-    implementations = plan.registry.implementation_digests
     executions = PreflightDag(
         tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
     ).run(plan.context, through_tier=2, now=lambda: NOW - timedelta(minutes=1))
-    return PreflightAttestation(
-        schema_version=2,
+    return PreflightAttestation.issue(
         bindings=_bindings(),
+        executions=executions,
+        checks=plan.registry.checks,
+        issued_at=NOW - timedelta(minutes=1),
         registry_digest=plan.registry.registry_digest,
         coverage_digest=plan.registry.coverage_digest,
-        check_implementation_digests=implementations,
-        evidence_hashes={execution.check_id: execution.evidence_hash for execution in executions},
-        issued_at=NOW - timedelta(minutes=1),
-        expires_at=NOW + timedelta(minutes=30),
-        attestation_digest="1" * 64,
     )
 
 
@@ -443,6 +479,37 @@ def test_final_admission_rechecks_exact_drift_sensitive_tier0() -> None:
     assert admission.preflight_plan is plan
 
 
+def test_final_admission_compares_identity_for_phase_dependency_closure() -> None:
+    dependency = _check(
+        "dependency.identity",
+        {"authority": "a"},
+        (EvidenceField("authority", "string"),),
+        admission_phases=(),
+    )
+    checks = _checks()
+    candidate = replace(
+        checks[0],
+        spec=replace(checks[0].spec, dependencies=(dependency.spec.check_id,)),
+    )
+    attested_plan = _plan((dependency, candidate, *checks[1:]))
+    drifted_dependency = _check(
+        "dependency.identity",
+        {"authority": "b"},
+        (EvidenceField("authority", "string"),),
+        admission_phases=(),
+    )
+    drifted_plan = _plan((drifted_dependency, candidate, *checks[1:]))
+
+    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
+
+
 def test_final_admission_tolerates_pool_identity_drift() -> None:
     # pool-identity-digest is a live count of external-supervisor worker rows per
     # pool; it shifts with ordinary worker registration between the restore
@@ -465,53 +532,14 @@ def test_final_admission_tolerates_pool_identity_drift() -> None:
     assert all(execution.passed for execution in admission.tier0_executions)
 
 
-def test_final_admission_tolerates_supervisor_runtime_convergence() -> None:
-    canonical_pointer_digest = "9" * 64
-    attested_plan = _plan(
-        _checks(
-            predecessor_kind="canonical",
-            predecessor_pointer_digest=canonical_pointer_digest,
-            predecessor_live_digest="d" * 64,
-            predecessor_runtime_state="repairable",
-        )
-    )
-    attestation = _attestation(attested_plan)
-    attested_controller_bindings = dict(attestation.bindings.supervisor_controller_bindings)
-    attested_controller_bindings["gx10-01c7/authority-kind"] = "canonical"
-    attested_controller_bindings["gx10-01c7/pointer-digest"] = canonical_pointer_digest
-    attested_controller_bindings["gx10-01c7/runtime-state"] = "repairable"
-    attestation = replace(
-        attestation,
-        bindings=replace(
-            attestation.bindings,
-            supervisor_predecessor_kind="canonical",
-            supervisor_predecessor_pointer_digest=canonical_pointer_digest,
-            supervisor_controller_bindings=attested_controller_bindings,
-        ),
-    )
-    converged_plan = _plan(
-        _checks(
-            predecessor_kind="canonical",
-            predecessor_pointer_digest=canonical_pointer_digest,
-            predecessor_live_digest="0" * 64,
-            predecessor_runtime_state="ready",
-        )
-    )
-
-    admission = validate_final_attestation(
-        attestation=attestation,
-        candidate=_candidate(),
-        plan=converged_plan,
-        current_mutation_epoch=7,
-        now=NOW,
-    )
-
-    assert all(execution.passed for execution in admission.tier0_executions)
-
-
-def test_final_admission_tolerates_other_controller_live_evidence_drift() -> None:
+def test_final_admission_tolerates_oldlab_controller_runtime_drift() -> None:
     attested_plan = _plan(_checks())
-    drifted_plan = _plan(_checks(oldlab_predecessor_live_digest="9" * 64))
+    drifted_plan = _plan(
+        _checks(
+            oldlab_predecessor_live_digest="9" * 64,
+            oldlab_predecessor_runtime_state="repairable",
+        )
+    )
 
     admission = validate_final_attestation(
         attestation=_attestation(attested_plan),
@@ -522,6 +550,20 @@ def test_final_admission_tolerates_other_controller_live_evidence_drift() -> Non
     )
 
     assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_admission_rejects_oldlab_controller_authority_drift() -> None:
+    attested_plan = _plan(_checks())
+    drifted_plan = _plan(_checks(oldlab_predecessor_authority_digest="9" * 64))
+
+    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
 
 
 @pytest.mark.parametrize(
@@ -536,14 +578,14 @@ def test_final_admission_tolerates_other_controller_live_evidence_drift() -> Non
         ("unit-directory", "/var/lib/loom-staging-rollout/.config/systemd/user"),
     ),
 )
-def test_final_admission_rejects_stable_controller_binding_drift(
+def test_final_admission_rejects_stable_controller_identity_drift(
     field: str,
     drifted_value: str,
 ) -> None:
     attested_plan = _plan(_checks())
     drifted_plan = _plan(
         _checks(
-            controller_binding_overrides={f"gx10-01c7/{field}": drifted_value},
+            controller_identity_overrides={f"gx10-01c7/{field}": drifted_value},
         )
     )
 
@@ -561,22 +603,23 @@ def test_final_admission_rejects_stable_controller_binding_drift(
     ("transition_clear", "runtime_ready"),
     ((False, True), (True, False)),
 )
-def test_final_admission_rejects_unclear_transition_or_failed_runtime(
+def test_final_admission_rejects_unclear_transition_or_unhealthy_runtime(
     transition_clear: bool,
     runtime_ready: bool,
 ) -> None:
-    plan = _plan(
+    attested_plan = _plan(_checks())
+    unhealthy_plan = _plan(
         _checks(
             predecessor_transition_clear=transition_clear,
             predecessor_runtime_ready=runtime_ready,
         )
     )
 
-    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+    with pytest.raises(ValueError, match="Tier 0 drift check failed"):
         validate_final_attestation(
-            attestation=_attestation(plan),
+            attestation=_attestation(attested_plan),
             candidate=_candidate(),
-            plan=plan,
+            plan=unhealthy_plan,
             current_mutation_epoch=7,
             now=NOW,
         )
@@ -608,24 +651,24 @@ def test_final_and_post_apply_admission_tolerate_tokenrequest_kubeconfig_rotatio
         "readonly-kubeconfig": "1" * 64,
         "rehearsal-kubeconfig": "2" * 64,
     }
-    attested_plan = _plan(_checks(credential_metadata=attested_metadata))
-    attestation = _attestation(attested_plan)
-    attestation = replace(
-        attestation,
-        bindings=replace(
-            attestation.bindings,
-            secret_metadata_fingerprints={
-                key: f"sha256:{value}" for key, value in attested_metadata.items()
-            },
-        ),
+    stable_metadata = {"admin": attested_metadata["admin"]}
+    rotating_metadata = {key: value for key, value in attested_metadata.items() if key != "admin"}
+    attested_plan = _plan(
+        _checks(
+            credential_metadata=stable_metadata,
+            rotating_credential_metadata=rotating_metadata,
+        )
     )
+    attestation = _attestation(attested_plan)
     final_plan = _plan(
         _checks(
             credential_metadata={
-                **attested_metadata,
+                "admin": attested_metadata["admin"],
+            },
+            rotating_credential_metadata={
                 "readonly-kubeconfig": "3" * 64,
                 "rehearsal-kubeconfig": "4" * 64,
-            }
+            },
         )
     )
 
@@ -640,10 +683,12 @@ def test_final_and_post_apply_admission_tolerate_tokenrequest_kubeconfig_rotatio
         _plan(
             _checks(
                 credential_metadata={
-                    **attested_metadata,
+                    "admin": attested_metadata["admin"],
+                },
+                rotating_credential_metadata={
                     "readonly-kubeconfig": "5" * 64,
                     "rehearsal-kubeconfig": "6" * 64,
-                }
+                },
             )
         ),
         8,
@@ -696,10 +741,11 @@ def test_final_admission_still_rejects_stable_credential_or_source_set_drift() -
 
 
 def test_final_admission_rejects_host_boot_or_epoch_drift() -> None:
+    attested_plan = _plan(_checks())
     drifted_plan = _plan(_checks(boot_id="boot-2"))
     with pytest.raises(ValueError, match="evidence changed"):
         validate_final_attestation(
-            attestation=_attestation(drifted_plan),
+            attestation=_attestation(attested_plan),
             candidate=_candidate(),
             plan=drifted_plan,
             current_mutation_epoch=7,
@@ -741,11 +787,12 @@ def test_final_admission_tolerates_tier2_baseline_resource_drift() -> None:
 def test_final_admission_rejects_unhealthy_tier2_baseline() -> None:
     # A baseline that is no longer ready must still fail final admission even
     # though its resource-digest is not byte-matched.
+    attested_plan = _plan(_checks())
     plan = _plan(_checks(baseline_ready=False))
 
     with pytest.raises(ValueError, match="Tier 0 drift check failed"):
         validate_final_attestation(
-            attestation=_attestation(plan),
+            attestation=_attestation(attested_plan),
             candidate=_candidate(),
             plan=plan,
             current_mutation_epoch=7,
@@ -753,18 +800,24 @@ def test_final_admission_rejects_unhealthy_tier2_baseline() -> None:
         )
 
 
-def test_final_admission_rejects_predecessor_drift_before_apply() -> None:
+def test_final_admission_tolerates_predecessor_runtime_observation_drift() -> None:
     attested_plan = _plan(_checks())
-    drifted_plan = _plan(_checks(predecessor_pending_transition_digest="0" * 64))
-
-    with pytest.raises(ValueError, match="evidence changed"):
-        validate_final_attestation(
-            attestation=_attestation(attested_plan),
-            candidate=_candidate(),
-            plan=drifted_plan,
-            current_mutation_epoch=7,
-            now=NOW,
+    drifted_plan = _plan(
+        _checks(
+            predecessor_live_digest="0" * 64,
+            predecessor_runtime_state="repairable",
         )
+    )
+
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
 
 
 def test_post_apply_drift_uses_fresh_epoch_plan_without_baseline_replay() -> None:
