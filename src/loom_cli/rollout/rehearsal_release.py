@@ -16,6 +16,7 @@ from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.rehearsal_action_source import RehearsalPlan, rehearsal_image_reference
 
 _MAX_RENDERED_BYTES = 16 * 1024 * 1024
+REHEARSAL_TERMINATION_GRACE_SECONDS = 10
 _LABEL_KEY_RE = re.compile(
     r"(?:(?:[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?)/)?"
     r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?\Z"
@@ -309,6 +310,7 @@ def _isolate_deployment(
     pod["automountServiceAccountToken"] = False
     pod["dnsPolicy"] = "ClusterFirst"
     pod["enableServiceLinks"] = False
+    pod["terminationGracePeriodSeconds"] = REHEARSAL_TERMINATION_GRACE_SECONDS
     pod["securityContext"] = {
         "fsGroup": run_as_user,
         "runAsGroup": run_as_user,
@@ -742,6 +744,7 @@ def _contains_expected(observed: object, expected: object) -> bool:
 
 
 __all__ = [
+    "REHEARSAL_TERMINATION_GRACE_SECONDS",
     "RehearsalReleaseArtifact",
     "build_rehearsal_release_artifact",
     "rehearsal_deployment_ready",
