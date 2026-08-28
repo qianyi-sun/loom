@@ -6,7 +6,9 @@ import importlib
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -49,6 +51,15 @@ from tests.unit.test_personal_dev_acceptance_evidence import (
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 _NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
+
+
+def _synthetic_checkout_env(**overrides: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("COV_CORE_"):
+            del env[key]
+    env.update(overrides)
+    return env
 
 
 def _git_identity() -> tuple[str, str]:
@@ -620,9 +631,16 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     assert rc == 0
     assert captured.err == ""
     record = json.loads(captured.out)
-    assert captured.out == json.dumps(
-        record, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    ) + "\n"
+    assert (
+        captured.out
+        == json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    )
     assert record == {
         "acceptance_manifest_sha256": "a" * 64,
         "acceptance_plan_sha256": plan_sha256,
@@ -683,7 +701,9 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         plan, v1_plan = _result_plan(tmp_path / "v1")
         del plan
         payload = json.dumps(
-            v1_plan.canonical_value(), sort_keys=True, separators=(",", ":"),
+            v1_plan.canonical_value(),
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode("ascii")
         plan_path = tmp_path / "v1-plan.json"
         plan_path.write_bytes(payload)
@@ -728,12 +748,15 @@ def test_verify_acceptance_result_rejects_invalid_inputs_before_kubernetes_runne
         result_path.chmod(0o600)
         result_sha256 = hashlib.sha256(payload).hexdigest()
 
-    with patch(
-        "loom_cli.personal_dev_control_plane_cmd._SubprocessKubectlRunner",
-        side_effect=AssertionError("verification must not construct a Kubernetes runner"),
-    ), patch(
-        "loom_cli.personal_dev_control_plane_cmd.subprocess.run",
-        side_effect=AssertionError("verification must not create a subprocess"),
+    with (
+        patch(
+            "loom_cli.personal_dev_control_plane_cmd._SubprocessKubectlRunner",
+            side_effect=AssertionError("verification must not construct a Kubernetes runner"),
+        ),
+        patch(
+            "loom_cli.personal_dev_control_plane_cmd.subprocess.run",
+            side_effect=AssertionError("verification must not create a subprocess"),
+        ),
     ):
         rc = dispatch(
             _verify_acceptance_result_argv(
@@ -758,30 +781,39 @@ def test_verify_acceptance_result_parser_has_no_mutation_options() -> None:
     subparsers = parser.add_subparsers(required=True)
     personal_dev_control_plane_cmd.add_personal_dev_control_plane_subparser(subparsers)
     verify = next(
-        action for action in parser._actions
-        if isinstance(action, argparse._SubParsersAction)
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     ).choices["personal-dev-control-plane"]
     operations = next(
         action for action in verify._actions if isinstance(action, argparse._SubParsersAction)
     )
     option_names = {
-        option for action in operations.choices["verify-acceptance-result"]._actions
+        option
+        for action in operations.choices["verify-acceptance-result"]._actions
         for option in action.option_strings
     }
-    forbidden = {"--apply", "--activate", "--kubeconfig", "--database", "--secret", "--slurm",
-                 "--capacity"}
+    forbidden = {
+        "--apply",
+        "--activate",
+        "--kubeconfig",
+        "--database",
+        "--secret",
+        "--slurm",
+        "--capacity",
+    }
     assert option_names.isdisjoint(forbidden)
     assert "--rollback-shadow-manifest-file" in option_names
 
 
 def test_verify_acceptance_result_requires_all_digest_pinned_arguments() -> None:
     with pytest.raises(SystemExit) as exc:
-        dispatch([
-            "personal-dev-control-plane",
-            "verify-acceptance-result",
-            "--acceptance-plan-file",
-            "plan.json",
-        ])
+        dispatch(
+            [
+                "personal-dev-control-plane",
+                "verify-acceptance-result",
+                "--acceptance-plan-file",
+                "plan.json",
+            ]
+        )
 
     assert exc.value.code == 2
 
@@ -1057,6 +1089,354 @@ def test_render_backup_restore_evidence_rejects_unbound_cleanup_names(
     assert result == 2
     assert captured.out == ""
     assert captured.err == "error: personal-dev acceptance evidence inputs are invalid\n"
+
+
+def test_render_schema_transition_emits_exact_job_and_canonical_plan(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    from loom.personal_dev_schema_transition import PreparedPersonalDevSchemaTransition
+
+    job = b'{"kind":"Job","metadata":{"name":"migration"}}'
+    plan = {
+        "migration": {"job_sha256": hashlib.sha256(job).hexdigest()},
+        "schema": "loom-personal-dev-schema-transition-plan-v1",
+    }
+    plan_json = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("ascii")
+    captured_inputs: dict[str, object] = {}
+    source_validation_count = 0
+
+    def prepare(**kwargs: object) -> PreparedPersonalDevSchemaTransition:
+        captured_inputs.update(kwargs)
+        return PreparedPersonalDevSchemaTransition(
+            plan=plan,
+            plan_json=plan_json,
+            migration_job_json=job,
+        )
+
+    def validate_source(*_args: object, **_kwargs: object) -> None:
+        nonlocal source_validation_count
+        source_validation_count += 1
+
+    monkeypatch.setattr(command, "prepare_personal_dev_schema_transition", prepare)
+    monkeypatch.setattr(
+        command,
+        "validate_personal_dev_schema_transition_source_root",
+        validate_source,
+    )
+    result = dispatch(
+        [
+            "personal-dev-control-plane",
+            "render-schema-transition",
+            "--file",
+            str(_PROFILE),
+            "--trusted-release-file",
+            str(release_path),
+            "--trusted-release-sha256",
+            release_digest,
+            "--source-root",
+            str(_ROOT),
+            "--predecessor-trusted-release-file",
+            str(release_path),
+            "--predecessor-trusted-release-sha256",
+            release_digest,
+            "--backup-restore-evidence-file",
+            str(tmp_path / "backup.json"),
+            "--backup-restore-evidence-sha256",
+            "a" * 64,
+            "--postgres-dump-file",
+            str(tmp_path / "postgres.dump"),
+            "--postgres-source-state-file",
+            str(tmp_path / "postgres.tsv"),
+            "--predecessor-shadow-manifest-file",
+            str(tmp_path / "shadow.yaml"),
+            "--predecessor-shadow-manifest-sha256",
+            "b" * 64,
+            "--alembic-config-file",
+            str(_ROOT / "migrations/alembic.ini"),
+            "--expected-predecessor-schema-head",
+            "0112",
+            "--expected-target-schema-head",
+            "0120",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out.encode("ascii") == job
+    assert captured.err.encode("ascii") == plan_json + b"\n"
+    assert captured_inputs["backup_evidence_sha256"] == "a" * 64
+    assert captured_inputs["predecessor_shadow_sha256"] == "b" * 64
+    assert captured_inputs["expected_predecessor_head"] == "0112"
+    assert captured_inputs["expected_target_head"] == "0120"
+    assert source_validation_count == 2
+
+
+def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.test_personal_dev_schema_transition import (
+        _transition_inputs,
+        _write_json,
+    )
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    shutil.copytree(_ROOT / "src", checkout / "src")
+    shutil.copytree(_ROOT / "migrations", checkout / "migrations")
+    profile = checkout / "deploy/dev-fleet/personal-dev-control-plane.toml"
+    profile.parent.mkdir(parents=True)
+    shutil.copy2(_PROFILE, profile)
+    (checkout / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="ascii")
+    subprocess.run(["/usr/bin/git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Loom tests",
+            "-c",
+            "user.email=loom-tests@example.invalid",
+            "commit",
+            "-qm",
+            "exact CLI source fixture",
+        ],
+        check=True,
+    )
+    source_sha = subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_tree = subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    inputs = _transition_inputs(artifacts)
+    current_release_path = artifacts / "current-release.json"
+    current_release_value = json.loads(current_release_path.read_text(encoding="ascii"))
+    current_release_value["source_sha"] = source_sha
+    current_release_value["source_tree"] = source_tree
+    current_release_sha256 = _write_json(current_release_path, current_release_value)
+    arguments = [
+        "personal-dev-control-plane",
+        "render-schema-transition",
+        "--file",
+        str(profile),
+        "--trusted-release-file",
+        str(current_release_path),
+        "--trusted-release-sha256",
+        current_release_sha256,
+        "--source-root",
+        str(checkout),
+        "--predecessor-trusted-release-file",
+        str(artifacts / "predecessor-release.json"),
+        "--predecessor-trusted-release-sha256",
+        str(inputs["predecessor_release_sha256"]),
+        "--backup-restore-evidence-file",
+        str(inputs["backup_evidence_path"]),
+        "--backup-restore-evidence-sha256",
+        str(inputs["backup_evidence_sha256"]),
+        "--postgres-dump-file",
+        str(inputs["postgres_dump_path"]),
+        "--postgres-source-state-file",
+        str(inputs["postgres_source_state_path"]),
+        "--predecessor-shadow-manifest-file",
+        str(inputs["predecessor_shadow_path"]),
+        "--predecessor-shadow-manifest-sha256",
+        str(inputs["predecessor_shadow_sha256"]),
+        "--alembic-config-file",
+        str(checkout / "migrations/alembic.ini"),
+        "--expected-predecessor-schema-head",
+        "0112",
+        "--expected-target-schema-head",
+        "0120",
+    ]
+    program = (
+        "import json, sys\n"
+        "from loom_cli.admin_cmd import dispatch\n"
+        "raise SystemExit(dispatch(json.loads(sys.argv[1])))\n"
+    )
+    environment = _synthetic_checkout_env(
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(checkout / "src"),
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    job = json.loads(result.stdout)
+    plan = json.loads(result.stderr)
+    assert job["kind"] == "Job"
+    assert job["metadata"]["namespace"] == "loom-dev"
+    assert plan["schema"] == "loom-personal-dev-schema-transition-plan-v1"
+    assert plan["predecessor"]["schema_head"] == "0112"
+    assert plan["target"]["schema_head"] == "0120"
+    assert plan["target"]["source_commit"] == source_sha
+    assert plan["target"]["source_tree"] == source_tree
+    assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
+
+    outside_cli_root = tmp_path / "outside-cli"
+    shutil.copytree(checkout / "src/loom_cli", outside_cli_root / "loom_cli")
+    with (outside_cli_root / "loom_cli/personal_dev_control_plane_cmd.py").open(
+        "a", encoding="utf-8"
+    ) as stream:
+        stream.write("\n# outside CLI source\n")
+    outside_cli_environment = environment.copy()
+    outside_cli_environment["PYTHONPATH"] = f"{outside_cli_root}{os.pathsep}{checkout / 'src'}"
+    outside_cli = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(arguments)],
+        cwd=checkout,
+        env=outside_cli_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert outside_cli.returncode == 2
+    assert outside_cli.stdout == ""
+    assert outside_cli.stderr == "error: personal-dev schema transition inputs are invalid\n"
+
+    outside_profile = tmp_path / "outside-profile.toml"
+    shutil.copy2(profile, outside_profile)
+    outside_profile_arguments = list(arguments)
+    profile_index = outside_profile_arguments.index("--file") + 1
+    outside_profile_arguments[profile_index] = str(outside_profile)
+    outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert outside_profile_result.returncode == 2
+    assert outside_profile_result.stdout == ""
+    assert outside_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+
+    profile.unlink()
+    profile.symlink_to(outside_profile)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "add", str(profile.relative_to(checkout))],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Loom tests",
+            "-c",
+            "user.email=loom-tests@example.invalid",
+            "commit",
+            "-qm",
+            "replace profile with outside symlink",
+        ],
+        check=True,
+    )
+    symlink_source_sha = subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    symlink_source_tree = subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    current_release_value["source_sha"] = symlink_source_sha
+    current_release_value["source_tree"] = symlink_source_tree
+    symlink_release_sha256 = _write_json(current_release_path, current_release_value)
+    symlink_profile_arguments = list(arguments)
+    release_digest_index = symlink_profile_arguments.index("--trusted-release-sha256") + 1
+    symlink_profile_arguments[release_digest_index] = symlink_release_sha256
+    symlink_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(symlink_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert symlink_profile_result.returncode == 2
+    assert symlink_profile_result.stdout == ""
+    assert symlink_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+
+
+def test_render_schema_transition_has_a_specific_fail_closed_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+
+    result = dispatch(
+        [
+            "personal-dev-control-plane",
+            "render-schema-transition",
+            "--file",
+            str(_PROFILE),
+            "--trusted-release-file",
+            str(release_path),
+            "--trusted-release-sha256",
+            release_digest,
+            "--source-root",
+            str(tmp_path),
+            "--predecessor-trusted-release-file",
+            str(release_path),
+            "--predecessor-trusted-release-sha256",
+            release_digest,
+            "--backup-restore-evidence-file",
+            str(tmp_path / "backup.json"),
+            "--backup-restore-evidence-sha256",
+            "a" * 64,
+            "--postgres-dump-file",
+            str(tmp_path / "postgres.dump"),
+            "--postgres-source-state-file",
+            str(tmp_path / "postgres.tsv"),
+            "--predecessor-shadow-manifest-file",
+            str(tmp_path / "shadow.yaml"),
+            "--predecessor-shadow-manifest-sha256",
+            "b" * 64,
+            "--alembic-config-file",
+            str(_ROOT / "migrations/alembic.ini"),
+            "--expected-predecessor-schema-head",
+            "0112",
+            "--expected-target-schema-head",
+            "0120",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev schema transition inputs are invalid\n"
 
 
 def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
