@@ -168,12 +168,19 @@ def derive_attestation_bindings(
     browser_image = _string(evidence("browser.runtime", "image-id"), "browser image")
     if browser_image not in image_digests.values():
         raise ValueError("browser image is not part of the exact image artifact set")
+    stable_secret_metadata = _string_map_allow_empty(
+        evidence("credentials.metadata", "stable-metadata-fingerprints"),
+        "stable credential metadata",
+    )
+    rotating_secret_metadata = _string_map_allow_empty(
+        evidence("credentials.metadata", "rotating-metadata-fingerprints"),
+        "rotating credential metadata",
+    )
+    if set(stable_secret_metadata) & set(rotating_secret_metadata):
+        raise ValueError("credential metadata evidence classes overlap")
     secret_metadata = {
         name: (value if value.startswith("sha256:") else f"sha256:{value}")
-        for name, value in _string_map(
-            evidence("credentials.metadata", "metadata-fingerprints"),
-            "credential metadata",
-        ).items()
+        for name, value in {**stable_secret_metadata, **rotating_secret_metadata}.items()
     }
     cleanup = evidence("rehearsal.cleanup", "cleanup-verified")
     protected_mutation = evidence("rehearsal.cleanup", "protected-mutation")
@@ -273,11 +280,18 @@ def derive_attestation_bindings(
         evidence("systemd.render", "supervisor-controller-unit-set-digests"),
         "external supervisor controller unit sets",
     )
+    controller_identity_bindings = _string_map(
+        evidence("external-supervisor.predecessor", "controller-identity-bindings"),
+        "external supervisor controller identities",
+    )
+    controller_runtime_observations = _string_map(
+        evidence("external-supervisor.predecessor", "controller-runtime-observations"),
+        "external supervisor controller runtime observations",
+    )
+    if set(controller_identity_bindings) & set(controller_runtime_observations):
+        raise ValueError("external supervisor controller evidence classes overlap")
     controller_predecessors = _controller_predecessors(
-        _string_map(
-            evidence("external-supervisor.predecessor", "controller-bindings"),
-            "external supervisor controller predecessors",
-        )
+        {**controller_identity_bindings, **controller_runtime_observations}
     )
     controller_hosts = set(controller_artifacts)
     if (

@@ -15,6 +15,7 @@ from typing import TypedDict, cast
 from uuid import uuid4
 
 from loom_cli.rollout.external_supervisor_controller import (
+    encode_external_supervisor_predecessor_identities,
     parse_external_supervisor_controller_bindings,
 )
 from loom_cli.rollout.external_supervisor_predecessor import (
@@ -76,7 +77,7 @@ class _PredecessorEvidence(TypedDict):
     unit_set_digest: str
     live_evidence_digest: str
     pending_transition_digest: str
-    controller_bindings: dict[str, str]
+    controller_identity_bindings: dict[str, str]
 
 
 class FinalGatePlanError(RuntimeError):
@@ -165,7 +166,7 @@ class FinalGatePlan:
         validate_safe_identifier(self.request_id, "request_id")
         validate_safe_identifier(self.rollout_id, "rollout_id")
         if (
-            self.schema_version != 4
+            self.schema_version not in {4, 5}
             or type(self.attempt_number) is not int
             or self.attempt_number < 1
             or self.source_mode not in {"merged-dev", "sealed-cumulative"}
@@ -391,6 +392,7 @@ class FinalGatePlan:
             target_script_sha256=self.supervisor_script_digests,
             target_unit_sha256=target_unit_sha256,
             target_unit_set_digest=external_supervisor_unit_set_digest(target_unit_sha256),
+            transition_schema_version=1 if self.schema_version == 4 else 2,
         )
         if expected_transition != self.supervisor_transition_digest:
             raise ValueError("final gate supervisor transition identity drifted")
@@ -447,6 +449,7 @@ class FinalGatePlan:
                     target_script_sha256=controller_script_digests,
                     target_unit_sha256=host_units,
                     target_unit_set_digest=self.supervisor_controller_unit_set_digests[host],
+                    transition_schema_version=1 if self.schema_version == 4 else 2,
                 )
                 != binding.transition_digest
             ):
@@ -520,11 +523,10 @@ class FinalGatePlan:
         systemd = _parse_systemd_evidence(systemd_evidence)
         predecessor = _parse_external_supervisor_predecessor_evidence(predecessor_evidence)
         attested_controller_bindings = dict(bindings.supervisor_controller_bindings)
-        if {
-            key: value
-            for key, value in attested_controller_bindings.items()
-            if not key.endswith("/transition-digest")
-        } != predecessor["controller_bindings"]:
+        attested_controller_identities = encode_external_supervisor_predecessor_identities(
+            parse_external_supervisor_controller_bindings(attested_controller_bindings)
+        )
+        if attested_controller_identities != predecessor["controller_identity_bindings"]:
             raise ValueError("final gate supervisor controller predecessor drifted")
         supervisor_transition = external_supervisor_transition_digest(
             unit_directory=GB10_CANONICAL_UNIT_DIR,
@@ -536,7 +538,7 @@ class FinalGatePlan:
             predecessor_pointer_digest=predecessor["pointer_digest"],
             predecessor_unit_sha256=predecessor["unit_sha256"],
             predecessor_unit_set_digest=predecessor["unit_set_digest"],
-            predecessor_live_evidence_digest=predecessor["live_evidence_digest"],
+            predecessor_live_evidence_digest=bindings.supervisor_predecessor_live_evidence_digest,
             predecessor_pending_transition_digest=predecessor["pending_transition_digest"],
             target_artifact_digest=systemd["supervisor_artifact_digest"],
             target_profile_sha256=systemd["supervisor_profile_sha256"],
@@ -581,15 +583,13 @@ class FinalGatePlan:
             or predecessor["pointer_digest"] != bindings.supervisor_predecessor_pointer_digest
             or predecessor["unit_sha256"] != dict(bindings.supervisor_predecessor_unit_sha256)
             or predecessor["unit_set_digest"] != bindings.supervisor_predecessor_unit_set_digest
-            or predecessor["live_evidence_digest"]
-            != bindings.supervisor_predecessor_live_evidence_digest
             or predecessor["pending_transition_digest"]
             != bindings.supervisor_predecessor_pending_transition_digest
             or supervisor_transition != bindings.supervisor_transition_digest
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
-            "schema_version": 4,
+            "schema_version": 5,
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
@@ -650,7 +650,9 @@ class FinalGatePlan:
             "supervisor_predecessor_pointer_digest": predecessor["pointer_digest"],
             "supervisor_predecessor_unit_sha256": predecessor["unit_sha256"],
             "supervisor_predecessor_unit_set_digest": predecessor["unit_set_digest"],
-            "supervisor_predecessor_live_evidence_digest": predecessor["live_evidence_digest"],
+            "supervisor_predecessor_live_evidence_digest": (
+                bindings.supervisor_predecessor_live_evidence_digest
+            ),
             "supervisor_predecessor_pending_transition_digest": predecessor[
                 "pending_transition_digest"
             ],
@@ -1019,19 +1021,13 @@ def _parse_external_supervisor_predecessor_evidence(
         "pending-transition-digest",
         "transition-clear",
         "runtime-ready",
-        # ``pool-identity-digest`` is part of the external-supervisor.predecessor
-        # evidence schema. It is a live count of external-supervisor worker rows
-        # per pool (legacy ``gb10-arm64`` vs target ``gb10``) that ordinary worker
-        # registration shifts, so it is deliberately NOT an authority/transition
-        # field and is NOT folded into the supervisor transition digest below --
-        # exactly as the final-admission drift check excludes it (see
-        # final_attestation_admission.py). We still require it to be present and a
-        # well-formed sha256 so the evidence stays schema-conformant.
         "pool-identity-digest",
-        "controller-bindings",
+        "controller-identity-bindings",
+        "controller-runtime-observations",
     }
     units = value.get("unit-digests")
-    controller_bindings = value.get("controller-bindings")
+    controller_identity_bindings = value.get("controller-identity-bindings")
+    controller_runtime_observations = value.get("controller-runtime-observations")
     strings = {
         "kind": value.get("authority-kind"),
         "authority_digest": value.get("authority-digest"),
@@ -1049,8 +1045,11 @@ def _parse_external_supervisor_predecessor_evidence(
         set(value) != expected_fields
         or strings["kind"] not in {"legacy-manifest", "canonical", "absent"}
         or not isinstance(units, Mapping)
-        or not isinstance(controller_bindings, Mapping)
-        or not controller_bindings
+        or not isinstance(controller_identity_bindings, Mapping)
+        or not controller_identity_bindings
+        or not isinstance(controller_runtime_observations, Mapping)
+        or not controller_runtime_observations
+        or set(controller_identity_bindings) & set(controller_runtime_observations)
         or bool(units) == supervisor_predecessor_absent
         or (strings["authority_digest"] == EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
         != supervisor_predecessor_absent
@@ -1075,7 +1074,10 @@ def _parse_external_supervisor_predecessor_evidence(
         or external_supervisor_unit_set_digest_or_empty(units) != strings["unit_set_digest"]
         or any(
             not isinstance(key, str) or not key or not isinstance(item, str) or not item
-            for key, item in controller_bindings.items()
+            for key, item in {
+                **controller_identity_bindings,
+                **controller_runtime_observations,
+            }.items()
         )
     ):
         raise ValueError("final gate external supervisor predecessor evidence is invalid")
@@ -1087,7 +1089,7 @@ def _parse_external_supervisor_predecessor_evidence(
         "unit_set_digest": strings["unit_set_digest"],
         "live_evidence_digest": cast(str, strings["live_evidence_digest"]),
         "pending_transition_digest": cast(str, strings["pending_transition_digest"]),
-        "controller_bindings": dict(controller_bindings),
+        "controller_identity_bindings": dict(controller_identity_bindings),
     }
 
 

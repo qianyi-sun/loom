@@ -39,7 +39,7 @@ from .protected_external_supervisor_transport import (
     classify_external_supervisor_live_state,
 )
 
-_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v3").hexdigest()
+_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v4").hexdigest()
 _COMPONENT_ID_BY_EXECUTION_HOST = {
     "gx10-01c7": "external-supervisors-gb10",
     "TRT-EAI-OLDLAB-1": "external-supervisors-oldlab",
@@ -91,16 +91,12 @@ class ProtectedExternalSupervisorComponent:
                     "unit_directory": str(self.unit_dir),
                     "supervisor_predecessor_digest": controller.predecessor_digest,
                     "supervisor_predecessor_kind": controller.predecessor_kind,
-                    "supervisor_predecessor_live_evidence_digest": (
-                        controller.predecessor_live_evidence_digest
-                    ),
                     "supervisor_predecessor_pending_transition_digest": (
                         controller.predecessor_pending_transition_digest
                     ),
                     "supervisor_predecessor_pointer_digest": (
                         controller.predecessor_pointer_digest
                     ),
-                    "supervisor_predecessor_runtime_state": (controller.predecessor_runtime_state),
                     "supervisor_predecessor_unit_set_digest": (
                         controller.predecessor_unit_set_digest
                     ),
@@ -164,10 +160,6 @@ class ProtectedExternalSupervisorComponent:
                 # predecessor. Re-attest them only through that complete,
                 # plan-bound predecessor authority.
                 try:
-                    if controller.predecessor_runtime_state != "ready":
-                        raise RuntimeError(
-                            "protected external supervisor predecessor runtime state drifted"
-                        )
                     self._verify_predecessor_binding(plan, artifact, live, controller)
                 except (RuntimeError, ValueError):
                     state = ComponentState.DRIFTED
@@ -175,10 +167,6 @@ class ProtectedExternalSupervisorComponent:
                     state = ComponentState.READY
         elif state is ComponentState.READY:
             try:
-                if controller.predecessor_runtime_state != live_state:
-                    raise RuntimeError(
-                        "protected external supervisor predecessor runtime state drifted"
-                    )
                 self._verify_predecessor_binding(plan, artifact, live, controller)
             except (RuntimeError, ValueError):
                 state = ComponentState.DRIFTED
@@ -204,11 +192,8 @@ class ProtectedExternalSupervisorComponent:
             live,
             unit_dir=self.unit_dir,
         )
-        expected_runtime_state = "repairable" if live_state == "repairable" else "ready"
         if live_state not in {"exact", "ready", "repairable"}:
             raise RuntimeError("protected external supervisor state changed before apply")
-        if controller.predecessor_runtime_state != expected_runtime_state:
-            raise RuntimeError("protected external supervisor predecessor runtime state drifted")
         self.transport.apply(
             artifact,
             live,
@@ -307,10 +292,7 @@ class ProtectedExternalSupervisorComponent:
                 raise RuntimeError("protected external supervisor predecessor pointer drifted")
         elif canonical is not None:
             raise RuntimeError("protected external supervisor predecessor pointer appeared")
-        if (
-            live_evidence_digest != controller.predecessor_live_evidence_digest
-            or pending_transition_digest != controller.predecessor_pending_transition_digest
-        ):
+        if pending_transition_digest != controller.predecessor_pending_transition_digest:
             raise RuntimeError("protected external supervisor predecessor evidence drifted")
         target_unit_set_digest = external_supervisor_unit_set_digest(artifact.unit_sha256)
         calculated_transition = external_supervisor_transition_digest(
