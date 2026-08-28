@@ -753,10 +753,24 @@ def run_attempt(
             or original.rollout_id != envelope.rollout_id
             or original.candidate.resolved_sha != envelope.resolved_sha
             or original.candidate_tree != envelope.resolved_tree
-            or original.mutation_epoch != evidence.mutation_epoch
             or original.environment != envelope.environment
             or original.namespace != envelope.namespace
         ):
+            raise ValueError("staging mutation guard binding drifted")
+        expected_mutation_epoch = original.mutation_epoch
+        if envelope.resume and dependencies.state_root is not None:
+            recovery_attempt = find_advanced_epoch_attempt(
+                dependencies.state_root,
+                request_id=envelope.request_id,
+                through_attempt=envelope.attempt_number - 1,
+                candidate_sha=envelope.resolved_sha,
+                attestation_digest=envelope.preflight_attestation_sha256,
+                starting_mutation_epoch=original.mutation_epoch,
+                service_uid=os.geteuid(),
+            )
+            if recovery_attempt is not None:
+                expected_mutation_epoch += 1
+        if evidence.mutation_epoch != expected_mutation_epoch:
             raise ValueError("staging mutation guard binding drifted")
         return _run_attempt_owned(
             envelope,
