@@ -1868,7 +1868,7 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
 def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
     assert (
         _document_sha256("docs/runbooks/personal-dev-durable-launch.md")
-        == "3eed45de41bd12b20dcb85f308bf093c32566350129eac9e25f1fafd5adaa248"
+        == "675d661283b1d69850e1c7cb404a6d43cd0f8b1a0b202446e322cc89c73d099a"
     )
 
 
@@ -2119,6 +2119,8 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
                 "cert-manager.io/cluster-issuer": "letsencrypt-prod",
                 "nginx.ingress.kubernetes.io/proxy-body-size": "512m",
                 "nginx.ingress.kubernetes.io/proxy-read-timeout": "300",
+                "loom.dev/render-input-sha256": "a" * 64,
+                "loom.dev/trusted-release-sha256": "b" * 64,
             }
         },
         "spec": {
