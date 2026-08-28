@@ -186,6 +186,46 @@ def test_rollback_shadow_status_loads_canonical_zero_capacity_evidence(
     assert loaded == value
 
 
+def test_rollback_shadow_status_loads_schema_three_web_component(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.status.json"
+    value = _rollback_shadow_status_value()
+    value["components"].append(  # type: ignore[union-attr]
+        {"name": "web", "observed": 1, "ready": True}
+    )
+    sha256 = _write_owner_only(path, value)
+
+    loaded = acceptance_evidence.load_personal_dev_rollback_shadow_status(
+        path,
+        sha256,
+    )
+
+    assert loaded == value
+
+
+def test_shadow_status_validation_requires_release_specific_web_component() -> None:
+    schema_two = _rollback_shadow_status_value()
+    schema_three = deepcopy(schema_two)
+    schema_three["components"].append(  # type: ignore[union-attr]
+        {"name": "web", "observed": 1, "ready": True}
+    )
+
+    acceptance_evidence._validate_shadow_status(schema_two, web_expected=False)
+    acceptance_evidence._validate_shadow_status(schema_three, web_expected=True)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence._validate_shadow_status(schema_two, web_expected=True)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence._validate_shadow_status(schema_three, web_expected=False)
+    invalid_web_count = deepcopy(schema_three)
+    invalid_web_count["components"][-1]["observed"] = 0  # type: ignore[index]
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence._validate_shadow_status(
+            invalid_web_count,
+            web_expected=True,
+        )
+
+
 @pytest.mark.parametrize(
     "invalid_kind",
     [
@@ -679,8 +719,10 @@ def test_evidence_loader_rejects_noncanonical_or_non_owner_only_file(tmp_path: P
         )
 
 
+@pytest.mark.parametrize("web_expected", [False, True], ids=["schema-2", "schema-3"])
 def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
     tmp_path: Path,
+    web_expected: bool,
 ) -> None:
     (
         profile,
@@ -692,6 +734,12 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         _scanner_path,
         _backup_path,
     ) = _inputs(tmp_path)
+    if not web_expected:
+        release = replace(
+            release,
+            schema_version=2,
+            images=replace(release.images, loom_web=None),
+        )
 
     def owner_file(name: str, payload: bytes) -> Path:
         path = tmp_path / name
@@ -748,6 +796,10 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         json.dumps(secret_inventory, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n",
     )
     shadow_status = _rollback_shadow_status_value()
+    if web_expected:
+        shadow_status["components"].append(  # type: ignore[union-attr]
+            {"name": "web", "observed": 1, "ready": True}
+        )
     shadow_status["release_sha256"] = release_sha256
     status_payload = json.dumps(shadow_status).encode("ascii") + b"\n"
     pre_status = owner_file("pre-status.json", status_payload)
