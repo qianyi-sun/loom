@@ -1380,9 +1380,9 @@ The secret-bearing `publish-local` flags also accept safe references such as
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`, but literal credential
 values are rejected because argv is visible in process listings.
 
-`loom datasets verify` intentionally ignores the hidden `.loom-revisions`
-namespace because it cannot identify the live revision without consulting the
-database. For a `publish-local` benchmark, use
+`loom datasets verify` refuses to sample a benchmark containing the hidden
+`.loom-revisions` namespace because it cannot identify the live revision
+without consulting the database. For a `publish-local` benchmark, use
 `loom datasets audit team-evals --verify-bundles`; it verifies the immutable
 bundle sources referenced by the registered task rows.
 

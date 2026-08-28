@@ -169,7 +169,7 @@ name = "main"
     assert "verify pipeline error" in bad["stderr_tail"]
 
 
-async def test_verify_ignores_immutable_publication_revisions(
+async def test_verify_rejects_immutable_publication_revision_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Historical and orphan publication revisions are not live tasks."""
@@ -202,19 +202,8 @@ name = "main"
         )
     ] = task_toml
 
-    async def _fake_oracle(
-        *,
-        task_id: str,
-        task_dir: Path,
-        image: str,
-    ) -> OracleResult:
-        return OracleResult(
-            task_id=task_id,
-            passed=True,
-            return_code=0,
-            stdout_tail="ok",
-            stderr_tail="",
-        )
+    async def _fake_oracle(**_kwargs: object) -> OracleResult:
+        raise AssertionError("legacy verify must fail closed before running an oracle")
 
     monkeypatch.setattr(
         "loom_benchmark_tool.verify_cmd.run_oracle_for_task",
@@ -228,12 +217,17 @@ name = "main"
         limit=10,
     )
 
-    assert report["total"] == 1
-    assert report["passed"] == 1
-    assert report["failed"] == 0
-    assert [result["task_id"] for result in report["results"]] == [
-        "humaneval/good",
-    ]
+    assert report == {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "results": [],
+        "blocked_reason": (
+            "benchmark contains immutable .loom-revisions; legacy object-listing "
+            "verification cannot identify the live task sources; use "
+            "`loom datasets audit humaneval --verify-bundles`"
+        ),
+    }
 
 
 async def test_verify_rejects_unsafe_prefix_slug(
