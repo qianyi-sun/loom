@@ -267,6 +267,38 @@ def test_release_artifact_isolates_exact_candidate_subset(tmp_path: Path) -> Non
     }
 
 
+def test_release_artifact_bounds_disposable_grace_without_mutating_source(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    resources = list(yaml.safe_load_all(plan.rendered_manifest_path.read_text()))
+    gateway = next(
+        resource
+        for resource in resources
+        if resource["kind"] == "Deployment"
+        and resource["metadata"]["name"] == "loom-llm-gateway"
+    )
+    gateway["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] = 300
+    source_payload = yaml.safe_dump_all(resources, sort_keys=True)
+    plan.rendered_manifest_path.write_text(source_payload)
+    plan.rendered_manifest_path.chmod(0o600)
+    record = plan.to_record()
+    record["rendered_manifest_sha256"] = hashlib.sha256(source_payload.encode()).hexdigest()
+
+    artifact = build_rehearsal_release_artifact(RehearsalPlan.from_record(record))
+
+    isolated = list(yaml.safe_load_all(artifact.payload))
+    isolated_deployments = [
+        resource for resource in isolated if resource["kind"] == "Deployment"
+    ]
+    assert len(isolated_deployments) == 4
+    assert all(
+        deployment["spec"]["template"]["spec"]["terminationGracePeriodSeconds"] == 10
+        for deployment in isolated_deployments
+    )
+    assert plan.rendered_manifest_path.read_text() == source_payload
+
+
 @pytest.mark.parametrize(
     "config_name",
     ("staging.cluster.toml", "staging.multinode.cluster.toml"),

@@ -806,6 +806,12 @@ def test_plan_rejects_missing_exact_image_before_executor() -> None:
         )
 
 
+def test_database_pod_manifest_uses_bounded_termination_grace() -> None:
+    manifest = _database_pod_manifest(_plan())
+
+    assert manifest["spec"]["terminationGracePeriodSeconds"] == 10
+
+
 def test_registry_rehearsal_uses_preflight_published_digest_without_republish() -> None:
     manifest_digests = {
         name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
