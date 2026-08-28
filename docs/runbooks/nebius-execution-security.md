@@ -101,6 +101,44 @@ unrecorded cross-pool placement, duplicate adapter authority, or missing cleanup
 the target, revoke active generations, preserve evidence, and do not continue
 to a performance or traffic canary.
 
+The first bounded containment slice is automated by
+`scripts/ops/nebius_runtime_containment_smoke.py`. It requires an exact
+digest-pinned image and full candidate SHA, refuses to overwrite an existing
+smoke namespace or RuntimeClass, and creates a restricted temporary namespace.
+The script proves the gVisor marker, non-root identity, zero effective
+capabilities, no-new-privileges, seccomp filtering, absent service-account
+token and host/runtime paths, failed mount and setuid attempts, working
+loopback and cluster DNS, and denied Kubernetes API, metadata, private, public,
+and link-local IPv6 connections under a DNS-only NetworkPolicy. It also uses
+server-side dry-run to require Pod Security rejection of privileged, host
+namespace, and hostPath variants. It captures the Pod/node/image/container
+identities and every redacted kubectl result, then deletes the namespace and
+RuntimeClass even on failure.
+
+Convert the checked-in RuntimeClass YAML to JSON without changing its semantic
+content, then run the smoke only during an authorized window in which the
+pinned handler is installed on a disposable execution node:
+
+```bash
+candidate_sha="$(git rev-parse HEAD)"
+image="ghcr.io/qianyi-sun/loom-execution-actuator@sha256:<reviewed-digest>"
+runtime_json="$(mktemp)"
+kubectl create --dry-run=client \
+  -f deploy/terraform/nebius/modules/execution-target/runtime/loom-sandbox-runtime-class.yaml \
+  -o json >"$runtime_json"
+python scripts/ops/nebius_runtime_containment_smoke.py \
+  --kubeconfig /path/to/owner-only-kubeconfig \
+  --candidate-sha "$candidate_sha" \
+  --image "$image" \
+  --runtime-class-json "$runtime_json" \
+  --evidence-dir /path/to/new-owner-only-evidence-directory
+```
+
+This bounded slice is necessary but not sufficient for #1551. It does not
+replace the owning-interface packet/credential tests, two-team tests, stale
+generation and cross-pool tests, failure/recovery matrix, escape corpus,
+resource exhaustion, or performance measurements above.
+
 ## Enablement sequence
 
 After all negative and positive tests pass, attach the evidence digests to
