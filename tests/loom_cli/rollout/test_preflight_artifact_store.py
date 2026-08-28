@@ -55,7 +55,17 @@ def _images() -> ImageArtifactSet:
 
 def _manifests(images: ImageArtifactSet) -> ManifestArtifact:
     rollout_names = {name for name, _dockerfile in ROLLOUT_IMAGES}
-    rendered = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: exact\n"
+    rendered = (
+        "apiVersion: batch/v1\n"
+        "kind: CronJob\n"
+        "metadata:\n"
+        "  name: loom-staging-data-lifecycle\n"
+        "  namespace: loom-staging\n"
+        "spec:\n"
+        "  concurrencyPolicy: Forbid\n"
+        "  schedule: '*/5 * * * *'\n"
+        "  suspend: false\n"
+    )
     return ManifestArtifact(
         rendered_yaml=rendered,
         rendered_sha256=__import__("hashlib").sha256(rendered.encode()).hexdigest(),

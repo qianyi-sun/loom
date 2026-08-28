@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from loom_cli.rollout.operator.manifest_apply_contract import server_side_apply_argv
 from loom_cli.rollout.operator.protected_apply_journal import (
@@ -59,10 +60,13 @@ def _authority(runner: Runner, *, epoch_state: ComponentState = ComponentState.E
     )
 
 
-def test_manifest_component_converges_exact_published_artifact(tmp_path: Path) -> None:
+def test_manifest_component_converges_guard_held_published_artifact(tmp_path: Path) -> None:
     plan = _published_plan(tmp_path)
     runner = Runner()
     authority = _authority(runner)
+    original = Path(plan.rendered_manifest_path).read_bytes()
+    expected_documents = list(yaml.safe_load_all(original))
+    expected_documents[0]["spec"]["suspend"] = True
 
     assert authority.classify(plan).state is ComponentState.READY
     authority.apply(plan)
@@ -70,7 +74,10 @@ def test_manifest_component_converges_exact_published_artifact(tmp_path: Path) -
 
     assert exact.state is ComponentState.EXACT
     assert exact.observed_epoch == plan.starting_mutation_epoch + 1
-    assert runner.calls[0][1] == Path(plan.rendered_manifest_path).read_bytes()
+    assert Path(plan.rendered_manifest_path).read_bytes() == original
+    for _argv, payload in runner.calls:
+        assert payload is not None
+        assert list(yaml.safe_load_all(payload)) == expected_documents
     apply_argv = runner.calls[2][0]
     assert apply_argv == server_side_apply_argv(plan.namespace)
     assert "--server-side=true" in apply_argv
