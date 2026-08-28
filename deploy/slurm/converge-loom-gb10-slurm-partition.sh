@@ -15,6 +15,46 @@ PARTITION="loom-staging"
 PARTITION_LINE="PartitionName=$PARTITION Nodes=trt-gb10-[1-15] Default=NO MaxTime=1-00:00:00 State=UP PriorityTier=100 AllowAccounts=loom-staging AllowQos=loom-staging OverSubscribe=NO"
 EXPECTED_NODES="$(printf 'trt-gb10-%s\n' {1..15})"
 
+loom_gb10_refresh_stale_backup() {
+  local archive
+  local backup_digest
+  local history
+  local replacement=""
+
+  history="$STATE_ROOT/slurm.conf.before-loom-staging-partition.history"
+  backup_digest="$(sha256sum "$BACKUP" | awk '{ print $1 }')"
+  archive="$history/$backup_digest"
+  if [ -e "$history" ] || [ -L "$history" ]; then
+    if [ -L "$history" ] \
+      || [ "$(stat -c '%U:%G:%a:%F' "$history")" \
+        != "$STATE_OWNER:$STATE_GROUP:700:directory" ]; then
+      echo "error: GB10 partition backup history is unsafe" >&2
+      exit 1
+    fi
+  else
+    install -d -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0700 "$history"
+  fi
+  if [ -e "$archive" ] || [ -L "$archive" ]; then
+    if [ -L "$archive" ] \
+      || [ "$(stat -c '%U:%G:%a:%F' "$archive")" \
+        != "$STATE_OWNER:$STATE_GROUP:600:regular file" ] \
+      || ! cmp -s "$archive" "$BACKUP"; then
+      echo "error: GB10 partition backup archive is unsafe or conflicting" >&2
+      exit 1
+    fi
+  else
+    install -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0600 "$BACKUP" "$archive"
+  fi
+
+  replacement="$(mktemp "$STATE_ROOT/.slurm.conf.before-loom-staging-partition.XXXXXX")"
+  if ! install -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0600 \
+    "$CONFIG" "$replacement"; then
+    unlink "$replacement"
+    exit 1
+  fi
+  mv "$replacement" "$BACKUP"
+}
+
 loom_gb10_restore_backup_and_fail() {
   local failure="$1"
   install -o "$CONFIG_OWNER" -g "$CONFIG_GROUP" -m 0644 "$BACKUP" "$CONFIG"
@@ -113,10 +153,12 @@ loom_gb10_converge_partition() {
     if [ -e "$BACKUP" ]; then
       if [ -L "$BACKUP" ] \
         || [ "$(stat -c '%U:%G:%a:%F' "$BACKUP")" \
-          != "$STATE_OWNER:$STATE_GROUP:600:regular file" ] \
-        || ! cmp -s "$BACKUP" "$CONFIG"; then
-        echo "error: GB10 partition backup is unsafe or stale" >&2
+          != "$STATE_OWNER:$STATE_GROUP:600:regular file" ]; then
+        echo "error: GB10 partition backup is unsafe" >&2
         exit 1
+      fi
+      if ! cmp -s "$BACKUP" "$CONFIG"; then
+        loom_gb10_refresh_stale_backup
       fi
     else
       install -o "$STATE_OWNER" -g "$STATE_GROUP" -m 0600 "$CONFIG" "$BACKUP"
