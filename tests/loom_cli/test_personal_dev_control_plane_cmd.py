@@ -53,6 +53,15 @@ _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 _NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
 
 
+def _synthetic_checkout_env(**overrides: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("COV_CORE_"):
+            del env[key]
+    env.update(overrides)
+    return env
+
+
 def _git_identity() -> tuple[str, str]:
     def git(*arguments: str) -> str:
         return subprocess.run(
@@ -1262,9 +1271,10 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         "from loom_cli.admin_cmd import dispatch\n"
         "raise SystemExit(dispatch(json.loads(sys.argv[1])))\n"
     )
-    environment = os.environ.copy()
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["PYTHONPATH"] = str(checkout / "src")
+    environment = _synthetic_checkout_env(
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(checkout / "src"),
+    )
 
     result = subprocess.run(
         [sys.executable, "-c", program, json.dumps(arguments)],
