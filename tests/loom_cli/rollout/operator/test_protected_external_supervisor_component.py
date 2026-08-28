@@ -703,7 +703,7 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
     assert ready.observed_epoch == plan.starting_mutation_epoch + 1
 
     transport.observation = _observation(artifact, files="partial", runtime="absent")
-    assert component.classify(plan).state is ComponentState.DRIFTED
+    assert component.classify(plan).state is ComponentState.READY
 
     transport.observation = _observation(
         artifact,
@@ -838,7 +838,9 @@ def test_component_applies_attested_repairable_predecessor(tmp_path: Path) -> No
     assert transport.applied == 1
 
 
-def test_component_rejects_unattested_repairable_predecessor(tmp_path: Path) -> None:
+def test_component_accepts_repairable_predecessor_after_ready_attestation(
+    tmp_path: Path,
+) -> None:
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     live = _repairable_predecessor_observation(candidate_root, artifact)
     plan = _bind_primary_controller_to_canonical_predecessor(plan, artifact, live)
@@ -851,9 +853,8 @@ def test_component_rejects_unattested_repairable_predecessor(tmp_path: Path) -> 
         artifact_builder=_build_active_artifact,
     )
 
-    assert component.classify(plan).state is ComponentState.DRIFTED
-    with pytest.raises(RuntimeError, match="runtime state drifted"):
-        component.apply(plan)
+    assert component.classify(plan).state is ComponentState.READY
+    component.apply(plan)
 
 
 def test_component_reattests_exact_attested_predecessor_for_new_plan(tmp_path: Path) -> None:

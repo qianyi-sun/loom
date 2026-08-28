@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
+    AdmissionPhase,
     CheckExecution,
     PreflightAttestation,
     PreflightDag,
+    RegisteredCheck,
+    identity_evidence_hash,
 )
 
 _BASELINE_CHECKS = frozenset(
@@ -27,37 +29,72 @@ _BASELINE_CHECKS = frozenset(
     }
 )
 
-_POST_APPLY_DRIFT_EVIDENCE_CHECKS = frozenset(
-    {
-        "candidate.identity",
-        "runner.install",
-        "credentials.metadata",
-        "gb10.shared-mount",
-        "gb10.candidate-source",
-        "gb10.host-readiness",
-    }
-)
-_PRE_APPLY_DRIFT_EVIDENCE_CHECKS = _POST_APPLY_DRIFT_EVIDENCE_CHECKS | {
-    "external-supervisor.predecessor"
-}
-_ROTATING_CREDENTIAL_METADATA = frozenset({"readonly-kubeconfig", "rehearsal-kubeconfig"})
+
+class FinalAttestationAdmissionError(ValueError):
+    """Secret-safe, bounded failure identity for pre-apply admission."""
+
+    _FAILURE_CODES = frozenset(
+        {
+            "check-contract-invalid",
+            "check-failed",
+            "clock-invalid",
+            "context-drift",
+            "evidence-drift",
+            "identity-drift",
+        }
+    )
+
+    def __init__(self, failure_code: str, message: str) -> None:
+        if failure_code not in self._FAILURE_CODES:
+            raise ValueError("final admission failure code is invalid")
+        self.failure_code = failure_code
+        super().__init__(message)
 
 
 class PostApplyDriftTransientError(ValueError):
     """A post-apply observation was temporarily incomplete but may converge."""
 
 
-def _credential_metadata_matches(
-    current: Mapping[str, str],
-    attested: Mapping[str, str],
+def _checks_for_admission_phase(
+    plan: CandidatePreflightPlan,
+    phase: AdmissionPhase,
+) -> tuple[tuple[RegisteredCheck, ...], frozenset[str]]:
+    available = {check.spec.check_id: check for check in plan.registry.checks}
+    selected = {
+        check_id for check_id, check in available.items() if phase in check.spec.admission_phases
+    }
+    if not selected:
+        raise ValueError("admission phase has no registered checks")
+    required = set(selected)
+    pending = list(selected)
+    while pending:
+        check_id = pending.pop()
+        try:
+            dependencies = available[check_id].spec.dependencies
+        except KeyError as exc:
+            raise ValueError("admission check implementation is missing") from exc
+        for dependency in dependencies:
+            if dependency not in available:
+                raise ValueError("admission check dependency is missing")
+            if dependency not in required:
+                required.add(dependency)
+                pending.append(dependency)
+    checks = tuple(check for check in plan.registry.checks if check.spec.check_id in required)
+    return checks, frozenset(selected)
+
+
+def _identity_evidence_matches(
+    *,
+    checks: tuple[RegisteredCheck, ...],
+    executions: tuple[CheckExecution, ...],
+    attestation: PreflightAttestation,
 ) -> bool:
-    """Freeze stable credentials while allowing reviewed TokenRequest rotation."""
-    if current.keys() != attested.keys():
-        return False
-    return all(
-        current[name] == fingerprint
-        for name, fingerprint in attested.items()
-        if name not in _ROTATING_CREDENTIAL_METADATA
+    specs = {check.spec.check_id: check.spec for check in checks}
+    by_id = {execution.check_id: execution for execution in executions}
+    return specs.keys() == by_id.keys() and all(
+        identity_evidence_hash(specs[check_id], by_id[check_id].evidence)
+        == attestation.identity_evidence_hashes.get(check_id)
+        for check_id in specs
     )
 
 
@@ -112,10 +149,14 @@ def validate_final_attestation(
 ) -> FinalAttestationAdmission:
     """Recheck only drift-sensitive Tier 0 authority before any live apply."""
     if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("final admission clock must be timezone-aware")
+        raise FinalAttestationAdmissionError(
+            "clock-invalid",
+            "final admission clock must be timezone-aware",
+        )
     bindings = attestation.bindings
     if (
-        now >= attestation.expires_at
+        attestation.schema_version != 3
+        or now >= attestation.expires_at
         or plan.candidate != candidate
         or bindings.candidate_sha != candidate.resolved_sha
         or bindings.candidate_tree != candidate.resolved_tree
@@ -125,7 +166,10 @@ def validate_final_attestation(
         or plan.registry.coverage_digest != attestation.coverage_digest
         or plan.registry.implementation_digests != attestation.check_implementation_digests
     ):
-        raise ValueError("final admission attestation identity drifted")
+        raise FinalAttestationAdmissionError(
+            "identity-drift",
+            "final admission attestation identity drifted",
+        )
     context_expected = {
         "candidate.sha": bindings.candidate_sha,
         "candidate.tree": bindings.candidate_tree,
@@ -135,20 +179,30 @@ def validate_final_attestation(
         "route": bindings.route,
     }
     if any(plan.context.bindings.get(key) != value for key, value in context_expected.items()):
-        raise ValueError("final admission context binding drifted")
+        raise FinalAttestationAdmissionError(
+            "context-drift",
+            "final admission context binding drifted",
+        )
 
-    drift_checks = tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
+    try:
+        drift_checks, _ = _checks_for_admission_phase(
+            plan,
+            AdmissionPhase.PRE_APPLY,
+        )
+    except ValueError as exc:
+        raise FinalAttestationAdmissionError(
+            "check-contract-invalid",
+            "final admission check contract is invalid",
+        ) from exc
     executions = PreflightDag(drift_checks, max_concurrency=max_concurrency).run(
         plan.context,
         through_tier=2,
         now=lambda: now,
     )
-    by_id = {execution.check_id: execution for execution in executions}
     tier0 = tuple(execution for execution in executions if execution.tier == 0)
     tier2 = tuple(execution for execution in executions if execution.tier == 2)
     if (
-        not _PRE_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys()
-        or set(execution.check_id for execution in tier2) != _BASELINE_CHECKS
+        set(execution.check_id for execution in tier2) != _BASELINE_CHECKS
         or any(not execution.passed for execution in executions)
         or any(
             execution.implementation_digest
@@ -156,122 +210,19 @@ def validate_final_attestation(
             for execution in executions
         )
     ):
-        raise ValueError("final admission Tier 0 drift check failed")
-
-    def evidence(check_id: str, field: str) -> object:
-        try:
-            return by_id[check_id].evidence[field]
-        except KeyError as exc:
-            raise ValueError("final admission drift evidence is incomplete") from exc
-
-    def string_map(check_id: str, field: str) -> dict[str, str]:
-        value = evidence(check_id, field)
-        if not isinstance(value, Mapping) or any(
-            not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()
-        ):
-            raise ValueError("final admission drift evidence is incomplete")
-        return dict(value)
-
-    current_secret_metadata = string_map("credentials.metadata", "metadata-fingerprints")
-    normalized_secret_metadata = {
-        str(key): (str(value) if str(value).startswith("sha256:") else f"sha256:{value}")
-        for key, value in current_secret_metadata.items()
-    }
-    volatile_controller_binding_suffixes = (
-        "/transition-digest",
-        "/live-evidence-digest",
-        "/runtime-state",
-    )
-
-    def stable_controller_bindings(values: Mapping[str, str]) -> dict[str, str]:
-        return {
-            key: value
-            for key, value in values.items()
-            if not key.endswith(volatile_controller_binding_suffixes)
-        }
-
-    exact_evidence = (
-        evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
-        evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
-        evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        # These two kubeconfigs contain bounded TokenRequest credentials and are
-        # intentionally refreshed hourly.  Their current no-follow metadata,
-        # ACL, read stability, and downstream capability are revalidated by the
-        # passing preflight DAG above; freezing their inode/timestamps would
-        # turn an authorized refresh into unavoidable attestation drift.  The
-        # complete credential label set and every non-rotating credential stay
-        # byte-exact here.
-        _credential_metadata_matches(
-            normalized_secret_metadata,
-            bindings.secret_metadata_fingerprints,
-        ),
-        evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
-        evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
-        # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
-        # it folds in each host's node-agent service/timer runtime state
-        # (ActiveState/SubState/Result), which cycles as the readiness timer
-        # fires and the oneshot agent runs between the restore rehearsal and this
-        # re-check, so a fixed attestation snapshot can never re-match a running
-        # fleet. Meaningful gb10 drift is still gated -- the check must PASS
-        # (fleet reachable + ready) and boot-ids must match (no host reboot or
-        # host-set change).
-        string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
-        evidence("external-supervisor.predecessor", "authority-kind")
-        == bindings.supervisor_predecessor_kind,
-        evidence("external-supervisor.predecessor", "authority-digest")
-        == bindings.supervisor_predecessor_digest,
-        evidence("external-supervisor.predecessor", "pointer-digest")
-        == bindings.supervisor_predecessor_pointer_digest,
-        string_map("external-supervisor.predecessor", "unit-digests")
-        == dict(bindings.supervisor_predecessor_unit_sha256),
-        evidence("external-supervisor.predecessor", "unit-set-digest")
-        == bindings.supervisor_predecessor_unit_set_digest,
-        evidence("external-supervisor.predecessor", "pending-transition-digest")
-        == bindings.supervisor_predecessor_pending_transition_digest,
-        evidence("external-supervisor.predecessor", "transition-clear") is True,
-        evidence("external-supervisor.predecessor", "runtime-ready") is True,
-        stable_controller_bindings(
-            string_map("external-supervisor.predecessor", "controller-bindings")
+        raise FinalAttestationAdmissionError(
+            "check-failed",
+            "final admission Tier 0 drift check failed",
         )
-        == stable_controller_bindings(bindings.supervisor_controller_bindings),
-    )
-    # The drift-sensitive external-supervisor.predecessor *authority* and
-    # transition fields are re-checked individually above. We deliberately do
-    # NOT additionally require the check's whole evidence_hash to byte-match the
-    # attestation, because that evidence also folds in ``pool-identity-digest`` --
-    # a live count of external-supervisor worker rows per pool (legacy `gb10-arm64`
-    # vs target `gb10`). Ordinary worker registration between the restore
-    # rehearsal (which mints the attestation) and this final admission shifts that
-    # count. The top-level and per-controller ``live-evidence-digest`` also fold
-    # in supervisor runtime state, which can legitimately converge from
-    # ``repairable`` to ``ready`` in this window. Those live observations cannot
-    # be frozen against a running fleet. Meaningful authority, pointer, unit,
-    # unit-set, and pending-transition fields remain exact above, while the
-    # freshly passing check still requires every controller to be runtime-ready
-    # and transition-clear. (Concurrent legacy->target migration remains
-    # coordinated by the rollout itself and by the pending-transition digests.)
-    if not all(exact_evidence):
-        raise ValueError("final admission drift-sensitive evidence changed")
-    for execution in tier2:
-        current_evidence = execution.evidence
-        # Each Tier 2 baseline is re-verified HEALTHY at final admission: ready,
-        # observed at the current mutation epoch, bound to the read-only
-        # principal, carrying a resource-digest, and unblocked. We intentionally
-        # do NOT additionally require the check's whole evidence_hash to byte-match
-        # the attestation: the evidence carries ``resource-digest`` -- a live hash
-        # of the probed staging resource (auth/release-baseline/storage-db) that
-        # shifts with ordinary staging traffic between the restore rehearsal and
-        # this re-check, so a fixed attestation snapshot can never re-match a
-        # serving system. The health checks above (not the frozen resource
-        # digest) are the meaningful pre-apply baseline gate.
-        if (
-            current_evidence.get("ready") is not True
-            or current_evidence.get("observed-epoch") != current_mutation_epoch
-            or current_evidence.get("readonly-principal") in {None, ""}
-            or current_evidence.get("resource-digest") in {None, ""}
-            or current_evidence.get("blockers") != {}
-        ):
-            raise ValueError("final admission Tier 2 baseline changed")
+    if not _identity_evidence_matches(
+        checks=drift_checks,
+        executions=executions,
+        attestation=attestation,
+    ):
+        raise FinalAttestationAdmissionError(
+            "evidence-drift",
+            "final admission drift-sensitive evidence changed",
+        )
     return FinalAttestationAdmission(attestation, tier0, tier2, plan)
 
 
@@ -308,35 +259,21 @@ def validate_post_apply_attestation_drift(
     }
     if any(plan.context.bindings.get(key) != value for key, value in context_expected.items()):
         raise ValueError("post-apply context binding drifted")
-    available = {
-        check.spec.check_id: check for check in plan.registry.checks if check.spec.tier == 0
-    }
-    selected_ids = set(_POST_APPLY_DRIFT_EVIDENCE_CHECKS)
-    pending = list(selected_ids)
-    while pending:
-        check_id = pending.pop()
-        try:
-            dependencies = available[check_id].spec.dependencies
-        except KeyError as exc:
-            raise ValueError("post-apply drift check implementation is missing") from exc
-        for dependency in dependencies:
-            if dependency not in selected_ids:
-                selected_ids.add(dependency)
-                pending.append(dependency)
-    checks = tuple(available[check_id] for check_id in sorted(selected_ids))
+    checks, selected_ids = _checks_for_admission_phase(
+        plan,
+        AdmissionPhase.POST_APPLY,
+    )
     executions = PreflightDag(checks, max_concurrency=max_concurrency).run(
         plan.context,
         through_tier=0,
         now=lambda: now,
     )
     by_id = {execution.check_id: execution for execution in executions}
-    if not _POST_APPLY_DRIFT_EVIDENCE_CHECKS <= by_id.keys() or any(
-        not execution.passed for execution in executions
-    ):
+    if not selected_ids <= by_id.keys() or any(not execution.passed for execution in executions):
         raise PostApplyDriftTransientError("post-apply drift evidence is incomplete")
     selected = tuple(
         sorted(
-            (by_id[check_id] for check_id in _POST_APPLY_DRIFT_EVIDENCE_CHECKS),
+            (by_id[check_id] for check_id in selected_ids),
             key=lambda execution: execution.check_id,
         )
     )
@@ -348,49 +285,11 @@ def validate_post_apply_attestation_drift(
         raise ValueError("post-apply drift evidence implementation changed")
     if any(execution.expires_at <= now for execution in executions):
         raise PostApplyDriftTransientError("post-apply drift evidence expired")
-
-    def evidence(check_id: str, field: str) -> object:
-        try:
-            return by_id[check_id].evidence[field]
-        except KeyError as exc:
-            raise ValueError("post-apply drift evidence is incomplete") from exc
-
-    def string_map(check_id: str, field: str) -> dict[str, str]:
-        value = evidence(check_id, field)
-        if not isinstance(value, Mapping) or any(
-            not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()
-        ):
-            raise ValueError("post-apply drift evidence is incomplete")
-        return dict(value)
-
-    current_secret_metadata = string_map("credentials.metadata", "metadata-fingerprints")
-    normalized_secret_metadata = {
-        str(key): (str(value) if str(value).startswith("sha256:") else f"sha256:{value}")
-        for key, value in current_secret_metadata.items()
-    }
-    exact = (
-        evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
-        evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
-        evidence("runner.install", "attestation-digest") == bindings.runner_install_hash,
-        # TokenRequest kubeconfigs may rotate during the protected apply too;
-        # their current authority is still required to pass the DAG above.
-        _credential_metadata_matches(
-            normalized_secret_metadata,
-            bindings.secret_metadata_fingerprints,
-        ),
-        evidence("gb10.shared-mount", "mount-digest") == bindings.gb10_mount_digest,
-        evidence("gb10.candidate-source", "source-digest") == bindings.gb10_unit_digest,
-        # gb10.host-readiness inventory-digest is intentionally NOT byte-matched:
-        # it folds in each host's node-agent service/timer runtime state
-        # (ActiveState/SubState/Result), which cycles as the readiness timer
-        # fires and the oneshot agent runs between the restore rehearsal and this
-        # re-check, so a fixed attestation snapshot can never re-match a running
-        # fleet. Meaningful gb10 drift is still gated -- the check must PASS
-        # (fleet reachable + ready) and boot-ids must match (no host reboot or
-        # host-set change).
-        string_map("gb10.host-readiness", "boot-ids") == dict(bindings.gb10_boot_ids),
-    )
-    if not all(exact):
+    if not _identity_evidence_matches(
+        checks=checks,
+        executions=executions,
+        attestation=attestation,
+    ):
         # Protected apply can leave a short read-after-write window across the
         # independently managed OLDLAB and GB10 hosts.  Re-observe without
         # mutating; the action source still fails closed after its bounded wait.
@@ -471,6 +370,7 @@ def validate_post_apply_resume_attestation(
 
 __all__ = [
     "FinalAttestationAdmission",
+    "FinalAttestationAdmissionError",
     "PostApplyDriftEvidence",
     "PostApplyDriftTransientError",
     "validate_final_attestation",

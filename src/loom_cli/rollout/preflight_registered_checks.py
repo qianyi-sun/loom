@@ -107,10 +107,12 @@ from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+    AdmissionPhase,
     CheckContext,
     CheckOperation,
     CheckProbe,
     CheckSpec,
+    EvidenceClass,
     EvidenceField,
     MutationClass,
     RegisteredCheck,
@@ -164,6 +166,7 @@ class CredentialProbeSource:
     label: str
     path: Path
     expected_content_fingerprint: str | None = None
+    metadata_evidence_class: EvidenceClass = EvidenceClass.IDENTITY
 
     def __post_init__(self) -> None:
         if self.label not in {
@@ -186,6 +189,8 @@ class CredentialProbeSource:
             or len(self.expected_content_fingerprint) > 96
         ):
             raise ValueError("credential expected fingerprint is invalid")
+        if not isinstance(self.metadata_evidence_class, EvidenceClass):
+            raise ValueError("credential metadata evidence class is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +328,7 @@ def build_candidate_identity_check(
             freshness_ttl_seconds=300,
             remediation="restore the exact clean candidate, source tree, approved base, and install config",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
@@ -443,6 +449,7 @@ def build_runner_install_check(
             freshness_ttl_seconds=300,
             remediation="reinstall and root-verify the exact runner source, config, and assets",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
@@ -473,6 +480,7 @@ def credential_source_set_digest(sources: tuple[CredentialProbeSource, ...]) -> 
     payload = [
         {
             "label": source.label,
+            "metadata_evidence_class": source.metadata_evidence_class.value,
             "path": str(source.path),
         }
         for source in sorted(sources, key=lambda item: item.label)
@@ -517,7 +525,8 @@ def build_credentials_metadata_check(
                 failed_sources={source.label: "binding-drift" for source in sources},
             )
 
-        metadata_fingerprints: dict[str, str] = {}
+        stable_metadata_fingerprints: dict[str, str] = {}
+        rotating_metadata_fingerprints: dict[str, str] = {}
         acl_fingerprints: dict[str, str] = {}
         content_fingerprints: dict[str, str] = {}
         authorities: dict[str, str] = {}
@@ -543,7 +552,12 @@ def build_credentials_metadata_check(
                 ):
                     failed_sources[source.label] = "content-fingerprint-mismatch"
                     continue
-                metadata_fingerprints[source.label] = trusted.metadata_fingerprint
+                metadata_target = (
+                    rotating_metadata_fingerprints
+                    if source.metadata_evidence_class is EvidenceClass.OBSERVATION
+                    else stable_metadata_fingerprints
+                )
+                metadata_target[source.label] = trusted.metadata_fingerprint
                 acl_fingerprints[source.label] = trusted.acl_fingerprint
                 content_fingerprints[source.label] = fingerprint
                 authorities[source.label] = (
@@ -554,9 +568,14 @@ def build_credentials_metadata_check(
                 failed_sources[source.label] = "authority-or-stability-failed"
 
         return CheckProbe(
-            passed=not failed_sources and len(metadata_fingerprints) == len(sources),
+            passed=(
+                not failed_sources
+                and len(stable_metadata_fingerprints) + len(rotating_metadata_fingerprints)
+                == len(sources)
+            ),
             evidence={
-                "metadata-fingerprints": metadata_fingerprints,
+                "stable-metadata-fingerprints": stable_metadata_fingerprints,
+                "rotating-metadata-fingerprints": rotating_metadata_fingerprints,
                 "acl-fingerprints": acl_fingerprints,
                 "content-fingerprints": content_fingerprints,
                 "authorities": authorities,
@@ -580,11 +599,20 @@ def build_credentials_metadata_check(
                 "service.uid",
             ),
             evidence_schema=(
-                EvidenceField("metadata-fingerprints", "string-map"),
+                EvidenceField("stable-metadata-fingerprints", "string-map"),
+                EvidenceField(
+                    "rotating-metadata-fingerprints",
+                    "string-map",
+                    EvidenceClass.OBSERVATION,
+                ),
                 EvidenceField("acl-fingerprints", "string-map"),
-                EvidenceField("content-fingerprints", "string-map"),
+                EvidenceField(
+                    "content-fingerprints",
+                    "string-map",
+                    EvidenceClass.OBSERVATION,
+                ),
                 EvidenceField("authorities", "string-map"),
-                EvidenceField("failed-sources", "string-map"),
+                EvidenceField("failed-sources", "string-map", EvidenceClass.OBSERVATION),
                 EvidenceField("source-set-digest", "sha256"),
             ),
             timeout_seconds=10,
@@ -593,8 +621,9 @@ def build_credentials_metadata_check(
                 "restore the fixed protected files, service readability, private ACL, and exact metadata"
             ),
             secret_redaction_policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -607,7 +636,8 @@ def _empty_credentials_probe(
     return CheckProbe(
         passed=False,
         evidence={
-            "metadata-fingerprints": {},
+            "stable-metadata-fingerprints": {},
+            "rotating-metadata-fingerprints": {},
             "acl-fingerprints": {},
             "content-fingerprints": {},
             "authorities": {},
@@ -905,7 +935,7 @@ def build_external_supervisor_predecessor_check(
             return _empty_external_supervisor_predecessor_probe()
         primary_host = "gx10-01c7" if "gx10-01c7" in snapshots else min(snapshots)
         primary = snapshots[primary_host]
-        controller_bindings = {
+        controller_identity_bindings = {
             key: value
             for host, snapshot in sorted(snapshots.items())
             for key, value in {
@@ -913,11 +943,17 @@ def build_external_supervisor_predecessor_check(
                 f"{host}/authority-digest": snapshot.authority_digest,
                 f"{host}/pointer-digest": snapshot.pointer_digest,
                 f"{host}/unit-set-digest": snapshot.unit_set_digest,
-                f"{host}/live-evidence-digest": snapshot.live_evidence_digest,
                 f"{host}/pending-transition-digest": snapshot.pending_transition_digest,
                 f"{host}/unit-directory": external_supervisor_unit_directory(host),
-                f"{host}/runtime-state": snapshot.runtime_state,
                 **{f"{host}/unit/{name}": digest for name, digest in snapshot.unit_sha256.items()},
+            }.items()
+        }
+        controller_runtime_observations = {
+            key: value
+            for host, snapshot in sorted(snapshots.items())
+            for key, value in {
+                f"{host}/live-evidence-digest": snapshot.live_evidence_digest,
+                f"{host}/runtime-state": snapshot.runtime_state,
             }.items()
         }
         return CheckProbe(
@@ -942,7 +978,8 @@ def build_external_supervisor_predecessor_check(
                 ),
                 "runtime-ready": all(snapshot.runtime_ready for snapshot in snapshots.values()),
                 "pool-identity-digest": primary.pool_identity_digest,
-                "controller-bindings": controller_bindings,
+                "controller-identity-bindings": controller_identity_bindings,
+                "controller-runtime-observations": controller_runtime_observations,
             },
         )
 
@@ -969,12 +1006,25 @@ def build_external_supervisor_predecessor_check(
                 EvidenceField("pointer-digest", "sha256"),
                 EvidenceField("unit-digests", "string-map"),
                 EvidenceField("unit-set-digest", "sha256"),
-                EvidenceField("live-evidence-digest", "sha256"),
+                EvidenceField(
+                    "live-evidence-digest",
+                    "sha256",
+                    EvidenceClass.OBSERVATION,
+                ),
                 EvidenceField("pending-transition-digest", "sha256"),
-                EvidenceField("transition-clear", "boolean"),
-                EvidenceField("runtime-ready", "boolean"),
-                EvidenceField("pool-identity-digest", "sha256"),
-                EvidenceField("controller-bindings", "string-map"),
+                EvidenceField("transition-clear", "boolean", EvidenceClass.OBSERVATION),
+                EvidenceField("runtime-ready", "boolean", EvidenceClass.OBSERVATION),
+                EvidenceField(
+                    "pool-identity-digest",
+                    "sha256",
+                    EvidenceClass.OBSERVATION,
+                ),
+                EvidenceField("controller-identity-bindings", "string-map"),
+                EvidenceField(
+                    "controller-runtime-observations",
+                    "string-map",
+                    EvidenceClass.OBSERVATION,
+                ),
             ),
             # The GB10 adapter propagates this absolute bound across elapsed
             # predecessor work and both possible controller observations.
@@ -986,8 +1036,9 @@ def build_external_supervisor_predecessor_check(
                 "clear every durable transition, and re-run read-only admission"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY,),
         ),
-        implementation_version="v6",
+        implementation_version="v7",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -1006,7 +1057,8 @@ def _empty_external_supervisor_predecessor_probe() -> CheckProbe:
             "transition-clear": False,
             "runtime-ready": False,
             "pool-identity-digest": "0" * 64,
-            "controller-bindings": {},
+            "controller-identity-bindings": {},
+            "controller-runtime-observations": {},
         },
     )
 
@@ -1539,14 +1591,15 @@ def build_systemd_user_manager_check(
                 EvidenceField("version", "string"),
                 EvidenceField("linger", "boolean"),
                 EvidenceField("boot-id", "string"),
-                EvidenceField("rpc-latency-ms", "integer"),
+                EvidenceField("rpc-latency-ms", "integer", EvidenceClass.OBSERVATION),
                 EvidenceField("rpc-budget-ms", "integer"),
-                EvidenceField("readiness-digest", "sha256"),
+                EvidenceField("readiness-digest", "sha256", EvidenceClass.OBSERVATION),
             ),
             timeout_seconds=10,
             freshness_ttl_seconds=120,
             remediation="restore the rollout service user manager, linger, and bounded RPC",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY,),
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
@@ -1768,6 +1821,7 @@ def build_gb10_shared_mount_check(
             freshness_ttl_seconds=120,
             remediation="restore the canonical shared mount, UID/GID authority, and immutable checkout root",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
@@ -1870,16 +1924,17 @@ def build_gb10_host_readiness_check(
             input_keys=("gb10.inventory-digest", "runner.config.sha256"),
             evidence_schema=(
                 EvidenceField("boot-ids", "string-map"),
-                EvidenceField("host-digests", "string-map"),
-                EvidenceField("failed-hosts", "string-map"),
-                EvidenceField("transient-hosts", "string-map"),
+                EvidenceField("host-digests", "string-map", EvidenceClass.OBSERVATION),
+                EvidenceField("failed-hosts", "string-map", EvidenceClass.OBSERVATION),
+                EvidenceField("transient-hosts", "string-map", EvidenceClass.OBSERVATION),
                 EvidenceField("host-count", "integer"),
-                EvidenceField("inventory-digest", "sha256"),
+                EvidenceField("inventory-digest", "sha256", EvidenceClass.OBSERVATION),
             ),
             timeout_seconds=60,
             freshness_ttl_seconds=120,
             remediation="restore GB10 user managers, linger, node-agent units, and timer readiness",
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
         implementation_version="v1",
         operations={CheckOperation.PROBE: probe},
@@ -1983,6 +2038,7 @@ def build_gb10_candidate_source_check(
                 "restore the exact immutable shared candidate checkout and candidate unit bytes"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+            admission_phases=(AdmissionPhase.PRE_APPLY, AdmissionPhase.POST_APPLY),
         ),
         implementation_version="v3",
         operations={CheckOperation.PROBE: probe},
@@ -3050,8 +3106,9 @@ def build_staging_baseline_checks(
                     freshness_ttl_seconds=120,
                     remediation=remediations[check_id],
                     secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                    admission_phases=(AdmissionPhase.PRE_APPLY,),
                 ),
-                implementation_version="v1",
+                implementation_version="v2",
                 operations={CheckOperation.PROBE: probe},
             )
         )
@@ -3085,8 +3142,9 @@ def build_staging_baseline_checks(
                 freshness_ttl_seconds=120,
                 remediation="restore every candidate-independent current-staging baseline",
                 secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
+                admission_phases=(AdmissionPhase.PRE_APPLY,),
             ),
-            implementation_version="v1",
+            implementation_version="v2",
             operations={CheckOperation.PROBE: probe_release_baseline},
         )
     )
@@ -3095,11 +3153,11 @@ def build_staging_baseline_checks(
 
 def _baseline_evidence_schema() -> tuple[EvidenceField, ...]:
     return (
-        EvidenceField("ready", "boolean"),
+        EvidenceField("ready", "boolean", EvidenceClass.OBSERVATION),
         EvidenceField("readonly-principal", "string"),
         EvidenceField("observed-epoch", "integer"),
-        EvidenceField("resource-digest", "sha256"),
-        EvidenceField("blockers", "string-map"),
+        EvidenceField("resource-digest", "sha256", EvidenceClass.OBSERVATION),
+        EvidenceField("blockers", "string-map", EvidenceClass.OBSERVATION),
     )
 
 

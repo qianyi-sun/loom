@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.failure_authority import classify_rollout_failure
+from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmissionError
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.operator import worker as worker_module
 from loom_cli.rollout.operator.backup import BackupCreator, BackupError
@@ -366,6 +367,21 @@ def test_worker_refuses_driver_when_final_attestation_admission_fails() -> None:
     assert bundle.store.events[-1].reason == "preflight.attestation.final-admission@static"
     assert bundle.store.events[-1].current_step == "00-final-admission"
     assert bundle.store.active is None
+
+
+def test_worker_publishes_bounded_final_admission_failure_identity() -> None:
+    bundle = worker_fakes()
+
+    def reject(_envelope: DriverEnvelope) -> object:
+        raise FinalAttestationAdmissionError("evidence-drift", "secret details")
+
+    bundle.deps.final_admission = reject
+
+    assert run_attempt(valid_envelope(), bundle.deps) == 1
+    assert bundle.store.events[-1].reason == (
+        "preflight.attestation.final-admission.evidence-drift@static"
+    )
+    assert "secret" not in bundle.store.events[-1].reason
 
 
 def test_worker_uses_attested_final_gates_instead_of_legacy_driver() -> None:

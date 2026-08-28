@@ -10,6 +10,7 @@ from pathlib import Path
 from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_file
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
 from loom_cli.rollout.install_attestation import VerifiedRunnerInstall, verify_runner_install
+from loom_cli.rollout.preflight_contract import EvidenceClass
 from loom_cli.rollout.preflight_credential_paths import (
     READONLY_DATABASE_CREDENTIAL_PATH,
     READONLY_KUBECONFIG_PATH,
@@ -194,6 +195,7 @@ def _credential_sources(
             CredentialProbeSource(
                 label="readonly-kubeconfig",
                 path=READONLY_KUBECONFIG_PATH,
+                metadata_evidence_class=EvidenceClass.OBSERVATION,
             ),
             CredentialProbeSource(
                 label="readonly-database",
@@ -206,6 +208,7 @@ def _credential_sources(
             CredentialProbeSource(
                 label="rehearsal-kubeconfig",
                 path=REHEARSAL_KUBECONFIG_PATH,
+                metadata_evidence_class=EvidenceClass.OBSERVATION,
             ),
             CredentialProbeSource(
                 label="server-dry-run-kubeconfig",

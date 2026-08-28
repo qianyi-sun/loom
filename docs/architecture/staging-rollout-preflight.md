@@ -33,6 +33,9 @@ naming an existing check ID cannot hide an uncovered late predicate.
 - exact input keys used for a deterministic fingerprint;
 - a typed evidence schema;
 - timeout and evidence freshness TTL;
+- zero or more lifecycle admission phases (`pre-apply` and `post-apply`);
+- an evidence class for every field: durable `identity` or volatile
+  `observation`;
 - bounded remediation text and secret-redaction policy;
 - a technical justification for every final-only predicate.
 
@@ -66,9 +69,10 @@ attest if a rerun is stale or failed, if a check implementation changed, or if
 an authority input fingerprint changed. The one declared exception is
 `backup.lease-eligibility`: its input must transition from the pre-backup
 fresh-checkpoint sentinel to the newly restore-verified checkpoint. Volatile
-latency, transient-unit and host observations may produce a new evidence hash;
-the fresh passing evidence becomes the attestation authority and is rechecked
-again at final admission. Candidate-static server-schema, field-ownership and
+latency, transient-unit and host observations may produce a new full evidence
+hash. They remain immutable audit evidence and must still come from a fresh
+passing check, but final admission compares only the schema-declared identity
+projection. Candidate-static server-schema, field-ownership and
 browser-runtime evidence uses the same one-hour freshness budget as the other
 immutable Tier 1 artifacts, so the bounded cleanup wait cannot expire it while
 the current DAG is still running. This avoids a circular dependency in which
@@ -900,14 +904,18 @@ fails closed. Installed actions receive only this fixed plan path and digest;
 they do not resolve Git refs, reread ambient configuration, or rediscover
 preflight artifacts.
 
-Final admission rebuilds the same registered-check implementations and reruns
-only the drift-sensitive Tier 0 checks plus the six Tier 2 readonly staging
-baseline checks. It does not rebuild images or rerender Tier 1 artifacts. Every
-Tier 2 execution must retain the attested mutation epoch, readonly principal,
-empty blocker set, implementation digest, resource evidence, and exact
-evidence hash. A health, auth, catalog/task, storage/database, network, or
-aggregate release-baseline change after rehearsal therefore stops before the
-first protected component rather than being rediscovered after apply.
+Final admission derives its check set from the registry's `pre-apply` phase and
+includes the complete dependency closure; the current contract selects the
+drift-sensitive Tier 0 checks plus the six Tier 2 readonly staging baselines.
+It does not rebuild images or rerender Tier 1 artifacts. Every execution must
+pass with the attested implementation digest. Identity fields such as
+candidate/tree, stable credential sources, mutation epoch, readonly principal,
+host boot IDs, supervisor authority/pointer/unit set and pending transition
+must retain their attested identity hash. Runtime snapshots such as
+TokenRequest kubeconfig fingerprints, supervisor live-evidence digest and
+`ready`/`repairable` state, GB10 inventory digest, and Tier 2 resource digests
+may change while the check remains healthy. An unhealthy baseline or durable
+identity change still stops before the first protected component.
 The worker passes that exact `FinalAttestationAdmission` object into the final
 runner; a final runner without admission evidence fails before the attempt is
 marked running. `FinalGateActionSource` derives the protected baseline embedded
@@ -1022,11 +1030,13 @@ image; drift is returned as bounded per-component blocker evidence.
 
 The post-apply drift check never tries to compare the intentionally changed
 live baseline with its pre-apply evidence. It requires the epoch claimed by
-the exact request, then reruns the same final-admission implementations for the
+the exact request, then derives the check set from the registry's `post-apply`
+phase and dependency closure. The current contract selects the
 epoch-independent candidate, runner install, credential metadata and GB10
-mount/boot identities. Those records must remain unexpired and retain their
-attested implementation digests; image builds, Tier 1 artifacts, the changed
-live baseline and backup eligibility are not repeated after mutation.
+mount/boot identities. Those records must remain unexpired, retain their
+attested implementation digests, and match their identity projections; image
+builds, Tier 1 artifacts, the changed live baseline and backup eligibility are
+not repeated after mutation.
 The service keeps the exact process-local preflight plan in final admission and
 routes `final.drift` directly to that shared validator after convergence; the
 installed generic helper cannot substitute a second implementation.
@@ -1098,17 +1108,33 @@ A successful Tier 0–3 run issues one immutable `PreflightAttestation` bound to
 - secret metadata fingerprints only;
 - GB10 inventory, boot IDs, mount and unit probe digests;
 - browser runner image and report schema;
-- check implementation digests and evidence hashes.
+- check implementation digests, full evidence hashes, and identity evidence
+  hashes.
 
 Rollout start refuses a missing, expired, incomplete, or drifted attestation.
 An unchanged candidate and epoch may reuse expensive evidence until its minimum
 TTL expires. Tier 1 build artifacts and Tier 3 isolated rehearsal define that
 minimum because they are not repeated. Tier 0 and Tier 2 observations may age
-while the detached checkpoint and rehearsal are still running, but they remain
-only exact evidence-hash references: final admission reruns those checks and
-requires the current evidence and implementation identities to match before
-protected mutation. Candidate, config, token metadata, epoch, host boot ID,
-mount, or implementation drift therefore still invalidates the attestation.
+while the detached checkpoint and rehearsal are still running. Attestation
+schema v3 stores both their exact full evidence hashes for audit and their
+registry-derived identity hashes for later admission. Final admission requires
+fresh passing executions, identical implementations, and matching identity
+hashes before protected mutation. A rotating TokenRequest credential or
+healthy supervisor runtime transition is therefore not promoted into
+deployment authority, while candidate, stable credential source, epoch, host
+boot ID, mount, supervisor authority, or implementation drift still
+invalidates admission.
+
+Attestation schema v2 remains strict-schema readable so existing immutable
+records can be inspected and round-tripped, but it has no identity projection
+and cannot authorize the v3 final-admission path. `FinalGatePlan` schema v5 and
+external-supervisor transition digest v2 similarly remove live observation
+bytes from predecessor authority. Schema v4 plans continue to validate with
+the historical transition digest v1; new plans are always emitted as v5.
+Controller predecessor comparisons use the typed durable identity projection,
+not field-name exceptions. Worker events expose only bounded failure classes
+such as `identity-drift`, `check-failed`, or `evidence-drift`; detailed evidence
+remains in the private attestation and check records.
 
 The canonical JSON form is strict-schema, duplicate-key rejecting, and
 digest-addressed. It round-trips every binding and per-check digest before

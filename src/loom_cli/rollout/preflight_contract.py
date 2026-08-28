@@ -71,8 +71,15 @@ def external_supervisor_transition_digest(
     target_script_sha256: Mapping[str, str],
     target_unit_sha256: Mapping[str, str],
     target_unit_set_digest: str,
+    transition_schema_version: int = 2,
 ) -> str:
-    """Bind the exact live predecessor to the exact candidate target."""
+    """Bind immutable predecessor authority to the exact candidate target.
+
+    Version 1 remains available only to validate historical final plans. New
+    transitions use version 2, which retains the live digest as validated audit
+    input but excludes it from authority identity because service/timer runtime
+    is re-observed immediately before apply.
+    """
 
     if (
         len(candidate_sha) not in {40, 64}
@@ -82,6 +89,7 @@ def external_supervisor_transition_digest(
         or environment != "staging"
         or unit_directory not in _EXTERNAL_SUPERVISOR_UNIT_DIRECTORIES
         or predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
+        or transition_schema_version not in {1, 2}
         or any(
             _SHA256_RE.fullmatch(value) is None
             for value in (
@@ -108,22 +116,24 @@ def external_supervisor_transition_digest(
         )
     ):
         raise ValueError("external supervisor transition identity is invalid")
+    predecessor: dict[str, object] = {
+        "kind": predecessor_kind,
+        "authority_digest": predecessor_digest,
+        "pointer_digest": predecessor_pointer_digest,
+        "unit_sha256": dict(sorted(predecessor_unit_sha256.items())),
+        "unit_set_digest": predecessor_unit_set_digest,
+        "pending_transition_digest": predecessor_pending_transition_digest,
+    }
+    if transition_schema_version == 1:
+        predecessor["live_evidence_digest"] = predecessor_live_evidence_digest
     return _hash_json(
         {
-            "schema_version": 1,
+            "schema_version": transition_schema_version,
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
             "environment": environment,
             "unit_directory": unit_directory,
-            "predecessor": {
-                "kind": predecessor_kind,
-                "authority_digest": predecessor_digest,
-                "pointer_digest": predecessor_pointer_digest,
-                "unit_sha256": dict(sorted(predecessor_unit_sha256.items())),
-                "unit_set_digest": predecessor_unit_set_digest,
-                "live_evidence_digest": predecessor_live_evidence_digest,
-                "pending_transition_digest": predecessor_pending_transition_digest,
-            },
+            "predecessor": predecessor,
             "target": {
                 "artifact_digest": target_artifact_digest,
                 "profile_sha256": target_profile_sha256,
@@ -186,10 +196,29 @@ class CheckOutcome(StrEnum):
     TIMEOUT = "timeout"
 
 
+class AdmissionPhase(StrEnum):
+    PRE_APPLY = "pre-apply"
+    POST_APPLY = "post-apply"
+
+
+class EvidenceClass(StrEnum):
+    """Declare how attested evidence participates in later admission.
+
+    Identity evidence is re-observed and byte-compared with the rehearsal
+    attestation. Observation evidence is retained in the immutable rehearsal
+    record for audit, but later admission requires a fresh passing probe rather
+    than equality with an operational snapshot.
+    """
+
+    IDENTITY = "identity"
+    OBSERVATION = "observation"
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceField:
     name: str
     value_type: str
+    evidence_class: EvidenceClass = EvidenceClass.IDENTITY
 
     def __post_init__(self) -> None:
         if _ID_RE.fullmatch(self.name) is None:
@@ -203,6 +232,8 @@ class EvidenceField:
             "string-map",
         }:
             raise ValueError("evidence field type is invalid")
+        if not isinstance(self.evidence_class, EvidenceClass):
+            raise ValueError("evidence field class is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +250,7 @@ class CheckSpec:
     freshness_ttl_seconds: int
     remediation: str
     secret_redaction_policy: SecretRedactionPolicy
+    admission_phases: tuple[AdmissionPhase, ...] = ()
     final_only_justification: str | None = None
     run_after_failed_dependencies: bool = False
 
@@ -268,6 +300,16 @@ class CheckSpec:
             self.evidence_schema
         ):
             raise ValueError("evidence schema must be unique and non-empty")
+        if len(set(self.admission_phases)) != len(self.admission_phases) or any(
+            not isinstance(phase, AdmissionPhase) for phase in self.admission_phases
+        ):
+            raise ValueError("check admission phases are invalid")
+        if self.admission_phases and (
+            self.tier not in {0, 2}
+            or self.stage not in {StageCapability.STATIC, StageCapability.BASELINE_LIVE_READONLY}
+            or (AdmissionPhase.POST_APPLY in self.admission_phases and self.tier != 0)
+        ):
+            raise ValueError("check admission phase is incompatible with its stage")
         if not 1 <= self.timeout_seconds <= 3600:
             raise ValueError("check timeout is outside the supported range")
         if not 1 <= self.freshness_ttl_seconds <= 86400:
@@ -295,10 +337,15 @@ class CheckSpec:
     @property
     def contract_digest(self) -> str:
         payload = {
+            "admission_phases": [phase.value for phase in self.admission_phases],
             "check_id": self.check_id,
             "dependencies": self.dependencies,
             "evidence_schema": [
-                {"name": field.name, "value_type": field.value_type}
+                {
+                    "name": field.name,
+                    "value_type": field.value_type,
+                    "evidence_class": field.evidence_class.value,
+                }
                 for field in self.evidence_schema
             ],
             "failure_code": self.failure_code,
@@ -647,6 +694,26 @@ def _validate_evidence(
     return normalized
 
 
+def identity_evidence_hash(
+    spec: CheckSpec,
+    evidence: Mapping[str, EvidenceValue],
+) -> str:
+    """Hash only the fields declared as immutable admission identity."""
+    normalized = _validate_evidence(spec, evidence)
+    identity_fields = {
+        field.name: normalized[field.name]
+        for field in spec.evidence_schema
+        if field.evidence_class is EvidenceClass.IDENTITY
+    }
+    return _hash_json(
+        {
+            "schema_version": 1,
+            "check_id": spec.check_id,
+            "identity_evidence": identity_fields,
+        }
+    )
+
+
 def _is_bounded_string_map(value: object) -> bool:
     if not isinstance(value, Mapping) or len(value) > 64:
         return False
@@ -673,7 +740,7 @@ class PreflightDag:
 
     def __init__(
         self,
-        checks: Sequence[RegisteredCheck],
+        checks: Sequence[RegisteredCheck] = (),
         *,
         max_concurrency: int = 8,
         attested_dependencies: frozenset[str] = frozenset(),
@@ -1682,9 +1749,10 @@ class PreflightAttestation:
     issued_at: datetime
     expires_at: datetime
     attestation_digest: str
+    identity_evidence_hashes: Mapping[str, str] = dataclass_field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2:
+        if self.schema_version not in {2, 3}:
             raise ValueError("preflight attestation schema is unsupported")
         if not isinstance(self.bindings, AttestationBindings):
             raise ValueError("preflight attestation bindings are invalid")
@@ -1704,6 +1772,15 @@ class PreflightAttestation:
         evidence = _validate_digest_map(self.evidence_hashes, "evidence")
         if implementation.keys() != evidence.keys():
             raise ValueError("preflight attestation check maps differ")
+        identity = (
+            {}
+            if self.schema_version == 2
+            else _validate_digest_map(self.identity_evidence_hashes, "identity evidence")
+        )
+        if self.schema_version == 2 and self.identity_evidence_hashes:
+            raise ValueError("preflight attestation v2 cannot carry identity evidence")
+        if self.schema_version == 3 and identity.keys() != evidence.keys():
+            raise ValueError("preflight attestation identity maps differ")
         if _SHA256_RE.fullmatch(self.attestation_digest) is None:
             raise ValueError("preflight attestation digest is invalid")
         object.__setattr__(
@@ -1712,6 +1789,7 @@ class PreflightAttestation:
             MappingProxyType(implementation),
         )
         object.__setattr__(self, "evidence_hashes", MappingProxyType(evidence))
+        object.__setattr__(self, "identity_evidence_hashes", MappingProxyType(identity))
 
     @classmethod
     def issue(
@@ -1722,6 +1800,7 @@ class PreflightAttestation:
         issued_at: datetime,
         registry_digest: str,
         coverage_digest: str,
+        checks: Sequence[RegisteredCheck] = (),
     ) -> PreflightAttestation:
         if issued_at.tzinfo is None:
             raise ValueError("attestation issue time must be timezone-aware")
@@ -1751,19 +1830,42 @@ class PreflightAttestation:
             raise ValueError("attestation is staging-only")
         digests = {result.check_id: result.implementation_digest for result in required}
         evidence = {result.check_id: result.evidence_hash for result in required}
+        if checks:
+            checks_by_id = {check.spec.check_id: check for check in checks}
+            if len(checks_by_id) != len(checks) or set(checks_by_id) != set(evidence):
+                raise ValueError("attestation evidence classification is incomplete")
+            if any(
+                checks_by_id[result.check_id].implementation_digest != result.implementation_digest
+                for result in required
+            ):
+                raise ValueError("attestation evidence classification implementation drifted")
+            identity = {
+                result.check_id: identity_evidence_hash(
+                    checks_by_id[result.check_id].spec,
+                    result.evidence,
+                )
+                for result in required
+            }
+        else:
+            # A caller without registry schemas gets the fail-closed fallback:
+            # every evidence field is identity. The production pipeline always
+            # supplies its complete registry so reviewed OBSERVATION fields are
+            # projected deliberately rather than inferred here.
+            identity = dict(evidence)
         expires_at = min(result.expires_at for result in freshness_authority)
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "bindings": _attestation_bindings_payload(bindings),
             "registry_digest": registry_digest,
             "coverage_digest": coverage_digest,
             "check_implementation_digests": digests,
             "evidence_hashes": evidence,
+            "identity_evidence_hashes": identity,
             "issued_at": issued_at.isoformat(),
             "expires_at": expires_at.isoformat(),
         }
         return cls(
-            schema_version=2,
+            schema_version=3,
             bindings=bindings,
             registry_digest=registry_digest,
             coverage_digest=coverage_digest,
@@ -1772,6 +1874,7 @@ class PreflightAttestation:
             issued_at=issued_at,
             expires_at=expires_at,
             attestation_digest=_hash_json(payload),
+            identity_evidence_hashes=MappingProxyType(identity),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1781,7 +1884,7 @@ class PreflightAttestation:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> PreflightAttestation:
-        expected = {
+        common = {
             "schema_version",
             "bindings",
             "registry_digest",
@@ -1792,6 +1895,8 @@ class PreflightAttestation:
             "expires_at",
             "attestation_digest",
         }
+        schema_version = data.get("schema_version")
+        expected = common | ({"identity_evidence_hashes"} if schema_version == 3 else set())
         if set(data) != expected:
             raise ValueError("preflight attestation fields are invalid")
         schema_version = data["schema_version"]
@@ -1832,6 +1937,11 @@ class PreflightAttestation:
             issued_at=issued_at,
             expires_at=expires_at,
             attestation_digest=raw_digest,
+            identity_evidence_hashes=(
+                _validate_digest_map(data["identity_evidence_hashes"], "identity evidence")
+                if schema_version == 3
+                else {}
+            ),
         )
         if _hash_json(_preflight_attestation_payload(attestation)) != raw_digest:
             raise ValueError("preflight attestation digest does not match its payload")
@@ -1875,7 +1985,7 @@ def _validate_digest_map(value: object, label: str) -> dict[str, str]:
 
 
 def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[str, object]:
-    return {
+    payload = {
         "schema_version": attestation.schema_version,
         "bindings": attestation.bindings.to_dict(),
         "registry_digest": attestation.registry_digest,
@@ -1885,11 +1995,15 @@ def _preflight_attestation_payload(attestation: PreflightAttestation) -> dict[st
         "issued_at": attestation.issued_at.isoformat(),
         "expires_at": attestation.expires_at.isoformat(),
     }
+    if attestation.schema_version == 3:
+        payload["identity_evidence_hashes"] = dict(attestation.identity_evidence_hashes)
+    return payload
 
 
 __all__ = [
     "EXTERNAL_SUPERVISOR_ABSENT_DIGEST",
     "EXTERNAL_SUPERVISOR_UNIT_DIRECTORY",
+    "AdmissionPhase",
     "AttestationBindings",
     "CheckContext",
     "CheckExecution",
@@ -1897,6 +2011,7 @@ __all__ = [
     "CheckOutcome",
     "CheckProbe",
     "CheckSpec",
+    "EvidenceClass",
     "EvidenceField",
     "MutationClass",
     "PreflightAttestation",
@@ -1907,4 +2022,5 @@ __all__ = [
     "external_supervisor_transition_digest",
     "external_supervisor_unit_set_digest",
     "external_supervisor_unit_set_digest_or_empty",
+    "identity_evidence_hash",
 ]
