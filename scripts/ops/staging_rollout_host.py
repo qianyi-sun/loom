@@ -2287,6 +2287,17 @@ def _rotation_references_payload(
     return payload_id in referenced
 
 
+@dataclass(slots=True)
+class _OrphanedBackupWatchdogState:
+    deadline_error: InstallError
+    cleanup_depth: int = 0
+    expiry_observed: bool = False
+    restoration_in_progress: bool = False
+
+
+_ACTIVE_ORPHANED_BACKUP_WATCHDOG: _OrphanedBackupWatchdogState | None = None
+
+
 def _orphaned_backup_deadline(deadline_monotonic: float | None) -> float:
     if deadline_monotonic is None:
         return time.monotonic() + _ORPHANED_BACKUP_OPERATION_TIMEOUT_SECONDS
@@ -2299,8 +2310,12 @@ def _orphaned_backup_deadline(deadline_monotonic: float | None) -> float:
 def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]:
     """Interrupt every normally interruptible recovery operation at one deadline."""
 
+    global _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+
     if threading.current_thread() is not threading.main_thread():
         raise InstallError("orphaned backup deadline watchdog requires the main thread")
+    if _ACTIVE_ORPHANED_BACKUP_WATCHDOG is not None:
+        raise InstallError("orphaned backup deadline watchdog is already active")
     remaining = _orphaned_backup_remaining(deadline_monotonic)
     try:
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
@@ -2319,13 +2334,16 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
             raise InstallError("orphaned backup deadline watchdog restoration failed") from exc
         raise InstallError("orphaned backup recovery conflicts with an active process timer")
 
-    deadline_error = InstallError("orphaned backup operation deadline exceeded")
-    owned_expiry_observed = False
+    watchdog_state = _OrphanedBackupWatchdogState(
+        deadline_error=InstallError("orphaned backup operation deadline exceeded")
+    )
+    _ACTIVE_ORPHANED_BACKUP_WATCHDOG = watchdog_state
 
-    def deadline_expired(_signum: int, _frame: Any) -> NoReturn:
-        nonlocal owned_expiry_observed
-        owned_expiry_observed = True
-        raise deadline_error
+    def deadline_expired(_signum: int, _frame: Any) -> None:
+        watchdog_state.expiry_observed = True
+        if watchdog_state.cleanup_depth > 0 or watchdog_state.restoration_in_progress:
+            return
+        raise watchdog_state.deadline_error
 
     watchdog_owns_alarm = False
     try:
@@ -2343,7 +2361,15 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
         yield
         _orphaned_backup_remaining(deadline_monotonic)
     finally:
+        watchdog_state.restoration_in_progress = True
         restoration_error: BaseException | None = None
+        if (
+            _ACTIVE_ORPHANED_BACKUP_WATCHDOG is not watchdog_state
+            or watchdog_state.cleanup_depth != 0
+        ):
+            restoration_error = OSError("watchdog cleanup ownership changed")
+        if _ACTIVE_ORPHANED_BACKUP_WATCHDOG is watchdog_state:
+            _ACTIVE_ORPHANED_BACKUP_WATCHDOG = None
         restoration_blocked = False
         block_error: BaseException | None = None
         for _attempt in range(_WATCHDOG_RESTORATION_ATTEMPTS):
@@ -2351,10 +2377,10 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
                 signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
                 current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
             except InstallError as exc:
-                if not watchdog_owns_alarm or exc is not deadline_error:
+                if not watchdog_owns_alarm or exc is not watchdog_state.deadline_error:
                     block_error = exc
                     continue
-                owned_expiry_observed = True
+                watchdog_state.expiry_observed = True
                 block_error = exc
             except (OSError, ValueError) as exc:
                 block_error = exc
@@ -2398,7 +2424,7 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
                         raise OSError("SIGALRM watchdog handler ownership changed")
                     if signal.SIGALRM in signal.sigpending():
                         signal.sigwait({signal.SIGALRM})
-                        owned_expiry_observed = True
+                        watchdog_state.expiry_observed = True
                 elif current_handler not in (previous_handler, deadline_expired):
                     raise OSError("SIGALRM handler ownership changed during setup")
                 if signal.SIGALRM in signal.sigpending():
@@ -2445,24 +2471,44 @@ def _orphaned_backup_deadline_guard(deadline_monotonic: float) -> Iterator[None]
             raise InstallError("orphaned backup deadline watchdog restoration failed") from (
                 mask_error or OSError("signal mask restoration is unverified")
             )
+        watchdog_state.restoration_in_progress = False
         # Process-safe restoration outranks an owned expiry; an owned expiry
         # outranks any body exception. Otherwise the body exception propagates.
-        if owned_expiry_observed:
-            raise deadline_error
+        if watchdog_state.expiry_observed:
+            raise watchdog_state.deadline_error
 
 
 @contextlib.contextmanager
 def _orphaned_backup_marker_cleanup_guard() -> Iterator[None]:
     """Defer SIGALRM delivery until a valid maintenance marker is removed."""
 
+    global _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+
+    watchdog_state = _ACTIVE_ORPHANED_BACKUP_WATCHDOG
+    if watchdog_state is not None:
+        if threading.current_thread() is not threading.main_thread():
+            raise InstallError("orphaned backup cleanup requires the watchdog thread")
+        watchdog_state.cleanup_depth += 1
     try:
         previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     except (OSError, ValueError) as exc:
+        if watchdog_state is not None:
+            watchdog_state.cleanup_depth -= 1
         raise InstallError("orphaned backup cleanup signal guard is unavailable") from exc
     try:
         yield
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        finally:
+            if watchdog_state is not None:
+                watchdog_state.cleanup_depth -= 1
+        if (
+            watchdog_state is not None
+            and watchdog_state.cleanup_depth == 0
+            and watchdog_state.expiry_observed
+        ):
+            raise watchdog_state.deadline_error
 
 
 def _orphaned_backup_remaining(deadline_monotonic: float) -> float:
