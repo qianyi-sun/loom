@@ -81,6 +81,7 @@ from .protected_apply_journal import (
     ProtectedApplyJournalError,
     read_component_failure,
 )
+from .protected_apply_recovery import find_advanced_epoch_attempt
 from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
@@ -1207,6 +1208,19 @@ def _resume(
                 attempt_uid=caller.uid,
                 resume=True,
             )
+        expected_mutation_epoch = original.mutation_epoch
+        if not recover_orphan:
+            recovery_attempt = find_advanced_epoch_attempt(
+                dependencies.config.state_root,
+                request_id=request_id,
+                through_attempt=latest_attempt,
+                candidate_sha=original.candidate.resolved_sha,
+                attestation_digest=first.preflight_attestation_sha256,
+                starting_mutation_epoch=original.mutation_epoch,
+                service_uid=os.geteuid(),
+            )
+            if recovery_attempt is not None:
+                expected_mutation_epoch += 1
         mutation_guard = dependencies.mutation_guard
         read_mutation_epoch = dependencies.read_mutation_epoch
         guard_acquired = False
@@ -1220,9 +1234,9 @@ def _resume(
                 or guard_evidence.request_id != request_id
                 or guard_evidence.candidate_sha != original.candidate.resolved_sha
                 or guard_evidence.candidate_tree != original.candidate_tree
-                or guard_evidence.mutation_epoch != original.mutation_epoch
+                or guard_evidence.mutation_epoch != expected_mutation_epoch
                 or guard_evidence.state != "ready"
-                or observed_epoch != original.mutation_epoch
+                or observed_epoch != expected_mutation_epoch
             ):
                 return _safe_error(
                     dependencies,

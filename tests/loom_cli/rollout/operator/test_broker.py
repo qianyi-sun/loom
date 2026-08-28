@@ -2158,6 +2158,142 @@ def test_resume_requires_original_epoch_and_releases_guard_on_drift(
     assert deps.systemd.start_count == starts_before
 
 
+def test_resume_accepts_exact_advanced_epoch_recovery_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    guard = _enable_guarded_resume(deps, mutation_epoch=8)
+    deps.dependencies.read_mutation_epoch = lambda: 8
+    recovery_calls: list[dict[str, object]] = []
+
+    def find_recovery(state_root: Path, **bindings: object) -> int:
+        recovery_calls.append({"state_root": state_root, **bindings})
+        return 1
+
+    monkeypatch.setattr(
+        broker_module,
+        "find_advanced_epoch_attempt",
+        find_recovery,
+        raising=False,
+    )
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    assert recovery_calls == [
+        {
+            "state_root": deps.config.state_root,
+            "request_id": REQUEST_ID,
+            "through_attempt": 1,
+            "candidate_sha": SHA,
+            "attestation_digest": "3" * 64,
+            "starting_mutation_epoch": 7,
+            "service_uid": os.geteuid(),
+        }
+    ]
+    assert guard.acquired == [REQUEST_ID]
+    assert guard.released == []
+    assert deps.store.read_active() is not None
+    assert deps.store.read_active().attempt_number == 2
+    assert deps.store.read_attempt_envelope(REQUEST_ID, 2).resume is True
+
+
+def test_resume_rejects_advanced_epoch_without_exact_recovery_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    guard = _enable_guarded_resume(deps, mutation_epoch=8)
+    deps.dependencies.read_mutation_epoch = lambda: 8
+    monkeypatch.setattr(
+        broker_module,
+        "find_advanced_epoch_attempt",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    starts_before = deps.systemd.start_count
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+
+    assert guard.acquired == [REQUEST_ID]
+    assert guard.released == [REQUEST_ID]
+    assert deps.store.next_attempt_number(REQUEST_ID) == 2
+    assert deps.store.active is None
+    assert deps.systemd.start_count == starts_before
+
+
+def test_resume_rejects_invalid_advanced_epoch_recovery_before_guard_or_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    deps.store.active = None
+    deps.store.append_event(
+        RequestEvent(
+            request_id=REQUEST_ID,
+            event="attempt_failed",
+            occurred_at="2026-07-14T12:10:00Z",
+            operator="hongjian",
+            operator_uid=2002,
+            attempt_number=1,
+            unit_name=f"loom-staging-rollout-{REQUEST_ID}-1.service",
+            status="failed",
+            reason="driver_failed",
+        )
+    )
+    guard = _enable_guarded_resume(deps)
+
+    def reject_recovery(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("protected apply recovery plan binding drifted")
+
+    monkeypatch.setattr(
+        broker_module,
+        "find_advanced_epoch_attempt",
+        reject_recovery,
+        raising=False,
+    )
+    starts_before = deps.systemd.start_count
+
+    assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 1
+
+    assert guard.acquired == []
+    assert guard.released == []
+    assert deps.store.next_attempt_number(REQUEST_ID) == 2
+    assert deps.store.active is None
+    assert deps.systemd.start_count == starts_before
+
+
 def test_cancel_records_actor_reason_and_terminates_known_unit(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
@@ -2505,6 +2641,7 @@ def test_resume_rejects_every_config_bound_drift_before_publication_or_launch(
 
 def test_resume_recovers_finalized_prelaunch_orphan_without_creating_new_attempt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     deps = fakes(tmp_path)
     assert broker_main(["start"], dependencies=deps.dependencies) == 0
@@ -2512,6 +2649,15 @@ def test_resume_recovers_finalized_prelaunch_orphan_without_creating_new_attempt
     deps.store.active = None
     deps.systemd.start_count = 0
     _enable_guarded_resume(deps)
+
+    def reject_finalized_recovery(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("prelaunch orphan must not use finalized-attempt recovery")
+
+    monkeypatch.setattr(
+        broker_module,
+        "find_advanced_epoch_attempt",
+        reject_finalized_recovery,
+    )
 
     assert broker_main(["resume", REQUEST_ID], dependencies=deps.dependencies) == 0
     assert deps.store.read_attempt_envelope(REQUEST_ID, 1) == first
