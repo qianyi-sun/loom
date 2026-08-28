@@ -24,6 +24,15 @@ from loom.personal_dev_builder_manifest import personal_dev_builder_manifest_doc
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+def _synthetic_checkout_env(**overrides: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("COV_CORE_"):
+            del env[key]
+    env.update(overrides)
+    return env
+
+
 def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
 
@@ -63,6 +72,172 @@ def _fenced_bash(document: str) -> str:
     blocks = re.findall(r"^```bash\n(.*?)^```$", document, flags=re.DOTALL | re.MULTILINE)
     assert blocks
     return "\n".join(blocks)
+
+
+def _write_backup_schema_head_test_repo(
+    root: Path,
+    *,
+    heads: tuple[object, ...],
+) -> Path:
+    repo = root.resolve()
+    package = repo / "src" / "loom"
+    migrations = repo / "migrations"
+    (package / "db").mkdir(parents=True)
+    migrations.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "db" / "__init__.py").write_text("", encoding="utf-8")
+    (migrations / "alembic.ini").write_text("[alembic]\n", encoding="utf-8")
+    module = textwrap.dedent(
+        f"""
+        import os
+        from pathlib import Path
+
+        _EXPECTED_ALEMBIC_INI = Path({str(migrations / "alembic.ini")!r}).resolve()
+        _HEADS = {heads!r}
+
+        def service_schema_heads(alembic_ini=None):
+            if alembic_ini is None:
+                return frozenset(("wrong-default-head",))
+            if Path(alembic_ini).resolve() != _EXPECTED_ALEMBIC_INI:
+                return frozenset(("wrong-config-head",))
+            return frozenset(_HEADS)
+
+        if override := os.environ.get("LOOM_TEST_SCHEMA_MODULE_FILE"):
+            __file__ = override
+        """
+    )
+    (package / "db" / "schema_startup.py").write_text(module, encoding="utf-8")
+    return repo
+
+
+def _run_backup_schema_head_resolver(
+    tmp_path: Path,
+    *,
+    heads: tuple[object, ...],
+    schema_module_override: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
+    function_source = _fenced_shell_function(
+        runbook,
+        "resolve_expected_service_schema_head",
+    )
+    selected_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "selected",
+        heads=heads,
+    )
+    stale_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "stale-editable",
+        heads=("stale_editable_head",),
+    )
+    program = (
+        "set -euo pipefail\n"
+        f"{function_source}\n"
+        f"repo={shlex.quote(str(selected_repo))}\n"
+        f"python_cli={shlex.quote(sys.executable)}\n"
+        "resolve_expected_service_schema_head\n"
+    )
+    env = _synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src"))
+    if schema_module_override is not None:
+        env["LOOM_TEST_SCHEMA_MODULE_FILE"] = str(schema_module_override)
+    return subprocess.run(
+        ["bash", "-c", program],
+        cwd=_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_backup_selected_source_binding(
+    tmp_path: Path,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
+    start = runbook.index('repo="$(pwd -P)"')
+    end_marker = 'profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"'
+    end = runbook.index(end_marker, start) + len(end_marker)
+    bootstrap_source = runbook[start:end]
+    selected_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "selected",
+        heads=("selected_head",),
+    )
+    stale_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "stale-editable",
+        heads=("stale_head",),
+    )
+    program = (
+        "set -euo pipefail\n"
+        f"{bootstrap_source}\n"
+        f"python_cli={shlex.quote(sys.executable)}\n"
+        "\"$python_cli\" - <<'PY'\n"
+        "from pathlib import Path\n"
+        "import loom\n"
+        "print(Path(loom.__file__).resolve())\n"
+        "PY\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", program],
+        cwd=selected_repo,
+        env=_synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src")),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, (selected_repo / "src" / "loom" / "__init__.py").resolve()
+
+
+def _run_backup_schema_head_comparison(
+    tmp_path: Path,
+    *,
+    phase: str,
+    observed_head: str,
+) -> subprocess.CompletedProcess[str]:
+    runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
+    function_source = _fenced_shell_function(
+        runbook,
+        "resolve_expected_service_schema_head",
+    )
+    selected_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "selected",
+        heads=("future_schema_head",),
+    )
+    stale_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "stale-editable",
+        heads=("stale_editable_head",),
+    )
+    if phase == "live":
+        start = runbook.index('expected_service_schema_head="$(')
+        end = runbook.index("\nsuffix=", start)
+        comparison_source = runbook[start:end]
+        command_stub = f"kubectl() {{ printf '%s\\n' {shlex.quote(observed_head)}; }}"
+    elif phase == "restored":
+        start = runbook.index('restored_schema_head="$(docker')
+        end = runbook.index("\ncmp -s", start)
+        comparison_source = runbook[start:end]
+        command_stub = f"docker() {{ printf '%s\\n' {shlex.quote(observed_head)}; }}"
+    else:
+        raise AssertionError(f"unknown schema comparison phase: {phase}")
+    program = (
+        "set -euo pipefail\n"
+        f"{function_source}\n"
+        f"repo={shlex.quote(str(selected_repo))}\n"
+        f"python_cli={shlex.quote(sys.executable)}\n"
+        "kubeconfig=unused\n"
+        "postgres_pod=unused\n"
+        "postgres_restore=unused\n"
+        f"{command_stub}\n"
+    )
+    if phase == "restored":
+        program += 'expected_service_schema_head="$(resolve_expected_service_schema_head)"\n'
+    program += comparison_source + "\n"
+    return subprocess.run(
+        ["bash", "-c", program],
+        cwd=_ROOT,
+        env=_synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src")),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 _WEB_V2_COMPONENT_NAMES = (
@@ -3074,6 +3249,81 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> Non
     assert "Use the identical bucket/object loop" not in runbook
     assert 'test -f "$minio_restored_manifest"' not in runbook
     assert "kubectl cp" not in runbook.casefold()
+
+
+def test_backup_restore_schema_head_is_bound_to_selected_source_and_graph(
+    tmp_path: Path,
+) -> None:
+    result = _run_backup_schema_head_resolver(
+        tmp_path,
+        heads=("future_schema_head",),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "future_schema_head\n"
+
+
+def test_backup_restore_binds_every_python_entrypoint_to_selected_source(
+    tmp_path: Path,
+) -> None:
+    result, expected_module = _run_backup_selected_source_binding(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{expected_module}\n"
+
+
+@pytest.mark.parametrize(
+    ("heads", "error"),
+    (
+        ((), "expected exactly one service schema head"),
+        (("head_one", "head_two"), "expected exactly one service schema head"),
+        (("",), "expected one valid service schema head"),
+        (("invalid head",), "expected one valid service schema head"),
+        ((123,), "expected one valid service schema head"),
+    ),
+)
+def test_backup_restore_schema_head_fails_closed(
+    tmp_path: Path,
+    heads: tuple[object, ...],
+    error: str,
+) -> None:
+    result = _run_backup_schema_head_resolver(tmp_path, heads=heads)
+
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_backup_restore_schema_head_rejects_wrong_loaded_module(
+    tmp_path: Path,
+) -> None:
+    result = _run_backup_schema_head_resolver(
+        tmp_path,
+        heads=("future_schema_head",),
+        schema_module_override=tmp_path / "outside" / "schema_startup.py",
+    )
+
+    assert result.returncode != 0
+    assert "selected repository source" in result.stderr
+
+
+@pytest.mark.parametrize("phase", ("live", "restored"))
+def test_backup_restore_compares_each_database_to_source_derived_head(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    matching = _run_backup_schema_head_comparison(
+        tmp_path / "matching",
+        phase=phase,
+        observed_head="future_schema_head",
+    )
+    stale = _run_backup_schema_head_comparison(
+        tmp_path / "stale",
+        phase=phase,
+        observed_head="stale_editable_head",
+    )
+
+    assert matching.returncode == 0, matching.stderr
+    assert stale.returncode != 0
 
 
 def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:

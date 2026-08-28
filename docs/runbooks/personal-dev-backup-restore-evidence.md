@@ -17,6 +17,10 @@ evidence. The only Secret-derived operations execute inside the existing
 Postgres and MinIO Pods; their environment values are neither printed nor
 returned.
 
+Every Python entry point is bound to the reviewed checkout's `src` tree. The
+schema comparison derives its sole expected Alembic head from that checkout's
+explicit migration graph and stops on source drift or an invalid head set.
+
 ## 1. Bind exact inputs and an empty owner-only output root
 
 ```bash
@@ -24,6 +28,7 @@ set -euo pipefail
 umask 077
 
 repo="$(pwd -P)"
+export PYTHONPATH="$repo/src"
 loom_cli="$repo/.venv/bin/loom"
 python_cli="$repo/.venv/bin/python"
 profile="$repo/deploy/dev-fleet/personal-dev-control-plane.toml"
@@ -181,11 +186,53 @@ capture_live_postgres_state() {
   done < "$tables"
   chmod 0600 "$destination"
 }
+resolve_expected_service_schema_head() {
+  PYTHONPATH="$repo/src" "$python_cli" - \
+    "$repo" "$repo/migrations/alembic.ini" <<'PY'
+import sys
+from pathlib import Path
+
+import loom
+from loom.db import schema_startup
+
+repo = Path(sys.argv[1]).resolve(strict=True)
+alembic_ini = Path(sys.argv[2]).resolve(strict=True)
+expected_alembic_ini = (repo / "migrations" / "alembic.ini").resolve(strict=True)
+expected_loom_module = (repo / "src" / "loom" / "__init__.py").resolve(strict=True)
+expected_schema_module = (
+    repo / "src" / "loom" / "db" / "schema_startup.py"
+).resolve(strict=True)
+try:
+    loaded_loom_module = Path(loom.__file__).resolve(strict=True)
+    loaded_schema_module = Path(schema_startup.__file__).resolve(strict=True)
+except (OSError, TypeError):
+    raise SystemExit("expected modules from selected repository source") from None
+if (
+    alembic_ini != expected_alembic_ini
+    or loaded_loom_module != expected_loom_module
+    or loaded_schema_module != expected_schema_module
+):
+    raise SystemExit("expected modules and migration graph from selected repository source")
+
+heads = tuple(schema_startup.service_schema_heads(alembic_ini=alembic_ini))
+if len(heads) != 1:
+    raise SystemExit("expected exactly one service schema head")
+head = heads[0]
+if (
+    not isinstance(head, str)
+    or not head
+    or any(character.isspace() for character in head)
+):
+    raise SystemExit("expected one valid service schema head")
+print(head)
+PY
+}
 capture_live_postgres_state "$postgres_source_state"
+expected_service_schema_head="$(resolve_expected_service_schema_head)"
 source_schema_head="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec \
   "$postgres_pod" -c postgres -- /bin/sh -euc \
   'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "SELECT version_num FROM alembic_version"')"
-test "$source_schema_head" = 0112
+test "$source_schema_head" = "$expected_service_schema_head"
 
 suffix="$(printf '%s' "$trusted_release_sha256" | cut -c1-12)"
 postgres_restore="loom-personal-dev-pg-restore-$suffix"
@@ -248,7 +295,7 @@ chmod 0600 "$evidence_dir/postgres.restored-sequences.txt" \
 restored_schema_head="$(docker exec "$postgres_restore" psql -AtX \
   --set ON_ERROR_STOP=1 -U postgres -d postgres -c \
   'SELECT version_num FROM alembic_version')"
-test "$restored_schema_head" = "$source_schema_head"
+test "$restored_schema_head" = "$expected_service_schema_head"
 cmp -s "$postgres_source_state" "$postgres_restored_state"
 ```
 
