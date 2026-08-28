@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import traceback
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
 from loom_cli.rollout.operator.config import OperatorConfig
+from loom_cli.rollout.operator.staging_mutation_guard import (
+    MutationGuardEvidence,
+    guard_evidence_path,
+)
 from loom_cli.rollout.operator.systemd import (
     JournalStreamRunner,
     SystemdOperationError,
@@ -378,6 +385,176 @@ def test_start_timeout_is_a_fail_closed_launch_error() -> None:
         manager.start_attempt(envelope, "loom-staging-rollout-req-alpha-1.service")
 
     assert str(captured.value) == "transient rollout unit could not be started"
+
+
+class MutationGuardRunner:
+    def __init__(self, config: OperatorConfig, *, service_uid: int) -> None:
+        self.config = config
+        self.service_uid = service_uid
+        self.running = False
+        self.evidence_pid = 4321
+        self.absence_delay = 0
+        self.calls: list[list[str]] = []
+
+    def _publish(self, state: Literal["ready", "released"]) -> None:
+        evidence = MutationGuardEvidence.build(
+            request_id="req-alpha",
+            candidate_sha=CANDIDATE_SHA,
+            candidate_tree="b" * 40,
+            mutation_epoch=100,
+            guard_pid=self.evidence_pid,
+            cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+            suspended_resource_version="11",
+            state=state,
+        )
+        path = guard_evidence_path(self.config, "req-alpha")
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        path.write_text(
+            json.dumps(evidence.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        path.chmod(0o600)
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
+        if argv[0] == "systemd-run":
+            self.running = True
+            self._publish("ready")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == ["systemctl", "--user", "show"]:
+            if not self.running and self.absence_delay > 0:
+                self.absence_delay -= 1
+            elif not self.running:
+                return subprocess.CompletedProcess(argv, 4, "", "unit absent")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                (
+                    "ActiveState=active\nSubState=running\nResult=success\n"
+                    "ExecMainStatus=0\nMainPID=4321\n"
+                    "ExecMainStartTimestamp=Mon 2026-08-27 20:00:00 UTC\n"
+                    "ExecMainExitTimestamp=\n"
+                ),
+                "",
+            )
+        if argv[:3] == ["systemctl", "--user", "stop"]:
+            self._publish("released")
+            self.running = False
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == ["systemctl", "--user", "reset-failed"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        raise AssertionError(argv)
+
+
+def _mutation_guard_manager(tmp_path: Path):
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir(mode=0o700)
+    config = replace(make_config(), runtime_root=runtime_root)
+    runner = MutationGuardRunner(config, service_uid=os.getuid())
+    manager = SystemdUserManager(
+        config,
+        service_uid=os.getuid(),
+        run=runner,
+        sleep=lambda _seconds: None,
+        guard_readiness_timeout_seconds=2,
+    )
+    return manager, runner
+
+
+def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+
+    evidence = manager.start_mutation_guard("req-alpha")
+
+    assert evidence.state == "ready"
+    launch = next(call for call in runner.calls if call[0] == "systemd-run")
+    assert launch[:10] == [
+        "systemd-run",
+        "--user",
+        "--collect",
+        "--service-type=exec",
+        "--unit",
+        "loom-staging-mutation-guard-req-alpha.service",
+        "--property",
+        "UMask=0077",
+        "--property",
+        f"WorkingDirectory={CANDIDATE_REPO}",
+    ]
+    assert "Restart=on-failure" in launch
+    assert "RestartSec=5s" in launch
+    assert "KillMode=mixed" in launch
+    assert "TimeoutStopSec=120s" in launch
+    assert "RuntimeMaxSec=14400s" in launch
+    assert launch[-5:] == [
+        "-m",
+        "loom_cli.rollout.operator.staging_mutation_guard",
+        "hold",
+        "--request-id",
+        "req-alpha",
+    ]
+    assert "/usr/bin/env" in launch
+    assert "-i" in launch
+    assert not any("SECRET" in item or "TOKEN" in item for item in launch)
+    status = manager.show_mutation_guard("req-alpha")
+    assert status is not None and status.is_running
+
+
+def test_mutation_guard_stop_requires_release_evidence_and_absent_unit(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    manager.start_mutation_guard("req-alpha")
+
+    evidence = manager.stop_mutation_guard("req-alpha")
+
+    assert evidence is not None and evidence.state == "released"
+    assert runner.calls[-3][0:3] == ["systemctl", "--user", "stop"]
+    assert runner.calls[-2][0:3] == ["systemctl", "--user", "reset-failed"]
+    assert runner.calls[-1][0:3] == ["systemctl", "--user", "show"]
+
+
+def test_mutation_guard_stop_waits_for_collected_unit_absence(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    manager.start_mutation_guard("req-alpha")
+    runner.absence_delay = 1
+
+    evidence = manager.stop_mutation_guard("req-alpha")
+
+    assert evidence is not None and evidence.state == "released"
+    show_calls = [call for call in runner.calls if call[0:3] == ["systemctl", "--user", "show"]]
+    assert len(show_calls) == 5
+
+
+def test_mutation_guard_start_rejects_stale_ready_evidence_from_prior_pid(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    runner.evidence_pid = 9999
+
+    with pytest.raises(UnitLaunchError, match="readiness evidence drifted"):
+        manager.start_mutation_guard("req-alpha")
+
+    assert runner.running is False
+
+
+def test_mutation_guard_stop_is_idempotent_when_unit_and_evidence_are_absent(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+
+    assert manager.stop_mutation_guard("req-alpha") is None
+    assert len(runner.calls) == 1
+    assert runner.calls[0][0:3] == ["systemctl", "--user", "show"]
+
+
+@pytest.mark.parametrize("request_id", ["x", "req/escape", "req-alpha.service"])
+def test_mutation_guard_rejects_unapproved_identity_before_systemd(
+    tmp_path: Path,
+    request_id: str,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+
+    with pytest.raises((UnitLaunchError, SystemdQueryError, SystemdOperationError)):
+        manager.start_mutation_guard(request_id)
+
+    assert runner.calls == []
 
 
 def test_show_timeout_is_a_fail_closed_query_error() -> None:
