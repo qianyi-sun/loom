@@ -7937,8 +7937,6 @@ class HostInstaller:
         self._bind_existing_source(record)
         if self.source_sha is None:  # validated and bound above
             raise InstallError("installed source SHA is unavailable")
-        if self.source_mode != "merged-dev":
-            raise InstallError("orphaned backup recovery requires a merged dev installation")
         invocation_head = self.system.validate_invocation_checkout()
         self.system.validate_invocation_dev_head(invocation_head, self.source_sha)
         self.system.validate_assets(REPO_ROOT, invocation_head)

@@ -206,7 +206,13 @@ source must be an ancestor of the authenticated head, every recovered candidate
 must be a strict ancestor, and the candidate tree recorded by the immutable job
 must equal Git's exact `candidate^{tree}`. Both the installed source and current
 head are forbidden recovery candidates after the checkout's rollout assets are
-validated and before maintenance or receipt publication.
+validated and before maintenance or receipt publication. A ready
+`sealed-cumulative` installation may use this migration only when its exact
+recorded commit has since become an ancestor of the authenticated current
+`dev`; its sealed SHA/tree/base and linear-history proofs remain mandatory.
+An unmerged sealed source refuses before maintenance. Recovery does not rewrite
+the install record: after retained activity is reconciled, the normal installer
+performs the separate migration to `merged-dev`.
 
 `orphaned-backup-recovery inventory` validates the complete canonical v3
 rotation, preflight-job, job-state, lease, and nested timestamp contracts.
