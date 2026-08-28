@@ -800,6 +800,106 @@ class MutationGuardManager:
         return self._validate(evidence, request_id=request_id, state="released")
 
 
+def _validate_reconcile_evidence(
+    evidence: MutationGuardEvidence,
+    *,
+    cronjob: _CronJob,
+    request_id: str,
+    candidate_sha: str,
+    candidate_tree: str,
+) -> None:
+    if (
+        evidence.request_id != request_id
+        or evidence.candidate_sha != candidate_sha
+        or evidence.candidate_tree != candidate_tree
+        or evidence.cronjob_uid != cronjob.uid
+    ):
+        raise MutationGuardError("orphaned mutation guard evidence binding drifted")
+
+
+def reconcile_orphaned_guard(
+    *,
+    config: OperatorConfig,
+    service_uid: int,
+    run: KubernetesRunner,
+    show_guard: Callable[[str], _MutationGuardUnitStatus | None],
+) -> dict[str, str]:
+    """Restore only an exact annotated freeze whose request unit is absent."""
+
+    _validate_config(config)
+    if service_uid < 1 or os.geteuid() != service_uid:
+        raise MutationGuardError("mutation guard reconciler authority is invalid")
+    cronjob = _load_cronjob(config, run)
+    annotations = _guard_annotation_state(cronjob)
+    if not annotations:
+        if cronjob.suspended:
+            raise MutationGuardError("lifecycle CronJob is suspended without guard annotations")
+        return {"status": "idle"}
+    if set(annotations) != _GUARD_ANNOTATIONS:
+        raise MutationGuardError("lifecycle CronJob guard annotations are incomplete")
+    request_id = annotations[_REQUEST_ANNOTATION]
+    candidate_sha = annotations[_CANDIDATE_ANNOTATION]
+    candidate_tree = annotations[_TREE_ANNOTATION]
+    try:
+        validate_safe_identifier(request_id, "request_id")
+    except ValueError as exc:
+        raise MutationGuardError("lifecycle CronJob guard annotation is invalid") from exc
+    if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
+        raise MutationGuardError("lifecycle CronJob guard annotation is invalid")
+    status = show_guard(request_id)
+    evidence_path = guard_evidence_path(config, request_id)
+    if status is not None:
+        if not status.is_running or status.main_pid < 1:
+            raise MutationGuardError("orphaned mutation guard unit is not absent")
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=service_uid,
+            )
+        except MutationGuardError as exc:
+            raise MutationGuardError("active mutation guard evidence is unsafe") from exc
+        _validate_reconcile_evidence(
+            evidence,
+            cronjob=cronjob,
+            request_id=request_id,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+        if evidence.state != "ready" or evidence.guard_pid != status.main_pid:
+            raise MutationGuardError("active mutation guard evidence binding drifted")
+        return {"request_id": request_id, "status": "active"}
+    try:
+        os.lstat(evidence_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MutationGuardError("orphaned mutation guard evidence is unavailable") from exc
+    else:
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=service_uid,
+            )
+        except MutationGuardError as exc:
+            raise MutationGuardError("orphaned mutation guard evidence is unsafe") from exc
+        _validate_reconcile_evidence(
+            evidence,
+            cronjob=cronjob,
+            request_id=request_id,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
+    _restore_cronjob(
+        config,
+        run,
+        uid=cronjob.uid,
+        request_id=request_id,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+    )
+    return {"request_id": request_id, "status": "restored"}
+
+
 def hold_request_guard(
     *,
     config: OperatorConfig,
@@ -975,6 +1075,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     hold = subparsers.add_parser("hold", allow_abbrev=False)
     hold.add_argument("--request-id", required=True)
+    subparsers.add_parser("reconcile", allow_abbrev=False)
     return parser
 
 
@@ -996,13 +1097,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         if os.geteuid() != service_uid:
             raise MutationGuardError("mutation guard effective UID is invalid")
         environment = sanitized_child_environment(config, service_uid=service_uid)
-        hold_request_guard(
-            config=config,
-            request_id=args.request_id,
-            service_uid=service_uid,
-            run=lambda command: _run(command, environment=environment),
-            stop_requested=stopped.is_set,
-        )
+
+        def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            return _run(command, environment=environment)
+
+        if args.command == "hold":
+            hold_request_guard(
+                config=config,
+                request_id=args.request_id,
+                service_uid=service_uid,
+                run=run,
+                stop_requested=stopped.is_set,
+            )
+        else:
+            from .systemd import SystemdUserManager
+
+            systemd = SystemdUserManager(
+                config,
+                service_uid=service_uid,
+                run=run,
+            )
+            result = reconcile_orphaned_guard(
+                config=config,
+                service_uid=service_uid,
+                run=run,
+                show_guard=systemd.show_mutation_guard,
+            )
+            sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
         return 0
     except Exception:
         sys.stderr.write("error: staging mutation guard failed safely\n")
@@ -1024,4 +1145,5 @@ __all__ = [
     "hold_request_guard",
     "main",
     "read_mutation_guard_evidence",
+    "reconcile_orphaned_guard",
 ]

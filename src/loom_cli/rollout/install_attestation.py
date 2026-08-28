@@ -37,6 +37,27 @@ INSTALL_ASSETS = MappingProxyType(
             0o644,
             False,
         ),
+        "mutation-guard-reconcile-helper": (
+            Path("/usr/local/libexec/loom-staging-rollout-mutation-guard-reconcile"),
+            0o755,
+            False,
+        ),
+        "mutation-guard-reconcile-service": (
+            Path(
+                "/etc/systemd/system/"
+                "loom-staging-rollout-mutation-guard-reconcile.service"
+            ),
+            0o644,
+            False,
+        ),
+        "mutation-guard-reconcile-timer": (
+            Path(
+                "/etc/systemd/system/"
+                "loom-staging-rollout-mutation-guard-reconcile.timer"
+            ),
+            0o644,
+            False,
+        ),
         "gb10-known-hosts": (
             Path("/etc/loom/staging-rollout-gb10-known-hosts"),
             0o644,

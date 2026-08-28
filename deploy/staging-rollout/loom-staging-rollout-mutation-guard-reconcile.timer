@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile orphaned Loom staging rollout mutation guards every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+Unit=loom-staging-rollout-mutation-guard-reconcile.service
+
+[Install]
+WantedBy=timers.target

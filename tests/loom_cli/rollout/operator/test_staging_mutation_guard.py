@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -20,6 +21,7 @@ from loom_cli.rollout.operator.staging_mutation_guard import (
     guard_evidence_path,
     hold_request_guard,
     read_mutation_guard_evidence,
+    reconcile_orphaned_guard,
 )
 from tests.loom_cli.rollout.operator.test_systemd import make_config
 
@@ -537,3 +539,133 @@ def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_dri
         manager.acquire(_REQUEST_ID)
 
     assert stopped == [_REQUEST_ID]
+
+
+def _annotate_guard(cluster: _Cluster) -> None:
+    metadata = cast(dict[str, object], cluster.cronjob["metadata"])
+    cast(dict[str, str], metadata["annotations"]).update(
+        {
+            _REQUEST_ANNOTATION: _REQUEST_ID,
+            _CANDIDATE_ANNOTATION: _CANDIDATE_SHA,
+            _TREE_ANNOTATION: _CANDIDATE_TREE,
+        }
+    )
+    cast(dict[str, object], cluster.cronjob["spec"])["suspend"] = True
+
+
+def _write_ready_evidence(config, *, guard_pid: int = 4321) -> None:  # type: ignore[no-untyped-def]
+    evidence = MutationGuardEvidence.build(
+        request_id=_REQUEST_ID,
+        candidate_sha=_CANDIDATE_SHA,
+        candidate_tree=_CANDIDATE_TREE,
+        mutation_epoch=100,
+        guard_pid=guard_pid,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="ready",
+    )
+    path = guard_evidence_path(config, _REQUEST_ID)
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(evidence.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
+    path.chmod(0o600)
+
+
+def test_reconcile_leaves_exact_active_guard_untouched(tmp_path: Path) -> None:
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+    config = _config(tmp_path)
+    _write_ready_evidence(config)
+
+    result = reconcile_orphaned_guard(
+        config=config,
+        service_uid=os.getuid(),
+        run=cluster,
+        show_guard=lambda request_id: SimpleNamespace(is_running=True, main_pid=4321),
+    )
+
+    assert result == {"request_id": _REQUEST_ID, "status": "active"}
+    assert cluster.events == []
+
+
+def test_reconcile_restores_exact_annotated_freeze_only_when_unit_is_absent(
+    tmp_path: Path,
+) -> None:
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+
+    result = reconcile_orphaned_guard(
+        config=_config(tmp_path),
+        service_uid=os.getuid(),
+        run=cluster,
+        show_guard=lambda _request_id: None,
+    )
+
+    assert result == {"request_id": _REQUEST_ID, "status": "restored"}
+    assert cluster.events == ["restore"]
+    assert cast(dict[str, object], cluster.cronjob["spec"])["suspend"] is False
+
+
+def test_reconcile_rejects_partial_annotations_and_unsafe_evidence(tmp_path: Path) -> None:
+    partial = _Cluster()
+    metadata = cast(dict[str, object], partial.cronjob["metadata"])
+    cast(dict[str, str], metadata["annotations"])[_REQUEST_ANNOTATION] = _REQUEST_ID
+    cast(dict[str, object], partial.cronjob["spec"])["suspend"] = True
+
+    with pytest.raises(MutationGuardError, match="annotation"):
+        reconcile_orphaned_guard(
+            config=_config(tmp_path),
+            service_uid=os.getuid(),
+            run=partial,
+            show_guard=lambda _request_id: None,
+        )
+
+    cluster = _Cluster()
+    _annotate_guard(cluster)
+    unsafe_root = tmp_path / "unsafe"
+    unsafe_root.mkdir()
+    config = _config(unsafe_root)
+    path = guard_evidence_path(config, _REQUEST_ID)
+    path.parent.mkdir(mode=0o700)
+    outside = tmp_path / "outside-evidence.json"
+    outside.write_text("{}")
+    path.symlink_to(outside)
+    with pytest.raises(MutationGuardError, match="evidence"):
+        reconcile_orphaned_guard(
+            config=config,
+            service_uid=os.getuid(),
+            run=cluster,
+            show_guard=lambda _request_id: None,
+        )
+    assert cluster.events == []
+
+
+def test_reconcile_is_idempotent_when_cronjob_is_already_unsuspended(tmp_path: Path) -> None:
+    cluster = _Cluster()
+
+    assert reconcile_orphaned_guard(
+        config=_config(tmp_path),
+        service_uid=os.getuid(),
+        run=cluster,
+        show_guard=lambda _request_id: (_ for _ in ()).throw(AssertionError()),
+    ) == {"status": "idle"}
+    assert cluster.events == []
+
+
+def test_reconcile_refuses_to_claim_restore_when_exact_release_fails(tmp_path: Path) -> None:
+    class _ReleaseFailureCluster(_Cluster):
+        def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if "patch" in argv and "cronjob/loom-staging-data-lifecycle" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "injected release failure")
+            return super().__call__(argv)
+
+    cluster = _ReleaseFailureCluster()
+    _annotate_guard(cluster)
+
+    with pytest.raises(MutationGuardError, match="patch"):
+        reconcile_orphaned_guard(
+            config=_config(tmp_path),
+            service_uid=os.getuid(),
+            run=cluster,
+            show_guard=lambda _request_id: None,
+        )
+    assert cluster.events == []

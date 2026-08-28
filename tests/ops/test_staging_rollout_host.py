@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import threading
 from pathlib import Path
 from typing import ClassVar
@@ -72,6 +73,7 @@ class FakeSystem:
         self.shared_work2_mounted = False
         self.preflight_credentials = False
         self.credential_refresh_timer = False
+        self.mutation_guard_reconcile_timer = False
         self.preflight_candidate_source = False
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
@@ -307,6 +309,17 @@ class FakeSystem:
 
     def disable_credential_refresh_timer(self) -> None:
         self.credential_refresh_timer = False
+
+    def mutation_guard_reconcile_timer_ready(self) -> bool:
+        return self.mutation_guard_reconcile_timer
+
+    def ensure_mutation_guard_reconcile_timer(self, *, reload_units: bool) -> bool:
+        changed = reload_units or not self.mutation_guard_reconcile_timer
+        self.mutation_guard_reconcile_timer = True
+        return changed
+
+    def disable_mutation_guard_reconcile_timer(self) -> None:
+        self.mutation_guard_reconcile_timer = False
 
     def ensure_owned_directory(self, path: Path, *, owner: str, mode: int) -> bool:
         assert owner == host.SERVICE_USER
@@ -1016,6 +1029,9 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh",
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh.service",
         "deploy/staging-rollout/loom-staging-rollout-credential-refresh.timer",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile.service",
+        "deploy/staging-rollout/loom-staging-rollout-mutation-guard-reconcile.timer",
         "deploy/staging-rollout/loom-staging-rollout-final-gate",
         "deploy/staging-rollout/loom-staging-rollout-rehearsal",
         "deploy/staging-rollout/loom-staging-rollout.sudoers",
@@ -2688,6 +2704,80 @@ def test_check_rejects_disabled_credential_refresh_timer(tmp_path: Path) -> None
 
     assert result["ok"] is False
     assert "credential-refresh-timer" in result["failures"]
+
+
+def test_mutation_guard_reconcile_assets_converge_and_uninstall_cleanly(tmp_path: Path) -> None:
+    helper_source = host.DEPLOY_ROOT / "loom-staging-rollout-mutation-guard-reconcile"
+    service_source = helper_source.with_name(
+        "loom-staging-rollout-mutation-guard-reconcile.service"
+    )
+    timer_source = helper_source.with_name("loom-staging-rollout-mutation-guard-reconcile.timer")
+    helper_text = helper_source.read_text(encoding="utf-8")
+    service_text = service_source.read_text(encoding="utf-8")
+    timer_text = timer_source.read_text(encoding="utf-8")
+
+    syntax = subprocess.run(
+        ["bash", "-n", str(helper_source)], check=False, capture_output=True, text=True
+    )
+
+    assert syntax.returncode == 0, syntax.stderr
+    assert "__CANDIDATE_VENV__" in helper_text
+    assert "loom_cli.rollout.operator.staging_mutation_guard reconcile" in helper_text
+    assert "-u loom-rollout -- /usr/bin/env -i" in helper_text
+    assert '"$@"' not in helper_text
+    assert "User=root" in service_text
+    assert "Group=root" in service_text
+    assert f"ExecStart={host.MUTATION_GUARD_RECONCILE_PATH}" in service_text
+    assert "OnBootSec=1min" in timer_text
+    assert "OnUnitActiveSec=1min" in timer_text
+    assert "Persistent=true" in timer_text
+    assert f"Unit={host.MUTATION_GUARD_RECONCILE_SERVICE}" in timer_text
+
+    installer, system = _installer(tmp_path)
+    first = installer.install(TEAM_ID)
+    second = installer.install(TEAM_ID)
+
+    candidate_venv = host._candidate_venv_path("a" * 40)
+    installed_helper = installer.filesystem.path(host.MUTATION_GUARD_RECONCILE_PATH)
+    assert str(candidate_venv / "bin/python") in installed_helper.read_text(encoding="utf-8")
+    assert "__CANDIDATE_VENV__" not in installed_helper.read_text(encoding="utf-8")
+    for path in (
+        host.MUTATION_GUARD_RECONCILE_PATH,
+        host.MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+        host.MUTATION_GUARD_RECONCILE_TIMER_PATH,
+    ):
+        assert installer.filesystem.exists(path)
+        assert (path, "root", "root", 0o755 if path == host.MUTATION_GUARD_RECONCILE_PATH else 0o644) in (
+            system.install_owner_calls
+        )
+    assert system.mutation_guard_reconcile_timer is True
+    assert "mutation-guard-reconcile-timer" in first["changed"]
+    assert second["changed"] == []
+    assert installer.check()["ok"] is True
+    attestation = json.loads(
+        installer.filesystem.path(host.INSTALL_ATTESTATION).read_text(encoding="utf-8")
+    )
+    assert {
+        "mutation-guard-reconcile-helper",
+        "mutation-guard-reconcile-service",
+        "mutation-guard-reconcile-timer",
+    } <= set(attestation["asset_sha256"])
+
+    system.mutation_guard_reconcile_timer = False
+    assert "mutation-guard-reconcile-timer" in installer.check()["failures"]
+
+    result = installer.uninstall(retain_ledger=True)
+
+    assert result["ok"] is True
+    assert system.mutation_guard_reconcile_timer is False
+    assert not any(
+        installer.filesystem.exists(path)
+        for path in (
+            host.MUTATION_GUARD_RECONCILE_PATH,
+            host.MUTATION_GUARD_RECONCILE_SERVICE_PATH,
+            host.MUTATION_GUARD_RECONCILE_TIMER_PATH,
+        )
+    )
 
 
 def test_host_system_converges_only_fixed_inotify_sysctl() -> None:
