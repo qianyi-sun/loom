@@ -5098,6 +5098,39 @@ def test_orphaned_backup_inventory_refuses_current_installed_candidate(
         )
 
 
+def test_orphaned_backup_apply_refuses_unsafe_root_evidence_parent(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    evidence_root.parent.chmod(0o777)
+
+    with pytest.raises(host.InstallError, match="evidence parent is unsafe"):
+        host._apply_orphaned_backup_recovery(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            approved_plan_sha256=digest,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

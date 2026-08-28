@@ -2047,12 +2047,38 @@ def _apply_orphaned_backup_recovery(
     digest = hashlib.sha256(plan_payload).hexdigest()
     if digest != approved_plan_sha256:
         raise InstallError("orphaned backup approved plan does not match current evidence")
-    evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chown(evidence_root, authority_uid, authority_gid)
-    os.chmod(evidence_root, 0o700)
     items = plan.get("items")
     if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
         raise InstallError("orphaned backup recovery plan is invalid")
+    try:
+        parent_metadata = os.lstat(evidence_root.parent)
+    except OSError as exc:
+        raise InstallError("orphaned backup evidence parent is unavailable") from exc
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != authority_uid
+        or parent_metadata.st_gid != authority_gid
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+    ):
+        raise InstallError("orphaned backup evidence parent is unsafe")
+    try:
+        evidence_metadata = os.lstat(evidence_root)
+    except FileNotFoundError:
+        try:
+            os.mkdir(evidence_root, mode=0o700)
+            os.chown(evidence_root, authority_uid, authority_gid)
+            evidence_metadata = os.lstat(evidence_root)
+        except OSError as exc:
+            raise InstallError("orphaned backup evidence root is unavailable") from exc
+    except OSError as exc:
+        raise InstallError("orphaned backup evidence root is unavailable") from exc
+    if (
+        not stat.S_ISDIR(evidence_metadata.st_mode)
+        or evidence_metadata.st_uid != authority_uid
+        or evidence_metadata.st_gid != authority_gid
+        or stat.S_IMODE(evidence_metadata.st_mode) != 0o700
+    ):
+        raise InstallError("orphaned backup evidence root is unsafe")
     reconciled_request_ids: list[object] = []
     for item in items:
         assert isinstance(item, dict)
@@ -2069,18 +2095,29 @@ def _apply_orphaned_backup_recovery(
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                Path(temporary).unlink(missing_ok=True)
+            raise InstallError("orphaned backup receipt publication failed safely") from exc
         except BaseException:
             with contextlib.suppress(OSError):
                 os.close(fd)
             Path(temporary).unlink(missing_ok=True)
             raise
         reconciled_request_ids.append(item["request_id"])
-    directory_fd = os.open(
-        evidence_root,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
-    )
+    try:
+        directory_fd = os.open(
+            evidence_root,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+        )
+    except OSError as exc:
+        raise InstallError("orphaned backup receipt publication failed safely") from exc
     try:
         os.fsync(directory_fd)
+    except OSError as exc:
+        raise InstallError("orphaned backup receipt publication failed safely") from exc
     finally:
         os.close(directory_fd)
     return {
