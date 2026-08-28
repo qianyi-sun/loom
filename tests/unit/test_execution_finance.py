@@ -121,6 +121,78 @@ def test_execution_cost_estimate_splits_reservation_at_utc_day_boundary() -> Non
     assert estimate.estimated_cost_microusd == 3_600_000
 
 
+def test_execution_cost_estimate_rounds_cross_day_duration_only_once() -> None:
+    now = datetime(2026, 8, 26, 23, 30, 0, 1, tzinfo=UTC)
+    price = ExecutionPriceSnapshot(
+        id=uuid4(),
+        provider="nebius",
+        region="eu-north1",
+        sku="cpu-d3",
+        currency="USD",
+        source="test",
+        source_version="v1",
+        source_uri="https://example.test/rates",
+        effective_at=now,
+        observed_at=now,
+        base_microusd_per_hour=3_600_000,
+        vcpu_microusd_per_hour=0,
+        memory_gib_microusd_per_hour=0,
+        ephemeral_storage_gib_microusd_per_hour=0,
+        rate_card_json={},
+        rate_card_sha256="sha256:" + "5" * 64,
+    )
+
+    estimate = estimate_execution_cost(
+        _plan(now),
+        price,
+        acquired_at=now,
+        deadline_at=now + timedelta(hours=1),
+    )
+
+    assert estimate.duration_seconds == 3_600
+    assert estimate.daily_costs == (
+        (datetime(2026, 8, 26, tzinfo=UTC).date(), 1_800_000),
+        (datetime(2026, 8, 27, tzinfo=UTC).date(), 1_800_000),
+    )
+    assert estimate.estimated_cost_microusd == 3_600_000
+
+
+def test_execution_cost_estimate_does_not_round_each_subsecond_day_segment() -> None:
+    now = datetime(2026, 8, 26, 23, 59, 59, 999_999, tzinfo=UTC)
+    price = ExecutionPriceSnapshot(
+        id=uuid4(),
+        provider="nebius",
+        region="eu-north1",
+        sku="cpu-d3",
+        currency="USD",
+        source="test",
+        source_version="v1",
+        source_uri="https://example.test/rates",
+        effective_at=now,
+        observed_at=now,
+        base_microusd_per_hour=3_600_000,
+        vcpu_microusd_per_hour=0,
+        memory_gib_microusd_per_hour=0,
+        ephemeral_storage_gib_microusd_per_hour=0,
+        rate_card_json={},
+        rate_card_sha256="sha256:" + "5" * 64,
+    )
+
+    estimate = estimate_execution_cost(
+        _plan(now),
+        price,
+        acquired_at=now,
+        deadline_at=now + timedelta(microseconds=2),
+    )
+
+    assert estimate.duration_seconds == 1
+    assert estimate.daily_costs == (
+        (datetime(2026, 8, 26, tzinfo=UTC).date(), 1_000),
+        (datetime(2026, 8, 27, tzinfo=UTC).date(), 1),
+    )
+    assert estimate.estimated_cost_microusd == 1_001
+
+
 def test_node_bill_normalization_never_allocates_above_provider_bill() -> None:
     assert _normalized_allocations([800, 800], 1_000) == [500, 500]
     assert _normalized_allocations([400, 200], 1_000) == [400, 200]
