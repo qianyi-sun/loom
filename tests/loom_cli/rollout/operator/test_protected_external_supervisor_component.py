@@ -556,6 +556,67 @@ def _observation(
     )
 
 
+def _repairable_predecessor_observation(
+    candidate_root: Path,
+    target_artifact: ExternalSupervisorArtifact,
+) -> ExternalSupervisorLiveObservation:
+    execution_host = target_artifact.supervisors[0].execution_host
+    unit_dir = Path(external_supervisor_unit_directory(execution_host))
+    predecessor_artifact = _build_active_artifact(
+        candidate_root,
+        candidate_sha="1" * 40,
+        candidate_tree="2" * 40,
+        image_tag="staging-1111111",
+        execution_host=execution_host,
+    )
+    predecessor = ExternalSupervisorCanonicalIdentity.build(
+        predecessor_artifact,
+        plan_digest="3" * 64,
+        attestation_digest="4" * 64,
+        transition_group_id="5" * 32,
+        runtime_evidence_digest=transport_module._expected_activation_runtime_digest(
+            predecessor_artifact,
+            unit_dir=unit_dir,
+        ),
+        unit_dir=str(unit_dir),
+    )
+    observation = ExternalSupervisorLiveObservation(
+        unit_payloads={
+            name: payload.encode() for name, payload in predecessor.unit_payloads.items()
+        },
+        timer_statuses={
+            supervisor.timer_name: _timer_status(
+                supervisor.timer_name,
+                "loaded",
+                "enabled",
+                "active",
+                unit_dir=unit_dir,
+            )
+            for supervisor in predecessor_artifact.supervisors
+        },
+        service_statuses={
+            supervisor.service_name: _service_status(
+                supervisor.service_name,
+                "loaded",
+                "exit-code",
+                1,
+                unit_dir=unit_dir,
+            )
+            for supervisor in predecessor_artifact.supervisors
+        },
+        canonical_identity=predecessor,
+    )
+    assert (
+        classify_external_supervisor_live_state(
+            target_artifact,
+            observation,
+            unit_dir=unit_dir,
+        )
+        == "repairable"
+    )
+    return observation
+
+
 def _timer_status(
     name: str,
     load_state: str,
@@ -658,6 +719,8 @@ def _bind_primary_controller_to_canonical_predecessor(
     plan,
     artifact: ExternalSupervisorArtifact,
     live: ExternalSupervisorLiveObservation,
+    *,
+    predecessor_runtime_state: str = "ready",
 ):
     canonical = live.canonical_identity
     assert canonical is not None
@@ -677,7 +740,7 @@ def _bind_primary_controller_to_canonical_predecessor(
         predecessor_unit_set_digest=predecessor_unit_set,
         predecessor_live_evidence_digest=live.evidence_digest,
         predecessor_pending_transition_digest=live.pending_transition_digest,
-        predecessor_runtime_state="ready",
+        predecessor_runtime_state=predecessor_runtime_state,
         unit_directory=unit_directory,
         target_artifact_digest=artifact.artifact_digest,
         target_profile_sha256=artifact.profile_sha256,
@@ -728,6 +791,69 @@ def _bind_primary_controller_to_canonical_predecessor(
         }
     )
     return type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
+
+
+def test_component_classifies_attested_repairable_predecessor_as_ready(tmp_path: Path) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    live = _repairable_predecessor_observation(candidate_root, artifact)
+    plan = _bind_primary_controller_to_canonical_predecessor(
+        plan,
+        artifact,
+        live,
+        predecessor_runtime_state="repairable",
+    )
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=_Transport(artifact, live),
+        epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
+        artifact_builder=_build_active_artifact,
+    )
+
+    assert component.classify(plan).state is ComponentState.READY
+
+
+def test_component_applies_attested_repairable_predecessor(tmp_path: Path) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    live = _repairable_predecessor_observation(candidate_root, artifact)
+    plan = _bind_primary_controller_to_canonical_predecessor(
+        plan,
+        artifact,
+        live,
+        predecessor_runtime_state="repairable",
+    )
+    transport = _Transport(artifact, live)
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=transport,
+        epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
+        artifact_builder=_build_active_artifact,
+    )
+
+    component.apply(plan)
+
+    assert transport.applied == 1
+
+
+def test_component_rejects_unattested_repairable_predecessor(tmp_path: Path) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    live = _repairable_predecessor_observation(candidate_root, artifact)
+    plan = _bind_primary_controller_to_canonical_predecessor(plan, artifact, live)
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=_Transport(artifact, live),
+        epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
+        artifact_builder=_build_active_artifact,
+    )
+
+    assert component.classify(plan).state is ComponentState.DRIFTED
+    with pytest.raises(RuntimeError, match="runtime state drifted"):
+        component.apply(plan)
 
 
 def test_component_reattests_exact_attested_predecessor_for_new_plan(tmp_path: Path) -> None:

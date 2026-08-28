@@ -39,7 +39,7 @@ from .protected_external_supervisor_transport import (
     classify_external_supervisor_live_state,
 )
 
-_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v2").hexdigest()
+_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v3").hexdigest()
 _COMPONENT_ID_BY_EXECUTION_HOST = {
     "gx10-01c7": "external-supervisors-gb10",
     "TRT-EAI-OLDLAB-1": "external-supervisors-oldlab",
@@ -100,6 +100,7 @@ class ProtectedExternalSupervisorComponent:
                     "supervisor_predecessor_pointer_digest": (
                         controller.predecessor_pointer_digest
                     ),
+                    "supervisor_predecessor_runtime_state": (controller.predecessor_runtime_state),
                     "supervisor_predecessor_unit_set_digest": (
                         controller.predecessor_unit_set_digest
                     ),
@@ -145,13 +146,12 @@ class ProtectedExternalSupervisorComponent:
                 )
             except (RuntimeError, ValueError):
                 return self._observation(plan, artifact, epoch, ComponentState.DRIFTED, "0" * 64)
-        state = ComponentState(
-            classify_external_supervisor_live_state(
-                artifact,
-                live,
-                unit_dir=self.unit_dir,
-            )
+        live_state = classify_external_supervisor_live_state(
+            artifact,
+            live,
+            unit_dir=self.unit_dir,
         )
+        state = ComponentState.READY if live_state == "repairable" else ComponentState(live_state)
         if state is ComponentState.EXACT:
             canonical = live.canonical_identity
             if canonical is None:
@@ -164,6 +164,10 @@ class ProtectedExternalSupervisorComponent:
                 # predecessor. Re-attest them only through that complete,
                 # plan-bound predecessor authority.
                 try:
+                    if controller.predecessor_runtime_state != "ready":
+                        raise RuntimeError(
+                            "protected external supervisor predecessor runtime state drifted"
+                        )
                     self._verify_predecessor_binding(plan, artifact, live, controller)
                 except (RuntimeError, ValueError):
                     state = ComponentState.DRIFTED
@@ -171,6 +175,10 @@ class ProtectedExternalSupervisorComponent:
                     state = ComponentState.READY
         elif state is ComponentState.READY:
             try:
+                if controller.predecessor_runtime_state != live_state:
+                    raise RuntimeError(
+                        "protected external supervisor predecessor runtime state drifted"
+                    )
                 self._verify_predecessor_binding(plan, artifact, live, controller)
             except (RuntimeError, ValueError):
                 state = ComponentState.DRIFTED
@@ -196,8 +204,11 @@ class ProtectedExternalSupervisorComponent:
             live,
             unit_dir=self.unit_dir,
         )
-        if live_state not in {"exact", "ready"}:
+        expected_runtime_state = "repairable" if live_state == "repairable" else "ready"
+        if live_state not in {"exact", "ready", "repairable"}:
             raise RuntimeError("protected external supervisor state changed before apply")
+        if controller.predecessor_runtime_state != expected_runtime_state:
+            raise RuntimeError("protected external supervisor predecessor runtime state drifted")
         self.transport.apply(
             artifact,
             live,
@@ -351,9 +362,7 @@ class ProtectedExternalSupervisorComponent:
         }
         expected_script_digests = {
             path: plan.supervisor_script_digests[path]
-            for path in protected_external_supervisor_script_paths_for_units(
-                expected_dynamic_units
-            )
+            for path in protected_external_supervisor_script_paths_for_units(expected_dynamic_units)
         }
         calculated_set_digest = _hash_json({"failed": {}, "units": dict(plan.systemd_unit_digests)})
         if (
