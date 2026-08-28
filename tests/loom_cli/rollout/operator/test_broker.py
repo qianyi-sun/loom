@@ -892,6 +892,95 @@ class _BackupRetention:
         return {"retired_payload_ids": ["payload-failed01"], "schema_version": 1}
 
 
+class _BackupRecovery(_BackupRetention):
+    def apply(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("apply", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"recovered_payload_id": "payload-candidate01", "schema_version": 1}
+
+
+def test_default_dependencies_wire_backup_maintenance_for_merged_dev(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = SimpleNamespace(
+        assess=lambda _candidate, _epoch: None,
+        current_mutation_epoch=lambda: 0,
+    )
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid()),
+    )
+    monkeypatch.setattr(
+        broker_module,
+        "sanitized_child_environment",
+        lambda _config, *, service_uid: {
+            "HOME": "/var/lib/loom-rollout",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin",
+            "USER": "loom-rollout",
+        },
+    )
+    monkeypatch.setattr(
+        broker_module,
+        "build_installed_deep_preflight_composition",
+        lambda *_args, **_kwargs: SimpleNamespace(authority=lambda: authority),
+    )
+
+    dependencies = broker_module._default_dependencies(make_config(tmp_path))
+
+    assert dependencies.backup_retention is not None
+    assert dependencies.backup_recovery is not None
+
+
+@pytest.mark.parametrize(
+    ("command", "service_type", "result_key", "result_value"),
+    (
+        ("backup-retention", _BackupRetention, "retired_payload_ids", ["payload-failed01"]),
+        ("backup-recovery", _BackupRecovery, "recovered_payload_id", "payload-candidate01"),
+    ),
+)
+def test_merged_dev_backup_maintenance_uses_the_configured_service(
+    tmp_path: Path,
+    command: str,
+    service_type: type[_BackupRetention],
+    result_key: str,
+    result_value: object,
+) -> None:
+    deps = fakes(tmp_path)
+    deps.lifecycle.maintenance = True
+    service = service_type(deps.lifecycle)
+    dependencies = (
+        replace(
+            deps.dependencies,
+            authenticate=lambda: CallerIdentity("hongjian", 2002),
+            backup_retention=service,
+        )
+        if command == "backup-retention"
+        else replace(
+            deps.dependencies,
+            authenticate=lambda: CallerIdentity("hongjian", 2002),
+            backup_recovery=service,
+        )
+    )
+
+    assert broker_main([command, "inventory"], dependencies=dependencies) == 0
+    assert _last_json(deps.stdout) == {
+        "plan": {"rotation_generation": 7, "schema_version": 1},
+        "plan_sha256": "f" * 64,
+    }
+
+    assert (
+        broker_main(
+            [command, "apply", "--approved-plan-sha256", "f" * 64],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert _last_json(deps.stdout)[result_key] == result_value
+
+
 def test_backup_retention_requires_maintenance_and_digest_approval(tmp_path: Path) -> None:
     deps = fakes(tmp_path)
     sealed_config = replace(
@@ -1126,13 +1215,6 @@ def test_preflight_artifact_retention_rejects_malformed_approval(
 
     assert broker_main(argv, dependencies=deps.dependencies) == 2
     assert deps.order == []
-
-
-class _BackupRecovery(_BackupRetention):
-    def apply(self, plan):  # type: ignore[no-untyped-def]
-        self.calls.append(("apply", self.lifecycle.guard_depth))
-        assert plan is self.plan
-        return {"recovered_payload_id": "payload-candidate01", "schema_version": 1}
 
 
 def test_backup_recovery_requires_maintenance_and_digest_approval(tmp_path: Path) -> None:
