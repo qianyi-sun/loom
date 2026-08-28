@@ -15,6 +15,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from loom_launcher.openhands_sdk_capture import (
+    LOOM_BRIDGE_REVISION,
+    SANDBOX_OPENHANDS_SDK_EVENTS,
+    build_artifact_ref_payload,
+    build_runtime_provenance_payload,
+    resolve_package_version,
+    write_native_events_file,
+)
 from loom_launcher.openhands_sdk_events import OpenHandsEventMapper
 
 
@@ -113,6 +121,30 @@ def main(argv: list[str] | None = None) -> int:
 
     for payload in mapper.flush_pending():
         _emit(payload)
+
+    sdk_version = resolve_package_version("openhands.sdk")
+    tools_version = resolve_package_version("openhands.tools.terminal")
+    _emit(
+        build_runtime_provenance_payload(
+            envelope=mapper._envelope,
+            sdk_version=sdk_version,
+            openhands_tools_version=tools_version,
+            loom_bridge_revision=LOOM_BRIDGE_REVISION,
+        )
+    )
+    native_events = getattr(getattr(conversation, "state", None), "events", None) or []
+    _write_path, content_hash, size_bytes = write_native_events_file(
+        Path(args.workdir),
+        native_events,
+    )
+    _emit(
+        build_artifact_ref_payload(
+            envelope=mapper._envelope,
+            sandbox_path=SANDBOX_OPENHANDS_SDK_EVENTS,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
+        )
+    )
 
     _emit(mapper.map_result(ok=True))
     return 0

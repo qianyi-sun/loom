@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from types import SimpleNamespace
+
 from loom_launcher import openhands_sdk_runner
 
 
@@ -32,13 +34,16 @@ def test_runner_invokes_openhands_sdk_and_emits_jsonl(monkeypatch, tmp_path, cap
             calls["conversation_agent"] = agent
             calls["conversation"] = kwargs
             self._callbacks = kwargs["callbacks"]
+            self.state = SimpleNamespace(events=[])
 
         def send_message(self, message: str) -> None:
             calls["message"] = message
 
         def run(self) -> None:
+            event = FakeEvent()
+            self.state.events = [event]
             for callback in self._callbacks:
-                callback(FakeEvent())
+                callback(event)
 
     monkeypatch.setenv("LLM_API_KEY", "step-token")
     monkeypatch.setenv("LLM_BASE_URL", "https://gateway.example/v1")
@@ -97,6 +102,15 @@ def test_runner_invokes_openhands_sdk_and_emits_jsonl(monkeypatch, tmp_path, cap
     assert "FakeEvent" in lines[1]["content"]
     assert lines[-1]["kind"] == "agent_thought"
     assert lines[-1]["content"] == "result: ok"
+    assert any(line["kind"] == "openhands_sdk_runtime_provenance" for line in lines)
+    artifact_refs = [
+        line for line in lines if line["kind"] == "openhands_sdk_artifact_ref"
+    ]
+    assert len(artifact_refs) == 1
+    assert artifact_refs[0]["artifact_kind"] == "openhands_sdk.events"
+    assert artifact_refs[0]["sandbox_path"] == ".loom/agent/openhands_sdk_events.json"
+    native_path = tmp_path / ".loom" / "agent" / "openhands_sdk_events.json"
+    assert native_path.exists()
 
 
 def test_runner_requires_jsonl_output(monkeypatch, tmp_path, capsys) -> None:

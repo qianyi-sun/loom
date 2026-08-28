@@ -31,6 +31,10 @@ from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
 )
+from loom_service.delivery_export_openhands import (
+    OpenHandsExportError,
+    build_per_trial_openhands_bundle,
+)
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
     parse_trajectory_events,
@@ -47,6 +51,7 @@ DeliveryExportMode = Literal[
     "raw-harbor",
     "raw-harbor-tb2-v1",
     "raw-harbor-tb2-v2",
+    "openhands-export",
 ]
 
 
@@ -874,6 +879,15 @@ def _summary(
             "execution_trajectory": "trajectory.json",
             "terminal_transcript": "terminal_transcript.jsonl",
         }
+    elif _is_openhands_export_profile(mode):
+        summary["export_profile"] = {
+            "name": "openhands-export",
+            "version": "1",
+            "source_of_truth": "native/openhands_sdk_events.json",
+            "audit_spine": "loom_trajectory.jsonl",
+            "model_input_trajectory": "model_input_trajectory.json",
+            "execution_trajectory": "trajectory.json",
+        }
     return summary
 
 
@@ -1374,7 +1388,12 @@ def _raw_agent_native_note(item: SelectedTrial) -> dict[str, Any]:
 
 
 def _is_raw_harbor_mode(mode: DeliveryExportMode) -> bool:
-    return mode in {"raw-harbor", "raw-harbor-tb2-v1", "raw-harbor-tb2-v2"}
+    return mode in {
+        "raw-harbor",
+        "raw-harbor-tb2-v1",
+        "raw-harbor-tb2-v2",
+        "openhands-export",
+    }
 
 
 def _is_tb2_v1_profile(mode: DeliveryExportMode) -> bool:
@@ -1383,6 +1402,10 @@ def _is_tb2_v1_profile(mode: DeliveryExportMode) -> bool:
 
 def _is_tb2_v2_profile(mode: DeliveryExportMode) -> bool:
     return mode == "raw-harbor-tb2-v2"
+
+
+def _is_openhands_export_profile(mode: DeliveryExportMode) -> bool:
+    return mode == "openhands-export"
 
 
 def _is_tb2_profile(mode: DeliveryExportMode) -> bool:
@@ -1489,6 +1512,7 @@ def _add_raw_harbor_entries(
 ) -> None:
     tb2_v1_profile = _is_tb2_v1_profile(mode)
     tb2_v2_profile = _is_tb2_v2_profile(mode)
+    openhands_profile = _is_openhands_export_profile(mode)
     tb2_profile = _is_tb2_profile(mode)
     provider_logs: list[dict[str, Any]] = []
     sft_rows: list[dict[str, Any]] = []
@@ -1514,7 +1538,7 @@ def _add_raw_harbor_entries(
             }
             provider_logs.append(manifest_row)
             trial_provider_logs.append(manifest_row)
-            if not tb2_v2_profile:
+            if not tb2_v2_profile and not openhands_profile:
                 messages = _messages_from_raw_log(raw_log, normalize_tb2=tb2_profile)
                 if messages:
                     sft_rows.append(
@@ -1556,7 +1580,44 @@ def _add_raw_harbor_entries(
         )
 
         trajectory_artifacts: list[dict[str, str]]
-        if tb2_v2_profile:
+        if openhands_profile:
+            events = _load_trajectory_events(client, item.trajectory)
+            bundle = build_per_trial_openhands_bundle(
+                trial=item.trial,
+                events=events,
+                calls=calls,
+                client=client,
+                artifacts_bucket=artifacts_bucket,
+                messages_from_raw_log=_messages_from_raw_log,
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "trajectory.json"),
+                _public_json_bytes(bundle.execution_trajectory),
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "model_input_trajectory.json"),
+                _public_json_bytes(bundle.model_input_trajectory),
+            )
+            add_bytes(
+                tar,
+                _raw_agent_run_path(item, "export_provenance.json"),
+                _public_json_bytes(bundle.export_provenance),
+            )
+            add_ref(
+                tar,
+                _raw_agent_run_path(item, "loom_trajectory.jsonl"),
+                item.trajectory,
+            )
+            for archive_path, data in bundle.native_artifacts.items():
+                add_bytes(
+                    tar,
+                    _raw_agent_run_path(item, archive_path),
+                    data,
+                )
+            trajectory_artifacts = list(bundle.artifact_manifest_entries)
+        elif tb2_v2_profile:
             events = _load_trajectory_events(client, item.trajectory)
             bundle = build_per_trial_v2_bundle(
                 trial=item.trial,
@@ -1732,7 +1793,7 @@ def _add_raw_harbor_entries(
             }
         ),
     )
-    if not tb2_v2_profile:
+    if not tb2_v2_profile and not openhands_profile:
         add_bytes(
             tar,
             "derived/sft_messages.jsonl",
@@ -1746,6 +1807,7 @@ def _archive_filename(batch: Batch, *, mode: DeliveryExportMode) -> str:
         "raw-harbor": "raw-harbor",
         "raw-harbor-tb2-v1": "raw-harbor-tb2-v1",
         "raw-harbor-tb2-v2": "raw-harbor-tb2-v2",
+        "openhands-export": "openhands-export",
     }
     suffix = suffix_by_mode[mode]
     return f"{_safe_slug(batch.name, max_len=120)}-{suffix}.tar.gz"
