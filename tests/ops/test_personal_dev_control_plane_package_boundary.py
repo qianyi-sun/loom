@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
+import py_compile
 import re
 import runpy
 import shlex
@@ -63,6 +65,87 @@ def _fenced_bash(document: str) -> str:
     blocks = re.findall(r"^```bash\n(.*?)^```$", document, flags=re.DOTALL | re.MULTILINE)
     assert blocks
     return "\n".join(blocks)
+
+
+def _run_schema_transition_orchestration(
+    tmp_path: Path,
+    *,
+    fail_at: str = "",
+    persistent_fail_at: str = "",
+    fail_after: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "quiesce_management",
+            "apply_target_transition",
+            "restore_predecessor",
+            "run_schema_transition",
+        )
+    )
+    call_log = tmp_path / "calls.txt"
+    failure_marker = tmp_path / "failed-once"
+    operation_names = (
+        "assert_transition_interlocks",
+        "assert_predecessor_recovery_interlocks",
+        "assert_predecessor_restore_artifacts",
+        "assert_live_predecessor_state",
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "assert_migration_job_absent",
+        "apply_reviewed_migration_job",
+        "wait_for_reviewed_migration_job",
+        "assert_live_target_head",
+        "apply_reviewed_target_shadow",
+        "wait_for_target_shadow",
+        "assert_target_shadow_ready",
+        "stop_target_migration",
+        "assert_only_restore_connection",
+        "restore_predecessor_database",
+        "apply_reviewed_predecessor_shadow",
+        "remove_forward_only_web",
+        "wait_for_predecessor_shadow",
+        "assert_predecessor_shadow_ready",
+    )
+    stubs = "\n".join(
+        f"{name}() {{ record_call {shlex.quote(name)}; }}" for name in operation_names
+    )
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        f"failure_marker={shlex.quote(str(failure_marker))}\n"
+        f"fail_at={shlex.quote(fail_at)}\n"
+        f"persistent_fail_at={shlex.quote(persistent_fail_at)}\n"
+        f"fail_after={fail_after}\n"
+        "declare -A call_counts=()\n"
+        "record_call() {\n"
+        '  printf \'%s\\n\' "$1" >> "$call_log"\n'
+        "  call_counts[$1]=$(( ${call_counts[$1]:-0} + 1 ))\n"
+        '  if test "$1" = "$persistent_fail_at" &&\n'
+        '     test "${call_counts[$1]}" -gt "$fail_after"; then\n'
+        "    return 1\n"
+        "  fi\n"
+        '  if test "$1" = "$fail_at" && test ! -e "$failure_marker"; then\n'
+        '    : > "$failure_marker"\n'
+        "    return 1\n"
+        "  fi\n"
+        "  return 0\n"
+        "}\n"
+        f"{stubs}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"{functions}\n"
+        "run_schema_transition\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    calls = call_log.read_text(encoding="utf-8").splitlines()
+    return result, calls
 
 
 def _write_backup_schema_head_test_repo(
@@ -234,6 +317,63 @@ def _run_backup_schema_head_comparison(
     )
 
 
+def _run_schema_transition_predecessor_checkout_head(
+    tmp_path: Path,
+    *,
+    schema_module_override: Path | None = None,
+    malicious_bytecode_head: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    start = runbook.index('predecessor_checkout_schema_head="$(')
+    end = runbook.index('\ntest "$predecessor_checkout_schema_head"', start)
+    resolver_source = runbook[start:end]
+    predecessor_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "predecessor",
+        heads=("selected_predecessor_head",),
+    )
+    stale_repo = _write_backup_schema_head_test_repo(
+        tmp_path / "stale-editable",
+        heads=("stale_editable_head",),
+    )
+    if malicious_bytecode_head is not None:
+        selected_module = predecessor_repo / "src/loom/db/schema_startup.py"
+        malicious_source = tmp_path / "malicious_schema_startup.py"
+        malicious_source.write_text(
+            "def service_schema_heads(alembic_ini=None):\n"
+            f"    return frozenset(({malicious_bytecode_head!r},))\n",
+            encoding="utf-8",
+        )
+        bytecode = Path(importlib.util.cache_from_source(str(selected_module)))
+        bytecode.parent.mkdir(parents=True, exist_ok=True)
+        py_compile.compile(
+            str(malicious_source),
+            cfile=str(bytecode),
+            dfile=str(selected_module),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+    program = (
+        "set -euo pipefail\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+        f"python_cli={shlex.quote(sys.executable)}\n"
+        f"{resolver_source}\n"
+        'printf "%s\\n" "$predecessor_checkout_schema_head"\n'
+    )
+    environment = {**os.environ, "PYTHONPATH": str(stale_repo / "src")}
+    if schema_module_override is not None:
+        schema_module_override.parent.mkdir(parents=True)
+        schema_module_override.write_text("# wrong module\n", encoding="ascii")
+        environment["LOOM_TEST_SCHEMA_MODULE_FILE"] = str(schema_module_override)
+    return subprocess.run(
+        ["/bin/bash", "-c", program],
+        cwd=_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 _WEB_V2_COMPONENT_NAMES = (
     "cluster-resources",
     "manager",
@@ -348,18 +488,26 @@ def _run_web_v2_rollback_interlocks(
         + "assert_canonical_json_line() { :; }\n"
         + f"status_json={shlex.quote(json.dumps(status))}\n"
         + "loom_cli_stub() {\n"
-        + f"  case \" $* \" in *\" {status_command} \"*) ;; *) return 91 ;; esac\n"
+        + f'  case " $* " in *" {status_command} "*) ;; *) return 91 ;; esac\n'
         + "  printf '%s\\n' \"$status_json\"\n"
         + "  return 1\n"
         + "}\n"
         + "loom_cli=loom_cli_stub\n"
         + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
         + "kubeconfig=/unused/kubeconfig\nprofile=/unused/profile\n"
-        + "trusted_release=/unused/release\ntrusted_release_sha256=" + "b" * 64 + "\n"
+        + "trusted_release=/unused/release\ntrusted_release_sha256="
+        + "b" * 64
+        + "\n"
         + f"{plan_variable}_plan=/unused/plan\n"
-        + f"{plan_variable}_plan_sha256=" + "a" * 64 + "\n"
+        + f"{plan_variable}_plan_sha256="
+        + "a" * 64
+        + "\n"
         + f"{plan_variable}_evidence_args=()\n"
-        + ("rollback_pre_status=" + shlex.quote(str(tmp_path / "rollback.json")) + "\n" if not durable else "")
+        + (
+            "rollback_pre_status=" + shlex.quote(str(tmp_path / "rollback.json")) + "\n"
+            if not durable
+            else ""
+        )
         + "assert_rollback_interlocks\n"
     )
     return subprocess.run(
@@ -1428,9 +1576,7 @@ def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> N
 
 
 def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     normalized = " ".join(runbook.split())
 
     assert "set -euo pipefail" in runbook
@@ -1439,9 +1585,7 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
     repo_binding = 'repo="$(validated_repository_root "$(pwd -P)")"'
     assert repo_binding in runbook
-    assert runbook.index(repo_binding) < runbook.index(
-        'prepare_new_evidence_dir "$evidence_dir"'
-    )
+    assert runbook.index(repo_binding) < runbook.index('prepare_new_evidence_dir "$evidence_dir"')
     assert 'loom_cli="$repo/.venv/bin/loom"' in runbook
     assert 'python_cli="$repo/.venv/bin/python"' in runbook
     assert 'test -x "$loom_cli"' in runbook
@@ -1491,14 +1635,8 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert ".acceptance_owners[1].team_id" in runbook
     assert 'test "$(realpath -e "$owner_0_xdg")" != "$(realpath -e "$owner_1_xdg")"' in runbook
     assert 'test "$owner_0_config_identity" != "$owner_1_config_identity"' in runbook
-    assert (
-        'owner_0_principal="$(jq -cS \'{user_id,team_id}\' "$owner_0_whoami")"'
-        in runbook
-    )
-    assert (
-        'owner_1_principal="$(jq -cS \'{user_id,team_id}\' "$owner_1_whoami")"'
-        in runbook
-    )
+    assert 'owner_0_principal="$(jq -cS \'{user_id,team_id}\' "$owner_0_whoami")"' in runbook
+    assert 'owner_1_principal="$(jq -cS \'{user_id,team_id}\' "$owner_1_whoami")"' in runbook
     principal_inequality = 'test "$owner_0_principal" != "$owner_1_principal"'
     assert principal_inequality in runbook
     assert runbook.index(principal_inequality) < runbook.index(
@@ -1535,9 +1673,9 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert runbook.index("owner_1_deploy_pid=$!") < runbook.index('wait "$owner_0_deploy_pid"')
     assert runbook.index("owner_1_update_pid=$!") < runbook.index('wait "$owner_0_update_pid"')
     assert runbook.count("--min-slots 0") >= 5
-    assert '--max-slots 2' in runbook
-    assert '--max-slots 3' in runbook
-    assert '--max-slots 4' in runbook
+    assert "--max-slots 2" in runbook
+    assert "--max-slots 3" in runbook
+    assert "--max-slots 4" in runbook
 
     assert "probe_cross_owner_denial()" in runbook
     assert 'local actor_xdg="$1"' in runbook
@@ -1547,14 +1685,18 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert 'local actor_index="$5"' in runbook
     assert 'local target_index="$6"' in runbook
     assert 'local operation="$7"' in runbook
-    assert 'XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json' in normalized
+    assert (
+        'XDG_CONFIG_HOME="$target_xdg" loom dev status "$target_name" --format json' in normalized
+    )
     assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev status "$target_name" --format json' in normalized
     assert '--candidate "$actor_candidate"' in normalized
-    assert '--expected-operation-epoch 1' in normalized
-    assert '--expected-operation-epoch 0' not in normalized
-    assert '--min-slots 0' in normalized
-    assert '--quiet' in normalized
-    assert 'XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json' in normalized
+    assert "--expected-operation-epoch 1" in normalized
+    assert "--expected-operation-epoch 0" not in normalized
+    assert "--min-slots 0" in normalized
+    assert "--quiet" in normalized
+    assert (
+        'XDG_CONFIG_HOME="$actor_xdg" loom dev destroy "$target_name" --format json' in normalized
+    )
     assert normalized.count("--expected-hidden-denial") == 3
     assert (
         'target_epoch="$(jq -er ".operation_epoch | '
@@ -1594,13 +1736,13 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
         'select(type == \\"number\\" and . > 0)" "$owner_1_destroyed")"'
     ) in normalized
     assert '--expected-operation-epoch "$owner_1_redeploy_epoch"' in normalized
-    assert '.subject_id == $subject' in runbook
-    assert '.subject_incarnation != $incarnation' in runbook
+    assert ".subject_id == $subject" in runbook
+    assert ".subject_incarnation != $incarnation" in runbook
     assert 'loom dev destroy "$owner_1_name" --format json' in normalized
     assert "assert_no_dynamic_namespaces" in runbook
     assert "loom-personal-dev-zero-capacity-acceptance-result-v2" in runbook
     assert "jq -cS" in runbook
-    assert 'verify-acceptance-result' in normalized
+    assert "verify-acceptance-result" in normalized
     assert '--acceptance-result-file "$acceptance_result"' in normalized
     assert '--acceptance-result-sha256 "$acceptance_result_sha256"' in normalized
     assert '--rollback-shadow-manifest-file "$shadow_render"' in normalized
@@ -1630,9 +1772,7 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
 def test_concurrent_owner_denial_probe_canonicalizes_pretty_cli_status(
     tmp_path: Path,
 ) -> None:
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     canonical_function = _indented_shell_function(
         runbook,
         "assert_canonical_json_line",
@@ -1661,7 +1801,7 @@ def test_concurrent_owner_denial_probe_canonicalizes_pretty_cli_status(
         + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
         + f"acceptance_plan={shlex.quote(str(acceptance_plan))}\n"
         + f"denials_jsonl={shlex.quote(str(denials_jsonl))}\n"
-        + r'''
+        + r"""
 loom() {
   if [[ " $* " == *" --expected-hidden-denial "* ]]; then
     printf '%s\n' '{"error_code":"resource_hidden","http_method":"GET","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_read"}' >&2
@@ -1674,7 +1814,7 @@ assert_live_acceptance() {
 }
 : > "$denials_jsonl"
 probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 read
-'''
+"""
     )
 
     result = subprocess.run(
@@ -1697,9 +1837,7 @@ probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 read
 def test_concurrent_owner_update_denial_probe_uses_noncreating_sentinel_epoch(
     tmp_path: Path,
 ) -> None:
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     canonical_function = _indented_shell_function(
         runbook,
         "assert_canonical_json_line",
@@ -1723,7 +1861,7 @@ def test_concurrent_owner_update_denial_probe_uses_noncreating_sentinel_epoch(
         + f"acceptance_plan={shlex.quote(str(acceptance_plan))}\n"
         + f"denials_jsonl={shlex.quote(str(denials_jsonl))}\n"
         + f"calls={shlex.quote(str(calls))}\n"
-        + r'''
+        + r"""
 loom() {
   printf '%s\n' "$*" >> "$calls"
   if [[ " $* " == *" --expected-hidden-denial "* ]]; then
@@ -1737,7 +1875,7 @@ assert_live_acceptance() {
 }
 : > "$denials_jsonl"
 probe_cross_owner_denial actor-xdg actor-candidate target-xdg target 0 1 update
-'''
+"""
     )
 
     result = subprocess.run(
@@ -1780,9 +1918,7 @@ def test_concurrent_owner_sessions_share_the_reviewed_management_plane(
     owner_1_server: str,
     expected_returncode: int,
 ) -> None:
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     origin_function = _indented_shell_function(runbook, "reviewed_public_origin")
     server_function = _indented_shell_function(
         runbook,
@@ -1854,9 +1990,7 @@ def test_concurrent_owner_sessions_share_the_reviewed_management_plane(
 def test_concurrent_owner_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> (
     None
 ):
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     lowered = runbook.casefold()
 
     assert "separately reviewed concurrent-owner certification window" in lowered
@@ -2009,9 +2143,7 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     runbook_index = _read("docs/runbooks/README.md")
     fleet = _read("deploy/dev-fleet/README.md")
     architecture = _read("docs/architecture/multi-dev-environments.md")
-    deployment_architecture = _read(
-        "docs/architecture/personal-dev-management-plane-deployment.md"
-    )
+    deployment_architecture = _read("docs/architecture/personal-dev-management-plane-deployment.md")
 
     required = (
         "personal-dev-zero-capacity-acceptance.md",
@@ -2187,16 +2319,14 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '(.spec | has("egress") | not)' in runbook
     assert runbook.count('(.spec.ingress[0] | has("from") | not)') >= 2
     assert '.spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]' in runbook
-    assert '--proto \'=https\' --tlsv1.2' in runbook
+    assert "--proto '=https' --tlsv1.2" in runbook
     assert "/home/hongjian/loom/.venv" not in runbook
     assert "schema-v1 single-owner record remains historical compatibility" in runbook
     assert "final multi-person launch requires a verified schema-v2 result" in runbook
     assert "separately reviewed multi-owner durable-launch window" in runbook
     repo_binding = 'repo="$(validated_repository_root "$repo")"'
     assert repo_binding in runbook
-    assert runbook.index(repo_binding) < runbook.index(
-        'prepare_new_evidence_dir "$evidence_dir"'
-    )
+    assert runbook.index(repo_binding) < runbook.index('prepare_new_evidence_dir "$evidence_dir"')
     assert "#1280" not in runbook
     assert "personal-dev-concurrent-owner-zero-capacity-acceptance.md" in runbook
     assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
@@ -2336,7 +2466,7 @@ def test_multi_owner_durable_preflight_and_final_route_contract_share_ingress_bi
         + "curl() {\n"
         + '  case "${!#}" in\n'
         + "    */api/v1/health) printf '%s\\n' '{\"status\":\"ok\"}' ;;\n"
-        + "    */loom-frontend-config.json) printf '%s\\n' '{\"environment\":\"development\",\"routePath\":\"\",\"apiBase\":\"\",\"apiRouteBase\":\"https://loom-service.dev.yylx.world/api\"}' ;;\n"
+        + '    */loom-frontend-config.json) printf \'%s\\n\' \'{"environment":"development","routePath":"","apiBase":"","apiRouteBase":"https://loom-service.dev.yylx.world/api"}\' ;;\n'
         + "    */auth/reset|*/auth/setup) printf '%s\\n' '<div id=\"root\"></div>' ;;\n"
         + "    *) return 92 ;;\n"
         + "  esac\n"
@@ -2347,14 +2477,12 @@ def test_multi_owner_durable_preflight_and_final_route_contract_share_ingress_bi
         + "\n); then preflight_status=1; fi\n"
         + "final_status=0\n"
         + "if ! assert_web_api_route_contract; then final_status=1; fi\n"
-        + "printf 'preflight=%s final=%s\\n' \"$preflight_status\" \"$final_status\"\n"
+        + 'printf \'preflight=%s final=%s\\n\' "$preflight_status" "$final_status"\n'
         + f'test "$preflight_status" -eq {expected_returncode}\n'
         + f'test "$final_status" -eq {expected_returncode}\n'
     )
 
-    completed = subprocess.run(
-        ["bash"], input=program, text=True, capture_output=True, check=False
-    )
+    completed = subprocess.run(["bash"], input=program, text=True, capture_output=True, check=False)
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == f"preflight={expected_returncode} final={expected_returncode}\n"
@@ -2410,13 +2538,9 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
     )
     reset_page = "<html></html>" if mutation == "reset-route" else '<div id="root"></div>'
     setup_page = "<html></html>" if mutation == "setup-route" else '<div id="root"></div>'
-    web_selector: dict[str, object] = {
-        "matchLabels": {"app": "loom-personal-dev-web"}
-    }
+    web_selector: dict[str, object] = {"matchLabels": {"app": "loom-personal-dev-web"}}
     if mutation == "web-selector":
-        web_selector["matchExpressions"] = [
-            {"key": "loom.dev/never", "operator": "Exists"}
-        ]
+        web_selector["matchExpressions"] = [{"key": "loom.dev/never", "operator": "Exists"}]
     network_policy = {
         "spec": {
             "podSelector": web_selector,
@@ -2471,12 +2595,14 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
                     "secretName": "loom-personal-dev-management-tls",
                 }
             ],
-        }
+        },
     }
     if mutation == "ingress-default-backend":
         ingress["spec"]["defaultBackend"] = {"service": {"name": "wrong"}}
     if mutation == "ingress-snippet":
-        ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/server-snippet"] = "deny all;"
+        ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/server-snippet"] = (
+            "deny all;"
+        )
     if mutation == "acceptance-binding":
         ingress["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "c" * 64
     if mutation == "operational-binding":
@@ -2517,7 +2643,7 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
         + "  esac\n"
         + "}\n"
         + "curl() {\n"
-        + "  test \"$1\" = --disable || return 93\n"
+        + '  test "$1" = --disable || return 93\n'
         + '  case " $* " in\n'
         + "    *' --connect-timeout 10 --max-time 30 '*) ;;\n"
         + "    *) return 94 ;;\n"
@@ -2576,9 +2702,7 @@ def test_multi_owner_rollback_does_not_depend_on_public_route_availability(
 
     assert "assert_web_api_route_contract" not in rollback_interlocks
     assert "assert_dns_tls_ingress" not in rollback_interlocks
-    rollback_apply = runbook.index(
-        '> "$evidence_dir/rollback.server-side-apply.txt"'
-    )
+    rollback_apply = runbook.index('> "$evidence_dir/rollback.server-side-apply.txt"')
     web_rollout = runbook.index(
         "deployment/loom-personal-dev-web --timeout=300s",
         rollback_apply,
@@ -2708,9 +2832,7 @@ def test_multi_owner_runbook_curl_is_bounded_and_ignores_user_config(
     relative: str,
 ) -> None:
     runbook = _read(relative)
-    curl_lines = [
-        line.strip() for line in runbook.splitlines() if re.search(r"\bcurl\s", line)
-    ]
+    curl_lines = [line.strip() for line in runbook.splitlines() if re.search(r"\bcurl\s", line)]
     required = (
         "curl --disable --fail --silent --show-error --proto '=https' "
         "--tlsv1.2 --connect-timeout 10 --max-time 30"
@@ -2734,8 +2856,7 @@ def test_multi_owner_runbook_curl_is_bounded_and_ignores_user_config(
             ),
         ),
         (
-            'test "$rollback_diff_status" -eq 0 || '
-            'test "$rollback_diff_status" -eq 1',
+            'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1',
             'kubectl --kubeconfig "$kubeconfig" apply --server-side',
             (
                 'assert_server_side_diff_unchanged "$shadow_render" '
@@ -2785,9 +2906,7 @@ def test_multi_owner_durable_launch_executes_pre_apply_calls_in_order_and_mutati
         )
 
 
-def test_multi_owner_durable_launch_captures_and_immediately_revalidates_render_bindings() -> (
-    None
-):
+def test_multi_owner_durable_launch_captures_and_immediately_revalidates_render_bindings() -> None:
     runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
     render = runbook.index('operational_render_sha256="$(sha256sum')
     forward_diff = runbook.index("diff_status=0", render)
@@ -2877,7 +2996,7 @@ def test_multi_owner_durable_launch_diff_recheck_helper_requires_exact_reviewed_
         + f"kubeconfig={shlex.quote(str(tmp_path / 'kubeconfig'))}\n"
         + f"arguments={shlex.quote(str(arguments))}\n"
         + "kubectl() {\n"
-        + "  printf '%s\\n' \"$*\" > \"$arguments\"\n"
+        + '  printf \'%s\\n\' "$*" > "$arguments"\n'
         + "  printf '%s\\n' \"$fake_diff\"\n"
         + "  return 1\n"
         + "}\n"
@@ -2902,8 +3021,8 @@ def test_multi_owner_durable_launch_diff_recheck_helper_requires_exact_reviewed_
     assert result.returncode == 0, result.stderr
     assert result.stdout == "drift-detected\n"
     assert arguments.read_text() == (
-        f'--kubeconfig {tmp_path / "kubeconfig"} diff --server-side '
-        f'--field-manager=loom-personal-dev-control-plane -f {manifest}\n'
+        f"--kubeconfig {tmp_path / 'kubeconfig'} diff --server-side "
+        f"--field-manager=loom-personal-dev-control-plane -f {manifest}\n"
     )
 
 
@@ -2989,9 +3108,7 @@ def test_multi_owner_launch_smoke_uses_exact_cli_and_reviewed_server(
     )
 
     assert result.returncode == expected_returncode, result.stderr
-    assert exact_marker.read_text(encoding="ascii") == (
-        f"{launch_xdg}|auth whoami --format json\n"
-    )
+    assert exact_marker.read_text(encoding="ascii") == (f"{launch_xdg}|auth whoami --format json\n")
     assert not bare_marker.exists()
     if expected_returncode == 0:
         whoami = json.loads(launch_owner_whoami.read_text(encoding="ascii"))
@@ -3090,9 +3207,7 @@ def test_multi_owner_launch_requires_a_new_canonical_evidence_directory(
 def test_concurrent_acceptance_requires_a_new_canonical_outside_evidence_directory(
     tmp_path: Path,
 ) -> None:
-    runbook = _read(
-        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md"
-    )
+    runbook = _read("docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md")
     repository_function = _indented_shell_function(
         runbook,
         "validated_repository_root",
@@ -3245,6 +3360,19 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> Non
     assert "kubectl cp" not in runbook.casefold()
 
 
+def test_backup_restore_runbook_fenced_bash_is_syntactically_valid() -> None:
+    runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
+    assert "```bash\n```bash" not in runbook
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=_fenced_bash(runbook),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+
 def test_backup_restore_schema_head_is_bound_to_selected_source_and_graph(
     tmp_path: Path,
 ) -> None:
@@ -3318,6 +3446,1381 @@ def test_backup_restore_compares_each_database_to_source_derived_head(
 
     assert matching.returncode == 0, matching.stderr
     assert stale.returncode != 0
+
+
+def test_schema_transition_runbook_is_executable_and_discoverable() -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    runbook_index = _read("docs/runbooks/README.md")
+    shadow_runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    architecture = _read("docs/architecture/personal-dev-management-plane-deployment.md")
+
+    for document in (runbook_index, shadow_runbook, architecture):
+        assert "personal-dev-schema-transition.md" in document
+    assert "~~~" not in runbook
+    assert "Use capture_live_postgres_state" not in runbook
+    assert "Then stream the reviewed dump" not in runbook
+    shell = _fenced_bash(runbook)
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=shell,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+    for name in (
+        "capture_docker_postgres_state",
+        "capture_live_postgres_state",
+        "prepare_transition_evidence_dir",
+        "assert_transition_artifacts",
+        "assert_predecessor_restore_artifacts",
+        "restore_rehearsal_predecessor",
+        "restore_predecessor_database",
+        "quiesce_management",
+        "apply_target_transition",
+        "restore_predecessor",
+        "run_schema_transition",
+    ):
+        assert f"{name}() {{" in shell
+
+
+def test_schema_transition_predecessor_head_uses_selected_checkout(
+    tmp_path: Path,
+) -> None:
+    result = _run_schema_transition_predecessor_checkout_head(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "selected_predecessor_head\n"
+
+
+def test_schema_transition_predecessor_head_rejects_wrong_loaded_module(
+    tmp_path: Path,
+) -> None:
+    result = _run_schema_transition_predecessor_checkout_head(
+        tmp_path,
+        schema_module_override=tmp_path / "outside" / "schema_startup.py",
+    )
+
+    assert result.returncode != 0
+    assert "predecessor source binding failed" in result.stderr
+
+
+def test_schema_transition_predecessor_head_ignores_repository_bytecode(
+    tmp_path: Path,
+) -> None:
+    result = _run_schema_transition_predecessor_checkout_head(
+        tmp_path,
+        malicious_bytecode_head="malicious_unchecked_head",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "selected_predecessor_head\n"
+
+
+@pytest.mark.parametrize(
+    ("function_name", "command_name"),
+    (
+        ("restore_rehearsal_predecessor", "docker"),
+        ("restore_predecessor_database", "kubectl"),
+    ),
+)
+def test_schema_transition_restore_recreates_database_before_loading_archive(
+    tmp_path: Path,
+    function_name: str,
+    command_name: str,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, function_name)
+    call_log = tmp_path / "calls.txt"
+    dump = tmp_path / "postgres.dump"
+    dump.write_bytes(b"opaque dump")
+    program = (
+        "set -uo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"postgres_dump={shlex.quote(str(dump))}\n"
+        "rehearsal_postgres=rehearsal-postgres\n"
+        "postgres_pod=live-postgres\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{command_name}() {{\n"
+        '  case "$*" in\n'
+        '    *dropdb*createdb*) printf "reset\\n" >> "$call_log" ;;\n'
+        '    *pg_restore*) printf "pg_restore\\n" >> "$call_log" ;;\n'
+        "    *) return 1 ;;\n"
+        "  esac\n"
+        "}\n"
+        f"{function}\n"
+        f"{function_name}\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = call_log.read_text(encoding="utf-8").splitlines()
+    assert calls == ["reset", "pg_restore"]
+    assert runbook.count("start_rehearsal_postgres") == 2
+    assert runbook.count('docker rm --force "$rehearsal_postgres"') == 1
+    assert runbook.count("restore_rehearsal_predecessor") == 2
+
+
+def test_schema_transition_evidence_directory_must_be_new_absolute_and_owner_only(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "prepare_transition_evidence_dir")
+    target_repo = tmp_path / "target-repo"
+    predecessor_repo = tmp_path / "predecessor-repo"
+    target_repo.mkdir()
+    predecessor_repo.mkdir()
+    bindings = (
+        f"repo={shlex.quote(str(target_repo))}\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+    )
+    valid = tmp_path / "valid"
+    valid_result = subprocess.run(
+        ["bash"],
+        input=(
+            f"set -euo pipefail\n{bindings}{function}\n"
+            f"prepare_transition_evidence_dir {shlex.quote(str(valid))}\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert valid_result.returncode == 0, valid_result.stderr
+    assert valid.is_dir()
+    assert stat.S_IMODE(valid.stat().st_mode) == 0o700
+
+    existing = tmp_path / "existing"
+    existing.mkdir(mode=0o700)
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    linked = tmp_path / "linked"
+    linked.symlink_to(target, target_is_directory=True)
+    for invalid in (
+        Path("relative"),
+        existing,
+        linked,
+        target_repo / "evidence",
+        predecessor_repo / "evidence",
+    ):
+        result = subprocess.run(
+            ["bash"],
+            input=(
+                "set -euo pipefail\n"
+                f"{bindings}"
+                f"{function}\n"
+                f"prepare_transition_evidence_dir {shlex.quote(str(invalid))}\n"
+            ),
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+
+
+def test_schema_transition_evidence_directory_propagates_inventory_failure(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "prepare_transition_evidence_dir")
+    target_repo = tmp_path / "target-repo"
+    predecessor_repo = tmp_path / "predecessor-repo"
+    target_repo.mkdir()
+    predecessor_repo.mkdir()
+    evidence = tmp_path / "evidence"
+    program = (
+        "set -uo pipefail\n"
+        f"repo={shlex.quote(str(target_repo))}\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+        "find() { return 23; }\n"
+        f"{function}\n"
+        f"prepare_transition_evidence_dir {shlex.quote(str(evidence))}\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def _write_schema_transition_git_fixture(root: Path) -> tuple[str, str]:
+    root.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "tracked.txt").write_text("reviewed\n", encoding="ascii")
+    subprocess.run(["git", "-C", str(root), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Loom tests",
+            "-c",
+            "user.email=loom-tests@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return commit, tree
+
+
+def _write_owner_only_artifact(path: Path, payload: bytes) -> str:
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _schema_transition_artifact_program(
+    tmp_path: Path,
+) -> tuple[str, dict[str, Path]]:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_exact_source_repository",
+            "assert_transition_artifacts",
+            "assert_predecessor_recovery_artifacts",
+        )
+    )
+    target_repo = tmp_path / "target-repo"
+    predecessor_repo = tmp_path / "predecessor-repo"
+    target_commit, target_tree = _write_schema_transition_git_fixture(target_repo)
+    predecessor_commit, predecessor_tree = _write_schema_transition_git_fixture(predecessor_repo)
+    artifacts = {
+        name: tmp_path / name
+        for name in (
+            "trusted-release.json",
+            "predecessor-release.json",
+            "predecessor-shadow.yaml",
+            "backup-evidence.json",
+            "transition-plan.json",
+            "transition-job.json",
+            "target-shadow.yaml",
+        )
+    }
+    payloads = {name: f"{name}\n".encode("ascii") for name in artifacts}
+    payloads["predecessor-release.json"] = json.dumps(
+        {"source_sha": predecessor_commit, "source_tree": predecessor_tree},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    payloads["backup-evidence.json"] = b'{"postgres":{"source_schema_head":"0112"}}'
+    digests = {
+        name: _write_owner_only_artifact(path, payloads[name]) for name, path in artifacts.items()
+    }
+    variables = {
+        "repo": target_repo,
+        "predecessor_repo": predecessor_repo,
+        "trusted_release": artifacts["trusted-release.json"],
+        "predecessor_release": artifacts["predecessor-release.json"],
+        "predecessor_shadow": artifacts["predecessor-shadow.yaml"],
+        "backup_evidence": artifacts["backup-evidence.json"],
+        "transition_plan": artifacts["transition-plan.json"],
+        "transition_job": artifacts["transition-job.json"],
+        "target_shadow": artifacts["target-shadow.yaml"],
+    }
+    assignments = "\n".join(
+        f"{name}={shlex.quote(str(value))}" for name, value in variables.items()
+    )
+    assignments += "\n" + "\n".join(
+        (
+            f"target_source_commit={target_commit}",
+            f"target_source_tree={target_tree}",
+            f"predecessor_source_commit={predecessor_commit}",
+            f"predecessor_source_tree={predecessor_tree}",
+            "predecessor_head=0112",
+            f"trusted_release_sha256={digests['trusted-release.json']}",
+            f"predecessor_release_sha256={digests['predecessor-release.json']}",
+            f"predecessor_shadow_sha256={digests['predecessor-shadow.yaml']}",
+            f"backup_evidence_sha256={digests['backup-evidence.json']}",
+            f"plan_sha256={digests['transition-plan.json']}",
+            f"migration_job_sha256={digests['transition-job.json']}",
+            f"target_shadow_sha256={digests['target-shadow.yaml']}",
+        )
+    )
+    pinned = "\n".join(
+        (
+            'exec 30< "$trusted_release"',
+            'exec 31< "$predecessor_release"',
+            'exec 32< "$predecessor_shadow"',
+            'exec 33< "$backup_evidence"',
+            'exec 37< "$transition_job"',
+            'exec 38< "$transition_plan"',
+            'exec 39< "$target_shadow"',
+        )
+    )
+    return f"set -uo pipefail\n{functions}\n{assignments}\n{pinned}\n", artifacts
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    (
+        "trusted-release.json",
+        "predecessor-release.json",
+        "predecessor-shadow.yaml",
+        "backup-evidence.json",
+        "transition-plan.json",
+        "transition-job.json",
+        "target-shadow.yaml",
+    ),
+)
+def test_schema_transition_revalidates_every_bound_artifact(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    program, artifacts = _schema_transition_artifact_program(tmp_path)
+    valid = subprocess.run(
+        ["bash"],
+        input=program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    artifacts[artifact_name].write_bytes(b"tampered\n")
+    artifacts[artifact_name].chmod(0o600)
+    tampered = subprocess.run(
+        ["bash"],
+        input=program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert tampered.returncode != 0
+
+
+def test_schema_transition_target_artifact_drift_cannot_block_recovery_validation(
+    tmp_path: Path,
+) -> None:
+    program, artifacts = _schema_transition_artifact_program(tmp_path)
+    target_repo = tmp_path / "target-repo"
+    (target_repo / "untracked-target-drift.txt").write_text("target drift\n", encoding="ascii")
+    for artifact_name in (
+        "trusted-release.json",
+        "transition-job.json",
+        "transition-plan.json",
+        "target-shadow.yaml",
+    ):
+        artifacts[artifact_name].write_bytes(b"target artifact drift\n")
+        artifacts[artifact_name].chmod(0o600)
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=(
+            program
+            + "assert_predecessor_recovery_artifacts || exit 41\n"
+            + "if assert_transition_artifacts; then exit 42; fi\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_schema_transition_pinned_artifacts_are_inherited_by_external_consumers(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_open_owner_only_sha256",
+        )
+    )
+    pin_start = runbook.index('trusted_release_source="$trusted_release"')
+    pin_end_marker = "transition_plan=/proc/self/fd/38"
+    pin_end = runbook.index(pin_end_marker, pin_start) + len(pin_end_marker)
+    primary_pin_block = runbook[pin_start:pin_end]
+    target_start = runbook.index('target_shadow_source="$target_shadow"')
+    target_end_marker = "target_shadow=/proc/self/fd/39"
+    target_end = runbook.index(target_end_marker, target_start) + len(target_end_marker)
+    target_pin_block = runbook[target_start:target_end]
+    artifact_variables = (
+        "trusted_release",
+        "predecessor_release",
+        "predecessor_shadow",
+        "backup_evidence",
+        "postgres_dump",
+        "postgres_source_state",
+        "kubeconfig",
+        "transition_job",
+        "transition_plan",
+        "target_shadow",
+    )
+    digest_variables = (
+        "trusted_release_sha256",
+        "predecessor_release_sha256",
+        "predecessor_shadow_sha256",
+        "backup_evidence_sha256",
+        "postgres_dump_sha256",
+        "postgres_state_sha256",
+        "kubeconfig_sha256",
+        "migration_job_sha256",
+        "plan_sha256",
+        "target_shadow_sha256",
+    )
+    assignments: list[str] = []
+    child_arguments: list[str] = []
+    source_variables: list[str] = []
+    for index, (artifact_variable, digest_variable) in enumerate(
+        zip(artifact_variables, digest_variables, strict=True),
+        start=1,
+    ):
+        path = tmp_path / f"artifact-{index}"
+        digest = _write_owner_only_artifact(
+            path,
+            f"reviewed artifact {index}\n".encode("ascii"),
+        )
+        assignments.extend(
+            (
+                f"{artifact_variable}={shlex.quote(str(path))}",
+                f"{digest_variable}={digest}",
+            )
+        )
+        child_arguments.extend((f'"${artifact_variable}"', f'"${digest_variable}"'))
+        source_variables.append(f'"${artifact_variable}_source"')
+    program = (
+        "set -euo pipefail\n"
+        f"python_cli={shlex.quote(sys.executable)}\n"
+        f"{functions}\n"
+        + "\n".join(assignments)
+        + "\n"
+        + primary_pin_block
+        + "\n"
+        + target_pin_block
+        + "\n"
+        + "for source_path in "
+        + " ".join(source_variables)
+        + "; do\n"
+        + '  replacement="$source_path.replacement"\n'
+        + "  printf 'pathname replacement\\n' > \"$replacement\"\n"
+        + '  /usr/bin/chmod 0600 "$replacement"\n'
+        + '  /usr/bin/mv -f -- "$replacement" "$source_path"\n'
+        + "done\n"
+        + '"$python_cli" - '
+        + " ".join(child_arguments)
+        + " <<'PY'\n"
+        + "import hashlib\n"
+        + "import sys\n"
+        + "for path, expected in zip(sys.argv[1::2], sys.argv[2::2], strict=True):\n"
+        + "    if not path.startswith('/proc/self/fd/'):\n"
+        + "        raise SystemExit(f'unpinned path: {path}')\n"
+        + "    if hashlib.sha256(open(path, 'rb').read()).hexdigest() != expected:\n"
+        + "        raise SystemExit(f'descriptor drift: {path}')\n"
+        + "PY\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_schema_transition_rejects_source_drift_and_unsafe_artifact_metadata(
+    tmp_path: Path,
+) -> None:
+    dirty_program, dirty_artifacts = _schema_transition_artifact_program(tmp_path / "dirty")
+    target_repo = tmp_path / "dirty" / "target-repo"
+    (target_repo / "untracked.txt").write_text("drift\n", encoding="ascii")
+    dirty = subprocess.run(
+        ["bash"],
+        input=dirty_program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert dirty.returncode != 0
+    assert dirty_artifacts
+
+    mode_program, mode_artifacts = _schema_transition_artifact_program(tmp_path / "mode")
+    mode_artifacts["transition-job.json"].chmod(0o644)
+    unsafe_mode = subprocess.run(
+        ["bash"],
+        input=mode_program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert unsafe_mode.returncode != 0
+
+    link_program, link_artifacts = _schema_transition_artifact_program(tmp_path / "link")
+    os.link(link_artifacts["target-shadow.yaml"], tmp_path / "link" / "second-link")
+    unsafe_link = subprocess.run(
+        ["bash"],
+        input=link_program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert unsafe_link.returncode != 0
+
+
+@pytest.mark.parametrize("index_option", ("--skip-worktree", "--assume-unchanged"))
+def test_schema_transition_revalidation_rejects_hidden_index_state(
+    tmp_path: Path,
+    index_option: str,
+) -> None:
+    program, _ = _schema_transition_artifact_program(tmp_path)
+    target_repo = tmp_path / "target-repo"
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(target_repo),
+            "update-index",
+            index_option,
+            "tracked.txt",
+        ],
+        check=True,
+    )
+    (target_repo / "tracked.txt").write_text("hidden drift\n", encoding="ascii")
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program + "assert_transition_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def test_schema_transition_source_revalidation_ignores_caller_git_environment(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_exact_source_repository")
+    repository = tmp_path / "repo"
+    commit, tree = _write_schema_transition_git_fixture(repository)
+    program = (
+        "set -euo pipefail\n"
+        f"repository={shlex.quote(str(repository))}\n"
+        "export PATH=/definitely/missing\n"
+        f"export GIT_DIR={shlex.quote(str(tmp_path / 'wrong-git-dir'))}\n"
+        f"export GIT_INDEX_FILE={shlex.quote(str(tmp_path / 'wrong-index'))}\n"
+        f"export GIT_WORK_TREE={shlex.quote(str(tmp_path / 'wrong-work-tree'))}\n"
+        f"{function}\n"
+        f'assert_exact_source_repository "$repository" {commit} {tree}\n'
+    )
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_schema_transition_source_revalidation_does_not_execute_clean_filter(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_exact_source_repository")
+    repository = tmp_path / "repo"
+    _write_schema_transition_git_fixture(repository)
+    marker = tmp_path / "filter-executed"
+    (repository / ".gitattributes").write_text("tracked.txt filter=side-effect\n", encoding="ascii")
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repository),
+            "config",
+            "filter.side-effect.clean",
+            f"/bin/sh -c '/usr/bin/touch {marker}; /bin/cat'",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "add", ".gitattributes"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Loom tests",
+            "-c",
+            "user.email=loom-tests@example.invalid",
+            "commit",
+            "-qm",
+            "configure clean filter",
+        ],
+        check=True,
+    )
+    marker.unlink(missing_ok=True)
+    tracked = repository / "tracked.txt"
+    metadata = tracked.stat()
+    os.utime(tracked, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000))
+    commit = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    program = (
+        "set -euo pipefail\n"
+        f"repository={shlex.quote(str(repository))}\n"
+        f"{function}\n"
+        f'assert_exact_source_repository "$repository" {commit} {tree}\n'
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+
+
+def test_schema_transition_source_revalidation_rejects_non_repository(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_exact_source_repository")
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    program = (
+        "set -uo pipefail\n"
+        f"repository={shlex.quote(str(repository))}\n"
+        f"{function}\n"
+        'assert_exact_source_repository "$repository" commit tree\n'
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("artifact_name", ("postgres.dump", "postgres.state.tsv"))
+def test_schema_transition_revalidates_restore_artifacts_at_restore_boundaries(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_predecessor_restore_artifacts",
+        )
+    )
+    dump = tmp_path / "postgres.dump"
+    state = tmp_path / "postgres.state.tsv"
+    dump_sha256 = _write_owner_only_artifact(dump, b"opaque dump\n")
+    state_sha256 = _write_owner_only_artifact(state, b"opaque state\n")
+    program = (
+        "set -uo pipefail\n"
+        f"{functions}\n"
+        f"postgres_dump={shlex.quote(str(dump))}\n"
+        f"postgres_source_state={shlex.quote(str(state))}\n"
+        f"postgres_dump_sha256={dump_sha256}\n"
+        f"postgres_state_sha256={state_sha256}\n"
+        'exec 34< "$postgres_dump"\n'
+        'exec 35< "$postgres_source_state"\n'
+    )
+    valid = subprocess.run(
+        ["bash"],
+        input=program + "assert_predecessor_restore_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    (tmp_path / artifact_name).write_bytes(b"tampered\n")
+    (tmp_path / artifact_name).chmod(0o600)
+    tampered = subprocess.run(
+        ["bash"],
+        input=program + "assert_predecessor_restore_artifacts\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert tampered.returncode != 0
+
+
+def test_schema_transition_success_orders_quiesce_migration_and_target(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        "assert_transition_interlocks",
+        "assert_predecessor_restore_artifacts",
+        "assert_live_predecessor_state",
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "assert_live_predecessor_state",
+        "assert_transition_interlocks",
+        "assert_migration_job_absent",
+        "apply_reviewed_migration_job",
+        "wait_for_reviewed_migration_job",
+        "assert_live_target_head",
+        "assert_transition_interlocks",
+        "apply_reviewed_target_shadow",
+        "wait_for_target_shadow",
+        "assert_target_shadow_ready",
+        "assert_transition_interlocks",
+    ]
+
+
+def test_schema_transition_failure_restores_before_predecessor_restart(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(
+        tmp_path,
+        fail_at="wait_for_reviewed_migration_job",
+    )
+
+    assert result.returncode == 1
+    assert calls[-14:] == [
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "stop_target_migration",
+        "assert_predecessor_restore_artifacts",
+        "assert_only_restore_connection",
+        "restore_predecessor_database",
+        "assert_predecessor_restore_artifacts",
+        "assert_live_predecessor_state",
+        "assert_predecessor_recovery_interlocks",
+        "apply_reviewed_predecessor_shadow",
+        "remove_forward_only_web",
+        "wait_for_predecessor_shadow",
+        "assert_predecessor_shadow_ready",
+        "assert_predecessor_recovery_interlocks",
+    ]
+    restore = calls.index("restore_predecessor_database")
+    verify = calls.index("assert_live_predecessor_state", restore)
+    restart = calls.index("apply_reviewed_predecessor_shadow")
+    assert restore < verify < restart
+
+
+def test_schema_transition_rollback_removes_exact_forward_only_web_resources(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    start = runbook.index("\nremove_forward_only_web() {") + 1
+    end = runbook.index("\n}\nwait_for_predecessor_shadow() {", start) + 2
+    function = runbook[start:end]
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -uo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        "predecessor_shadow=/unused/predecessor.yaml\n"
+        'kubectl() { printf "%s\\n" "$*" >> "$call_log"; }\n'
+        f"{function}\n"
+        "remove_forward_only_web\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = call_log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 1
+    command = calls[0].split()
+    assert command.count("delete") == 1
+    assert {
+        "deployment/loom-personal-dev-web",
+        "networkpolicy/loom-personal-dev-web-ingress",
+        "service/loom-personal-dev-web",
+    }.issubset(command)
+
+
+def test_schema_transition_recovery_stops_migrations_without_target_job_name(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "stop_target_migration")
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        "kubectl() {\n"
+        '  printf "%s\\n" "$*" >> "$call_log"\n'
+        '  case "$*" in\n'
+        '    *"get jobs,pods"*"-o json"*) printf \'{"items":[]}\\n\' ;;\n'
+        '    *"get jobs,pods"*"-o name"*) : ;;\n'
+        "  esac\n"
+        "}\n"
+        f"{function}\n"
+        "stop_target_migration\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = call_log.read_text(encoding="ascii").splitlines()
+    assert len(calls) == 3
+    assert all("app=loom-personal-dev-migration" in call for call in calls)
+    assert "delete jobs" in calls[1]
+
+
+def test_schema_transition_recovery_rejects_orphan_migration_pod(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "stop_target_migration")
+    program = (
+        "set -euo pipefail\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        "kubectl() {\n"
+        '  case "$*" in\n'
+        '    *"get jobs,pods"*"-o json"*) printf \'{"items":[]}\\n\' ;;\n'
+        '    *"get jobs,pods"*"-o name"*) printf \'pod/orphan-migration\\n\' ;;\n'
+        '    *"get jobs"*"-o name"*) : ;;\n'
+        "  esac\n"
+        "}\n"
+        f"{function}\n"
+        "stop_target_migration\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    (
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "assert_migration_job_absent",
+        "apply_reviewed_migration_job",
+        "wait_for_reviewed_migration_job",
+        "assert_live_target_head",
+        "apply_reviewed_target_shadow",
+        "wait_for_target_shadow",
+        "assert_target_shadow_ready",
+    ),
+)
+def test_schema_transition_every_post_quiesce_failure_runs_full_restore(
+    tmp_path: Path,
+    fail_at: str,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(tmp_path, fail_at=fail_at)
+
+    assert result.returncode == 1
+    assert calls[-14:] == [
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "stop_target_migration",
+        "assert_predecessor_restore_artifacts",
+        "assert_only_restore_connection",
+        "restore_predecessor_database",
+        "assert_predecessor_restore_artifacts",
+        "assert_live_predecessor_state",
+        "assert_predecessor_recovery_interlocks",
+        "apply_reviewed_predecessor_shadow",
+        "remove_forward_only_web",
+        "wait_for_predecessor_shadow",
+        "assert_predecessor_shadow_ready",
+        "assert_predecessor_recovery_interlocks",
+    ]
+
+
+def test_schema_transition_target_drift_cannot_block_predecessor_recovery(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(
+        tmp_path,
+        persistent_fail_at="assert_transition_interlocks",
+        fail_after=1,
+    )
+
+    assert result.returncode == 1
+    failure = calls.index("assert_transition_interlocks", 1)
+    recovery = calls.index("assert_predecessor_recovery_interlocks", failure)
+    restart = calls.index("apply_reviewed_predecessor_shadow", recovery)
+    assert failure < recovery < restart
+    assert calls[-1] == "assert_predecessor_recovery_interlocks"
+
+
+def _write_schema_transition_cli_stub(
+    path: Path,
+    *,
+    call_log: Path,
+    output: str,
+    returncode: int = 0,
+) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' {shlex.quote(path.name)} >> {shlex.quote(str(call_log))}\n"
+        f"printf '%s\\n' {shlex.quote(output)}\n"
+        f"exit {returncode}\n",
+        encoding="ascii",
+    )
+    path.chmod(0o755)
+
+
+def test_schema_transition_predecessor_capacity_uses_predecessor_cli(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_zero_capacity")
+    call_log = tmp_path / "calls.txt"
+    target_cli = tmp_path / "target-loom"
+    predecessor_cli = tmp_path / "predecessor-loom"
+    _write_schema_transition_cli_stub(
+        target_cli,
+        call_log=call_log,
+        output="target launcher must not run",
+        returncode=23,
+    )
+    _write_schema_transition_cli_stub(
+        predecessor_cli,
+        call_log=call_log,
+        output='{"executable_new_capacity_ceiling":0,"status":"ready"}',
+    )
+    predecessor_repo = tmp_path / "predecessor"
+    (predecessor_repo / "src").mkdir(parents=True)
+    program = (
+        "set -euo pipefail\n"
+        f"repo={shlex.quote(str(tmp_path / 'target'))}\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+        f"loom_cli={shlex.quote(str(target_cli))}\n"
+        f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        'assert_zero_capacity "$predecessor_repo"\n'
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert call_log.read_text(encoding="ascii").splitlines() == ["predecessor-loom"]
+
+
+def test_schema_transition_predecessor_ready_uses_predecessor_cli(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_predecessor_shadow_ready")
+    call_log = tmp_path / "calls.txt"
+    target_cli = tmp_path / "target-loom"
+    predecessor_cli = tmp_path / "predecessor-loom"
+    _write_schema_transition_cli_stub(
+        target_cli,
+        call_log=call_log,
+        output="target launcher must not run",
+        returncode=23,
+    )
+    status = json.dumps(
+        {
+            "blockers": [],
+            "components": [{"name": "personal-workers", "observed": 0}],
+            "manager_ceiling": 0,
+            "mode": "shadow",
+            "ready": True,
+            "worker_available": False,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _write_schema_transition_cli_stub(
+        predecessor_cli,
+        call_log=call_log,
+        output=status,
+    )
+    predecessor_repo = tmp_path / "predecessor"
+    (predecessor_repo / "src").mkdir(parents=True)
+    program = (
+        "set -euo pipefail\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+        f"loom_cli={shlex.quote(str(target_cli))}\n"
+        f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
+        "predecessor_profile=/unused/profile\n"
+        "predecessor_release=/unused/release\n"
+        f"predecessor_release_sha256={'a' * 64}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        "assert_predecessor_shadow_ready\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert call_log.read_text(encoding="ascii").splitlines() == ["predecessor-loom"]
+
+
+def test_schema_transition_pre_quiesce_failure_does_not_mutate_recovery(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(
+        tmp_path,
+        fail_at="assert_transition_interlocks",
+    )
+
+    assert result.returncode == 1
+    assert calls == ["assert_transition_interlocks"]
+
+
+@pytest.mark.parametrize(
+    ("function_name", "arguments"),
+    (
+        ("capture_docker_postgres_state", 'fake "$evidence_dir/state.tsv"'),
+        ("capture_live_postgres_state", '"$evidence_dir/state.tsv"'),
+        ("assert_no_dynamic_namespaces", ""),
+        ("assert_migration_job_absent", ""),
+        ("apply_reviewed_migration_job", ""),
+        ("apply_reviewed_target_shadow", ""),
+        ("restore_predecessor_database", ""),
+        ("apply_reviewed_predecessor_shadow", ""),
+        ("remove_forward_only_web", ""),
+    ),
+)
+def test_schema_transition_critical_helpers_propagate_command_failure(
+    tmp_path: Path,
+    function_name: str,
+    arguments: str,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, function_name)
+    program = (
+        "set -uo pipefail\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        "postgres_pod=postgres\n"
+        f"postgres_dump={shlex.quote(str(tmp_path / 'postgres.dump'))}\n"
+        "transition_job=/unused/migration.json\n"
+        "target_shadow=/unused/target.yaml\n"
+        "predecessor_shadow=/unused/predecessor.yaml\n"
+        "migration_job_name=migration\n"
+        "kubectl() { return 23; }\n"
+        "docker() { return 23; }\n"
+        f"{function}\n"
+        ': > "$postgres_dump"\n'
+        f"{function_name} {arguments}\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def test_schema_transition_interlock_propagates_first_failed_check() -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_transition_interlocks")
+    program = (
+        "set -uo pipefail\n"
+        "assert_transition_artifacts() { return 23; }\n"
+        "assert_no_dynamic_namespaces() { return 0; }\n"
+        "assert_zero_capacity() { return 0; }\n"
+        "assert_reviewed_kubeconfig() { return 0; }\n"
+        "kubectl() { printf '0'; }\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        "assert_transition_interlocks\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def test_schema_transition_interlock_binds_kubeconfig_before_cluster_reads(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_transition_interlocks")
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -uo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        'record() { printf "%s\\n" "$1" >> "$call_log"; }\n'
+        "assert_reviewed_kubeconfig() { record kubeconfig; return 23; }\n"
+        "assert_transition_artifacts() { record artifacts; }\n"
+        "assert_no_dynamic_namespaces() { record namespaces; }\n"
+        "assert_zero_capacity() { record capacity; }\n"
+        'kubectl() { record kubectl; printf "0"; }\n'
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        "assert_transition_interlocks\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert call_log.read_text(encoding="utf-8").splitlines() == ["kubeconfig"]
+
+
+def test_schema_transition_binds_kubeconfig_before_first_live_status_read(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    status_start = runbook.index('predecessor_status="$evidence_dir/predecessor.status.json"')
+    start = runbook.rindex("assert_reviewed_kubeconfig\n", 0, status_start)
+    end = runbook.index("\n```", start)
+    live_preflight = runbook[start:end]
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        'record() { printf "%s\\n" "$1" >> "$call_log"; }\n'
+        "assert_reviewed_kubeconfig() { record kubeconfig; return 23; }\n"
+        "assert_no_dynamic_namespaces() { record namespaces; }\n"
+        "assert_zero_capacity() { record capacity; }\n"
+        "predecessor_cli() { record predecessor-status; printf '%s\\n' "
+        + shlex.quote(
+            '{"blockers":[],"components":[{"name":"personal-workers",'
+            '"observed":0}],"manager_ceiling":0,"mode":"shadow","ready":true,'
+            '"worker_available":false}'
+        )
+        + "; }\n"
+        'kubectl() { record kubectl; printf "0"; }\n'
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "predecessor_repo=/unused/predecessor\n"
+        "predecessor_loom_cli=predecessor_cli\n"
+        "predecessor_profile=/unused/profile\n"
+        "predecessor_release=/unused/release\n"
+        f"predecessor_release_sha256={'a' * 64}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{live_preflight}\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert call_log.read_text(encoding="ascii").splitlines() == ["kubeconfig"]
+
+
+def test_schema_transition_reviewed_kubeconfig_is_content_bound(tmp_path: Path) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_reviewed_kubeconfig",
+        )
+    )
+    kubeconfig = tmp_path / "kubeconfig"
+    digest = _write_owner_only_artifact(kubeconfig, b"reviewed kubeconfig\n")
+    program = (
+        "set -uo pipefail\n"
+        f"kubeconfig={shlex.quote(str(kubeconfig))}\n"
+        f"kubeconfig_sha256={digest}\n"
+        "expected_kube_context=reviewed-context\n"
+        'kubectl() { printf "reviewed-context\\n"; }\n'
+        f"{functions}\n"
+        'exec 36< "$kubeconfig"\n'
+        "kubeconfig=/proc/self/fd/36\n"
+    )
+    valid = subprocess.run(
+        ["bash"],
+        input=program + "assert_reviewed_kubeconfig\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    kubeconfig.write_bytes(b"redirected kubeconfig\n")
+    kubeconfig.chmod(0o600)
+    redirected = subprocess.run(
+        ["bash"],
+        input=program + "assert_reviewed_kubeconfig\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert redirected.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("namespace", "expected_returncode"),
+    (("loom-dev", 0), ("loom-dev-alice", 1), ("loom-build-candidate", 1)),
+)
+def test_schema_transition_dynamic_namespace_guard_executes(
+    namespace: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_no_dynamic_namespaces")
+    namespace_json = json.dumps({"items": [{"metadata": {"name": namespace}}]})
+    program = (
+        "set -uo pipefail\n"
+        f"namespace_json={shlex.quote(namespace_json)}\n"
+        "kubectl() { printf '%s\\n' \"$namespace_json\"; }\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        "assert_no_dynamic_namespaces\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+
+
+def test_schema_transition_dynamic_namespace_guard_rejects_malformed_inventory() -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_no_dynamic_namespaces")
+    program = (
+        "set -uo pipefail\n"
+        "kubectl() { printf 'not-json\\n'; }\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"{function}\n"
+        "assert_no_dynamic_namespaces\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
+def test_schema_transition_predecessor_check_propagates_capture_failure(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_live_predecessor_state")
+    expected = tmp_path / "expected.tsv"
+    observed = tmp_path / "live.test.tsv"
+    expected.write_text("same\n", encoding="utf-8")
+    observed.write_text("same\n", encoding="utf-8")
+    program = (
+        "set -uo pipefail\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"postgres_source_state={shlex.quote(str(expected))}\n"
+        "predecessor_head=0112\n"
+        "capture_live_postgres_state() { return 23; }\n"
+        "live_schema_head() { printf '0112\\n'; }\n"
+        f"{function}\n"
+        "assert_live_predecessor_state test\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
 
 
 def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
