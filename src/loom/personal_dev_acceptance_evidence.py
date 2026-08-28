@@ -1219,8 +1219,12 @@ def _validate_minio_manifest(value: Any) -> int:
     return len(objects)
 
 
-def _validate_shadow_status(value: Any) -> None:
-    expected_components = (
+def _validate_shadow_status(
+    value: Any,
+    *,
+    web_expected: bool | None = None,
+) -> None:
+    base_components = (
         "cluster-resources",
         "manager",
         "namespaced-resources",
@@ -1228,6 +1232,7 @@ def _validate_shadow_status(value: Any) -> None:
         "personal-workers",
         "runtime-class",
     )
+    schema_three_components = (*base_components, "web")
     expected_fields = {
         "blockers",
         "components",
@@ -1275,14 +1280,24 @@ def _validate_shadow_status(value: Any) -> None:
             raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
         component_names.append(component["name"])
         component_observed[component["name"]] = component["observed"]
+    observed_components = tuple(component_names)
+    if web_expected is None:
+        component_shape_valid = observed_components in {
+            base_components,
+            schema_three_components,
+        }
+    else:
+        expected_components = schema_three_components if web_expected else base_components
+        component_shape_valid = observed_components == expected_components
     if (
-        tuple(component_names) != expected_components
+        not component_shape_valid
         or component_observed["cluster-resources"] <= 0
         or component_observed["manager"] != 1
         or component_observed["namespaced-resources"] <= 0
         or component_observed["namespaces"] != 1
         or component_observed["personal-workers"] != 0
         or component_observed["runtime-class"] != 1
+        or ("web" in component_observed and component_observed["web"] != 1)
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
 
@@ -1455,8 +1470,9 @@ def build_personal_dev_backup_restore_evidence(
 
     _, pre_status = _parse_json_document(pre_shadow_status_path, canonical=False)
     _, post_status = _parse_json_document(post_shadow_status_path, canonical=False)
-    _validate_shadow_status(pre_status)
-    _validate_shadow_status(post_status)
+    web_expected = release.images.loom_web is not None
+    _validate_shadow_status(pre_status, web_expected=web_expected)
+    _validate_shadow_status(post_status, web_expected=web_expected)
     _, storage_inventory = _parse_json_document(storage_inventory_path, canonical=False)
     _validate_storage_inventory(storage_inventory, release=release)
 
