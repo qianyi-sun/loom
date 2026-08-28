@@ -108,6 +108,35 @@ database and object-store credentials, no service-account token, a read-only
 root filesystem, dropped capabilities, a fixed non-root UID/GID, and explicit
 NetworkPolicy. Development and production renders omit this CronJob.
 
+## Rollout coordination
+
+Lifecycle maintenance and protected rollout share one fixed PostgreSQL
+advisory lock. The GC process holds that session-scoped lock for its complete
+maintenance action. If a protected rollout guard already holds it, maintenance
+does no capacity collection, inventory, GC, resume, or other lifecycle work;
+it exits successfully with the explicit `rollout_guard_active` coordination
+status. This is an intentional no-op, not a retry or a second writer.
+
+Before acquiring the same database lock, a non-preview rollout suspends the
+legacy staging lifecycle CronJob using the exact CronJob UID and resource
+version, annotates it with its request and candidate SHA/tree, and drains an
+already-active verified CronJob Job. Its guard evidence additionally binds the
+authoritative mutation epoch. The detached backup worker verifies that complete
+request/candidate/epoch binding and transfers it to the detached rollout
+attempt; terminal release restores only that annotated CronJob and then unlocks
+the database. A failed pre-handoff backup releases the guard instead.
+
+The guard's 30-hour finite systemd lifetime prevents an indefinite maintenance
+freeze. A persistent root timer runs orphan reconciliation every minute; it
+restores only a suspended CronJob with complete exact annotations for the
+currently installed candidate and no active request guard unit. Unsafe,
+incomplete, unannotated, or drifted state is left fail-closed for investigation.
+This makes crashes, service restarts, reboots, and expiry recoverable without
+using a broad unsuspend or deleting lifecycle records. Rollout dry-run does not
+take this lock, suspend the CronJob, launch a worker, or mutate lifecycle data;
+it only preserves preliminary preview evidence in the service-owned rollout
+ledger.
+
 ## Mutation epoch and rollout checkpoints
 
 Protected staging mutations advance one database-backed epoch. Rollout backup

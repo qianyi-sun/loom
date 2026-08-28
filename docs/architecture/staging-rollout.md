@@ -30,7 +30,12 @@ loom-staging-rollout --env ENV backup-retention {inventory,apply} ...
 `start` accepts no ref, SHA, tag, image, checkout, environment file, token, or
 arbitrary passthrough argument. The installed policy selects the remote and
 branch, and the broker binds the request to the freshly fetched head. Use
-`--dry-run` to exercise admission and candidate resolution without mutation.
+`--dry-run` to exercise admission and candidate resolution without staging
+cluster, backup, or lifecycle-data mutation. It does not acquire a mutation
+guard, suspend the lifecycle CronJob, take the advisory lock, or launch a
+backup or rollout worker. It does publish the request-bound preliminary
+assessment and preview events in the service-owned ledger, so its immutable
+evidence can be inspected without being mistaken for a launch authority.
 Passing `preflight`, staged preview, and backup-pending responses include
 `preflight_artifact_bundle_sha256`. Use that secret-free evidence value as
 `DIGEST`; maintenance reopens only that immutable publication and revalidates
@@ -62,6 +67,43 @@ outside this audit boundary.
 Only one request may own an environment's full rollout lifecycle at a time.
 The lifecycle lock is separate from the shorter mutation locks acquired by
 individual rollout steps.
+
+## Lifecycle mutation guard
+
+After Tier 0--2 preflight has bound the candidate and staging mutation epoch,
+a non-preview `start` acquires a request-bound mutation guard before publishing
+the backup job. The service-owned transient guard unit first suspends the
+legacy `loom-staging-data-lifecycle` CronJob with a resource-version-checked
+patch and annotations carrying the request ID, candidate SHA, and candidate
+tree. It verifies the exact CronJob identity and waits for every already-active
+CronJob Job to finish. It then holds the fixed PostgreSQL staging-mutation
+advisory lock on one session, reads the authoritative mutation epoch, and
+publishes private ready evidence bound to the request ID, candidate SHA/tree,
+epoch, guard PID, CronJob UID, and suspension resource version.
+
+The broker rechecks that evidence and the epoch before it publishes the
+request-bound detached backup job. The backup worker independently rechecks
+the same complete binding before backup work, then hands ownership to the
+detached rollout attempt only after it has launched that attempt. The attempt
+again requires ready evidence and retains the guard through protected apply,
+final gates, and every terminal path. A launch or backup failure before
+handoff releases it; the attempt releases it on completion, failure,
+cancellation, or an exception. Release stops the unit, restores the exact
+annotated CronJob to unsuspended state while removing the annotations, confirms
+that restoration, unlocks PostgreSQL, and publishes released evidence. Binding
+or restoration drift fails closed rather than resuming a different CronJob or
+candidate.
+
+The transient guard has a finite `RuntimeMaxSec` of 30 hours, derived from the
+bounded backup and final-gate budgets, readiness allowance, and operational
+margin; it is never an indefinite freeze. A root-owned persistent systemd
+timer invokes reconciliation every minute. Reconciliation runs as the rollout
+service user and restores only an exact suspended, fully annotated guard whose
+request unit is absent and whose candidate, CronJob UID, and (when present)
+private evidence remain authoritative. An active verified unit is left alone;
+an unannotated suspension, incomplete annotation, unsafe evidence, or identity
+drift fails closed. This covers crashes, restarts, reboots, and finite-runtime
+expiry without treating arbitrary CronJob state as safe to change.
 
 ## Lifecycle
 

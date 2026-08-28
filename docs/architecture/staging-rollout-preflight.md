@@ -318,6 +318,34 @@ checkpoint. Registry and implementation digests must be byte-identical across
 both processes; no in-memory pending plan or cached live probe is rollout
 authority.
 
+## Guarded launch boundary
+
+The Tier 0–2 assessment remains outside the lifecycle mutation guard. For a
+non-preview launch, the broker binds the exact candidate and epoch first, then
+acquires the request-bound guard before publishing the detached backup job.
+The guard's ready evidence must agree with the request ID, candidate SHA and
+tree, and mutation epoch at broker admission, backup-worker continuation, and
+detached attempt execution. This prevents an in-memory handoff, a stale
+request, or a different candidate from turning a valid assessment into mutation
+authority.
+
+The guard suspends the legacy lifecycle CronJob, waits for a verified active
+job to finish, and holds the shared PostgreSQL advisory lock. Once the backup
+worker has started the detached rollout attempt, it hands that same guard to
+the attempt; guard ownership ends only through the verified release path or
+the guarded orphan reconciler. Thus preflight evidence, backup, protected
+apply, and final admission have one continuous candidate- and request-bound
+mutation exclusion window, while the regular lifecycle lock still governs the
+broader rollout lifecycle.
+
+Preview is deliberately narrower. `start --dry-run` performs normal admission,
+candidate resolution, assessment, and final epoch-drift checking, then writes a
+preliminary preview request and immutable assessment to the service ledger. It
+does not acquire the guard or advisory lock, suspend the CronJob, reserve a
+backup payload, or start any detached unit. The preview is therefore
+mutation-free for the staging cluster, backup state, and lifecycle data, but
+it is not an assertion that no service-owned evidence record is written.
+
 `DetachedPreflightBackupRunner` is the worker-side composition root. It first
 revalidates the persisted assessment against the immutable request, then owns
 the checkpoint, rehearsal, restore proof, lease, attestation, rotation and
