@@ -101,6 +101,29 @@ approve `backup-retention` to retire the prior active payload. Exact replay is
 idempotent; any lease, attestation, request, Attempt, or rotation drift is a
 hard refusal.
 
+If a host upgrade instead reports an active rollout solely because an older
+nonterminal preflight-backup record survives after its owner units disappeared,
+do not edit `state.json`, invent a lifecycle transition, or delete its bundle.
+Run the installer from a clean, root-owned checkout of the exact merged `dev`
+commit and review the bounded recovery inventory:
+
+```bash
+sudo -n python3 scripts/ops/staging_rollout_host.py \
+  orphaned-backup-recovery inventory
+sudo -n python3 scripts/ops/staging_rollout_host.py \
+  orphaned-backup-recovery apply --approved-plan-sha256 SHA256
+```
+
+Apply is authorized only by the exact inventory digest. It temporarily enters
+maintenance, requires no active pointer or live rollout/backup/guard unit, rejects
+any payload still present in active/candidate/retirement rotation state, and
+refuses a request for the currently installed candidate. It publishes a
+root-owned receipt bound to the exact unchanged candidate, job, and state. A
+later byte change or renewed rotation reference invalidates the receipt and
+blocks installation again. This migration attests that the historical record
+no longer owns work; it does not mutate the service-owned history or clean
+backup data.
+
 The broker enforces a single environment lifecycle owner. Broker unavailability
 does not grant authority for direct mutation. See
 [Protected Staging Rollout](../architecture/staging-rollout.md) for the

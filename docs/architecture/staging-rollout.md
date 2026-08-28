@@ -177,6 +177,23 @@ promoting the candidate; it never deletes either payload. The superseded
 active payload is queued for the separate `backup-retention` inventory/apply
 protocol.
 
+Host upgrades also fail closed on every durable nonterminal preflight-backup
+state, including records left by older implementations after their systemd
+owner disappeared. The candidate must differ from the currently installed
+source; a current-candidate request remains owned by normal recovery or
+`resume`. A superseded record that is absent from the current backup
+rotation is not silently ignored or edited. Root must run the merged installer's
+`orphaned-backup-recovery inventory`, review its exact job/state/rotation
+digest, and apply that digest. Apply enters the normal maintenance admission
+freeze, proves the active pointer is absent and no rollout, backup, or guard
+unit is live across two inventories, then publishes a root-owned receipt bound
+to the unchanged job and state bytes. Host inactivity accepts the receipt only
+while those bytes
+remain exact and the payload remains absent from the live rotation. Unsafe
+metadata, a referenced payload, concurrent drift, or an unknown receipt keeps
+the upgrade blocked. The receipt does not rewrite request history or claim that
+partial backup data was deleted.
+
 ## Failure behavior
 
 Admission rejects unauthorized callers, unsafe installation ownership, a dirty

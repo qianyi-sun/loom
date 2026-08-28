@@ -20,6 +20,7 @@ TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
 SERVICE_FINGERPRINT = "SHA256:6JjXfjyF6JMXDB2Wp4t1YgAzFJPaTv5mQJaqodL6GdU"
 OTHER_SERVICE_FINGERPRINT = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 TEST_CANDIDATE_SHA = "a" * 40
+SUPERSEDING_SOURCE_SHA = "c" * 40
 TEST_CANDIDATE_VENV = host._candidate_venv_path(TEST_CANDIDATE_SHA)
 
 
@@ -77,6 +78,7 @@ class FakeSystem:
         self.preflight_candidate_source = False
         self.inotify_capacity = False
         self.runtime_venvs: set[Path] = set()
+        self.orphan_recovery_calls: list[tuple[str, str | None, bool]] = []
 
     def _observe_runtime_venv(self, venv: Path) -> None:
         self.runtime_venvs.add(venv)
@@ -93,6 +95,23 @@ class FakeSystem:
             yield
         finally:
             self.lifecycle_lock_depth -= 1
+
+    def orphaned_backup_recovery(
+        self,
+        *,
+        action: str,
+        approved_plan_sha256: str | None,
+        installed_source_sha: str,
+    ) -> dict[str, object]:
+        assert installed_source_sha == "a" * 40
+        self.orphan_recovery_calls.append((action, approved_plan_sha256, self.maintenance))
+        if action == "inventory":
+            return {"plan": {"schema_version": 1}, "plan_sha256": "f" * 64}
+        return {
+            "approved_plan_sha256": approved_plan_sha256,
+            "reconciled_request_ids": ["req-orphan001"],
+            "schema_version": 1,
+        }
 
     def validate_invocation_checkout(self) -> str:
         self.validated += 1
@@ -1153,6 +1172,59 @@ def test_explicit_maintenance_requires_root(tmp_path: Path) -> None:
 
     with pytest.raises(host.InstallError, match="requires root"):
         installer.maintenance(enabled=True)
+
+
+def test_orphaned_backup_recovery_is_digest_approved_and_maintenance_bounded(
+    tmp_path: Path,
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+
+    inventory = installer.orphaned_backup_recovery(
+        action="inventory",
+        approved_plan_sha256=None,
+    )
+    applied = installer.orphaned_backup_recovery(
+        action="apply",
+        approved_plan_sha256="f" * 64,
+    )
+
+    assert inventory["plan_sha256"] == "f" * 64
+    assert applied["reconciled_request_ids"] == ["req-orphan001"]
+    assert system.orphan_recovery_calls == [
+        ("inventory", None, True),
+        ("apply", "f" * 64, True),
+    ]
+    assert system.maintenance is False
+
+
+def test_orphaned_backup_recovery_cli_dispatches_inventory_and_approved_apply(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installer, system = _installer(tmp_path)
+    installer.install(TEAM_ID)
+    capsys.readouterr()
+
+    assert host.main(["orphaned-backup-recovery", "inventory"], installer=installer) == 0
+    assert json.loads(capsys.readouterr().out)["plan_sha256"] == "f" * 64
+    assert (
+        host.main(
+            [
+                "orphaned-backup-recovery",
+                "apply",
+                "--approved-plan-sha256",
+                "f" * 64,
+            ],
+            installer=installer,
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["reconciled_request_ids"] == ["req-orphan001"]
+    assert system.orphan_recovery_calls[-2:] == [
+        ("inventory", None, True),
+        ("apply", "f" * 64, True),
+    ]
 
 
 def test_install_publishes_attestation_and_ready_record_before_sudoers(
@@ -4749,6 +4821,281 @@ def test_active_status_keeps_legacy_request_directory_without_durable_state_trav
 
     assert host.HostSystem(StatusRunner()).active_status() == "idle"
     assert any("/usr/bin/systemctl" in call for call in calls)
+
+
+def _write_orphaned_backup_fixture(
+    tmp_path: Path,
+    *,
+    phase: str = "backup_running",
+    referenced: bool = False,
+) -> tuple[Path, Path, int, int]:
+    service_uid = os.geteuid()
+    service_gid = os.getegid()
+    state_root = tmp_path / "state"
+    backup_root = state_root / "requests" / "req-orphan001" / "preflight-backup"
+    backup_root.mkdir(parents=True)
+    for directory in (
+        state_root,
+        state_root / "requests",
+        state_root / "requests" / "req-orphan001",
+        backup_root,
+    ):
+        directory.chmod(0o700)
+    verified = phase in {"backup_verified", "launch_pending"}
+    state = {
+        "failure_code": None,
+        "job_id": "job-orphan001",
+        "lease_digest": "d" * 64 if verified else None,
+        "manifest_sha256": "e" * 64 if verified else None,
+        "preflight_attestation_sha256": "f" * 64 if verified else None,
+        "phase": phase,
+        "request_id": "req-orphan001",
+        "schema_version": 1,
+        "sequence": 3,
+        "updated_at": "2026-07-25T01:52:34.957228+00:00",
+    }
+    job = {
+        "bundle_name": "20260725T014504Z-req-orphan001",
+        "candidate_sha": "a" * 40,
+        "candidate_tree": "b" * 40,
+        "created_at": "2026-07-25T01:45:04+00:00",
+        "environment": "staging",
+        "job_id": "job-orphan001",
+        "mutation_epoch": 10,
+        "namespace": "loom-staging",
+        "payload_id": "payload-orphan001",
+        "preflight_assessment_sha256": "1" * 64,
+        "preflight_coverage_sha256": "2" * 64,
+        "preflight_registry_sha256": "3" * 64,
+        "request_id": "req-orphan001",
+        "schema_version": 1,
+    }
+    for name, value in (("state.json", state), ("job.json", job)):
+        path = backup_root / name
+        path.write_text(json.dumps(value, sort_keys=True) + "\n")
+        path.chmod(0o600)
+    active = None
+    if referenced:
+        active = {
+            "bundle_name": job["bundle_name"],
+            "payload_id": job["payload_id"],
+            "request_id": job["request_id"],
+        }
+    rotation = {
+        "active": active,
+        "candidate": None,
+        "generation": 9,
+        "retirements": [],
+        "schema_version": 3,
+    }
+    rotation_path = state_root / "backup-rotation.json"
+    rotation_path.write_text(json.dumps(rotation, sort_keys=True) + "\n")
+    rotation_path.chmod(0o600)
+    evidence_root = tmp_path / "orphan-evidence"
+    return state_root, evidence_root, service_uid, service_gid
+
+
+@pytest.mark.parametrize("phase", ["backup_running", "backup_verified", "launch_pending"])
+def test_orphaned_backup_recovery_receipt_is_exact_and_unblocks_durable_inventory(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        phase=phase,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    assert [item["request_id"] for item in plan["items"]] == ["req-orphan001"]
+    assert plan["items"][0]["phase"] == phase
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+
+    result = host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+
+    assert result == {
+        "approved_plan_sha256": digest,
+        "reconciled_request_ids": ["req-orphan001"],
+        "schema_version": 1,
+    }
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "idle"
+    )
+
+    state_path = state_root / "requests/req-orphan001/preflight-backup/state.json"
+    state = json.loads(state_path.read_text())
+    state["sequence"] = 4
+    state_path.write_text(json.dumps(state, sort_keys=True) + "\n")
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "busy"
+    )
+    refreshed = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    assert [item["request_id"] for item in refreshed["items"]] == ["req-orphan001"]
+
+
+def test_orphaned_backup_recovery_refuses_referenced_payload_and_digest_drift(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+        referenced=True,
+    )
+    with pytest.raises(host.InstallError, match="still referenced"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path / "digest-drift",
+        referenced=False,
+    )
+    with pytest.raises(host.InstallError, match="approved plan"):
+        host._apply_orphaned_backup_recovery(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            approved_plan_sha256="0" * 64,
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+def test_orphaned_backup_receipt_stops_applying_if_payload_becomes_referenced(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    plan = host._orphaned_backup_recovery_plan(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    digest = hashlib.sha256(
+        (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    host._apply_orphaned_backup_recovery(
+        state_root,
+        evidence_root=evidence_root,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        authority_uid=os.geteuid(),
+        authority_gid=os.getegid(),
+        approved_plan_sha256=digest,
+        installed_source_sha=SUPERSEDING_SOURCE_SHA,
+    )
+    rotation_path = state_root / "backup-rotation.json"
+    rotation = json.loads(rotation_path.read_text())
+    rotation["active"] = {
+        "bundle_name": "20260725T014504Z-req-orphan001",
+        "payload_id": "payload-orphan001",
+        "request_id": "req-orphan001",
+    }
+    rotation_path.write_text(json.dumps(rotation, sort_keys=True) + "\n")
+
+    assert (
+        host._durable_preflight_backup_status(
+            state_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            evidence_root=evidence_root,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+        )
+        == "unknown"
+    )
+
+
+def test_orphaned_backup_inventory_rejects_unsafe_request_directory(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+    (state_root / "requests/req-orphan001").chmod(0o755)
+
+    with pytest.raises(host.InstallError, match="request authority is unsafe"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha=SUPERSEDING_SOURCE_SHA,
+        )
+
+
+def test_orphaned_backup_inventory_refuses_current_installed_candidate(
+    tmp_path: Path,
+) -> None:
+    state_root, evidence_root, service_uid, service_gid = _write_orphaned_backup_fixture(
+        tmp_path,
+    )
+
+    with pytest.raises(host.InstallError, match="not superseded"):
+        host._orphaned_backup_recovery_plan(
+            state_root,
+            evidence_root=evidence_root,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            authority_uid=os.geteuid(),
+            authority_gid=os.getegid(),
+            installed_source_sha="a" * 40,
+        )
 
 
 def test_active_status_refuses_safe_active_pointer_without_querying_systemd(
