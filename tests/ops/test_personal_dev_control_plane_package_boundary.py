@@ -715,8 +715,6 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     ("live_variant", "expected_returncode"),
     [
         ("exact", 0),
-        ("acceptance-binding", 0),
-        ("operational-binding", 0),
         ("all-reviewed-missing", 0),
         ("one-reviewed-missing", 0),
         ("unreviewed-missing", 1),
@@ -2051,6 +2049,146 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
     assert ".owner_count == 2" in runbook
     assert ".cross_owner_denial_count == 6" in runbook
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_returncode"),
+    [
+        ("shadow-binding", 0),
+        ("operational-binding", 0),
+        ("acceptance-binding", 1),
+        ("unexpected-loom-annotation", 1),
+        ("ingress-snippet", 1),
+        ("ingress-default-backend", 1),
+    ],
+)
+def test_multi_owner_durable_preflight_and_final_route_contract_share_ingress_bindings(
+    tmp_path: Path,
+    mutation: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
+    preflight = _shell_command_block(
+        runbook,
+        "ingress/loom-personal-dev-management -o json \\",
+        '"$evidence_dir/management.ingress.json" >/dev/null',
+    )
+    preflight = 'kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \\\n' + preflight
+    final_route_contract = _fenced_shell_function(runbook, "assert_web_api_route_contract")
+    annotations = {
+        "cert-manager.io/cluster-issuer": "letsencrypt-prod",
+        "loom.dev/render-input-sha256": "a" * 64,
+        "loom.dev/trusted-release-sha256": "b" * 64,
+        "nginx.ingress.kubernetes.io/proxy-body-size": "512m",
+        "nginx.ingress.kubernetes.io/proxy-read-timeout": "300",
+    }
+    if mutation == "operational-binding":
+        annotations["loom.dev/operational-plan-sha256"] = "c" * 64
+    elif mutation == "acceptance-binding":
+        annotations["loom.dev/acceptance-plan-sha256"] = "c" * 64
+    elif mutation == "unexpected-loom-annotation":
+        annotations["loom.dev/unexpected"] = "c" * 64
+    elif mutation == "ingress-snippet":
+        annotations["nginx.ingress.kubernetes.io/server-snippet"] = "deny all;"
+
+    ingress: dict[str, object] = {
+        "metadata": {"annotations": annotations},
+        "spec": {
+            "ingressClassName": "nginx",
+            "rules": [
+                {
+                    "host": "loom-service.dev.yylx.world",
+                    "http": {
+                        "paths": [
+                            {
+                                "backend": {
+                                    "service": {
+                                        "name": "loom-personal-dev-management",
+                                        "port": {"number": 8090},
+                                    }
+                                },
+                                "path": "/api",
+                                "pathType": "Prefix",
+                            },
+                            {
+                                "backend": {
+                                    "service": {
+                                        "name": "loom-personal-dev-web",
+                                        "port": {"number": 80},
+                                    }
+                                },
+                                "path": "/",
+                                "pathType": "Prefix",
+                            },
+                        ]
+                    },
+                }
+            ],
+            "tls": [
+                {
+                    "hosts": ["loom-service.dev.yylx.world"],
+                    "secretName": "loom-personal-dev-management-tls",
+                }
+            ],
+        },
+    }
+    if mutation == "ingress-default-backend":
+        ingress["spec"] = {
+            **ingress["spec"],
+            "defaultBackend": {"service": {"name": "wrong"}},
+        }
+
+    network_policy = {
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "loom-personal-dev-web"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{"ports": [{"port": 8080, "protocol": "TCP"}]}],
+        }
+    }
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+    program = (
+        "set -u\n"
+        + final_route_contract
+        + "\n"
+        + f"ingress={shlex.quote(json.dumps(ingress))}\n"
+        + f"network_policy={shlex.quote(json.dumps(network_policy))}\n"
+        + f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+        + "kubeconfig=/unused/kubeconfig\n"
+        + "management_host=loom-service.dev.yylx.world\n"
+        + "reviewed_server=https://loom-service.dev.yylx.world\n"
+        + "kubectl() {\n"
+        + '  case "$*" in\n'
+        + "    *networkpolicy/loom-personal-dev-web-ingress*) printf '%s\\n' \"$network_policy\" ;;\n"
+        + "    *ingress/loom-personal-dev-management*) printf '%s\\n' \"$ingress\" ;;\n"
+        + "    *) return 91 ;;\n"
+        + "  esac\n"
+        + "}\n"
+        + "curl() {\n"
+        + '  case "${!#}" in\n'
+        + "    */api/v1/health) printf '%s\\n' '{\"status\":\"ok\"}' ;;\n"
+        + "    */loom-frontend-config.json) printf '%s\\n' '{\"environment\":\"development\",\"routePath\":\"\",\"apiBase\":\"\",\"apiRouteBase\":\"https://loom-service.dev.yylx.world/api\"}' ;;\n"
+        + "    */auth/reset|*/auth/setup) printf '%s\\n' '<div id=\"root\"></div>' ;;\n"
+        + "    *) return 92 ;;\n"
+        + "  esac\n"
+        + "}\n"
+        + "preflight_status=0\n"
+        + "if ! (\n"
+        + preflight
+        + "\n); then preflight_status=1; fi\n"
+        + "final_status=0\n"
+        + "if ! assert_web_api_route_contract; then final_status=1; fi\n"
+        + "printf 'preflight=%s final=%s\\n' \"$preflight_status\" \"$final_status\"\n"
+        + f'test "$preflight_status" -eq {expected_returncode}\n'
+        + f'test "$final_status" -eq {expected_returncode}\n'
+    )
+
+    completed = subprocess.run(
+        ["bash"], input=program, text=True, capture_output=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == f"preflight={expected_returncode} final={expected_returncode}\n"
 
 
 @pytest.mark.parametrize(
