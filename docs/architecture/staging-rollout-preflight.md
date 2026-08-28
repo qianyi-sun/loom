@@ -764,9 +764,13 @@ it, the reset error is accepted only after a separate exact load-state readback
 proves `not-found`; loaded or unavailable state still fails closed.
 Namespace absence is likewise read through `kubectl get
 --ignore-not-found=true`: only a successful empty response proves absence.
-After deletion, a nonzero `kubectl wait` is accepted only when that independent
-readback proves the exact namespace is already gone; a present namespace stays
-a timeout and any transport or parse failure remains unavailable.
+After the UID/resourceVersion-preconditioned delete, cleanup polls that same
+authoritative readback for at most 300 seconds instead of delegating the wait to
+`kubectl wait`. Every still-present response must retain the exact rehearsal
+identity and original namespace UID; name reuse or identity drift fails closed.
+A successful empty response completes cleanup immediately, a still-present
+namespace at the absolute deadline is a timeout, and transport or parse failure
+remains unavailable.
 
 The restored database snapshot necessarily contains frozen worker heartbeat
 timestamps. Before the isolated API admission probe, the rehearsal inserts or
@@ -937,7 +941,21 @@ effect is recorded without repetition, a still-ready precondition may be applied
 partial or ambiguous effect fails closed. Reused terminal records are also
 reclassified and must retain the same evidence digest and epoch. The chain is
 serialized by a private attempt-scoped lock and neither the plan nor a
-component implementation/fingerprint may change underneath an intent.
+component implementation/fingerprint may change underneath an intent. A
+classifier exception before apply, after apply, or while revalidating a terminal
+publishes one immutable coded, secret-safe diagnostic beside the intent before
+the original exception propagates; exception messages and response bodies are
+never recorded.
+
+The protected environment-state component treats only bounded HTTP transport
+failures and readiness responses (`408`, `425`, `429`, `500`, `502`, `503`, or
+`504`) as transient. It makes at most 13 observations or idempotent PUT
+attempts with five seconds between attempts. The mutation epoch is rechecked
+before every observation and again immediately before each PUT sequence. After
+a lost mutation response, the next attempt first re-observes desired state and
+returns without another PUT when this candidate is already exact. Epoch drift,
+credential or authority failures, malformed successful responses, and local
+runner-prerequisite failures remain immediately fail-closed.
 
 The final plan also carries one canonical protected baseline extracted from
 exactly the six passing Tier 2 executions. It binds their common readonly
