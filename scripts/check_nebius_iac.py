@@ -10,15 +10,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NEBIUS_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
 TOPOLOGY_PATH = REPO_ROOT / "config" / "service-execution-topology.json"
 
-TOPOLOGY_FIELDS = (
-    "target_id",
-    "environment",
-    "region",
-    "failure_domain",
-    "namespace_name",
-)
-
-
 class ContractError(RuntimeError):
     pass
 
@@ -52,84 +43,77 @@ def check_nebius_iac(
     targets = topology.get("targets")
     if not isinstance(targets, list):
         raise ContractError("execution topology must contain a targets list")
-    expected = {
+    topology_targets = {
         str(target["target_id"]): target
         for target in targets
         if isinstance(target, dict) and target.get("provider") == "nebius"
     }
 
     target_paths = sorted((root / "targets").glob("*.tfvars.json.example"))
-    _require(len(target_paths) == 4, f"expected exactly 4 target examples, found {len(target_paths)}")
-    _require(len(expected) == 4, f"expected exactly 4 Nebius topology targets, found {len(expected)}")
+    _require(len(target_paths) == 1, f"expected exactly 1 shared-cluster example, found {len(target_paths)}")
+    _require(len(topology_targets) == 3, f"expected exactly 3 environment bindings, found {len(topology_targets)}")
+    path = target_paths[0]
+    _require(
+        path.name == "development-eu-north1.tfvars.json.example",
+        f"{path}: the live development state anchor must be retained during convergence",
+    )
+    document = _load_json(path)
+    target = document.get("target")
+    if not isinstance(target, dict):
+        raise ContractError(f"{path}: target must be an object")
+    _require(
+        target.get("target_id") == "nebius-eu-north1-development",
+        f"{path}: target_id must retain the live state/resource anchor",
+    )
+    cluster_scope_ids = {str(item.get("cluster_scope_id", "")) for item in topology_targets.values()}
+    _require(len(cluster_scope_ids) == 1 and "" not in cluster_scope_ids, "topology targets must share one cluster_scope_id")
+    cluster_scope_id = next(iter(cluster_scope_ids))
+    _require(target.get("cluster_scope_id") == cluster_scope_id, f"{path}: cluster_scope_id must match topology")
+    regions = {str(item.get("region", "")) for item in topology_targets.values()}
+    failure_domains = {str(item.get("failure_domain", "")) for item in topology_targets.values()}
+    _require(regions == {target.get("region")}, f"{path}: all bindings must use the shared cluster region")
+    _require(failure_domains == {target.get("failure_domain")}, f"{path}: all bindings must use one failure domain")
 
-    seen_ids: set[str] = set()
-    unique_values: dict[str, set[str]] = {
-        "nebius_profile": set(),
-        "project_id": set(),
-        "evidence_bucket_name": set(),
-        "network_cidr": set(),
-        "service_cidr": set(),
-    }
-    expected_stems: set[str] = set()
+    bindings = target.get("environment_bindings")
+    if not isinstance(bindings, dict):
+        raise ContractError(f"{path}: environment_bindings must be an object")
+    _require(set(bindings) == {"development", "staging", "production"}, f"{path}: all three environment bindings are required")
+    for environment, binding in bindings.items():
+        if not isinstance(binding, dict):
+            raise ContractError(f"{path}: {environment} binding must be an object")
+        target_id = str(binding.get("target_id", ""))
+        topology_target = topology_targets.get(target_id)
+        if topology_target is None:
+            raise ContractError(f"{path}: target_id {target_id!r} is absent from topology")
+        _require(topology_target.get("environment") == environment, f"{path}: {environment} target environment must match topology")
+        _require(binding.get("namespace_name") == topology_target.get("namespace_name"), f"{path}: {environment} namespace_name must match topology")
+        _require(binding.get("evidence_prefix") == target_id, f"{path}: {environment} evidence prefix must equal target_id")
 
-    for path in target_paths:
-        document = _load_json(path)
-        target = document.get("target")
-        if not isinstance(target, dict):
-            raise ContractError(f"{path}: target must be an object")
-        target_id = str(target.get("target_id", ""))
-        _require(target_id in expected, f"{path}: target_id {target_id!r} is absent from topology")
-        _require(target_id not in seen_ids, f"{path}: duplicate target_id {target_id}")
-        seen_ids.add(target_id)
-
-        topology_target = expected[target_id]
-        for field in TOPOLOGY_FIELDS:
-            _require(
-                target.get(field) == topology_target.get(field),
-                f"{path}: {field} must match config/service-execution-topology.json",
-            )
-
-        stem = f"{target['environment']}-{target['region']}"
-        expected_stems.add(stem)
-        _require(path.name == f"{stem}.tfvars.json.example", f"{path}: filename must be {stem}.tfvars.json.example")
-        _require(document.get("tenant_id") == "tenant-REPLACE", f"{path}: example tenant must remain a placeholder")
-        _require(
-            str(document.get("project_id", "")).startswith("project-REPLACE-"),
-            f"{path}: example project must remain a placeholder",
-        )
-
-        for name in ("nebius_profile", "project_id", "evidence_bucket_name"):
-            value = str(document.get(name, ""))
-            _require(bool(value), f"{path}: {name} is required")
-            _require(value not in unique_values[name], f"{path}: {name} must be target-unique")
-            unique_values[name].add(value)
-        for name in ("network_cidr", "service_cidr"):
-            value = str(target.get(name, ""))
-            _require(value not in unique_values[name], f"{path}: {name} must be target-unique")
-            unique_values[name].add(value)
-
-        cidrs = target.get("public_control_plane_cidrs")
-        if not isinstance(cidrs, list):
-            raise ContractError(f"{path}: public_control_plane_cidrs must be a list")
-        _require("0.0.0.0/0" not in cidrs, f"{path}: public control plane may never allow 0.0.0.0/0")
-        if target.get("environment") == "production":
-            _require(target.get("control_plane_etcd_size") == 3, f"{path}: production requires HA etcd")
-            _require(int(target.get("execution_min_nodes", 0)) >= 1, f"{path}: production requires a warm execution node")
-
-    _require(seen_ids == set(expected), "target examples and topology targets differ")
+    _require(document.get("tenant_id") == "tenant-REPLACE", f"{path}: example tenant must remain a placeholder")
+    _require(
+        str(document.get("project_id", "")).startswith("project-REPLACE-"),
+        f"{path}: example project must remain a placeholder",
+    )
+    for name in ("nebius_profile", "project_id", "evidence_bucket_name"):
+        _require(bool(str(document.get(name, ""))), f"{path}: {name} is required")
+    for name in ("network_cidr", "service_cidr"):
+        _require(bool(str(target.get(name, ""))), f"{path}: {name} is required")
+    cidrs = target.get("public_control_plane_cidrs")
+    if not isinstance(cidrs, list):
+        raise ContractError(f"{path}: public_control_plane_cidrs must be a list")
+    _require("0.0.0.0/0" not in cidrs, f"{path}: public control plane may never allow 0.0.0.0/0")
+    _require(int(target.get("execution_min_nodes", -1)) == 0, f"{path}: shared execution baseline must scale to zero")
 
     backend_paths = sorted((root / "backends").glob("*.s3.tfbackend.example"))
-    _require(len(backend_paths) == 4, f"expected exactly 4 backend examples, found {len(backend_paths)}")
+    _require(len(backend_paths) == 1, f"expected exactly 1 shared-cluster backend, found {len(backend_paths)}")
     _require(
-        {path.name.removesuffix(".s3.tfbackend.example") for path in backend_paths} == expected_stems,
-        "backend examples must match target environment-region names",
+        backend_paths[0].name == "development-eu-north1.s3.tfbackend.example",
+        "the existing development backend anchor must be reused, not forked",
     )
-    state_keys: set[str] = set()
     for path in backend_paths:
         text = path.read_text(encoding="utf-8")
         key = _backend_value(text, "key", path)
-        _require(key not in state_keys, f"{path}: state key must be target-unique")
-        state_keys.add(key)
+        _require(key == "nebius/development/eu-north1/terraform.tfstate", f"{path}: existing remote state key must be retained")
         _require(re.search(r"^\s*use_lockfile\s*=\s*true\s*$", text, re.MULTILINE) is not None, f"{path}: use_lockfile must be true")
         _require(re.search(r"(?i)(access_key|secret_key|token)\s*=", text) is None, f"{path}: credentials may not be stored in backend files")
 
@@ -150,6 +134,14 @@ def check_nebius_iac(
     _require('key    = "loom.nebius/execution"' in module, "execution node taint is required")
     _require("audit_logs        = {}" in module, "managed control-plane audit logging is required")
     _require('role        = "viewer"' in module, "registry pull access must remain resource-scoped viewer")
+    _require(
+        "for_each = var.environment_bindings" in module,
+        "evidence writer groups must remain environment-local",
+    )
+    _require(
+        'nebius_iam_v1_group.evidence_writers[environment].id' in module,
+        "every evidence prefix must bind its environment-local writer group",
+    )
     _require('roles    = ["storage.object-editor"]' in module, "evidence writers need object-only access")
 
 
@@ -160,7 +152,7 @@ def main() -> int:
         check_nebius_iac()
     except (ContractError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Nebius IaC contract failed: {exc}") from exc
-    print("Nebius IaC contract passed for 4 isolated execution targets.")
+    print("Nebius IaC contract passed for 1 shared cluster and 3 environment bindings.")
     return 0
 
 

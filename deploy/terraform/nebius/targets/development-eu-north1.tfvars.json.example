@@ -6,10 +6,26 @@
   "evidence_bucket_max_bytes": 107374182400,
   "target": {
     "target_id": "nebius-eu-north1-development",
-    "environment": "development",
+    "cluster_scope_id": "nebius-eu-north1-shared",
     "region": "eu-north1",
-    "failure_domain": "development-eu-north1",
-    "namespace_name": "loom-nebius-development",
+    "failure_domain": "nebius-eu-north1-shared",
+    "environment_bindings": {
+      "development": {
+        "target_id": "nebius-eu-north1-development",
+        "namespace_name": "loom-nebius-development",
+        "evidence_prefix": "nebius-eu-north1-development"
+      },
+      "staging": {
+        "target_id": "nebius-eu-north1-staging",
+        "namespace_name": "loom-nebius-staging",
+        "evidence_prefix": "nebius-eu-north1-staging"
+      },
+      "production": {
+        "target_id": "nebius-eu-north1-production",
+        "namespace_name": "loom-nebius-production",
+        "evidence_prefix": "nebius-eu-north1-production"
+      }
+    },
     "network_cidr": "10.0.0.0/16",
     "service_cidr": "172.20.0.0/16",
     "kubernetes_version": "1.35",

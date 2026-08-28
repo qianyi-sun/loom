@@ -293,6 +293,7 @@ def _target(suffix: str) -> ExecutionTargetV1:
         target_id=f"nebius-staging-{suffix}",
         logical_pool_id="nebius-cpu",
         execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        cluster_scope_id="nebius-eu-north1-shared",
         environment="staging",
         provider="nebius",
         region="eu-north1",

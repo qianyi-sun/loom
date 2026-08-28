@@ -79,11 +79,13 @@ provider, region, target, worker, pool, or reusable-slot field. A valid service
 class cannot permit privileged mode, hostPath, host networking, nested
 containers, host devices, or a shared-kernel isolation boundary.
 
-`ExecutionTargetV1` is the later binding point for provider, environment,
-region, failure domain, residency, and a target-specific health check. The
-checked `ExecutionTopologyV1` requires isolated development and staging
-targets, at least two production regions and failure domains, primary and
-secondary roles, and unique health checks.
+`ExecutionTargetV1` is the later environment binding point for provider,
+physical `cluster_scope_id`, region, failure domain, residency, namespace, and
+a binding-specific health check. The checked `ExecutionTopologyV1` requires
+exactly one development, staging, and production binding on the same physical
+cluster scope, region, and failure domain, with unique namespaces and health
+identities. Another cluster or region requires a separately accepted SLO and
+owner decision.
 
 Admission compares the immutable requirement record with the selected class
 and returns all structured rejection codes. It runs before a batch is persisted
@@ -338,21 +340,19 @@ Kubernetes, routing, profile, or traffic mutation.
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
-| Environment | Target | Role | Residency |
+| Environment | Logical target | Namespace | Physical cluster scope |
 | --- | --- | --- | --- |
-| development | `nebius-eu-north1-development` | primary | EU |
-| staging | `nebius-eu-north1-staging` | primary | EU |
-| production | `nebius-eu-north1-production` | primary | EU |
-| production | `nebius-eu-west1-production` | secondary | EU |
+| development | `nebius-eu-north1-development` | `loom-nebius-development` | `nebius-eu-north1-shared` |
+| staging | `nebius-eu-north1-staging` | `loom-nebius-staging` | `nebius-eu-north1-shared` |
+| production | `nebius-eu-north1-production` | `loom-nebius-production` | `nebius-eu-north1-shared` |
 
-Development, staging, and production cannot share a target identity or health
-observation. Every target is probed independently; a target becomes ineligible
-when its observation is older than its declared stale threshold. Nebius target
-placement is environment-local and health-first. Production prefers
-`eu-north1` and may
-fail over to `eu-west1` only when the secondary target is independently healthy
-and the durable lease policy permits the transition. Queued work does not
-cross environments or leave EU residency to recover capacity.
+Development, staging, and production cannot share a logical target identity,
+namespace, health observation, service identity, policy, or evidence prefix.
+They deliberately share one physical cluster/failure domain. Every binding is
+probed independently; a binding becomes ineligible when its observation is
+older than its declared stale threshold. Placement remains environment-local
+and health-first. Queued work does not cross environments or leave EU residency
+to recover capacity, and there is no implicit secondary-region fallback.
 
 These target records are desired logical bindings, not evidence that any
 Nebius project, cluster, node group, runtime class, or capacity exists.
@@ -362,7 +362,8 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 Migrations `0113` through `0120` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
-- immutable `execution_classes` and environment/regional `execution_targets`;
+- immutable `execution_classes` and environment-local `execution_targets`
+  bound to one shared physical cluster scope;
 - one canonical routing decision and monotonically increasing routing
   generation on each Trial, with the selected pool/reason/digest frozen into
   every Kubernetes lease and its history;

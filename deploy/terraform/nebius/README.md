@@ -1,9 +1,10 @@
 # Nebius execution-target infrastructure
 
-This directory owns one independently planned and applied Terraform state per
-Loom Nebius execution target. It creates target-local networking, registry,
-evidence storage, IAM identities, a Managed Kubernetes control plane, a fixed
-system node group, and an autoscaled execution node group.
+This directory owns one Terraform state for the shared Loom Nebius execution
+cluster. It creates networking, registry, evidence storage, IAM identities, one
+Managed Kubernetes control plane, a fixed system node group, and an autoscaled
+execution node group. Development, staging, and production remain distinct
+logical target bindings inside that cluster.
 
 It does **not** authorize cloud creation, quota changes, billing, credentials,
 production deployment, Kubernetes workload bootstrap, or Loom traffic. A web
@@ -15,16 +16,17 @@ the authorization and cost gate in
 
 - `modules/execution-target`: reusable, version-pinned target resources.
 - `stack`: the only root module operators plan and apply.
-- `targets`: reviewed examples for the four topology targets. Copy exactly one
-  outside the repository or to an ignored `.tfvars.json` path and replace only
-  placeholders.
-- `backends`: partial S3 backend examples with distinct state keys and native
-  lock files. The state bucket is an independently authorized prerequisite.
+- `targets`: the sole shared-cluster example. Its development-named anchor is
+  retained deliberately so the existing live state converges instead of
+  creating replacement infrastructure.
+- `backends`: the existing development remote-state anchor with a native lock
+  file. The state bucket is an independently authorized prerequisite.
 
-The target examples are checked against
-`config/service-execution-topology.json`. Networks, service CIDRs, project IDs,
-CLI profiles, evidence buckets, and state keys are target-specific. Combining
-environments or regions in one state is unsupported.
+The cluster example is checked against the three environment bindings in
+`config/service-execution-topology.json`. Each binding has a distinct namespace,
+target ID, health identity, and evidence prefix, while all three bind the same
+physical cluster scope, region, and failure domain. A second cluster, state, or
+region requires a separately accepted requirement and owner decision.
 
 ## Version and offline validation
 
@@ -48,14 +50,13 @@ recovery, or destruction.
 
 Provider `0.6.46` exposes Managed Kubernetes audit logging but no native
 monitoring, alert, dashboard, or budget resources. This stack enables audit
-logs and exports stable target/cluster/node-group identities for the separate
-collector and budget work in #1552. Metrics/alerts and a provider billing
-budget must therefore be live-read back before this infrastructure issue can be
-accepted; the repository must not infer them from cluster health.
+logs and exports stable target/cluster/node-group identities for #1552's
+collector and accounting work. Account-level budget enforcement is separately
+configurable; cluster health must never be treated as cost or alert evidence.
 
 ## Plan shape
 
-After the runbook gates are satisfied, prepare one target at a time:
+After the runbook gates are satisfied, prepare the one shared state anchor:
 
 ```bash
 cp deploy/terraform/nebius/targets/development-eu-north1.tfvars.json.example /secure/path/development-eu-north1.tfvars.json

@@ -15,13 +15,17 @@ variable "project_id" {
 }
 
 variable "target" {
-  description = "One target and no other environment or region."
+  description = "One shared physical cluster with three environment-local bindings."
   type = object({
-    target_id                  = string
-    environment                = string
-    region                     = string
-    failure_domain             = string
-    namespace_name             = string
+    target_id        = string
+    cluster_scope_id = string
+    region           = string
+    failure_domain   = string
+    environment_bindings = map(object({
+      target_id       = string
+      namespace_name  = string
+      evidence_prefix = string
+    }))
     network_cidr               = string
     service_cidr               = string
     kubernetes_version         = string

@@ -1,10 +1,11 @@
 # Nebius infrastructure operations
 
-This runbook provisions and accepts the four isolated Kubernetes execution
-targets defined by `config/service-execution-topology.json`. It is intentionally
-separate from Kubernetes workload bootstrap: Terraform establishes the cloud
-foundation; a later, independently reviewed step installs target-local Loom
-resources and exercises them.
+This runbook provisions and accepts one shared Kubernetes execution cluster
+with the three isolated environment bindings defined by
+`config/service-execution-topology.json`. It is intentionally separate from
+Kubernetes workload bootstrap: Terraform establishes the cloud foundation; a
+later, independently reviewed step installs environment-local Loom resources
+and exercises them.
 
 ## Authority boundary
 
@@ -14,7 +15,8 @@ authorizes resource creation or spend.
 
 Before each mutable operation, record all of the following in the owning issue:
 
-1. exact target, tenant, project, region, profile, and saved-plan hash;
+1. exact cluster scope, environment bindings, tenant, project, region, profile,
+   and saved-plan hash;
 2. resources created or changed and the maximum node count;
 3. current Nebius hourly and 730-hour monthly estimate, including disks,
    public IPs, object storage, egress, taxes, and any items the calculator omits;
@@ -30,7 +32,7 @@ resource was created during that preflight.
 
 ## Authentication and state prerequisites
 
-Use one Nebius CLI profile and one existing project per target. Browser login
+Use one Nebius CLI profile and one existing project for the shared cluster. Browser login
 alone does not configure the CLI. For a human-driven, auditable development
 apply:
 
@@ -49,13 +51,13 @@ Do not print or commit the profile configuration. Automation must use a
 dedicated service account with reviewed least privilege and an authorized-key
 profile, never a copied human token.
 
-Each target needs a pre-existing versioned state bucket with object access
+The cluster needs a pre-existing versioned state bucket with object access
 limited to its operators and CI identity. Bootstrap that bucket in a separately
 approved operation, enable access logging and retention appropriate to state,
 and record its resource ID. Never put access keys in `.tfbackend` files; supply
 short-lived or profile-backed S3 credentials through the approved secret
-channel. Confirm that the four backend keys remain distinct and that
-`use_lockfile = true`.
+channel. Reuse the existing development remote-state key so convergence cannot
+fork the live cluster into a new state, and confirm `use_lockfile = true`.
 
 ## Read-only preflight and saved plan
 
@@ -69,10 +71,10 @@ terraform -chdir=deploy/terraform/nebius/modules/execution-target validate
 terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 ```
 
-Copy one target and matching backend example to a protected directory. Replace
-the placeholder tenant, project, globally unique bucket names, and state bucket;
-do not change topology fields without changing and reviewing the canonical
-topology contract.
+Copy the sole shared-cluster input and its existing backend anchor to a protected
+directory. Replace the placeholder tenant, project, globally unique bucket
+name, and state bucket; do not change topology fields without changing and
+reviewing the canonical topology contract.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -86,11 +88,12 @@ terraform -chdir=deploy/terraform/nebius/stack show -json "$LOOM_NB_PLAN" > "$LO
 shasum -a 256 "$LOOM_NB_PLAN" "$LOOM_NB_PLAN.json"
 ```
 
-Review that the plan is create-only for the intended target, nodes have no
-public IP fields, the API is private unless exact non-world operator CIDRs were
-approved, both node groups forbid reservations, production keeps three etcd
-members and one warm execution node, and no unrelated project resource changes.
-Scan the JSON for secrets before retaining it as evidence.
+Review that the plan touches only the shared cluster state, nodes have no public
+IP fields, the API is private unless exact non-world operator CIDRs were
+approved, both node groups forbid reservations, execution minimum remains zero,
+all three environment bindings retain distinct namespaces/evidence prefixes,
+and no unrelated project resource changes. Scan the JSON for secrets before
+retaining it as evidence.
 
 ## Authorized apply and convergence
 
@@ -111,10 +114,9 @@ audited, and only the intended groups have access.
 
 Nebius provider `0.6.46` has no Terraform resource for provider monitoring,
 alerts, dashboards, or billing budgets. The target outputs are the durable
-identity input to #1552's collector, alert, and spend-control layer. Until that
-layer and an account-side budget are configured and read back, record
-observability/budget as an open acceptance blocker; audit logs alone are not a
-substitute.
+identity input to #1552's collector, alert, and accounting layer. Account-side
+budget enforcement is separately configurable, while telemetry and cost
+readback remain acceptance evidence; audit logs alone are not a substitute.
 
 For a private control plane, run `kubectl` from an approved VM in the same
 region and subnet. For an approved restricted public endpoint, use `--external`.
@@ -136,8 +138,8 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
 
 1. Apply only `development-eu-north1` with execution bounds `0..1`.
 2. Prove Terraform convergence and cloud-side Ready/readback.
-3. Create the target namespace with its canonical topology labels and install
-   only the target-local image-pull and evidence identities.
+3. Create only the development binding namespace with its canonical topology
+   labels and install only its environment-local identities/policies.
 4. Run a system-node connectivity pod and record node identity, DNS, HTTPS
    egress, logs, exit code, and deletion.
 5. Run one execution pod with the required toleration and node selector. Record
@@ -145,10 +147,12 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    artifact upload/readback. Delete the pod and verify no workload remains.
 6. From execution minimum zero, submit one bounded pod, observe the execution
    group scale to one, complete it, delete it, and observe scale-down to zero.
-7. Attempt a cross-target namespace, registry, bucket-prefix, and credential
+7. Create the separately reviewed staging/production bindings without traffic,
+   then attempt cross-environment namespace, bucket-prefix, and credential
    access; acceptance requires denial.
 8. Only after development passes, repeat the same gates in staging. Production
-   and the eu-west1 disaster-recovery target require separate approvals.
+   work and traffic require separate approval. A second cluster or region is
+   outside baseline scope.
 
 A generic Linux pod proves Kubernetes scheduling and network plumbing only. It
 does not prove hostile-workload isolation, Loom scheduler/worker/model/verifier
@@ -178,10 +182,10 @@ evidence-writers group only through a reviewed target-local bootstrap change.
 
 ## Upgrade, scaling, and incidents
 
-- Upgrade development, then staging, then one production region at a time.
-  Preserve `max_surge=1`, `max_unavailable=0`; record drain and replacement
-  evidence before continuing.
-- Change only one target variable file per plan. Quota exhaustion must leave
+- A cluster/node upgrade affects all three bindings. Disable new placement,
+  preserve `max_surge=1` and `max_unavailable=0`, and record active-workload
+  retry/drain evidence before restoring each environment.
+- Change only the shared cluster variable file per plan. Quota exhaustion must leave
   work queued and observable; never increase limits or swap to reserved/GPU
   capacity silently.
 - On a target incident, set routing health false, stop new placement, preserve
@@ -191,12 +195,12 @@ evidence-writers group only through a reviewed target-local bootstrap change.
   prove the old credential fails, the new identity has only its expected target
   access, and no kubeconfig or key entered source control or logs.
 
-## Disaster recovery and destruction rehearsal
+## Recovery and destruction rehearsal
 
-The eu-west1 production target is an isolated secondary, not a shared-state
-extension. A DR rehearsal must first block new north placement, verify west
-health and compatible images, run the same one-pod acceptance, then explicitly
-switch routing. Record failover and failback separately.
+Remote-state/configuration recovery of the shared cluster remains required. A
+second cluster, eu-west1 target, or regional failover is not a baseline recovery
+mechanism and must not be created without a separately accepted RTO/RPO,
+isolation, compliance, or capacity requirement.
 
 Destruction is a distinct owner-approved operation. First export redacted
 outputs, provider-side resource lists, evidence-object hashes, state version,
@@ -205,7 +209,7 @@ route references the target. Review `terraform plan -destroy`, disclose the
 residual state bucket, evidence objects, logs, snapshots, public IPs, and egress
 charges, then obtain explicit approval for the saved destroy plan.
 
-After destroy, read back the Nebius project: cluster, node groups, target VPC,
+After destroy, read back the Nebius project: cluster, node groups, shared VPC,
 registry, IAM resources, and evidence bucket must match the approved retention
 decision. A restore rehearsal starts from the versioned remote state and
 reviewed target inputs, applies to the same isolated target, repeats the entire

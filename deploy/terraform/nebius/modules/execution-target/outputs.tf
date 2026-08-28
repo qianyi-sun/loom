@@ -1,12 +1,12 @@
 output "target" {
-  description = "Non-secret immutable target identity for Loom routing and evidence."
+  description = "Non-secret shared-cluster identity plus its environment-local bindings."
   value = {
-    target_id      = var.target_id
-    environment    = var.environment
-    region         = var.region
-    failure_domain = var.failure_domain
-    namespace_name = var.namespace_name
-    project_id     = var.project_id
+    state_anchor_id      = var.target_id
+    cluster_scope_id     = var.cluster_scope_id
+    region               = var.region
+    failure_domain       = var.failure_domain
+    environment_bindings = var.environment_bindings
+    project_id           = var.project_id
   }
 }
 
@@ -49,9 +49,15 @@ output "registry" {
 
 output "evidence" {
   value = {
-    bucket_name     = nebius_storage_v1_bucket.evidence.name
-    writer_group_id = nebius_iam_v1_group.evidence_writers.id
-    prefix          = "${var.target_id}/"
+    bucket_name = nebius_storage_v1_bucket.evidence.name
+    writer_group_ids = {
+      for environment, group in nebius_iam_v1_group.evidence_writers :
+      environment => group.id
+    }
+    prefixes = {
+      for environment, binding in var.environment_bindings :
+      environment => "${binding.evidence_prefix}/"
+    }
   }
 }
 

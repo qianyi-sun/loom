@@ -70,6 +70,7 @@ def test_provider_binding_lives_on_regional_execution_target() -> None:
         target_id="nebius-eu-north1-production",
         logical_pool_id="nebius-cpu",
         execution_class_id="linux-amd64-cpu-pod-v1",
+        cluster_scope_id="nebius-eu-north1-shared",
         environment="production",
         provider="nebius",
         region="eu-north1",
@@ -123,11 +124,12 @@ def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> Non
         )
 
 
-def test_topology_requires_environment_isolation_and_two_production_regions() -> None:
+def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
     base = {
         "schema_version": "loom.execution-target.v1",
         "logical_pool_id": "nebius-cpu",
         "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "cluster_scope_id": "nebius-eu-north1-shared",
         "provider": "nebius",
         "region": "eu-north1",
         "failure_domain": "north",
@@ -156,24 +158,18 @@ def test_topology_requires_environment_isolation_and_two_production_regions() ->
             "targets": [
                 target("nebius-dev", "development"),
                 target("nebius-staging", "staging"),
-                target("nebius-prod-north", "production"),
-                target(
-                    "nebius-prod-west",
-                    "production",
-                    region="eu-west1",
-                    failure_domain="west",
-                    health_role="secondary",
-                ),
+                target("nebius-prod", "production"),
             ],
         }
     )
-    assert len(topology.targets) == 4
+    assert len(topology.targets) == 3
+    assert {target.cluster_scope_id for target in topology.targets} == {
+        "nebius-eu-north1-shared"
+    }
 
     invalid = topology.model_dump()
-    invalid["targets"] = [
-        row for row in invalid["targets"] if row["target_id"] != "nebius-prod-west"
-    ]
-    with pytest.raises(ValidationError, match="at least 4 items"):
+    invalid["targets"][2]["cluster_scope_id"] = "nebius-eu-west1-secondary"
+    with pytest.raises(ValidationError, match="same physical cluster scope"):
         ExecutionTopologyV1.model_validate(invalid)
 
 

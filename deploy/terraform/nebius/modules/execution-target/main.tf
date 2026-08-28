@@ -1,8 +1,12 @@
 locals {
   resource_prefix = replace(var.target_id, "nebius-", "loom-")
+  # Preserve the labels already attached to the live development-origin
+  # resources. Some Nebius IAM relationship resources replace on metadata-only
+  # label changes. The physical shared scope is carried by the contract/output
+  # and node template without churning those authorities.
   common_labels = merge(var.labels, {
     "loom-target"      = var.target_id
-    "loom-environment" = var.environment
+    "loom-environment" = "development"
     "loom-region"      = var.region
     "loom-managed-by"  = "terraform"
   })
@@ -11,31 +15,21 @@ locals {
 resource "terraform_data" "contract" {
   input = {
     target_id      = var.target_id
-    environment    = var.environment
+    cluster_scope  = var.cluster_scope_id
     region         = var.region
     failure_domain = var.failure_domain
-    namespace_name = var.namespace_name
+    bindings       = var.environment_bindings
   }
 
   lifecycle {
     precondition {
-      condition     = strcontains(var.target_id, var.region) && endswith(var.target_id, var.environment)
-      error_message = "target_id must encode the exact region and environment."
+      condition     = strcontains(var.target_id, var.region) && contains([for binding in values(var.environment_bindings) : binding.target_id], var.target_id)
+      error_message = "the stable target_id anchor must belong to this shared cluster's region and bindings."
     }
 
     precondition {
       condition     = var.execution_min_nodes <= var.execution_max_nodes
       error_message = "execution_min_nodes cannot exceed execution_max_nodes."
-    }
-
-    precondition {
-      condition     = var.environment != "production" || var.control_plane_etcd_size == 3
-      error_message = "Production targets require a three-member HA control plane."
-    }
-
-    precondition {
-      condition     = var.environment != "production" || var.execution_min_nodes >= 1
-      error_message = "Production targets require at least one warm execution node."
     }
 
   }
@@ -131,10 +125,20 @@ resource "nebius_iam_v1_access_permit" "node_registry_pull" {
   labels      = local.common_labels
 }
 
+moved {
+  from = nebius_iam_v1_group.evidence_writers
+  to   = nebius_iam_v1_group.evidence_writers["development"]
+}
+
 resource "nebius_iam_v1_group" "evidence_writers" {
+  for_each = var.environment_bindings
+
   parent_id = var.tenant_id
-  name      = "${local.resource_prefix}-evidence-writers"
-  labels    = local.common_labels
+  name      = "${replace(each.value.target_id, "nebius-", "loom-")}-evidence-writers"
+  labels = merge(local.common_labels, {
+    "loom-target"      = each.value.target_id
+    "loom-environment" = each.key
+  })
 }
 
 resource "nebius_storage_v1_bucket" "evidence" {
@@ -148,11 +152,13 @@ resource "nebius_storage_v1_bucket" "evidence" {
   versioning_policy     = "ENABLED"
 
   bucket_policy = {
-    rules = [{
-      group_id = nebius_iam_v1_group.evidence_writers.id
-      paths    = ["${var.target_id}/*"]
-      roles    = ["storage.object-editor"]
-    }]
+    rules = [
+      for environment, binding in var.environment_bindings : {
+        group_id = nebius_iam_v1_group.evidence_writers[environment].id
+        paths    = ["${binding.evidence_prefix}/*"]
+        roles    = ["storage.object-editor"]
+      }
+    ]
   }
 
   lifecycle_configuration = {
@@ -211,9 +217,8 @@ resource "nebius_mk8s_v1_node_group" "system" {
     max_pods           = 32
     metadata = {
       labels = {
-        "loom.nebius/node-role"   = "system"
-        "loom.nebius/target-id"   = var.target_id
-        "loom.nebius/environment" = var.environment
+        "loom.nebius/node-role"        = "system"
+        "loom.nebius/cluster-scope-id" = var.cluster_scope_id
       }
     }
     boot_disk = {
@@ -262,9 +267,8 @@ resource "nebius_mk8s_v1_node_group" "execution" {
     max_pods           = 16
     metadata = {
       labels = {
-        "loom.nebius/node-role"   = "execution"
-        "loom.nebius/target-id"   = var.target_id
-        "loom.nebius/environment" = var.environment
+        "loom.nebius/node-role"        = "execution"
+        "loom.nebius/cluster-scope-id" = var.cluster_scope_id
       }
     }
     taints = [{

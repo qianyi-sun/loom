@@ -19,7 +19,7 @@ variable "project_id" {
 }
 
 variable "target_id" {
-  description = "Execution target identity from config/service-execution-topology.json."
+  description = "Stable state/resource anchor retained from the development cluster during shared-cluster convergence."
   type        = string
 
   validation {
@@ -28,13 +28,13 @@ variable "target_id" {
   }
 }
 
-variable "environment" {
-  description = "Loom environment isolated by this target."
+variable "cluster_scope_id" {
+  description = "Physical shared-cluster identity bound by every logical environment target."
   type        = string
 
   validation {
-    condition     = contains(["development", "staging", "production"], var.environment)
-    error_message = "environment must be development, staging, or production."
+    condition     = can(regex("^nebius-[a-z0-9-]+-shared$", var.cluster_scope_id))
+    error_message = "cluster_scope_id must identify the shared Nebius cluster."
   }
 }
 
@@ -58,13 +58,27 @@ variable "failure_domain" {
   }
 }
 
-variable "namespace_name" {
-  description = "Target-local Kubernetes namespace used by the actuator and attempts."
-  type        = string
+variable "environment_bindings" {
+  description = "Exactly one isolated namespace and evidence prefix for each Loom environment on the shared cluster."
+  type = map(object({
+    target_id       = string
+    namespace_name  = string
+    evidence_prefix = string
+  }))
 
   validation {
-    condition     = can(regex("^loom-nebius-(development|staging|production(-north|-west)?)$", var.namespace_name))
-    error_message = "namespace_name must use the accepted isolated Loom Nebius namespace."
+    condition     = toset(keys(var.environment_bindings)) == toset(["development", "staging", "production"])
+    error_message = "environment_bindings must contain exactly development, staging, and production."
+  }
+
+  validation {
+    condition = alltrue([
+      for environment, binding in var.environment_bindings :
+      can(regex("^nebius-[a-z0-9-]+-${environment}$", binding.target_id)) &&
+      binding.namespace_name == "loom-nebius-${environment}" &&
+      binding.evidence_prefix == binding.target_id
+    ])
+    error_message = "every environment binding must use its canonical target, namespace, and evidence prefix."
   }
 }
 
@@ -100,7 +114,7 @@ variable "kubernetes_version" {
 }
 
 variable "control_plane_etcd_size" {
-  description = "One for disposable development; three for staging and production HA."
+  description = "Pinned etcd member count for the shared cluster; HA expansion requires a separately accepted SLO."
   type        = number
 
   validation {
@@ -133,7 +147,7 @@ variable "system_node_count" {
 }
 
 variable "execution_min_nodes" {
-  description = "Minimum regular on-demand execution nodes. Development and staging may be zero."
+  description = "Minimum regular on-demand execution nodes; the baseline shared pool scales to zero."
   type        = number
 
   validation {

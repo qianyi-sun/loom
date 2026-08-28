@@ -4,10 +4,10 @@ module "execution_target" {
   tenant_id                  = var.tenant_id
   project_id                 = var.project_id
   target_id                  = var.target.target_id
-  environment                = var.target.environment
+  cluster_scope_id           = var.target.cluster_scope_id
   region                     = var.target.region
   failure_domain             = var.target.failure_domain
-  namespace_name             = var.target.namespace_name
+  environment_bindings       = var.target.environment_bindings
   network_cidr               = var.target.network_cidr
   service_cidr               = var.target.service_cidr
   kubernetes_version         = var.target.kubernetes_version

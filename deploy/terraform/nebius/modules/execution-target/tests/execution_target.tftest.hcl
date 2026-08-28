@@ -1,13 +1,29 @@
 mock_provider "nebius" {}
 
 variables {
-  tenant_id                  = "tenant-e00test"
-  project_id                 = "project-e00test"
-  target_id                  = "nebius-eu-north1-development"
-  environment                = "development"
-  region                     = "eu-north1"
-  failure_domain             = "development-eu-north1"
-  namespace_name             = "loom-nebius-development"
+  tenant_id        = "tenant-e00test"
+  project_id       = "project-e00test"
+  target_id        = "nebius-eu-north1-development"
+  cluster_scope_id = "nebius-eu-north1-shared"
+  region           = "eu-north1"
+  failure_domain   = "nebius-eu-north1-shared"
+  environment_bindings = {
+    development = {
+      target_id       = "nebius-eu-north1-development"
+      namespace_name  = "loom-nebius-development"
+      evidence_prefix = "nebius-eu-north1-development"
+    }
+    staging = {
+      target_id       = "nebius-eu-north1-staging"
+      namespace_name  = "loom-nebius-staging"
+      evidence_prefix = "nebius-eu-north1-staging"
+    }
+    production = {
+      target_id       = "nebius-eu-north1-production"
+      namespace_name  = "loom-nebius-production"
+      evidence_prefix = "nebius-eu-north1-production"
+    }
+  }
   network_cidr               = "10.0.0.0/16"
   service_cidr               = "172.20.0.0/16"
   control_plane_etcd_size    = 1
@@ -69,18 +85,23 @@ run "public_control_plane_is_cidr_bounded" {
   }
 }
 
-run "production_rejects_zero_warm_execution" {
+run "shared_cluster_rejects_missing_environment_binding" {
   command = plan
 
   variables {
-    target_id               = "nebius-eu-north1-production"
-    environment             = "production"
-    failure_domain          = "production-eu-north1"
-    namespace_name          = "loom-nebius-production-north"
-    control_plane_etcd_size = 3
-    execution_min_nodes     = 0
-    execution_max_nodes     = 50
+    environment_bindings = {
+      development = {
+        target_id       = "nebius-eu-north1-development"
+        namespace_name  = "loom-nebius-development"
+        evidence_prefix = "nebius-eu-north1-development"
+      }
+      staging = {
+        target_id       = "nebius-eu-north1-staging"
+        namespace_name  = "loom-nebius-staging"
+        evidence_prefix = "nebius-eu-north1-staging"
+      }
+    }
   }
 
-  expect_failures = [terraform_data.contract]
+  expect_failures = [var.environment_bindings]
 }

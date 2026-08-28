@@ -28,7 +28,9 @@ def test_topology_drift_is_rejected(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["target"]["namespace_name"] = "wrong-namespace"
+    document["target"]["environment_bindings"]["development"][
+        "namespace_name"
+    ] = "wrong-namespace"
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ContractError, match="namespace_name must match"):
@@ -37,7 +39,7 @@ def test_topology_drift_is_rejected(tmp_path: Path) -> None:
 
 def test_public_world_control_plane_is_rejected(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
-    path = nebius_root / "targets" / "staging-eu-north1.tfvars.json.example"
+    path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"
     document = json.loads(path.read_text(encoding="utf-8"))
     document["target"]["public_control_plane_cidrs"] = ["0.0.0.0/0"]
     path.write_text(json.dumps(document), encoding="utf-8")
