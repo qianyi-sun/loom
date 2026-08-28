@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from sqlalchemy import Engine
+
 from loom.data_lifecycle_capacity import (
     collect_staging_capacity,
     collect_staging_capacity_from_drives,
@@ -34,10 +36,12 @@ from loom.data_lifecycle_operator import (
     run_lifecycle_operator,
 )
 from loom.data_lifecycle_runtime import (
+    LifecycleRuntime,
     build_lifecycle_engine,
     build_lifecycle_object_store_client,
     load_lifecycle_runtime,
 )
+from loom.staging_mutation_coordination import hold_staging_mutation_guard
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -80,8 +84,41 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
             raise RuntimeError("--capacity-source filesystem cannot use --expected-drive-count")
+        if args.capacity_source == "filesystem" and not args.filesystem_path:
+            raise RuntimeError(
+                "--capacity-source filesystem requires at least one --filesystem-path"
+            )
     runtime = load_lifecycle_runtime()
     engine = build_lifecycle_engine(runtime.database)
+    try:
+        with hold_staging_mutation_guard(engine) as acquired:
+            if not acquired:
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "action": args.action,
+                            "capacity": None,
+                            "coordination": {"status": "rollout_guard_active"},
+                            "gc": None,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+                return 0
+            return _run_maintenance(args, runtime=runtime, engine=engine)
+    finally:
+        engine.dispose()
+
+
+def _run_maintenance(
+    args: argparse.Namespace,
+    *,
+    runtime: LifecycleRuntime,
+    engine: Engine,
+) -> int:
     client = build_lifecycle_object_store_client(runtime.object_store)
     try:
         now = datetime.now(UTC)
@@ -142,10 +179,6 @@ def main(argv: list[str] | None = None) -> int:
                 observed_at=now,
             )
         else:
-            if not args.filesystem_path:
-                raise RuntimeError(
-                    "--capacity-source filesystem requires at least one --filesystem-path"
-                )
             capacity = collect_staging_capacity(
                 namespace=args.namespace,
                 objects=observed,
@@ -197,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     finally:
         client.close()
-        engine.dispose()
     return 0
 
 

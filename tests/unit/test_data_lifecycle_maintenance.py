@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,6 +12,19 @@ import pytest
 
 from loom import data_lifecycle_maintenance
 from loom.data_lifecycle_operator import OperatorAction
+
+
+@pytest.fixture(autouse=True)
+def _acquired_mutation_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def acquired(_engine: object) -> Iterator[bool]:
+        yield True
+
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "hold_staging_mutation_guard",
+        acquired,
+    )
 
 
 def test_resume_action_uses_exact_authority_without_capacity_inventory(
@@ -377,3 +392,161 @@ def test_filesystem_source_rejects_expected_drive_count() -> None:
                 "1",
             ]
         )
+
+
+@pytest.mark.parametrize("action", ["auto", "capacity", "resume"])
+def test_guard_denial_is_a_successful_noop_before_object_store_or_inventory(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = SimpleNamespace(database=object(), object_store=object())
+    engine = Mock()
+    client_builder = Mock(return_value=Mock())
+    inventory_builder = Mock(return_value=Mock())
+    capacity_store_builder = Mock(return_value=Mock())
+    collect_capacity = Mock()
+    run_gc = Mock()
+
+    @contextmanager
+    def denied(_engine: object) -> Iterator[bool]:
+        yield False
+
+    monkeypatch.setattr(
+        data_lifecycle_maintenance, "load_lifecycle_runtime", Mock(return_value=runtime)
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance, "build_lifecycle_engine", Mock(return_value=engine)
+    )
+    monkeypatch.setattr(data_lifecycle_maintenance, "hold_staging_mutation_guard", denied)
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "build_lifecycle_object_store_client",
+        client_builder,
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "S3ObservedObjectInventory",
+        inventory_builder,
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "SqlAlchemyStagingCapacityStore",
+        capacity_store_builder,
+    )
+    monkeypatch.setattr(data_lifecycle_maintenance, "collect_staging_capacity", collect_capacity)
+    monkeypatch.setattr(data_lifecycle_maintenance, "run_lifecycle_operator", run_gc)
+
+    argv = [
+        "--action",
+        action,
+        "--namespace",
+        "loom-staging",
+        "--bucket",
+        "loom-staging-artifacts",
+    ]
+    if action == "resume":
+        argv.extend(
+            (
+                "--resume-run-id",
+                "54e079e0-c321-41b8-a0c0-34601e23dc42",
+                "--request-id",
+                "req-gc-resume-live",
+            )
+        )
+    else:
+        argv.extend(("--filesystem-path", "/data"))
+
+    assert data_lifecycle_maintenance.main(argv) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "action": action,
+        "capacity": None,
+        "coordination": {"status": "rollout_guard_active"},
+        "gc": None,
+        "schema_version": 1,
+    }
+    client_builder.assert_not_called()
+    inventory_builder.assert_not_called()
+    capacity_store_builder.assert_not_called()
+    collect_capacity.assert_not_called()
+    run_gc.assert_not_called()
+    engine.dispose.assert_called_once_with()
+
+
+@pytest.mark.parametrize("action", ["auto", "capacity", "resume"])
+def test_acquired_guard_spans_action_failure_and_client_cleanup(
+    action: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SimpleNamespace(database=object(), object_store=object())
+    engine = Mock()
+    client = Mock()
+    object_inventory = Mock()
+    operation_failure = RuntimeError(f"{action} operation failed")
+    if action == "resume":
+        run_gc = Mock(side_effect=operation_failure)
+    else:
+        object_inventory.load.side_effect = operation_failure
+        run_gc = Mock()
+    guard_events: list[str] = []
+
+    @contextmanager
+    def tracking_guard(observed_engine: object) -> Iterator[bool]:
+        assert observed_engine is engine
+        guard_events.append("entered")
+        try:
+            yield True
+        finally:
+            assert client.close.call_count == 1
+            guard_events.append("released")
+
+    monkeypatch.setattr(
+        data_lifecycle_maintenance, "load_lifecycle_runtime", Mock(return_value=runtime)
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance, "build_lifecycle_engine", Mock(return_value=engine)
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "build_lifecycle_object_store_client",
+        Mock(return_value=client),
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "S3ObservedObjectInventory",
+        Mock(return_value=object_inventory),
+    )
+    monkeypatch.setattr(
+        data_lifecycle_maintenance,
+        "hold_staging_mutation_guard",
+        tracking_guard,
+    )
+    monkeypatch.setattr(data_lifecycle_maintenance, "run_lifecycle_operator", run_gc)
+
+    argv = [
+        "--action",
+        action,
+        "--namespace",
+        "loom-staging",
+        "--bucket",
+        "loom-staging-artifacts",
+    ]
+    if action == "resume":
+        argv.extend(
+            (
+                "--resume-run-id",
+                "54e079e0-c321-41b8-a0c0-34601e23dc42",
+                "--request-id",
+                "req-gc-resume-live",
+            )
+        )
+    else:
+        argv.extend(("--filesystem-path", "/data"))
+
+    with pytest.raises(RuntimeError, match=f"{action} operation failed"):
+        data_lifecycle_maintenance.main(argv)
+
+    assert guard_events == ["entered", "released"]
+    client.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
