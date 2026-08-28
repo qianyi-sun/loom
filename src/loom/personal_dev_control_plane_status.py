@@ -552,6 +552,20 @@ def _security_boundary_matches(
             or set(actual_spec) != set(expected_spec)
         ):
             return False
+    if kind == "Ingress":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        expected_metadata = _metadata(expected)
+        actual_metadata = _metadata(actual)
+        if (
+            not isinstance(expected_spec, Mapping)
+            or not isinstance(actual_spec, Mapping)
+            or set(actual_spec) != set(expected_spec)
+            or expected_metadata is None
+            or actual_metadata is None
+            or actual_metadata.get("annotations") != expected_metadata.get("annotations", {})
+        ):
+            return False
     if kind == "Service":
         expected_spec = expected.get("spec")
         actual_spec = actual.get("spec")

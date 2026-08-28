@@ -83,8 +83,11 @@ def _release_value() -> dict[str, Any]:
     }
 
 
-def _write_release(tmp_path: Path) -> tuple[PersonalDevTrustedRelease, str]:
-    payload = _canonical(_release_value())
+def _write_release(
+    tmp_path: Path,
+    value: dict[str, Any] | None = None,
+) -> tuple[PersonalDevTrustedRelease, str]:
+    payload = _canonical(_release_value() if value is None else value)
     path = tmp_path / "trusted-release.json"
     path.write_bytes(payload)
     path.chmod(0o600)
@@ -253,6 +256,27 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         plan,
         now=_NOW,
     )
+
+
+def test_legacy_release_images_remain_canonical_in_v1_plan_types(tmp_path: Path) -> None:
+    profile = load_personal_dev_control_plane_profile(_PROFILE_PATH)
+    release_value = _release_value()
+    release_value["schema_version"] = 2
+    del release_value["images"]["loom_web"]
+    release, release_sha256 = _write_release(tmp_path, release_value)
+    acceptance_value = _plan_value(profile, release, release_sha256)
+    acceptance_path, acceptance_sha256 = _write_plan(tmp_path, acceptance_value)
+
+    acceptance = load_personal_dev_acceptance_plan(acceptance_path, acceptance_sha256)
+
+    assert acceptance.schema_version == 1
+    assert acceptance.canonical_bytes() == acceptance_path.read_bytes()
+    operational_value = _operational_plan_value(acceptance_value)
+    operational_path, operational_sha256 = _write_plan(tmp_path, operational_value)
+
+    operational = load_personal_dev_operational_plan(operational_path, operational_sha256)
+
+    assert operational.canonical_bytes() == operational_path.read_bytes()
 
 
 def test_acceptance_plan_v2_requires_exactly_two_sorted_owners(tmp_path: Path) -> None:

@@ -1295,6 +1295,8 @@ def test_acceptance_status_allows_monotonic_manager_configuration_advancement(
         ("admission-policy-namespace-selector", "cluster_resource_drift"),
         ("admission-policy-object-selector", "cluster_resource_drift"),
         ("default-deny-ingress", "resource_inventory_drift"),
+        ("management-ingress-default-backend", "resource_inventory_drift"),
+        ("management-ingress-snippet", "resource_inventory_drift"),
         ("management-host-network", "resource_inventory_drift"),
         ("management-pod-host-network", "resource_inventory_drift"),
         ("postgres-node-port", "resource_inventory_drift"),
@@ -1344,6 +1346,26 @@ def test_acceptance_status_rejects_live_authority_or_exposure_widening(
             "loom-personal-dev-default-deny",
         )
         policy["spec"]["ingress"] = [{}]
+    elif mutation == "management-ingress-default-backend":
+        ingress = _item(
+            runner,
+            _NAMESPACED,
+            "Ingress",
+            "loom-personal-dev-management",
+        )
+        ingress["spec"]["defaultBackend"] = {
+            "service": {"name": "loom-dev-postgres", "port": {"number": 5432}}
+        }
+    elif mutation == "management-ingress-snippet":
+        ingress = _item(
+            runner,
+            _NAMESPACED,
+            "Ingress",
+            "loom-personal-dev-management",
+        )
+        ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/server-snippet"] = (
+            "return 418;"
+        )
     elif mutation == "management-host-network":
         deployment = _item(
             runner,

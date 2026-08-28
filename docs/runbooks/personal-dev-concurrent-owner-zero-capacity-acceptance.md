@@ -479,10 +479,17 @@ expected, while regression is a stop condition.
         return 1
       fi
       if ! jq -e --arg host "$management_host" '
+        (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+        .metadata.annotations == {
+          "cert-manager.io/cluster-issuer":"letsencrypt-prod",
+          "nginx.ingress.kubernetes.io/proxy-body-size":"512m",
+          "nginx.ingress.kubernetes.io/proxy-read-timeout":"300"
+        } and
+        .spec.ingressClassName == "nginx" and
         .spec.rules == [{host:$host,http:{paths:[
           {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
           {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
-        ]}}] and .spec.tls[0].hosts == [$host]
+        ]}}] and .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}]
       ' "$route_ingress" >/dev/null; then
         rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
         return 1

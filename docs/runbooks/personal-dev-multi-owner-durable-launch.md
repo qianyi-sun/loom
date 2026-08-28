@@ -485,10 +485,17 @@ assert_web_api_route_contract() {
     return 1
   fi
   if ! jq -e --arg host "$management_host" '
+    (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+    .metadata.annotations == {
+      "cert-manager.io/cluster-issuer":"letsencrypt-prod",
+      "nginx.ingress.kubernetes.io/proxy-body-size":"512m",
+      "nginx.ingress.kubernetes.io/proxy-read-timeout":"300"
+    } and
+    .spec.ingressClassName == "nginx" and
     .spec.rules == [{host:$host,http:{paths:[
       {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
       {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
-    ]}}] and .spec.tls[0].hosts == [$host]
+    ]}}] and .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}]
   ' "$route_ingress" >/dev/null; then
     rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
     return 1
@@ -565,10 +572,17 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
+  (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+  .metadata.annotations == {
+    "cert-manager.io/cluster-issuer":"letsencrypt-prod",
+    "nginx.ingress.kubernetes.io/proxy-body-size":"512m",
+    "nginx.ingress.kubernetes.io/proxy-read-timeout":"300"
+  } and
+  .spec.ingressClassName == "nginx" and
   .spec.rules == [{host:$host,http:{paths:[
     {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
     {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
-  ]}}] and .spec.tls[0].hosts == [$host]
+  ]}}] and .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}]
 ' "$evidence_dir/management.ingress.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   certificate/loom-personal-dev-management-tls -o json \

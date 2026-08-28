@@ -258,8 +258,15 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
+  (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+  .metadata.annotations == {
+    "cert-manager.io/cluster-issuer":"letsencrypt-prod",
+    "nginx.ingress.kubernetes.io/proxy-body-size":"512m",
+    "nginx.ingress.kubernetes.io/proxy-read-timeout":"300"
+  } and
+  .spec.ingressClassName == "nginx" and
   .spec.rules == [{host:$host,http:.spec.rules[0].http}] and
-  .spec.tls[0].hosts == [$host] and
+  .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}] and
   .spec.rules[0].http.paths == [
     {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
     {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
@@ -270,20 +277,24 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   > "$evidence_dir/management.certificate.json"
 jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' \
   "$evidence_dir/management.certificate.json" >/dev/null
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
   "https://$management_host/api/v1/health" \
   > "$evidence_dir/management.shadow-health.json"
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
   "https://$management_host/loom-frontend-config.json" \
   > "$evidence_dir/management.frontend-config.json"
 jq -e --arg origin "https://$management_host" '
   .environment == "development" and .routePath == "" and
   .apiBase == "" and .apiRouteBase == ($origin + "/api")
 ' "$evidence_dir/management.frontend-config.json" >/dev/null
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
   "https://$management_host/auth/reset" \
   > "$evidence_dir/management.reset-spa.html"
 grep -Fq '<div id="root">' "$evidence_dir/management.reset-spa.html"
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "https://$management_host/auth/setup" \
+  > "$evidence_dir/management.setup-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.setup-spa.html"
 ```
 
 Do not use `--resolve`, `-k`, an alternate CA, or a local port-forward as DNS,
@@ -437,7 +448,7 @@ for url in \
   "https://$owner_name.dev.yylx.world/" \
   "https://cp-$owner_name.dev.yylx.world/healthz" \
   "https://gw-$owner_name.dev.yylx.world/healthz"; do
-  curl --fail --silent --show-error --proto '=https' --tlsv1.2 "$url" \
+  curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 "$url" \
     >> "$evidence_dir/launch-owner.routes.txt"
 done
 chmod 0600 "$evidence_dir/launch-owner.routes.txt"

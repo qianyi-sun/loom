@@ -1868,7 +1868,7 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
 def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
     assert (
         _document_sha256("docs/runbooks/personal-dev-durable-launch.md")
-        == "2cfc900de577e7a88f17fa3fff10145d25eed7a9d5a8d83f0159ca01ee746c38"
+        == "3eed45de41bd12b20dcb85f308bf093c32566350129eac9e25f1fafd5adaa248"
     )
 
 
@@ -1986,6 +1986,18 @@ def test_durable_launch_uses_the_exact_checkout_cli() -> None:
     assert "/home/hongjian/loom/.venv" not in runbook
 
 
+def test_durable_launch_bounds_every_public_web_probe_and_checks_both_auth_spas() -> None:
+    runbook = _read("docs/runbooks/personal-dev-durable-launch.md")
+    curl_commands = re.findall(r"(?m)^\s*curl(?:[^\n]|\\\n)*", runbook)
+
+    assert curl_commands
+    assert all("--disable" in command for command in curl_commands)
+    assert all("--connect-timeout 10" in command for command in curl_commands)
+    assert all("--max-time 30" in command for command in curl_commands)
+    assert '"https://$management_host/auth/reset"' in runbook
+    assert '"https://$management_host/auth/setup"' in runbook
+
+
 def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
 
@@ -2053,6 +2065,8 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
         ("web-port", 1),
         ("web-selector", 1),
         ("ingress-backend", 1),
+        ("ingress-default-backend", 1),
+        ("ingress-snippet", 1),
         ("frontend-config", 1),
         ("reset-route", 1),
         ("setup-route", 1),
@@ -2100,7 +2114,15 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
         }
     }
     ingress = {
+        "metadata": {
+            "annotations": {
+                "cert-manager.io/cluster-issuer": "letsencrypt-prod",
+                "nginx.ingress.kubernetes.io/proxy-body-size": "512m",
+                "nginx.ingress.kubernetes.io/proxy-read-timeout": "300",
+            }
+        },
         "spec": {
+            "ingressClassName": "nginx",
             "rules": [
                 {
                     "host": "loom-service.dev.yylx.world",
@@ -2130,9 +2152,18 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
                     },
                 }
             ],
-            "tls": [{"hosts": ["loom-service.dev.yylx.world"]}],
+            "tls": [
+                {
+                    "hosts": ["loom-service.dev.yylx.world"],
+                    "secretName": "loom-personal-dev-management-tls",
+                }
+            ],
         }
     }
+    if mutation == "ingress-default-backend":
+        ingress["spec"]["defaultBackend"] = {"service": {"name": "wrong"}}
+    if mutation == "ingress-snippet":
+        ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/server-snippet"] = "deny all;"
     frontend = {
         "apiBase": "",
         "apiRouteBase": frontend_api,

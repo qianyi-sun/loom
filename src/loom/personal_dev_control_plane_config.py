@@ -1064,6 +1064,13 @@ class PersonalDevTrustedImages:
     minio_client: str
 
 
+def _canonical_images(images: PersonalDevTrustedImages) -> dict[str, Any]:
+    value = _dataclass_value(images)
+    if images.loom_web is None:
+        value.pop("loom_web")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PersonalDevTrustedScanner:
     binary_platform: str
@@ -1087,11 +1094,8 @@ class PersonalDevTrustedRelease:
     release_evidence_sha256: str
 
     def canonical_value(self) -> dict[str, Any]:
-        images = _dataclass_value(self.images)
-        if self.images.loom_web is None:
-            images.pop("loom_web")
         return {
-            "images": images,
+            "images": _canonical_images(self.images),
             "release_evidence_sha256": self.release_evidence_sha256,
             "scanner": _dataclass_value(self.scanner),
             "schema_version": self.schema_version,
@@ -1208,7 +1212,7 @@ class PersonalDevAcceptancePlan:
             "principals": _dataclass_value(self.principals),
             "quotas": _dataclass_value(self.quotas),
             "release": {
-                "images": _dataclass_value(self.release.images),
+                "images": _canonical_images(self.release.images),
                 "release_evidence_sha256": self.release.release_evidence_sha256,
                 "shadow_manifest_sha256": self.release.shadow_manifest_sha256,
                 "trusted_release_sha256": self.release.trusted_release_sha256,
@@ -1302,7 +1306,7 @@ class PersonalDevOperationalPlan:
             "principals": _dataclass_value(self.principals),
             "quotas": _dataclass_value(self.quotas),
             "release": {
-                "images": _dataclass_value(self.release.images),
+                "images": _canonical_images(self.release.images),
                 "release_evidence_sha256": self.release.release_evidence_sha256,
                 "shadow_manifest_sha256": self.release.shadow_manifest_sha256,
                 "trusted_release_sha256": self.release.trusted_release_sha256,
