@@ -31,6 +31,46 @@ class CommandResult(Protocol):
 
 RenderManifest = Callable[[], str]
 ServerDryRun = Callable[[str], CommandResult]
+FieldOwnershipRetryRender = Callable[[str], str]
+
+_LIFECYCLE_CRONJOB_NAME = "loom-staging-data-lifecycle"
+
+
+def render_checkpoint_guard_field_ownership_payload(rendered_yaml: str) -> str:
+    """Represent only the lifecycle guard's temporary suspension in a dry-run."""
+    if not rendered_yaml.strip() or len(rendered_yaml.encode("utf-8")) > _MAX_RENDERED_BYTES:
+        raise ValueError("checkpoint guard manifest payload is invalid")
+    try:
+        documents = [
+            document for document in yaml.safe_load_all(rendered_yaml) if document is not None
+        ]
+    except yaml.YAMLError as exc:
+        raise ValueError("checkpoint guard manifest payload is invalid") from exc
+    if not documents or any(not isinstance(document, dict) for document in documents):
+        raise ValueError("checkpoint guard manifest resource set is invalid")
+    matches = [
+        document
+        for document in documents
+        if document.get("apiVersion") == "batch/v1"
+        and document.get("kind") == "CronJob"
+        and isinstance(document.get("metadata"), dict)
+        and document["metadata"].get("name") == _LIFECYCLE_CRONJOB_NAME
+        and document["metadata"].get("namespace") == "loom-staging"
+    ]
+    if len(matches) != 1:
+        raise ValueError("checkpoint guard lifecycle CronJob identity is invalid")
+    spec = matches[0].get("spec")
+    if not isinstance(spec, dict) or spec.get("suspend") is not False:
+        raise ValueError("checkpoint guard lifecycle CronJob suspension is invalid")
+    spec["suspend"] = True
+    guarded = yaml.safe_dump_all(documents, sort_keys=False, explicit_start=True)
+    if (
+        not isinstance(guarded, str)
+        or not guarded.strip()
+        or len(guarded.encode("utf-8")) > _MAX_RENDERED_BYTES
+    ):
+        raise ValueError("checkpoint guard manifest payload is invalid")
+    return guarded
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +107,7 @@ class ManifestRenderSession:
         server_dry_run: ServerDryRun,
         *,
         field_ownership_dry_run: ServerDryRun | None = None,
+        field_ownership_retry_render: FieldOwnershipRetryRender | None = None,
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
@@ -80,6 +121,7 @@ class ManifestRenderSession:
         self._field_ownership_dry_run = (
             server_dry_run if field_ownership_dry_run is None else field_ownership_dry_run
         )
+        self._field_ownership_retry_render = field_ownership_retry_render
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
@@ -141,6 +183,15 @@ class ManifestRenderSession:
             if artifact is None:
                 raise ValueError("manifest was not rendered by this preflight session")
             result = self._field_ownership_dry_run(artifact.rendered_yaml)
+            if result.returncode != 0 and self._field_ownership_retry_render is not None:
+                retry_rendered = self._field_ownership_retry_render(artifact.rendered_yaml)
+                if (
+                    not retry_rendered.strip()
+                    or retry_rendered == artifact.rendered_yaml
+                    or len(retry_rendered.encode("utf-8")) > _MAX_RENDERED_BYTES
+                ):
+                    raise ValueError("field-ownership retry manifest is invalid")
+                result = self._field_ownership_dry_run(retry_rendered)
             if result.returncode != 0:
                 raise ValueError("rendered manifests failed field-ownership dry-run")
             return artifact
@@ -275,9 +326,8 @@ def pin_rendered_manifest_images(
     exact_digests = dict(registry_digests)
     standing_images = {name for name, _path in ROLLOUT_IMAGES}
     all_images = {name for name, _path in ALL_BUILD_IMAGES}
-    if (
-        frozenset(exact_digests) not in {frozenset(standing_images), frozenset(all_images)}
-        or any(_IMAGE_ID_RE.fullmatch(value) is None for value in exact_digests.values())
+    if frozenset(exact_digests) not in {frozenset(standing_images), frozenset(all_images)} or any(
+        _IMAGE_ID_RE.fullmatch(value) is None for value in exact_digests.values()
     ):
         raise ValueError("registry manifest digest set is incomplete")
     try:
@@ -594,10 +644,12 @@ def _hash_json(value: object) -> str:
 
 
 __all__ = [
+    "FieldOwnershipRetryRender",
     "ManifestArtifact",
     "ManifestRenderSession",
     "RenderManifest",
     "ServerDryRun",
     "inspect_rendered_manifests",
     "pin_rendered_manifest_images",
+    "render_checkpoint_guard_field_ownership_payload",
 ]
