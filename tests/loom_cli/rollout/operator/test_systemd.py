@@ -448,7 +448,7 @@ class MutationGuardRunner:
                 argv,
                 0,
                 (
-                    "ActiveState=active\nSubState=running\nResult=success\n"
+                    "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
                     "ExecMainStatus=0\nMainPID=4321\n"
                     "ExecMainStartTimestamp=Mon 2026-08-27 20:00:00 UTC\n"
                     "ExecMainExitTimestamp=\n"
@@ -1183,6 +1183,7 @@ def test_start_failure_does_not_expose_captured_output() -> None:
 def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status() -> None:
     runner = RecordingRunner(
         stdout=(
+            "LoadState=loaded\n"
             "ActiveState=active\n"
             "SubState=running\n"
             "Result=success\n"
@@ -1213,6 +1214,7 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
             "--user",
             "show",
             "--no-pager",
+            "--property=LoadState",
             "--property=ActiveState",
             "--property=SubState",
             "--property=Result",
@@ -1225,10 +1227,45 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
     ]
 
 
-def test_show_returns_none_only_for_systemctl_not_found_status() -> None:
+def test_show_returns_none_for_systemctl_not_found_exit_status() -> None:
     runner = RecordingRunner(returncode=4, stderr="Unit does not exist")
 
     assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
+
+
+def test_show_returns_none_for_exit_zero_not_found_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
+            "ExecMainExitTimestamp=\n"
+        )
+    )
+
+    assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
+
+
+def test_show_rejects_contradictory_not_found_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=active\n"
+            "SubState=running\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=4321\n"
+            "ExecMainStartTimestamp=Mon 2026-07-13 20:00:00 UTC\n"
+            "ExecMainExitTimestamp=\n"
+        )
+    )
+
+    with pytest.raises(SystemdQueryError, match="LoadState"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
 
 
 def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
@@ -1248,6 +1285,7 @@ def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
             "--user",
             "show",
             "--no-pager",
+            "--property=LoadState",
             "--property=ActiveState",
             "--property=SubState",
             "--property=Result",
@@ -1278,17 +1316,17 @@ def test_show_backup_rejects_job_unit_identity_mismatch_before_query() -> None:
     [
         "",
         (
-            "ActiveState=active\nSubState=running\nResult=success\n"
+            "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
             "ExecMainStatus=0\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nUnknownProperty=value\n"
         ),
         (
-            "ActiveState=active\nActiveState=inactive\nSubState=running\n"
+            "LoadState=loaded\nActiveState=active\nActiveState=inactive\nSubState=running\n"
             "Result=success\nExecMainStatus=0\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nExecMainExitTimestamp=\n"
         ),
         (
-            "ActiveState=active\nSubState=running\nResult=success\n"
+            "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
             "ExecMainStatus=not-an-int\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nExecMainExitTimestamp=\n"
         ),
@@ -1303,6 +1341,7 @@ def test_show_rejects_missing_malformed_or_extra_properties(stdout: str) -> None
 
 def test_show_wraps_oversized_numeric_property_as_query_error() -> None:
     stdout = (
+        "LoadState=loaded\n"
         "ActiveState=active\n"
         "SubState=running\n"
         "Result=success\n"
