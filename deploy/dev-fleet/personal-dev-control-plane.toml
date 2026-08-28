@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 namespace = "loom-dev"
 personal_namespace_prefix = "loom-dev-"
 min_slots_default = 0
@@ -86,6 +86,12 @@ cpu_request = "100m"
 memory_request = "256Mi"
 cpu_limit = "1"
 memory_limit = "2Gi"
+
+[resources.web]
+cpu_request = "50m"
+memory_request = "32Mi"
+cpu_limit = "200m"
+memory_limit = "128Mi"
 
 [resources.activation]
 cpu_request = "50m"

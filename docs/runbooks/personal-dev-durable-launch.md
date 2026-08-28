@@ -198,12 +198,14 @@ backup/restore, storage-lineage, migration, scanner-cache, RuntimeClass,
 global-manager, source, and kubeconfig interlocks. Do not shorten them to the
 illustrative observations above.
 
-## 3. Prove DNS, TLS, and management ingress before enablement
+## 3. Prove DNS, TLS, Web, and API ingress before enablement
 
-The shadow already renders the management Ingress, so DNS and certificate
-readiness can be established without enabling personal mutation. Record the
-reviewed DNS answers and require the exact cert-manager Certificate and Ingress
-host before the operational apply.
+The shadow already renders the public Web and API Ingress, so DNS, certificate,
+and account-action route readiness can be established without enabling personal
+mutation. Record the reviewed DNS answers and require the exact cert-manager
+Certificate, Web NetworkPolicy, and Ingress path split before the operational
+apply. The Web image is the existing Loom SPA; this package does not implement
+a second account or reset flow.
 
 ```bash
 management_host="$(python3 -c '
@@ -243,20 +245,52 @@ jq -e '
   .spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]
 ' "$evidence_dir/management.network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-web-ingress -o json \
+  > "$evidence_dir/web.network-policy.json"
+jq -e '
+  .spec.podSelector.matchLabels == {"app":"loom-personal-dev-web"} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  (.spec.ingress[0] | has("from") | not) and
+  .spec.ingress == [{ports:[{port:8080,protocol:"TCP"}]}]
+' "$evidence_dir/web.network-policy.json" >/dev/null
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
+  (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+  (.metadata.annotations | keys | sort) as $keys | ($keys == ["cert-manager.io/cluster-issuer","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"]) and .metadata.annotations["cert-manager.io/cluster-issuer"] == "letsencrypt-prod" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-body-size"] == "512m" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] == "300" and
+  .spec.ingressClassName == "nginx" and
   .spec.rules == [{host:$host,http:.spec.rules[0].http}] and
-  .spec.tls[0].hosts == [$host]
+  .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}] and
+  .spec.rules[0].http.paths == [
+    {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
+    {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
+  ]
 ' "$evidence_dir/management.ingress.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   certificate/loom-personal-dev-management-tls -o json \
   > "$evidence_dir/management.certificate.json"
 jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' \
   "$evidence_dir/management.certificate.json" >/dev/null
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
   "https://$management_host/api/v1/health" \
   > "$evidence_dir/management.shadow-health.json"
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "https://$management_host/loom-frontend-config.json" \
+  > "$evidence_dir/management.frontend-config.json"
+jq -e --arg origin "https://$management_host" '
+  .environment == "development" and .routePath == "" and
+  .apiBase == "" and .apiRouteBase == ($origin + "/api")
+' "$evidence_dir/management.frontend-config.json" >/dev/null
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "https://$management_host/auth/reset" \
+  > "$evidence_dir/management.reset-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.reset-spa.html"
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "https://$management_host/auth/setup" \
+  > "$evidence_dir/management.setup-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.setup-spa.html"
 ```
 
 Do not use `--resolve`, `-k`, an alternate CA, or a local port-forward as DNS,
@@ -345,6 +379,8 @@ chmod 0600 "$evidence_dir/operational.server-side-apply.txt"
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-activation-agent --timeout=300s
 
 "$loom_cli" admin personal-dev-control-plane \
@@ -408,7 +444,7 @@ for url in \
   "https://$owner_name.dev.yylx.world/" \
   "https://cp-$owner_name.dev.yylx.world/healthz" \
   "https://gw-$owner_name.dev.yylx.world/healthz"; do
-  curl --fail --silent --show-error --proto '=https' --tlsv1.2 "$url" \
+  curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 "$url" \
     >> "$evidence_dir/launch-owner.routes.txt"
 done
 chmod 0600 "$evidence_dir/launch-owner.routes.txt"
@@ -539,6 +575,8 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
 
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
 test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   deployment/loom-personal-dev-activation-agent \
   -o jsonpath='{.spec.replicas}')" = 0

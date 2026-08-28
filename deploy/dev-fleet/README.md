@@ -48,11 +48,14 @@ proves rootless amd64/arm64 BuildKit execution without enabling the personal
 builder, lifecycle, task submission, or physical capacity.
 
 Both modes render the same release-bound scanner cache preparation. Trusted
-release schema 2 adds the immutable `personal_dev_scanner_cache` image and
+release schema 2 added the immutable `personal_dev_scanner_cache` image and
 binds it to the checked-in lock, scanner binary, both databases and metadata,
 and one digest-named generation. The init has no Secret or API-token mount;
 management never mounts the PVC root. Preparing this cache leaves lifecycle
 and builder flags false in shadow and leaves the executable ceiling at zero.
+Current schema 3 also binds the immutable `loom_web` image. The package routes
+public `/api` traffic to the management Service and `/` to the existing SPA so
+account-action links work without duplicating their frontend or REST logic.
 
 After both shadows and one exact protected release are ready, use the
 [zero-capacity acceptance runbook](../../docs/runbooks/personal-dev-zero-capacity-acceptance.md).

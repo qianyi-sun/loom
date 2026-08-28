@@ -311,7 +311,8 @@ assert_live_identity_delta() {
     > "$live_unexpected_identities"
   test ! -s "$live_unexpected_identities" || return 1
   if test -s "$live_missing_identities"; then
-    cmp -s "$live_missing_identities" "$allowed_missing_identities" || return 1
+    test -z "$(LC_ALL=C comm -23 \
+      "$live_missing_identities" "$allowed_missing_identities")" || return 1
   fi
 }
 
@@ -323,6 +324,7 @@ assert_forward_identity_contract() {
   local live_missing_identities
   local live_namespaced_inventory
   local live_unexpected_identities
+  local previous_only_identities
   local previous_identities
   allowed_missing_identities="$(mktemp "$evidence_dir/forward-allowed-missing.XXXXXX.txt")"
   current_identities="$(mktemp "$evidence_dir/forward-current-identities.XXXXXX.txt")"
@@ -332,9 +334,13 @@ assert_forward_identity_contract() {
   live_namespaced_inventory="$(mktemp "$evidence_dir/forward-live-namespaced.XXXXXX.json")"
   live_cluster_inventory="$(mktemp "$evidence_dir/forward-live-cluster.XXXXXX.json")"
   live_unexpected_identities="$(mktemp "$evidence_dir/forward-live-unexpected.XXXXXX.txt")"
+  previous_only_identities="$(mktemp "$evidence_dir/forward-previous-only.XXXXXX.txt")"
   printf '%s\n' \
+    '["apps/v1","Deployment","loom-dev","loom-personal-dev-web"]' \
     '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-acme-http01-ingress"]' \
     '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-capacity-manager-ingress"]' \
+    '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-web-ingress"]' \
+    '["v1","Service","loom-dev","loom-personal-dev-web"]' \
     > "$allowed_missing_identities"
   render_identity_set "$shadow_render" > "$current_identities"
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
@@ -361,7 +367,7 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
   chmod 0600 "$allowed_missing_identities" "$current_identities" \
     "$previous_identities" "$live_identities" "$live_missing_identities" \
     "$live_namespaced_inventory" "$live_cluster_inventory" \
-    "$live_unexpected_identities"
+    "$live_unexpected_identities" "$previous_only_identities"
   if test -e "$previous_shadow_render" || test -L "$previous_shadow_render"; then
     test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
     test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
@@ -370,8 +376,13 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
     test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = \
       "$previous_shadow_sha256"
     render_identity_set "$previous_shadow_render" > "$previous_identities"
-    cmp -s "$current_identities" "$previous_identities"
-    assert_live_identity_delta "$previous_identities" "$live_identities" \
+    LC_ALL=C comm -23 "$previous_identities" "$current_identities" \
+      > "$previous_only_identities"
+    test ! -s "$previous_only_identities"
+    test -z "$(LC_ALL=C comm -13 \
+      "$previous_identities" "$current_identities" \
+      | LC_ALL=C comm -23 - "$allowed_missing_identities")"
+    assert_live_identity_delta "$current_identities" "$live_identities" \
       "$allowed_missing_identities" "$live_missing_identities" \
       "$live_unexpected_identities"
   else
@@ -380,7 +391,36 @@ validatingadmissionpolicybindings.admissionregistration.k8s.io \
   rm -f "$allowed_missing_identities" "$current_identities" \
     "$previous_identities" "$live_identities" "$live_missing_identities" \
     "$live_namespaced_inventory" "$live_cluster_inventory" \
-    "$live_unexpected_identities"
+    "$live_unexpected_identities" "$previous_only_identities"
+}
+
+remove_forward_only_web_resources_for_rollback() {
+  local previous_identities
+  local web_identity_count
+  previous_identities="$(mktemp "$evidence_dir/rollback-previous-identities.XXXXXX.txt")"
+  render_identity_set "$previous_shadow_render" > "$previous_identities"
+  chmod 0600 "$previous_identities"
+  web_identity_count=0
+  for identity in \
+    '["apps/v1","Deployment","loom-dev","loom-personal-dev-web"]' \
+    '["networking.k8s.io/v1","NetworkPolicy","loom-dev","loom-personal-dev-web-ingress"]' \
+    '["v1","Service","loom-dev","loom-personal-dev-web"]'; do
+    if grep -Fqx -- "$identity" "$previous_identities"; then
+      web_identity_count=$((web_identity_count + 1))
+    fi
+  done
+  if test "$web_identity_count" -eq 0; then
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete \
+      deployment.apps/loom-personal-dev-web \
+      service/loom-personal-dev-web \
+      networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress \
+      --ignore-not-found --wait=true --timeout=300s \
+      > "$evidence_dir/rollback-web-cleanup.txt"
+    chmod 0600 "$evidence_dir/rollback-web-cleanup.txt"
+  else
+    test "$web_identity_count" -eq 3
+  fi
+  rm -f "$previous_identities"
 }
 
 assert_forward_storage_lineage_contract() {
@@ -425,7 +465,7 @@ jq -e \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
   '.schema == "loom-personal-dev-control-plane-render-v1" and
    .mode == "shadow" and
-   .resource_count == 35 and
+   .resource_count == 38 and
    .release_sha256 == $release and
    .yaml_sha256 == $yaml and
    (.input_sha256 | test("^[0-9a-f]{64}$")) and
@@ -435,10 +475,10 @@ jq -e \
 ```
 
 Byte-review the YAML and canonical evidence. Confirm the render contains only
-the shared Namespace, storage, migration, management service, inert activation
-agent, RBAC, admission policy, and NetworkPolicy resources described in the
-architecture. The renderer does not include Secret values or a personal
-application.
+the shared Namespace, storage, migration, management API, existing Web SPA,
+inert activation agent, RBAC, admission policy, and NetworkPolicy resources
+described in the architecture. The renderer does not include Secret values or
+a personal runtime namespace.
 
 ## 3. Recheck live read-only boundaries
 
@@ -496,10 +536,12 @@ or capacity resource outside the reviewed shadow is a stop condition. A first
 installation also requires no existing package-owned top-level resource. An
 upgrade requires the previous-image rollback manifest and new forward manifest
 to have the same non-derived identity set. Live state must either match it or
-be missing exactly the two reviewed additive NetworkPolicies for the first
-#1573/#1576 upgrade; every live-only identity, deletion, replacement, or other
-missing identity remains a stop condition. Both policies remain in the rollback
-manifest because server-side apply does not prune absent objects.
+be missing only a bounded subset of the reviewed additive identities: the two
+#1573/#1576 NetworkPolicies and the Web Deployment, Service, and ingress
+NetworkPolicy introduced by #1591. Every live-only identity, deletion,
+replacement, or other missing identity remains a stop condition. The rollback
+path explicitly removes only the three non-storage Web identities when the
+previous manifest predates them; server-side apply is never treated as pruning.
 Before asking the API server for a diff, an upgrade also requires the new and
 previous-reviewed PostgreSQL and MinIO `volumeClaimTemplates`, live
 StatefulSet templates, and generated Bound PVCs to agree after normalization of
@@ -555,6 +597,8 @@ kubectl --kubeconfig "$kubeconfig" -n loom-dev wait \
   job -l app=loom-personal-dev-migration
 kubectl --kubeconfig "$kubeconfig" rollout status deployment/loom-personal-dev-management \
   --namespace loom-dev --timeout=300s
+kubectl --kubeconfig "$kubeconfig" rollout status deployment/loom-personal-dev-web \
+  --namespace loom-dev --timeout=300s
 
 test "$(
   kubectl --kubeconfig "$kubeconfig" -n loom-dev get \
@@ -608,14 +652,14 @@ chmod 0600 "$status_evidence.sha256"
 The successful canonical shape is:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":30,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":34,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
 The namespaced observed count may include bounded retained successful migration
 evidence after a later upgrade or rollback. All component names, blocker codes,
 and digest fields remain bounded.
 
-## 8. Roll back without deleting state
+## 8. Roll back without deleting durable state
 
 Rollback is another issue #1280 window action. Stop if any
 `loom-dev-<owner>` namespace exists, and stop if any `loom-build-*` namespace
@@ -630,12 +674,13 @@ downgrade schema, restore a database, or infer compatibility from a completed
 historical Job.
 
 Server-side apply does not remove objects absent from the older manifest.
-Before mutation, the procedure therefore requires identical current and
-previous resource identity sets after excluding immutable migration Jobs,
-which are retained as bounded evidence. The pre-apply interlock also requires
-the live top-level identity set to match both manifests. Any other identity
-difference requires a separately reviewed cleanup plan and is a rollback stop
-condition; this runbook never guesses which live object is safe to delete.
+Before mutation, the shared forward interlock therefore permits only the exact
+reviewed additive identities and forbids every removal or live-only identity.
+If the previous manifest predates #1591, rollback explicitly deletes only the
+stateless Web Deployment, Service, and ingress NetworkPolicy after reapplying
+that manifest. PVCs, databases, buckets, Secrets, migration evidence, and every
+other identity remain untouched. Any different identity delta is a rollback
+stop condition; this runbook never guesses which live object is safe to delete.
 
 ```bash
 test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
@@ -694,23 +739,6 @@ if ! cmp -s "$previous_shadow_render_tmp" "$previous_shadow_render"; then
 fi
 rm -f "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
 
-current_identities_tmp="$(mktemp "$evidence_dir/rollback-current-identities.XXXXXX.txt")"
-previous_identities_tmp="$(mktemp "$evidence_dir/rollback-previous-identities.XXXXXX.txt")"
-if ! render_identity_set "$shadow_render" > "$current_identities_tmp"; then
-  rm -f "$current_identities_tmp" "$previous_identities_tmp"
-  exit 1
-fi
-if ! render_identity_set "$previous_shadow_render" > "$previous_identities_tmp"; then
-  rm -f "$current_identities_tmp" "$previous_identities_tmp"
-  exit 1
-fi
-chmod 0600 "$current_identities_tmp" "$previous_identities_tmp"
-if ! cmp -s "$current_identities_tmp" "$previous_identities_tmp"; then
-  rm -f "$current_identities_tmp" "$previous_identities_tmp"
-  exit 1
-fi
-rm -f "$current_identities_tmp" "$previous_identities_tmp"
-
 forbidden_namespaces="$(
   kubectl --kubeconfig "$kubeconfig" get namespaces -o json \
     | jq -r '.items[].metadata.name |
@@ -739,6 +767,7 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
   -f "$previous_shadow_render" \
   > "$evidence_dir/rollback-apply.txt"
 chmod 0600 "$evidence_dir/rollback-apply.txt"
+remove_forward_only_web_resources_for_rollback
 ```
 
 Wait for the previous storage, migration, and management objects, then bind the

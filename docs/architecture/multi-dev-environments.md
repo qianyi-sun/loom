@@ -74,8 +74,11 @@ the separately reviewed #906/#822 capacity work.
 Shadow, acceptance, and operational mode all prepare the same
 release-bound scanner cache described by the
 [scanner-cache preparation architecture](personal-dev-scanner-cache-preparation.md).
-Trusted-release schema 2 adds `personal_dev_scanner_cache` and binds the
+Trusted-release schema 2 added `personal_dev_scanner_cache` and binds the
 checked-in lock, Trivy binary, databases, metadata, and framed cache identity.
+Schema 3 adds the immutable `loom_web` index. The shared public Ingress routes
+`/api` to the management API and `/` to that existing SPA, including its
+account-action routes; there is no second account implementation.
 Only the init container mounts the scanner PVC root; management mounts the
 exact generation plus a bounded disposable `fanal/` overlay. Preparation does
 not enable the personal lifecycle, publish executable capacity, or create a

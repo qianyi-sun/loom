@@ -508,9 +508,7 @@ def _security_boundary_matches(
     """Reject live additions that can widen authority or network exposure."""
 
     kind = expected.get("kind")
-    if kind == "ClusterRole" and actual.get("aggregationRule") != expected.get(
-        "aggregationRule"
-    ):
+    if kind == "ClusterRole" and actual.get("aggregationRule") != expected.get("aggregationRule"):
         return False
     if kind == "ValidatingAdmissionPolicyBinding":
         expected_spec = expected.get("spec")
@@ -554,6 +552,20 @@ def _security_boundary_matches(
             or set(actual_spec) != set(expected_spec)
         ):
             return False
+    if kind == "Ingress":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        expected_metadata = _metadata(expected)
+        actual_metadata = _metadata(actual)
+        if (
+            not isinstance(expected_spec, Mapping)
+            or not isinstance(actual_spec, Mapping)
+            or set(actual_spec) != set(expected_spec)
+            or expected_metadata is None
+            or actual_metadata is None
+            or actual_metadata.get("annotations") != expected_metadata.get("annotations", {})
+        ):
+            return False
     if kind == "Service":
         expected_spec = expected.get("spec")
         actual_spec = actual.get("spec")
@@ -574,9 +586,7 @@ def _security_boundary_matches(
                 return False
         ports = actual_spec.get("ports")
         if not isinstance(ports, list) or any(
-            isinstance(port, Mapping)
-            and type(port.get("nodePort")) is int
-            and port["nodePort"] > 0
+            isinstance(port, Mapping) and type(port.get("nodePort")) is int and port["nodePort"] > 0
             for port in ports
         ):
             return False
@@ -589,10 +599,13 @@ def _security_boundary_matches(
             pod_spec = template.get("spec") if isinstance(template, Mapping) else None
         if not isinstance(pod_spec, Mapping):
             return False
-        if any(
-            pod_spec.get(field) is True
-            for field in ("hostIPC", "hostNetwork", "hostPID", "shareProcessNamespace")
-        ) or pod_spec.get("hostUsers") is False:
+        if (
+            any(
+                pod_spec.get(field) is True
+                for field in ("hostIPC", "hostNetwork", "hostPID", "shareProcessNamespace")
+            )
+            or pod_spec.get("hostUsers") is False
+        ):
             return False
     return True
 
@@ -721,10 +734,8 @@ def _operational_plan_digest_matches(
     return (
         isinstance(labels, Mapping)
         and isinstance(annotations, Mapping)
-        and annotations.get("loom.dev/operational-plan-sha256")
-        == operational_plan_sha256
-        and labels.get("loom.dev/operational-plan-sha256")
-        == operational_plan_sha256[:32]
+        and annotations.get("loom.dev/operational-plan-sha256") == operational_plan_sha256
+        and labels.get("loom.dev/operational-plan-sha256") == operational_plan_sha256[:32]
     )
 
 
@@ -894,17 +905,11 @@ def _operational_management_binding_valid(
         "LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE": "operational",
         "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON": plan.manager_runtime_json(),
         "LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256": plan.sha256,
-        "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256": (
-            plan.activation.public_key_sha256
-        ),
+        "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256": (plan.activation.public_key_sha256),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED": "true",
-        "LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY": (
-            plan.builder.publisher_identity
-        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY": (plan.builder.publisher_identity),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_PREFIX": plan.builder.registry_prefix,
-        "LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME": (
-            plan.builder.runtime_class_name
-        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME": (plan.builder.runtime_class_name),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR": (
             "/var/lib/loom-personal-dev-scanner/generations/"
             + plan.builder.scanner_cache_identity_sha256
@@ -1121,8 +1126,7 @@ def _runtime_class_matches_binding(
         and metadata.get("name") == runtime_class_name
         and runtime.get("handler") == runtime_handler
         and isinstance(annotations, Mapping)
-        and annotations.get("loom.dev/runtime-profile-sha256")
-        == runtime_profile_sha256
+        and annotations.get("loom.dev/runtime-profile-sha256") == runtime_profile_sha256
         and isinstance(scheduling, Mapping)
         and set(scheduling).issubset({"nodeSelector", "tolerations"})
         and scheduling.get("nodeSelector") == selector
@@ -1169,13 +1173,11 @@ def _builder_dynamic_namespace_valid(
     attempt = labels.get("loom.dev/attempt")
     return (
         _BUILDER_NAMESPACE.fullmatch(name) is not None
-        and labels.get("app.kubernetes.io/managed-by")
-        == "loom-personal-dev-builder-controller"
+        and labels.get("app.kubernetes.io/managed-by") == "loom-personal-dev-builder-controller"
         and labels.get("app.kubernetes.io/part-of") == "loom"
         and labels.get("kubernetes.io/metadata.name", name) == name
         and isinstance(labels.get("loom.dev/candidate"), str)
-        and re.fullmatch(r"[0-9a-f]{12}", labels["loom.dev/candidate"])
-        is not None
+        and re.fullmatch(r"[0-9a-f]{12}", labels["loom.dev/candidate"]) is not None
         and all(
             _canonical_nonzero_uuid(labels.get(label))
             for label in (
@@ -1188,20 +1190,12 @@ def _builder_dynamic_namespace_valid(
         and isinstance(attempt, str)
         and attempt.replace("-", "") == name[11:43]
         and isinstance(labels.get("loom.dev/operation-epoch"), str)
-        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/operation-epoch"])
-        is not None
+        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/operation-epoch"]) is not None
         and isinstance(labels.get("loom.dev/build-attempt-sequence"), str)
-        and re.fullmatch(
-            r"[0-9]+", labels["loom.dev/build-attempt-sequence"]
-        )
-        is not None
+        and re.fullmatch(r"[0-9]+", labels["loom.dev/build-attempt-sequence"]) is not None
         and isinstance(labels.get("loom.dev/build-lease-epoch"), str)
-        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/build-lease-epoch"])
-        is not None
-        and all(
-            labels.get(label) == expected
-            for label, expected in _BUILDER_POD_SECURITY_LABELS
-        )
+        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/build-lease-epoch"]) is not None
+        and all(labels.get(label) == expected for label, expected in _BUILDER_POD_SECURITY_LABELS)
     )
 
 
@@ -1223,9 +1217,7 @@ def _dynamic_namespace_valid(
             and _RESERVED_PERSONAL_NAMESPACE.fullmatch(name) is None
         )
         managed_by = "loom-dev-instance-controller"
-        pod_security_valid = (
-            labels.get("pod-security.kubernetes.io/enforce") == "restricted"
-        )
+        pod_security_valid = labels.get("pod-security.kubernetes.io/enforce") == "restricted"
     else:
         return _builder_dynamic_namespace_valid(name, metadata, labels)
     return (
@@ -1368,11 +1360,7 @@ def _observe_personal_dev_status(
     expected: RenderedPersonalDevControlPlane,
     plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan | None,
     namespace: str = _NAMESPACE,
-) -> (
-    PersonalDevShadowStatus
-    | PersonalDevAcceptanceStatus
-    | PersonalDevOperationalStatus
-):
+) -> PersonalDevShadowStatus | PersonalDevAcceptanceStatus | PersonalDevOperationalStatus:
     """Compare bounded live state with one locally trusted mode render."""
 
     if namespace != _NAMESPACE:
@@ -1414,9 +1402,7 @@ def _observe_personal_dev_status(
     }
     blockers: set[str] = set()
     window_blocker = (
-        _acceptance_window_blocker(acceptance_plan)
-        if acceptance_plan is not None
-        else None
+        _acceptance_window_blocker(acceptance_plan) if acceptance_plan is not None else None
     )
     if window_blocker is not None:
         blockers.add(window_blocker)
@@ -1502,6 +1488,12 @@ def _observe_personal_dev_status(
     namespaced_ok = False
     namespaced_observed = 0
     activation_ready = not enabled
+    web_observed = 0
+    web_ready = True
+    web_expected = any(
+        item.get("kind") == "Deployment" and _metadata(item).get("name") == "loom-personal-dev-web"  # type: ignore[union-attr]
+        for item in expected_namespaced
+    )
     live_namespaced: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     expected_namespaced_index = _index_unique(expected_namespaced)
     try:
@@ -1792,6 +1784,21 @@ def _observe_personal_dev_status(
             if management is None or not _operational_management_probe_valid(management):
                 blockers.add("management_operational_probe_invalid")
 
+        web = next(
+            (
+                item
+                for item in live_expected.values()
+                if item.get("kind") == "Deployment"
+                and _metadata(item).get("name") == "loom-personal-dev-web"  # type: ignore[union-attr]
+            ),
+            None,
+        )
+        if web_expected:
+            web_observed = int(web is not None)
+            web_ready = web is not None and _management_ready(web)
+            if not web_ready:
+                blockers.add("web_not_ready")
+
         activation = next(
             (
                 item
@@ -1872,6 +1879,7 @@ def _observe_personal_dev_status(
             "resource_inventory_drift",
             "storage_not_ready",
             "workload_image_drift",
+            "web_not_ready",
         }
         namespaced_ok = not bool(blockers & namespaced_blockers)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, UnicodeError, ValueError):
@@ -1965,6 +1973,8 @@ def _observe_personal_dev_status(
         PersonalDevShadowComponent("namespaces", namespace_observed, namespace_ok),
         PersonalDevShadowComponent("runtime-class", runtime_observed, runtime_ok),
     ]
+    if web_expected:
+        component_values.append(PersonalDevShadowComponent("web", web_observed, web_ready))
     component_values.append(
         PersonalDevShadowComponent(
             "personal-workers",
@@ -1976,7 +1986,7 @@ def _observe_personal_dev_status(
     stable_blockers = tuple(sorted(blockers))
     if enabled:
         shared_ready = namespace_ok and runtime_ok and namespaced_ok and cluster_ok
-        application_ready = shared_ready and activation_ready
+        application_ready = shared_ready and activation_ready and web_ready
         capacity_publication_ready = manager_ok and manager_ceiling == 0
         ready = application_ready and capacity_publication_ready and not stable_blockers
         input_sha256 = expected.input_sha256 if digest_observed else None

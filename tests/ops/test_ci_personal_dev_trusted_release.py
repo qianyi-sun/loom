@@ -33,6 +33,11 @@ _INTERNAL = {
         "image_name": "loom-service",
         "dockerfile": "deploy/Dockerfile.service",
     },
+    "web": {
+        "release_key": "loom_web",
+        "image_name": "loom-web",
+        "dockerfile": "deploy/Dockerfile.web",
+    },
     "personal-dev-builder": {
         "release_key": "personal_dev_builder",
         "image_name": "loom-personal-dev-builder",
@@ -106,18 +111,14 @@ def _write_scanner_inputs(root: Path) -> dict[str, object]:
                 "ghcr.io/aquasecurity/trivy-db@sha256:"
                 "01edd081af12fd613776b0db66ac23ce62c9d25802d8ee57671394c10ca3530b"
             ),
-            "layer_sha256": (
-                "cafb664d1c10b65e06b317f86171d65ed1f17b1f4de594a7232e16c0848f3590"
-            ),
+            "layer_sha256": ("cafb664d1c10b65e06b317f86171d65ed1f17b1f4de594a7232e16c0848f3590"),
         },
         "java_database": {
             "image": (
                 "ghcr.io/aquasecurity/trivy-java-db@sha256:"
                 "58ef30d104106166d34f36c9861f2c5eb88d3279341fd4838bb5694d8998c436"
             ),
-            "layer_sha256": (
-                "bcc9ee0a8aa79524502cf892eda69e2180b54a3c7bd54c874b564201d2bdfc10"
-            ),
+            "layer_sha256": ("bcc9ee0a8aa79524502cf892eda69e2180b54a3c7bd54c874b564201d2bdfc10"),
         },
         "schema_version": 1,
         "trivy_version": "v0.70.0",
@@ -278,9 +279,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "binary_sha256": hashlib.sha256(_TRIVY_AMD64).hexdigest(),
         "database_metadata_sha256": hashlib.sha256(_DATABASE_METADATA).hexdigest(),
         "database_sha256": hashlib.sha256(_DATABASE).hexdigest(),
-        "java_database_metadata_sha256": hashlib.sha256(
-            _JAVA_DATABASE_METADATA
-        ).hexdigest(),
+        "java_database_metadata_sha256": hashlib.sha256(_JAVA_DATABASE_METADATA).hexdigest(),
         "java_database_sha256": hashlib.sha256(_JAVA_DATABASE).hexdigest(),
         "lock_sha256": hashlib.sha256(
             _scanner_paths(tmp_path)["scanner_cache_lock_file"].read_bytes()
@@ -298,7 +297,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "cache_identity_sha256": cache_identity_sha256,
     }
     assert release == {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "images": references,
@@ -313,7 +312,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "run_id": _RUN_ID,
         "run_attempt": _RUN_ATTEMPT,
     }
-    assert evidence["schema_version"] == 2
+    assert evidence["schema_version"] == 3
     assert set(evidence["internal_images"]) == set(_INTERNAL)
     assert set(evidence["external_images"]) == set(_EXTERNAL_REPOSITORIES)
     assert evidence["scanner"] == {
@@ -480,9 +479,7 @@ def test_assembly_rejects_scanner_input_drift(tmp_path: Path, drift: str) -> Non
             evidence["unexpected"] = True
         else:
             evidence["schema_version"] = 2
-        paths["scanner_cache_evidence_file"].write_bytes(
-            _canonical(evidence) + b"\n"
-        )
+        paths["scanner_cache_evidence_file"].write_bytes(_canonical(evidence) + b"\n")
 
     with pytest.raises(TrustedReleaseError):
         _assemble_inputs(records, manifests, external)
@@ -522,8 +519,7 @@ def test_assembly_rejects_duplicate_final_index_digests(tmp_path: Path) -> None:
     binding = json.loads(external.read_bytes())
     binding["images"]["minio"]["members"] = binding["images"]["postgres"]["members"]
     binding["images"]["minio"]["reference"] = (
-        "quay.io/minio/minio@sha256:"
-        + hashlib.sha256(postgres_manifest.read_bytes()).hexdigest()
+        "quay.io/minio/minio@sha256:" + hashlib.sha256(postgres_manifest.read_bytes()).hexdigest()
     )
     external.write_bytes(_canonical(binding) + b"\n")
 
@@ -548,10 +544,7 @@ def test_external_indexes_bind_target_members_without_forbidding_other_platforms
     manifest_bytes = _canonical(manifest)
     postgres_manifest.write_bytes(manifest_bytes)
     binding = json.loads(external.read_bytes())
-    reference = (
-        "docker.io/library/postgres@sha256:"
-        + hashlib.sha256(manifest_bytes).hexdigest()
-    )
+    reference = "docker.io/library/postgres@sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
     binding["images"]["postgres"]["reference"] = reference
     external.write_bytes(_canonical(binding) + b"\n")
 
@@ -696,9 +689,7 @@ def test_cli_writes_and_revalidates_only_the_three_canonical_outputs(
 
 
 def test_checked_in_external_indexes_are_exact_reviewed_multi_arch_pins() -> None:
-    value = json.loads(
-        (_ROOT / "deploy/dev-fleet/personal-dev-external-images.json").read_bytes()
-    )
+    value = json.loads((_ROOT / "deploy/dev-fleet/personal-dev-external-images.json").read_bytes())
 
     assert value == {
         "schema_version": 1,
@@ -750,9 +741,7 @@ def test_checked_in_external_indexes_are_exact_reviewed_multi_arch_pins() -> Non
 
 
 def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
-    workflow = yaml.safe_load(
-        (_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8")
-    )
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
     aggregate = jobs["personal-dev-trusted-release"]
 
@@ -765,15 +754,15 @@ def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
         "packages": "read",
     }
     condition = " ".join(aggregate["if"].split())
-    assert "\\\"" not in condition
+    assert '\\"' not in condition
     for component in _INTERNAL:
-        assert f"contains(needs.plan.outputs.images, '\"image\":\"{component}\"')" in condition
+        assert f'contains(needs.plan.outputs.images, \'"image":"{component}"\')' in condition
     downloads = [
         step
         for step in aggregate["steps"]
         if str(step.get("name", "")).startswith("Download exact ")
     ]
-    assert len(downloads) == 9
+    assert len(downloads) == 11
     script = "\n".join(str(step.get("run", "")) for step in aggregate["steps"])
     for component in _INTERNAL:
         for architecture in ("amd64", "arm64"):
@@ -783,7 +772,7 @@ def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
             ) in str(aggregate)
     assert script.count("gh attestation verify") == 1
     assert (
-        "for component in service personal-dev-builder "
+        "for component in service web personal-dev-builder "
         "personal-dev-activation-agent personal-dev-scanner-cache" in script
     )
     assert "personal-dev-scanner-cache-assets-run-${{ github.run_id }}" in str(aggregate)

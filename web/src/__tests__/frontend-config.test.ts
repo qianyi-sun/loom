@@ -106,6 +106,34 @@ describe("frontend runtime config", () => {
     expect(getFrontendConfig().apiRouteBase).toBe("https://yylx.world/dev/api");
   });
 
+  it("loads development config from a dedicated origin root", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          environment: "development",
+          environmentLabel: "Personal development",
+          routePath: "",
+          apiBase: "",
+          apiRouteBase: "https://loom-service.dev.yylx.world/api",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    window.history.replaceState(null, "", "/auth/setup");
+
+    const config = await loadFrontendConfig();
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/loom-frontend-config.json",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(config).toMatchObject({
+      environment: "development",
+      routePath: "",
+      apiRouteBase: "https://loom-service.dev.yylx.world/api",
+    });
+  });
+
   it("loads the exact isolated rehearsal runtime config", async () => {
     const rehearsalId = "5".repeat(24);
     const routePath = `/staging/rehearsal/${rehearsalId}`;

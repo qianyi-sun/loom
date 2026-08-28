@@ -132,13 +132,9 @@ def _claim_template_metadata(
     if (render_input_sha256 is None) != (trusted_release_sha256 is None):
         raise ValueError("storage lineage must be completely pinned")
     lineage = _RenderContext(
-        input_sha256=(
-            context.input_sha256 if render_input_sha256 is None else render_input_sha256
-        ),
+        input_sha256=(context.input_sha256 if render_input_sha256 is None else render_input_sha256),
         release_sha256=(
-            context.release_sha256
-            if trusted_release_sha256 is None
-            else trusted_release_sha256
+            context.release_sha256 if trusted_release_sha256 is None else trusted_release_sha256
         ),
     )
     return _metadata(lineage, "data")
@@ -669,9 +665,7 @@ def _builder_job_admission_validations(
     )
 
     def exact_quantity(value: str, expected: str) -> str:
-        return (
-            f"quantity(string({value})).compareTo(quantity('{expected}')) == 0"
-        )
+        return f"quantity(string({value})).compareTo(quantity('{expected}')) == 0"
 
     def exact_resources(container: str) -> str:
         requests = f"{container}.resources.requests"
@@ -752,8 +746,7 @@ def _builder_job_admission_validations(
         "loom.dev/build-lease-epoch",
     )
     labels_match = " && ".join(
-        f"{pod_labels}['{label}'] == {job_labels}['{label}']"
-        for label in identity_labels
+        f"{pod_labels}['{label}'] == {job_labels}['{label}']" for label in identity_labels
     )
     system_job_labels = (
         f"{pod_labels}.size() == 16 && "
@@ -816,9 +809,7 @@ def _builder_job_admission_validations(
         f"!has({target}.spec.backoffLimitPerIndex) && "
         f"!has({target}.spec.maxFailedIndexes) && "
         f"!has({target}.spec.podFailurePolicy) && "
-        + absent_or_equal(
-            f"{target}.spec.podReplacementPolicy", "'TerminatingOrFailed'"
-        )
+        + absent_or_equal(f"{target}.spec.podReplacementPolicy", "'TerminatingOrFailed'")
         + " && "
         f"!has({target}.spec.successPolicy) && "
         f"!has({target}.spec.managedBy))"
@@ -860,17 +851,13 @@ def _builder_job_admission_validations(
     pod_supplemental_security_boundary = (
         f"!{builder_job} || ("
         f"!has({pod}.securityContext.appArmorProfile) && "
-        + absent_or_equal(
-            f"{pod}.securityContext.fsGroupChangePolicy", "'Always'"
-        )
+        + absent_or_equal(f"{pod}.securityContext.fsGroupChangePolicy", "'Always'")
         + " && "
         f"!has({pod}.securityContext.seLinuxChangePolicy) && "
         f"!has({pod}.securityContext.seccompProfile.localhostProfile) && "
         + absent_or_empty(f"{pod}.securityContext.supplementalGroups")
         + " && "
-        + absent_or_equal(
-            f"{pod}.securityContext.supplementalGroupsPolicy", "'Merge'"
-        )
+        + absent_or_equal(f"{pod}.securityContext.supplementalGroupsPolicy", "'Merge'")
         + " && "
         f"!has({pod}.securityContext.windowsOptions))"
     )
@@ -891,18 +878,14 @@ def _builder_job_admission_validations(
         f"!has({client}.lifecycle) && !has({client}.livenessProbe) && "
         + absent_or_empty(f"{client}.ports")
         + " && "
-        f"!has({client}.readinessProbe) && "
-        + absent_or_empty(f"{client}.resizePolicy")
-        + " && "
+        f"!has({client}.readinessProbe) && " + absent_or_empty(f"{client}.resizePolicy") + " && "
         f"!has({client}.restartPolicy) && !has({client}.restartPolicyRules) && "
         f"!has({client}.startupProbe) && "
         + absent_or_equal(f"{client}.stdin", "false")
         + " && "
         + absent_or_equal(f"{client}.stdinOnce", "false")
         + " && "
-        + absent_or_equal(
-            f"{client}.terminationMessagePath", "'/dev/termination-log'"
-        )
+        + absent_or_equal(f"{client}.terminationMessagePath", "'/dev/termination-log'")
         + " && "
         + absent_or_equal(f"{client}.terminationMessagePolicy", "'File'")
         + " && "
@@ -935,9 +918,7 @@ def _builder_job_admission_validations(
         f"!has({client}.securityContext.seLinuxOptions) && "
         f"!has({client}.securityContext.windowsOptions))"
     )
-    client_resources_boundary = (
-        f"!{builder_job} || ({exact_resources(client)})"
-    )
+    client_resources_boundary = f"!{builder_job} || ({exact_resources(client)})"
     client_mount_boundary = (
         f"!{builder_job} || ("
         f"{client}.volumeMounts.size() == 5 && "
@@ -978,17 +959,13 @@ def _builder_job_admission_validations(
         f"!has({sidecar}.lifecycle) && !has({sidecar}.livenessProbe) && "
         + absent_or_empty(f"{sidecar}.ports")
         + " && "
-        f"!has({sidecar}.readinessProbe) && "
-        + absent_or_empty(f"{sidecar}.resizePolicy")
-        + " && "
+        f"!has({sidecar}.readinessProbe) && " + absent_or_empty(f"{sidecar}.resizePolicy") + " && "
         f"!has({sidecar}.restartPolicyRules) && "
         + absent_or_equal(f"{sidecar}.stdin", "false")
         + " && "
         + absent_or_equal(f"{sidecar}.stdinOnce", "false")
         + " && "
-        + absent_or_equal(
-            f"{sidecar}.terminationMessagePath", "'/dev/termination-log'"
-        )
+        + absent_or_equal(f"{sidecar}.terminationMessagePath", "'/dev/termination-log'")
         + " && "
         + absent_or_equal(f"{sidecar}.terminationMessagePolicy", "'File'")
         + " && "
@@ -1022,9 +999,7 @@ def _builder_job_admission_validations(
         f"!has({sidecar}.securityContext.seLinuxOptions) && "
         f"!has({sidecar}.securityContext.windowsOptions))"
     )
-    sidecar_resources_boundary = (
-        f"!{builder_job} || ({exact_resources(sidecar)})"
-    )
+    sidecar_resources_boundary = f"!{builder_job} || ({exact_resources(sidecar)})"
     sidecar_probe_boundary = (
         f"!{builder_job} || ("
         f"{sidecar}.startupProbe.exec.command == ['/usr/bin/buildctl','--addr',"
@@ -1128,9 +1103,7 @@ def _builder_job_admission_validations(
         },
         {
             "expression": execution_count_boundary,
-            "message": (
-                "builder Job execution count differs from its exact privileged exception"
-            ),
+            "message": ("builder Job execution count differs from its exact privileged exception"),
         },
         {
             "expression": pod_auxiliary_boundary,
@@ -1141,8 +1114,7 @@ def _builder_job_admission_validations(
         {
             "expression": pod_supplemental_security_boundary,
             "message": (
-                "builder Job pod supplemental security differs from its exact privileged "
-                "exception"
+                "builder Job pod supplemental security differs from its exact privileged exception"
             ),
         },
         {
@@ -1154,27 +1126,20 @@ def _builder_job_admission_validations(
         {
             "expression": client_auxiliary_boundary,
             "message": (
-                "builder Job client auxiliary execution differs from its exact privileged "
-                "exception"
+                "builder Job client auxiliary execution differs from its exact privileged exception"
             ),
         },
         {
             "expression": client_security_boundary,
-            "message": (
-                "builder Job client security differs from its exact privileged exception"
-            ),
+            "message": ("builder Job client security differs from its exact privileged exception"),
         },
         {
             "expression": client_resources_boundary,
-            "message": (
-                "builder Job client resources differ from its exact privileged exception"
-            ),
+            "message": ("builder Job client resources differ from its exact privileged exception"),
         },
         {
             "expression": client_mount_boundary,
-            "message": (
-                "builder Job client mounts differ from its exact privileged exception"
-            ),
+            "message": ("builder Job client mounts differ from its exact privileged exception"),
         },
         {
             "expression": sidecar_definition_boundary,
@@ -1191,33 +1156,23 @@ def _builder_job_admission_validations(
         },
         {
             "expression": sidecar_security_boundary,
-            "message": (
-                "builder Job sidecar security differs from its exact privileged exception"
-            ),
+            "message": ("builder Job sidecar security differs from its exact privileged exception"),
         },
         {
             "expression": sidecar_resources_boundary,
-            "message": (
-                "builder Job sidecar resources differ from its exact privileged exception"
-            ),
+            "message": ("builder Job sidecar resources differ from its exact privileged exception"),
         },
         {
             "expression": sidecar_probe_boundary,
-            "message": (
-                "builder Job sidecar probe differs from its exact privileged exception"
-            ),
+            "message": ("builder Job sidecar probe differs from its exact privileged exception"),
         },
         {
             "expression": sidecar_mount_boundary,
-            "message": (
-                "builder Job sidecar mounts differ from its exact privileged exception"
-            ),
+            "message": ("builder Job sidecar mounts differ from its exact privileged exception"),
         },
         {
             "expression": platform_volume_boundary,
-            "message": (
-                "builder Job platform volumes differ from its exact privileged exception"
-            ),
+            "message": ("builder Job platform volumes differ from its exact privileged exception"),
         },
         {
             "expression": volumes_boundary,
@@ -1256,10 +1211,7 @@ def _builder_network_policy_admission_validations(
         )
 
     def exact_port(port: str, *, protocol: str, number: int) -> str:
-        return (
-            f"{port}.protocol == '{protocol}' && {port}.port == {number} && "
-            f"!has({port}.endPort)"
-        )
+        return f"{port}.protocol == '{protocol}' && {port}.port == {number} && !has({port}.endPort)"
 
     def guarded(name: str, contract: str) -> str:
         return (
@@ -1269,8 +1221,7 @@ def _builder_network_policy_admission_validations(
         )
 
     common_identity = (
-        f"{target}.apiVersion == 'networking.k8s.io/v1' && "
-        f"{target}.kind == 'NetworkPolicy'"
+        f"{target}.apiVersion == 'networking.k8s.io/v1' && {target}.kind == 'NetworkPolicy'"
     )
     metadata_boundary = (
         "request.operation == 'DELETE' || "
@@ -1330,12 +1281,8 @@ def _builder_network_policy_admission_validations(
     public = f"{egress}[2]"
     ipv4 = f"{public}.to[0]"
     ipv6 = f"{public}.to[1]"
-    ipv4_except = "[" + ",".join(
-        f"'{value}'" for value in PUBLIC_EGRESS_IPV4_EXCEPTIONS
-    ) + "]"
-    ipv6_except = "[" + ",".join(
-        f"'{value}'" for value in PUBLIC_EGRESS_IPV6_EXCEPTIONS
-    ) + "]"
+    ipv4_except = "[" + ",".join(f"'{value}'" for value in PUBLIC_EGRESS_IPV4_EXCEPTIONS) + "]"
+    ipv6_except = "[" + ",".join(f"'{value}'" for value in PUBLIC_EGRESS_IPV6_EXCEPTIONS) + "]"
     public_egress = guarded(
         "builder-egress",
         f"has({egress}) && {egress}.size() == 3 && "
@@ -1402,10 +1349,7 @@ def _builder_support_resource_admission_validations(
         )
 
     def guarded(resource: str, contract: str) -> str:
-        return (
-            "request.operation == 'DELETE' || "
-            f"!{builder_resource(resource)} || ({contract})"
-        )
+        return f"request.operation == 'DELETE' || !{builder_resource(resource)} || ({contract})"
 
     common_metadata = _builder_resource_metadata_contract(target)
     lease_suffix = "request.namespace.substring(44)"
@@ -1772,9 +1716,7 @@ def _management_resource_admission(
                 },
                 {
                     "expression": builder_role_binding_metadata,
-                    "message": (
-                        "builder RoleBinding metadata differs from its exact contract"
-                    ),
+                    "message": ("builder RoleBinding metadata differs from its exact contract"),
                 },
                 *_builder_network_policy_admission_validations(
                     target=target,
@@ -2318,8 +2260,7 @@ def _management_env(
         f"java-db-sha256:{release.scanner.java_database_sha256}"
     )
     scanner_generation = (
-        "/var/lib/loom-personal-dev-scanner/generations/"
-        + release.scanner.cache_identity_sha256
+        "/var/lib/loom-personal-dev-scanner/generations/" + release.scanner.cache_identity_sha256
     )
     scanner_policy_sha256 = ""
     launcher_profile_sha256 = ""
@@ -2780,15 +2721,126 @@ def _management_deployment(
     }
 
 
-def _management_service_and_ingress(
+def _web_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+) -> dict[str, Any]:
+    if profile.resources.web is None or release.images.loom_web is None:
+        raise ValueError("personal-dev web inputs are incomplete")
+    name = "loom-personal-dev-web"
+    labels = {"app": name}
+    webroot = {
+        "name": "webroot",
+        "mountPath": "/var/run/loom-webroot",
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": _metadata(context, name, namespace="loom-dev"),
+        "spec": {
+            "replicas": 1,
+            "revisionHistoryLimit": 2,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": labels},
+            "template": {
+                "metadata": _pod_metadata(context, labels=labels),
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "securityContext": _pod_security(user=101, group=101),
+                    "initContainers": [
+                        {
+                            "name": "webroot-copy",
+                            "image": release.images.loom_web,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": ["/bin/cp"],
+                            "args": [
+                                "-R",
+                                "/usr/share/nginx/html/.",
+                                "/var/run/loom-webroot/",
+                            ],
+                            "resources": _resources(profile.resources.web),
+                            "securityContext": _container_security(user=101),
+                            "volumeMounts": [webroot],
+                        }
+                    ],
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": release.images.loom_web,
+                            "imagePullPolicy": "IfNotPresent",
+                            "env": [
+                                _literal_env("LOOM_FRONTEND_ENVIRONMENT", "development"),
+                                _literal_env(
+                                    "LOOM_FRONTEND_ENVIRONMENT_LABEL",
+                                    "Personal development",
+                                ),
+                                _literal_env("LOOM_FRONTEND_ROUTE_PATH", ""),
+                                _literal_env("LOOM_FRONTEND_API_BASE", ""),
+                                _literal_env(
+                                    "LOOM_FRONTEND_PUBLIC_ORIGIN",
+                                    profile.network.public_origin,
+                                ),
+                            ],
+                            "ports": [{"name": "http", "containerPort": 8080}],
+                            "readinessProbe": {
+                                "httpGet": {
+                                    "path": "/loom-frontend-config.json",
+                                    "port": "http",
+                                },
+                                "periodSeconds": 5,
+                                "timeoutSeconds": 2,
+                                "failureThreshold": 12,
+                            },
+                            "livenessProbe": {
+                                "httpGet": {"path": "/", "port": "http"},
+                                "periodSeconds": 10,
+                                "timeoutSeconds": 2,
+                                "failureThreshold": 6,
+                            },
+                            "resources": _resources(profile.resources.web),
+                            "securityContext": _container_security(user=101),
+                            "volumeMounts": [
+                                {
+                                    "name": "webroot",
+                                    "mountPath": "/usr/share/nginx/html",
+                                },
+                                {"name": "tmp", "mountPath": "/tmp"},
+                            ],
+                        }
+                    ],
+                    "volumes": [
+                        {"name": "webroot", "emptyDir": {"sizeLimit": "128Mi"}},
+                        {"name": "tmp", "emptyDir": {"sizeLimit": "32Mi"}},
+                    ],
+                },
+            },
+        },
+    }
+
+
+def _public_services_and_ingress(
+    context: _RenderContext,
+    profile: PersonalDevControlPlaneProfile,
+    *,
+    include_web: bool,
 ) -> tuple[dict[str, Any], ...]:
-    service = _service(
+    management_service = _service(
         context,
         profile.identities.management_service,
         selector={"app": "loom-personal-dev-management"},
         ports=[{"name": "http", "port": 8090, "targetPort": 8090}],
+    )
+    web_service = (
+        _service(
+            context,
+            "loom-personal-dev-web",
+            selector={"app": "loom-personal-dev-web"},
+            ports=[{"name": "http", "port": 80, "targetPort": 8080}],
+        )
+        if include_web
+        else None
     )
     host = urlsplit(profile.network.public_origin).hostname
     assert host is not None
@@ -2819,7 +2871,7 @@ def _management_service_and_ingress(
                     "http": {
                         "paths": [
                             {
-                                "path": "/",
+                                "path": "/api" if include_web else "/",
                                 "pathType": "Prefix",
                                 "backend": {
                                     "service": {
@@ -2827,14 +2879,30 @@ def _management_service_and_ingress(
                                         "port": {"number": 8090},
                                     }
                                 },
-                            }
+                            },
+                            *(
+                                [
+                                    {
+                                        "path": "/",
+                                        "pathType": "Prefix",
+                                        "backend": {
+                                            "service": {
+                                                "name": "loom-personal-dev-web",
+                                                "port": {"number": 80},
+                                            }
+                                        },
+                                    }
+                                ]
+                                if include_web
+                                else []
+                            ),
                         ]
                     },
                 }
             ],
         },
     }
-    return service, ingress
+    return tuple(item for item in (management_service, web_service, ingress) if item is not None)
 
 
 def _activation_deployment(
@@ -2951,6 +3019,8 @@ def _activation_deployment(
 def _network_policies(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
+    *,
+    include_web: bool,
 ) -> tuple[dict[str, Any], ...]:
     def policy(name: str, spec: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -3109,11 +3179,7 @@ def _network_policies(
             "ingress": [
                 {
                     "from": [
-                        {
-                            "podSelector": {
-                                "matchLabels": {"app": "loom-personal-dev-management"}
-                            }
-                        }
+                        {"podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}}}
                     ],
                     "ports": [
                         {
@@ -3136,9 +3202,7 @@ def _network_policies(
     acme_http01_ingress = policy(
         "loom-personal-dev-acme-http01-ingress",
         {
-            "podSelector": {
-                "matchLabels": {"acme.cert-manager.io/http01-solver": "true"}
-            },
+            "podSelector": {"matchLabels": {"acme.cert-manager.io/http01-solver": "true"}},
             "policyTypes": ["Ingress"],
             "ingress": [
                 {
@@ -3160,6 +3224,18 @@ def _network_policies(
             "ingress": [
                 {
                     "ports": [{"protocol": "TCP", "port": 8090}],
+                }
+            ],
+        },
+    )
+    web_ingress = policy(
+        "loom-personal-dev-web-ingress",
+        {
+            "podSelector": {"matchLabels": {"app": "loom-personal-dev-web"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "ports": [{"protocol": "TCP", "port": 8080}],
                 }
             ],
         },
@@ -3190,6 +3266,7 @@ def _network_policies(
         capacity_manager_ingress,
         acme_http01_ingress,
         management_ingress,
+        *((web_ingress,) if include_web else ()),
         migration,
         activation,
     )
@@ -3215,6 +3292,11 @@ def _render_documents(
 ) -> RenderedPersonalDevControlPlane:
     shared_role, shared_binding = _shared_role(context)
     runtime = plan.builder if plan is not None else profile.builder
+    web_profile = profile.resources.web is not None
+    web_release = release.images.loom_web is not None
+    if web_profile != web_release:
+        raise ValueError("personal-dev profile and trusted release web schemas differ")
+    include_web = web_profile and web_release
     documents = [
         _namespace(context),
         _management_mutation_role(context),
@@ -3237,9 +3319,10 @@ def _render_documents(
         _scanner_cache(context, profile),
         _migration(context, profile, release),
         _management_deployment(context, profile, release, plan),
-        *_management_service_and_ingress(context, profile),
+        *([_web_deployment(context, profile, release)] if include_web else []),
+        *_public_services_and_ingress(context, profile, include_web=include_web),
         _activation_deployment(context, profile, release, plan),
-        *_network_policies(context, profile),
+        *_network_policies(context, profile, include_web=include_web),
     ]
     documents.sort(key=_sort_key)
     yaml_text = yaml.safe_dump_all(

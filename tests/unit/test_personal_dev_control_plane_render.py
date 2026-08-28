@@ -51,11 +51,12 @@ _MANAGEMENT_FILES = {
 
 def _release_value() -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
             "loom_service": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+            "loom_web": "ghcr.io/qianyi-sun/loom-web@sha256:" + "b" * 64,
             "personal_dev_builder": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "4" * 64
             ),
@@ -110,6 +111,38 @@ def _render(tmp_path: Path):
     rendered = render_shadow_personal_dev_control_plane(profile, release)
     documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
     return profile, release, rendered, documents
+
+
+def _legacy_inputs(tmp_path: Path):
+    profile_text = re.sub(
+        r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
+        "\n",
+        _PROFILE.read_text(encoding="utf-8").replace(
+            "schema_version = 2\n", "schema_version = 1\n", 1
+        ),
+        count=1,
+    )
+    profile_path = tmp_path / "legacy-profile.toml"
+    profile_path.write_text(profile_text, encoding="utf-8")
+    release_value = _release_value()
+    release_value["schema_version"] = 2
+    del release_value["images"]["loom_web"]
+    payload = json.dumps(
+        release_value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    release_path = tmp_path / "legacy-release.json"
+    release_path.write_bytes(payload)
+    release_path.chmod(0o600)
+    return (
+        load_personal_dev_control_plane_profile(profile_path),
+        load_personal_dev_trusted_release(
+            release_path,
+            hashlib.sha256(payload).hexdigest(),
+        ),
+    )
 
 
 def _legacy_host_profile(tmp_path: Path):
@@ -224,9 +257,7 @@ def _acceptance_render(tmp_path: Path):
 
 
 def _operational_render(tmp_path: Path):
-    profile, release, acceptance, shadow, _rendered, _documents = _acceptance_render(
-        tmp_path
-    )
+    profile, release, acceptance, shadow, _rendered, _documents = _acceptance_render(tmp_path)
     value = acceptance.canonical_value()
     value.pop("acceptance_owner")
     value.pop("window")
@@ -283,7 +314,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert repeated == rendered
     assert rendered.yaml_text.endswith("\n")
     assert rendered.resource_count == len(documents)
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 38
     expected_input = hashlib.sha256(
         b"loom-personal-dev-shadow-render-v1\0"
         + profile.canonical_bytes()
@@ -296,7 +327,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "34ca6940da5d9abd2038f117096ec99e57452a7526496fe13992bd2ca4cfbee5"
+        "e99c7a9c9a6f3a6083c88df8e75b96221a9e333da1617f2a0d4591cd02102dbd"
     )
 
     identities = {_identity(document) for document in documents}
@@ -325,6 +356,8 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
         ("Deployment", "loom-dev", "loom-personal-dev-management"),
         ("Service", "loom-dev", "loom-personal-dev-management"),
         ("Ingress", "loom-dev", "loom-personal-dev-management"),
+        ("Deployment", "loom-dev", "loom-personal-dev-web"),
+        ("Service", "loom-dev", "loom-personal-dev-web"),
         ("Deployment", "loom-dev", "loom-personal-dev-activation-agent"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-default-deny"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-postgres-ingress"),
@@ -341,6 +374,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
             "loom-personal-dev-acme-http01-ingress",
         ),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress"),
+        ("NetworkPolicy", "loom-dev", "loom-personal-dev-web-ingress"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-migration-egress"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-activation"),
         (
@@ -376,6 +410,92 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert migration["metadata"]["labels"]["app"] == "loom-personal-dev-migration"
 
 
+def test_shadow_routes_api_to_management_and_account_actions_to_web(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, _rendered, documents = _render(tmp_path)
+
+    web = next(
+        document
+        for document in documents
+        if _identity(document) == ("Deployment", "loom-dev", "loom-personal-dev-web")
+    )
+    assert web["spec"]["replicas"] == 1
+    pod = web["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"]["runAsUser"] == 101
+    assert pod["securityContext"]["runAsGroup"] == 101
+    assert pod["securityContext"]["fsGroup"] == 101
+    assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+    assert pod["initContainers"][0]["image"] == _release.images.loom_web
+    assert pod["initContainers"][0]["command"] == ["/bin/cp"]
+    container = pod["containers"][0]
+    assert container["image"] == _release.images.loom_web
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    environment = {item["name"]: item["value"] for item in container["env"]}
+    assert environment == {
+        "LOOM_FRONTEND_API_BASE": "",
+        "LOOM_FRONTEND_ENVIRONMENT": "development",
+        "LOOM_FRONTEND_ENVIRONMENT_LABEL": "Personal development",
+        "LOOM_FRONTEND_PUBLIC_ORIGIN": _profile.network.public_origin,
+        "LOOM_FRONTEND_ROUTE_PATH": "",
+    }
+
+    service = next(
+        document
+        for document in documents
+        if _identity(document) == ("Service", "loom-dev", "loom-personal-dev-web")
+    )
+    assert service["spec"]["ports"] == [{"name": "http", "port": 80, "targetPort": 8080}]
+
+    ingress = next(document for document in documents if document["kind"] == "Ingress")
+    assert [
+        (
+            path["path"],
+            path["pathType"],
+            path["backend"]["service"]["name"],
+            path["backend"]["service"]["port"]["number"],
+        )
+        for path in ingress["spec"]["rules"][0]["http"]["paths"]
+    ] == [
+        ("/api", "Prefix", "loom-personal-dev-management", 8090),
+        ("/", "Prefix", "loom-personal-dev-web", 80),
+    ]
+    web_ingress = next(
+        document
+        for document in documents
+        if _identity(document) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-web-ingress")
+    )
+    assert web_ingress["spec"]["podSelector"] == {"matchLabels": {"app": "loom-personal-dev-web"}}
+    assert web_ingress["spec"]["ingress"] == [{"ports": [{"protocol": "TCP", "port": 8080}]}]
+
+
+def test_previous_schema_renders_exact_api_only_rollback_shape(tmp_path: Path) -> None:
+    profile, release = _legacy_inputs(tmp_path)
+
+    rendered = render_shadow_personal_dev_control_plane(profile, release)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+
+    assert rendered.resource_count == 35
+    assert not any(
+        document["metadata"].get("name", "").startswith("loom-personal-dev-web")
+        for document in documents
+    )
+    ingress = next(document for document in documents if document["kind"] == "Ingress")
+    assert ingress["spec"]["rules"][0]["http"]["paths"] == [
+        {
+            "path": "/",
+            "pathType": "Prefix",
+            "backend": {
+                "service": {
+                    "name": "loom-personal-dev-management",
+                    "port": {"number": 8090},
+                }
+            },
+        }
+    ]
+
+
 def test_later_release_preserves_installed_stateful_claim_template_metadata(
     tmp_path: Path,
 ) -> None:
@@ -388,12 +508,8 @@ def test_later_release_preserves_installed_stateful_claim_template_metadata(
         release_evidence_sha256="e" * 64,
     )
     later = render_shadow_personal_dev_control_plane(profile, later_release)
-    first_sets = _stateful_sets(
-        [item for item in yaml.safe_load_all(first.yaml_text) if item]
-    )
-    later_sets = _stateful_sets(
-        [item for item in yaml.safe_load_all(later.yaml_text) if item]
-    )
+    first_sets = _stateful_sets([item for item in yaml.safe_load_all(first.yaml_text) if item])
+    later_sets = _stateful_sets([item for item in yaml.safe_load_all(later.yaml_text) if item])
     expected_metadata = {
         "name": "data",
         "labels": {
@@ -417,11 +533,13 @@ def test_later_release_preserves_installed_stateful_claim_template_metadata(
     assert set(first_sets) == set(later_sets) == {"loom-dev-minio", "loom-dev-postgres"}
     for name in first_sets:
         assert first_sets[name]["metadata"] != later_sets[name]["metadata"]
-        assert first_sets[name]["spec"]["template"]["metadata"] != (
-            later_sets[name]["spec"]["template"]["metadata"]
+        assert (
+            first_sets[name]["spec"]["template"]["metadata"]
+            != (later_sets[name]["spec"]["template"]["metadata"])
         )
-        assert first_sets[name]["spec"]["volumeClaimTemplates"] == (
-            later_sets[name]["spec"]["volumeClaimTemplates"]
+        assert (
+            first_sets[name]["spec"]["volumeClaimTemplates"]
+            == (later_sets[name]["spec"]["volumeClaimTemplates"])
         )
         assert first_sets[name]["spec"]["volumeClaimTemplates"][0]["metadata"] == (
             expected_metadata
@@ -460,7 +578,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             + plan.canonical_bytes()
         ).hexdigest()
     )
-    assert rendered.resource_count == shadow.resource_count == 35
+    assert rendered.resource_count == shadow.resource_count == 38
     assert rendered.runtime_class_name == plan.builder.runtime_class_name
     assert rendered.runtime_handler == plan.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == plan.builder.runtime_profile_sha256
@@ -540,19 +658,21 @@ def test_acceptance_render_v2_two_owners_preserves_resource_shape(tmp_path: Path
 def test_acceptance_render_preserves_shadow_claim_template_lineage(
     tmp_path: Path,
 ) -> None:
-    _profile, _release, plan, shadow, acceptance, acceptance_documents = (
-        _acceptance_render(tmp_path)
+    _profile, _release, plan, shadow, acceptance, acceptance_documents = _acceptance_render(
+        tmp_path
     )
-    shadow_sets = _stateful_sets(
-        [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
-    )
+    shadow_sets = _stateful_sets([item for item in yaml.safe_load_all(shadow.yaml_text) if item])
     acceptance_sets = _stateful_sets(acceptance_documents)
 
     assert acceptance.input_sha256 != shadow.input_sha256
-    assert set(shadow_sets) == set(acceptance_sets) == {
-        "loom-dev-minio",
-        "loom-dev-postgres",
-    }
+    assert (
+        set(shadow_sets)
+        == set(acceptance_sets)
+        == {
+            "loom-dev-minio",
+            "loom-dev-postgres",
+        }
+    )
     for name in shadow_sets:
         shadow_templates = shadow_sets[name]["spec"]["volumeClaimTemplates"]
         acceptance_templates = acceptance_sets[name]["spec"]["volumeClaimTemplates"]
@@ -617,9 +737,7 @@ def test_operational_render_is_durable_but_remains_zero_capacity(
 ) -> None:
     _profile, _release, plan, shadow, rendered, documents = _operational_render(tmp_path)
     deployments = {
-        item["metadata"]["name"]: item
-        for item in documents
-        if item["kind"] == "Deployment"
+        item["metadata"]["name"]: item for item in documents if item["kind"] == "Deployment"
     }
     management = deployments["loom-personal-dev-management"]
     container = management["spec"]["template"]["spec"]["containers"][0]
@@ -631,9 +749,7 @@ def test_operational_render_is_durable_but_remains_zero_capacity(
     assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED"] == "true"
     assert env["LOOM_SVC_K8S_WORKER_ENABLED"] == "false"
     assert env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256"] == plan.sha256
-    assert env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON"] == (
-        plan.manager_runtime_json()
-    )
+    assert env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON"] == (plan.manager_runtime_json())
     binding = parse_personal_dev_operational_runtime_binding(
         env["LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON"],
         plan.sha256,
@@ -652,14 +768,11 @@ def _rendered_management_literal_environment(
     if mode == "shadow":
         _profile, _release, _rendered, documents = _render(tmp_path)
     else:
-        _profile, _release, _plan, _shadow, _rendered, documents = (
-            _acceptance_render(tmp_path)
-        )
+        _profile, _release, _plan, _shadow, _rendered, documents = _acceptance_render(tmp_path)
     management = next(
         document
         for document in documents
-        if _identity(document)
-        == ("Deployment", "loom-dev", "loom-personal-dev-management")
+        if _identity(document) == ("Deployment", "loom-dev", "loom-personal-dev-management")
     )
     container = next(
         item
@@ -740,7 +853,7 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         acceptance_documents,
     ) = _acceptance_render(tmp_path)
 
-    assert shadow_render.resource_count == acceptance_render.resource_count == 35
+    assert shadow_render.resource_count == acceptance_render.resource_count == 38
     for profile, release, plan, documents in (
         (shadow_profile, shadow_release, None, shadow_documents),
         (
@@ -951,6 +1064,7 @@ def test_shadow_workloads_are_inert_immutable_and_exclude_shared_app(tmp_path: P
     }
     assert images == {
         release.images.loom_service,
+        release.images.loom_web,
         release.images.personal_dev_activation_agent,
         release.images.personal_dev_scanner_cache,
         release.images.postgres,
@@ -1108,6 +1222,9 @@ def test_pods_are_restricted_finite_and_receive_only_explicit_api_tokens(
     deployments = [item for item in documents if item["kind"] == "Deployment"]
     for deployment in deployments:
         pod = deployment["spec"]["template"]["spec"]
+        if deployment["metadata"]["name"] == "loom-personal-dev-web":
+            assert all(volume["name"] != "kube-api-access" for volume in pod["volumes"])
+            continue
         token_volume = next(
             volume for volume in pod["volumes"] if volume["name"] == "kube-api-access"
         )
@@ -1179,11 +1296,10 @@ def test_management_ingress_admits_public_https_port_without_source_identity(
     management_ingress = next(
         item
         for item in documents
-        if _identity(item)
-        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
+        if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
     )
 
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 38
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1205,12 +1321,11 @@ def test_management_ingress_ignores_legacy_controller_source_profile(
     management_ingress = next(
         item
         for item in documents
-        if _identity(item)
-        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
+        if _identity(item) == ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress")
     )
 
     assert profile.network.ingress_controller_source_cidrs == ("192.168.50.14/32",)
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 38
     assert management_ingress["spec"] == {
         "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
         "policyTypes": ["Ingress"],
@@ -1237,7 +1352,7 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
         )
     )
 
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 38
     assert manager_ingress["spec"] == {
         "podSelector": {
             "matchLabels": {
@@ -1249,16 +1364,8 @@ def test_capacity_manager_ingress_admits_only_personal_management_mtls(
         "policyTypes": ["Ingress"],
         "ingress": [
             {
-                "from": [
-                    {
-                        "podSelector": {
-                            "matchLabels": {"app": "loom-personal-dev-management"}
-                        }
-                    }
-                ],
-                "ports": [
-                    {"protocol": "TCP", "port": profile.network.capacity_manager_port}
-                ],
+                "from": [{"podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}}}],
+                "ports": [{"protocol": "TCP", "port": profile.network.capacity_manager_port}],
             }
         ],
     }
@@ -1279,11 +1386,9 @@ def test_acme_http01_ingress_admits_public_challenge_only_on_exact_port(
         )
     )
 
-    assert rendered.resource_count == 35
+    assert rendered.resource_count == 38
     assert solver_ingress["spec"] == {
-        "podSelector": {
-            "matchLabels": {"acme.cert-manager.io/http01-solver": "true"}
-        },
+        "podSelector": {"matchLabels": {"acme.cert-manager.io/http01-solver": "true"}},
         "policyTypes": ["Ingress"],
         "ingress": [
             {
@@ -1376,21 +1481,13 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     assert exact_management in resource_policy
     assert "startsWith('loom-dev-')" in namespace_policy
     assert "startsWith('loom-build-')" in namespace_policy
-    assert (
-        "pod-security.kubernetes.io/enforce'] == 'restricted'" in namespace_policy
-    )
+    assert "pod-security.kubernetes.io/enforce'] == 'restricted'" in namespace_policy
     assert "pod-security.kubernetes.io/enforce'] == 'privileged'" in namespace_policy
-    assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in (
-        namespace_policy
-    )
+    assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in (namespace_policy)
     assert "pod-security.kubernetes.io/audit'] == 'restricted'" in namespace_policy
-    assert "pod-security.kubernetes.io/audit-version'] == 'v1.36'" in (
-        namespace_policy
-    )
+    assert "pod-security.kubernetes.io/audit-version'] == 'v1.36'" in (namespace_policy)
     assert "pod-security.kubernetes.io/warn'] == 'restricted'" in namespace_policy
-    assert "pod-security.kubernetes.io/warn-version'] == 'v1.36'" in (
-        namespace_policy
-    )
+    assert "pod-security.kubernetes.io/warn-version'] == 'v1.36'" in (namespace_policy)
     assert "matches('^loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?$')" in namespace_policy
     assert "matches('^loom-build-[0-9a-f]{32}-l[0-9a-f]{16}$')" in namespace_policy
     assert (
@@ -1492,9 +1589,7 @@ def test_builder_namespace_admission_binds_metadata_without_wedging_delete(
     expression = validation["expression"]
 
     for shape_validation in policy["spec"]["validations"][1:]:
-        assert shape_validation["expression"].startswith(
-            "request.operation == 'DELETE' || "
-        )
+        assert shape_validation["expression"].startswith("request.operation == 'DELETE' || ")
     assert expression.startswith("request.operation == 'DELETE' || ")
     for fragment in (
         ".metadata.annotations.size() == 0",
@@ -1621,8 +1716,7 @@ def test_builder_admission_requires_exact_gvisor_shared_mount_annotations(
     metadata_contract = next(
         item["expression"]
         for item in policy["spec"]["validations"]
-        if item["message"]
-        == "builder Job metadata differs from its exact privileged exception"
+        if item["message"] == "builder Job metadata differs from its exact privileged exception"
     )
 
     for value in (
@@ -1654,8 +1748,7 @@ def test_builder_admission_limits_each_job_to_one_cleanup_safe_execution(
     ]
 
     assert all(
-        "request.operation != 'DELETE'" in expression
-        for expression in job_boundaries.values()
+        "request.operation != 'DELETE'" in expression for expression in job_boundaries.values()
     )
     for value in (
         "spec.parallelism == 1",
@@ -1737,9 +1830,7 @@ def test_builder_admission_blocks_pod_auxiliary_authority(
         for item in policy["spec"]["validations"]
         if item["message"].startswith("builder Job ")
     }
-    pod = boundaries[
-        "builder Job pod auxiliary fields differ from its exact privileged exception"
-    ]
+    pod = boundaries["builder Job pod auxiliary fields differ from its exact privileged exception"]
     security = boundaries[
         "builder Job pod supplemental security differs from its exact privileged exception"
     ]
@@ -1795,9 +1886,7 @@ def test_builder_admission_binds_volume_source_and_mount_auxiliary_fields(
         for item in policy["spec"]["validations"]
         if item["message"].startswith("builder Job ")
     }
-    volumes = boundaries[
-        "builder Job volumes differ from its exact privileged exception"
-    ]
+    volumes = boundaries["builder Job volumes differ from its exact privileged exception"]
     client_mounts = boundaries[
         "builder Job client mounts differ from its exact privileged exception"
     ]
@@ -1829,12 +1918,8 @@ def test_builder_admission_couples_platform_capabilities_and_metadata(
         for item in policy["spec"]["validations"]
         if item["message"].startswith("builder Job ")
     }
-    metadata = boundaries[
-        "builder Job metadata differs from its exact privileged exception"
-    ]
-    platform = boundaries[
-        "builder Job platform volumes differ from its exact privileged exception"
-    ]
+    metadata = boundaries["builder Job metadata differs from its exact privileged exception"]
+    platform = boundaries["builder Job platform volumes differ from its exact privileged exception"]
 
     for field in (
         ".metadata.annotations",
@@ -1876,10 +1961,7 @@ def test_builder_admission_couples_all_resource_attempt_labels_to_namespace(
         if item["kind"] == "ValidatingAdmissionPolicy"
         and item["metadata"]["name"] == "loom-personal-dev-management-resources"
     )
-    boundaries = {
-        item["message"]: item["expression"]
-        for item in policy["spec"]["validations"]
-    }
+    boundaries = {item["message"]: item["expression"] for item in policy["spec"]["validations"]}
     attempt_namespace_coupling = "request.namespace.substring(11, 43) =="
 
     for message in (
@@ -1970,8 +2052,7 @@ def test_builder_admission_binds_rolebinding_metadata_to_exact_shape(
     boundary = next(
         item["expression"]
         for item in policy["spec"]["validations"]
-        if item["message"]
-        == "builder RoleBinding metadata differs from its exact contract"
+        if item["message"] == "builder RoleBinding metadata differs from its exact contract"
     )
 
     assert boundary.startswith("request.operation == 'DELETE' ||")
@@ -2027,9 +2108,7 @@ def test_builder_admission_binds_support_resources_to_exact_shapes(
     ):
         assert value in common
 
-    config_map = boundaries[
-        "builder support ConfigMap differs from its exact contract"
-    ]
+    config_map = boundaries["builder support ConfigMap differs from its exact contract"]
     assert "apiVersion == 'v1'" in config_map
     assert "kind == 'ConfigMap'" in config_map
     assert "immutable == true" in config_map
@@ -2050,9 +2129,7 @@ def test_builder_admission_binds_support_resources_to_exact_shapes(
     assert "build-capability-amd64-" in secret
     assert "build-capability-arm64-" in secret
 
-    limit_range = boundaries[
-        "builder support LimitRange differs from its exact contract"
-    ]
+    limit_range = boundaries["builder support LimitRange differs from its exact contract"]
     assert "kind == 'LimitRange'" in limit_range
     assert "spec.limits.size() == 1" in limit_range
     assert "defaultRequest.size() == 3" in limit_range
@@ -2060,9 +2137,7 @@ def test_builder_admission_binds_support_resources_to_exact_shapes(
     assert "quantity('20Gi')" in limit_range
     assert "maxLimitRequestRatio" in limit_range
 
-    quota = boundaries[
-        "builder support ResourceQuota differs from its exact contract"
-    ]
+    quota = boundaries["builder support ResourceQuota differs from its exact contract"]
     assert "kind == 'ResourceQuota'" in quota
     assert "spec.hard.size() == 4" in quota
     for resource in ("configmaps", "count/jobs.batch", "pods", "secrets"):
@@ -2082,9 +2157,7 @@ def test_management_admission_keeps_mutable_shape_checks_out_of_delete(
         if item["kind"] == "ValidatingAdmissionPolicy"
         and item["metadata"]["name"] == "loom-personal-dev-management-resources"
     )
-    expressions = {
-        item["message"]: item["expression"] for item in policy["spec"]["validations"]
-    }
+    expressions = {item["message"]: item["expression"] for item in policy["spec"]["validations"]}
 
     for message in (
         "management resource lacks its namespace-family ownership",
@@ -2092,9 +2165,9 @@ def test_management_admission_keeps_mutable_shape_checks_out_of_delete(
         "workload cannot acquire API or unrelated Secret authority",
     ):
         assert "|| request.operation == 'DELETE' ||" in expressions[message]
-    assert expressions[
-        "management RoleBinding is outside its exact delegated roles"
-    ].startswith("request.operation == 'DELETE' || ")
+    assert expressions["management RoleBinding is outside its exact delegated roles"].startswith(
+        "request.operation == 'DELETE' || "
+    )
 
 
 def test_management_admission_blocks_indirect_personal_secret_reads(

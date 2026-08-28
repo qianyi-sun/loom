@@ -315,6 +315,8 @@ owner-only input to stable bytes.
     }
 
     reviewed_server="$(reviewed_public_origin "$profile")"
+    management_host="$("$python_cli" -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname or "")' "$reviewed_server")"
+    test -n "$management_host"
 
     test -d "$trusted_release_artifact" && test ! -L "$trusted_release_artifact"
     test "$(realpath -e "$trusted_release_artifact")" = "$trusted_release_artifact"
@@ -367,7 +369,7 @@ owner-only input to stable bytes.
     test "$(sha256sum "$scanner_finding_policy" | awk '{print $1}')" = "$scanner_finding_policy_sha256"
 
     assert_scanner_release_binding() {
-      test "$(jq -r .schema_version "$trusted_release")" = 2
+      test "$(jq -r .schema_version "$trusted_release")" = 3
       test -f "$scanner_cache_lock" && test ! -L "$scanner_cache_lock"
       test "$(realpath -e "$scanner_cache_lock")" = "$scanner_cache_lock"
       test "$(sha256sum "$scanner_cache_lock" | awk '{print $1}')" = "$scanner_cache_lock_sha256"
@@ -444,6 +446,88 @@ expected, while regression is a stop condition.
       kubectl --kubeconfig "$kubeconfig" --request-timeout=10s --namespace loom-dev get jobs -l app=loom-personal-dev-migration -o json | jq -e '.items | length >= 1 and any(.[]; any(.status.conditions[]?; .type == "Complete" and .status == "True")) and all(.[]; all(.status.conditions[]?; .type != "Failed" or .status != "True"))' >/dev/null
     }
 
+    assert_web_api_route_contract() {
+      local route_frontend route_health route_ingress route_network_policy
+      local route_reset_page route_setup_page
+      route_network_policy="$(mktemp "$evidence_dir/web-policy-recheck.XXXXXX.json")"
+      route_ingress="$(mktemp "$evidence_dir/web-ingress-recheck.XXXXXX.json")"
+      route_frontend="$(mktemp "$evidence_dir/frontend-config-recheck.XXXXXX.json")"
+      route_health="$(mktemp "$evidence_dir/api-health-recheck.XXXXXX.json")"
+      route_reset_page="$(mktemp "$evidence_dir/reset-spa-recheck.XXXXXX.html")"
+      route_setup_page="$(mktemp "$evidence_dir/setup-spa-recheck.XXXXXX.html")"
+
+      if ! kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+        --namespace loom-dev get networkpolicy/loom-personal-dev-web-ingress \
+        -o json > "$route_network_policy"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! jq -e '
+        .spec.podSelector == {"matchLabels":{"app":"loom-personal-dev-web"}} and
+        .spec.policyTypes == ["Ingress"] and
+        (.spec | has("egress") | not) and
+        (.spec.ingress[0] | has("from") | not) and
+        .spec.ingress == [{ports:[{port:8080,protocol:"TCP"}]}]
+      ' "$route_network_policy" >/dev/null; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+        --namespace loom-dev get ingress/loom-personal-dev-management \
+        -o json > "$route_ingress"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! jq -e --arg host "$management_host" '
+        (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
+        (.metadata.annotations | keys | sort) as $keys |
+        ($keys == ["cert-manager.io/cluster-issuer","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"] or $keys == ["cert-manager.io/cluster-issuer","loom.dev/acceptance-plan-sha256","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"]) and
+        .metadata.annotations["cert-manager.io/cluster-issuer"] == "letsencrypt-prod" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-body-size"] == "512m" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] == "300" and
+        .spec.ingressClassName == "nginx" and
+        .spec.rules == [{host:$host,http:{paths:[
+          {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
+          {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
+        ]}}] and .spec.tls == [{hosts:[$host],secretName:"loom-personal-dev-management-tls"}]
+      ' "$route_ingress" >/dev/null; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+        "$reviewed_server/api/v1/health" > "$route_health"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! jq -e '.status == "ok"' "$route_health" >/dev/null; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+        "$reviewed_server/loom-frontend-config.json" > "$route_frontend"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! jq -e --arg origin "$reviewed_server" '
+        .environment == "development" and .routePath == "" and
+        .apiBase == "" and .apiRouteBase == ($origin + "/api")
+      ' "$route_frontend" >/dev/null; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+        "$reviewed_server/auth/reset" > "$route_reset_page" ||
+        ! grep -Fq '<div id="root">' "$route_reset_page"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+        "$reviewed_server/auth/setup" > "$route_setup_page" ||
+        ! grep -Fq '<div id="root">' "$route_setup_page"; then
+        rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+        return 1
+      fi
+      rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    }
+
     capture_scanner_cache_init_status() {
       local output="$1"
       kubectl --kubeconfig "$kubeconfig" --request-timeout=10s --namespace loom-dev get pods -l app=loom-personal-dev-management -o json | jq -cS '[.items[] | {init: [.status.initContainerStatuses[]? | select(.name == "personal-dev-scanner-cache-init") | {exit_code: .state.terminated.exitCode, image_id: .imageID, name: .name, reason: .state.terminated.reason}], pod: .metadata.name}]' > "$output"
@@ -494,6 +578,7 @@ expected, while regression is a stop condition.
       assert_reviewed_kubeconfig
       assert_secret_key_inventory
       assert_storage_and_migration
+      assert_web_api_route_contract
       "$loom_cli" admin personal-dev-control-plane status-acceptance --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" --acceptance-plan-file "$acceptance_plan" --acceptance-plan-sha256 "$acceptance_plan_sha256" "${acceptance_evidence_args[@]}" > "$output"
       chmod 0600 "$output"
       assert_canonical_json_line "$output"
@@ -507,6 +592,7 @@ expected, while regression is a stop condition.
       assert_secret_key_inventory
       assert_storage_and_migration
       assert_no_dynamic_namespaces
+      assert_web_api_route_contract
       capture_pre_acceptance_status
     }
 
@@ -522,7 +608,35 @@ expected, while regression is a stop condition.
       test "$status_rc" -eq 0 || test "$status_rc" -eq 1
       chmod 0600 "$rollback_pre_status"
       assert_canonical_json_line "$rollback_pre_status"
-      jq -e '.application_ready == true and .capacity_publication_ready == true and .worker_available == false and .manager_ceiling == 0 and ([.blockers[] | select(. != "acceptance_window_expired")] | length == 0) and all(.components[]; .ready == true) and any(.components[]; .name == "personal-workers" and .observed == 0 and .ready == true)' "$rollback_pre_status" >/dev/null
+      jq -e --arg plan "$acceptance_plan_sha256" '
+        .schema == "loom-personal-dev-control-plane-status-v1" and
+        .mode == "acceptance" and .acceptance_plan_sha256 == $plan and
+        .capacity_publication_ready == true and .worker_available == false and
+        .manager_ceiling == 0 and
+        (.blockers | type == "array") and
+        (.blockers as $blockers |
+          ($blockers | unique | length) == ($blockers | length)) and
+        ([.blockers[] |
+          select(. != "acceptance_window_expired" and . != "web_not_ready")]
+          | length == 0) and
+        (.components | type == "array" and length == 7 and
+          (map(.name) | sort) == [
+            "cluster-resources", "manager", "namespaced-resources",
+            "namespaces", "personal-workers", "runtime-class", "web"
+          ]) and
+        any(.components[];
+          .name == "personal-workers" and .observed == 0 and .ready == true) and
+        (if (.blockers | index("web_not_ready")) != null then
+          all(.components[];
+            if .name == "web" or .name == "namespaced-resources" then
+              .ready == false
+            else
+              .ready == true
+            end)
+         else
+          all(.components[]; .ready == true)
+         end)
+      ' "$rollback_pre_status" >/dev/null
     }
 
 The successful live acceptance record contains these exact facets:
@@ -565,8 +679,8 @@ that init's zero exit status and immutable image ID after each apply.
     acceptance_render_evidence_sha256="$(sha256sum "$acceptance_render_evidence" | awk '{print $1}')"
     shadow_render_evidence_sha256="$(sha256sum "$shadow_render_evidence" | awk '{print $1}')"
     test "$shadow_render_sha256" = "$(jq -r .release.shadow_manifest_sha256 "$acceptance_plan")"
-    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 35' "$acceptance_render_evidence" >/dev/null
-    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 35' "$shadow_render_evidence" >/dev/null
+    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 38' "$acceptance_render_evidence" >/dev/null
+    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38' "$shadow_render_evidence" >/dev/null
 
 ## 4. Diff and apply acceptance
 
@@ -584,6 +698,7 @@ or unrelated namespace is a stop condition.
     chmod 0600 "$evidence_dir/acceptance.server-side-apply.txt"
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-web --timeout=300s
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-activation-agent --timeout=300s
     capture_scanner_cache_init_status "$scanner_cache_init_status"
     assert_live_acceptance "$post_acceptance_status"
@@ -899,7 +1014,9 @@ separate reviewed plan.
     chmod 0600 "$evidence_dir/rollback.server-side-apply.txt"
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-web --timeout=300s
     capture_scanner_cache_init_status "$rollback_scanner_cache_init_status"
+    assert_web_api_route_contract
     test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get deployment/loom-personal-dev-activation-agent -o jsonpath='{.spec.replicas}')" = 0
     "$loom_cli" admin personal-dev-control-plane status --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status"
     chmod 0600 "$rollback_status"

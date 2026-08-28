@@ -261,7 +261,7 @@ owner-only input to stable bytes.
     test "$(sha256sum "$scanner_finding_policy" | awk '{print $1}')" = "$scanner_finding_policy_sha256"
 
     assert_scanner_release_binding() {
-      test "$(jq -r .schema_version "$trusted_release")" = 2
+      test "$(jq -r .schema_version "$trusted_release")" = 3
       test -f "$scanner_cache_lock" && test ! -L "$scanner_cache_lock"
       test "$(realpath -e "$scanner_cache_lock")" = "$scanner_cache_lock"
       test "$(sha256sum "$scanner_cache_lock" | awk '{print $1}')" = "$scanner_cache_lock_sha256"
@@ -459,8 +459,8 @@ that init's zero exit status and immutable image ID after each apply.
     acceptance_render_evidence_sha256="$(sha256sum "$acceptance_render_evidence" | awk '{print $1}')"
     shadow_render_evidence_sha256="$(sha256sum "$shadow_render_evidence" | awk '{print $1}')"
     test "$shadow_render_sha256" = "$(jq -r .release.shadow_manifest_sha256 "$acceptance_plan")"
-    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 35' "$acceptance_render_evidence" >/dev/null
-    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 35' "$shadow_render_evidence" >/dev/null
+    jq -e --arg plan "$acceptance_plan_sha256" --arg yaml "$acceptance_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "acceptance" and .acceptance_plan_sha256 == $plan and .yaml_sha256 == $yaml and .resource_count == 38' "$acceptance_render_evidence" >/dev/null
+    jq -e --arg yaml "$shadow_render_sha256" '.schema == "loom-personal-dev-control-plane-render-v1" and .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38' "$shadow_render_evidence" >/dev/null
 
 ## 4. Diff and apply acceptance
 
@@ -478,6 +478,7 @@ or unrelated namespace is a stop condition.
     chmod 0600 "$evidence_dir/acceptance.server-side-apply.txt"
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-web --timeout=300s
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-activation-agent --timeout=300s
     capture_scanner_cache_init_status "$scanner_cache_init_status"
     assert_live_acceptance "$post_acceptance_status"
@@ -661,6 +662,7 @@ separate reviewed plan.
     chmod 0600 "$evidence_dir/rollback.server-side-apply.txt"
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-web --timeout=300s
     capture_scanner_cache_init_status "$rollback_scanner_cache_init_status"
     test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get deployment/loom-personal-dev-activation-agent -o jsonpath='{.spec.replicas}')" = 0
     "$loom_cli" admin personal-dev-control-plane status --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status"
