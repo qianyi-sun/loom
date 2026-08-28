@@ -557,10 +557,15 @@ applied.
 
 The maintenance marker is entered and left only by the exact installed root
 host helper. Entry is serialized with broker launch admission and proves that
-the active pointer and rollout unit set are idle. The marker remains the
-authoritative admission freeze for the whole inventory/apply/readback window;
-ordinary host health reports it explicitly instead of treating maintenance as
-a normal ready state. Exit repeats the idle proof before removing the marker.
+the active pointer and the exact backup, rollout, and mutation-guard unit sets
+are idle. The helper also validates every durable preflight-backup phase before
+that unit inventory. Because marker entry is serialized with launch admission,
+a valid durable phase with no live request-bound unit is orphaned history, not
+executable work; malformed durable state remains a hard refusal. The marker
+remains the authoritative admission freeze for the whole
+inventory/apply/readback window; ordinary host health reports it explicitly
+instead of treating maintenance as a normal ready state. Exit repeats the idle
+proof before removing the marker.
 
 `migration.plan` loads the exact candidate's Alembic graph without a database
 connection. The checked-in staging policy requires one closed single-head DAG,

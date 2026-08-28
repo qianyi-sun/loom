@@ -4391,16 +4391,16 @@ def test_active_status_uses_protected_pointer_and_user_units_without_broker_impo
 @pytest.mark.parametrize(
     ("phase", "expected"),
     [
-        ("backup_pending", "busy"),
-        ("backup_running", "busy"),
-        ("backup_cancel_requested", "busy"),
-        ("backup_verified", "busy"),
-        ("launch_pending", "busy"),
+        ("backup_pending", "idle"),
+        ("backup_running", "idle"),
+        ("backup_cancel_requested", "idle"),
+        ("backup_verified", "idle"),
+        ("launch_pending", "idle"),
         ("launch_running", "idle"),
         ("backup_failed", "idle"),
     ],
 )
-def test_active_status_includes_safe_durable_preflight_backup_phases(
+def test_active_status_treats_safe_durable_preflight_backup_without_live_unit_as_orphaned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,

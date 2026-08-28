@@ -4315,8 +4315,13 @@ class HostSystem:
             service_uid=service_uid,
             service_gid=service_gid,
         )
-        if durable_status != "idle":
-            return durable_status
+        if durable_status == "unknown":
+            return "unknown"
+        # Maintenance admission is serialized with broker launch.  After it
+        # owns that boundary, a safe durable phase without a live backup,
+        # rollout, or guard unit is orphaned history rather than executable
+        # work.  Keep validating the history so malformed state fails closed,
+        # then let the fixed unit inventory decide whether execution is live.
 
         result = self.runner.run(
             [
