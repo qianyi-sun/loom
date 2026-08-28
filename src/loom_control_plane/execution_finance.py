@@ -78,6 +78,11 @@ def _ceil_fraction(value: Fraction) -> int:
     return (value.numerator + value.denominator - 1) // value.denominator
 
 
+def _ceil_timedelta_seconds(value: timedelta) -> int:
+    whole_seconds = value.days * 86_400 + value.seconds
+    return whole_seconds + int(value.microseconds > 0)
+
+
 def estimate_execution_cost(
     runtime_plan: ExecutionRuntimePlanV1,
     price: ExecutionPriceSnapshot,
@@ -93,9 +98,9 @@ def estimate_execution_cost(
 
     start = _utc(acquired_at, name="acquired_at")
     deadline = _utc(deadline_at, name="deadline_at")
-    duration_seconds = max(1, math.ceil((deadline - start).total_seconds()))
     if deadline <= start:
         raise ValueError("deadline_at must be after acquired_at")
+    duration_seconds = max(1, _ceil_timedelta_seconds(deadline - start))
     output_mib = max(
         1,
         (runtime_plan.max_artifact_bytes + 2 * runtime_plan.max_log_bytes_per_stream + 1_048_575)
@@ -127,13 +132,18 @@ def estimate_execution_cost(
     )
     daily_costs: list[tuple[date, int]] = []
     cursor = start
+    allocated_seconds = 0
     while cursor < deadline:
         next_day = datetime(cursor.year, cursor.month, cursor.day, tzinfo=UTC) + timedelta(days=1)
         segment_end = min(deadline, next_day)
-        segment_seconds = max(1, math.ceil((segment_end - cursor).total_seconds()))
+        # Round cumulative elapsed time so each UTC boundary cannot add a
+        # separate second to the complete reservation.
+        cumulative_seconds = _ceil_timedelta_seconds(segment_end - start)
+        segment_seconds = cumulative_seconds - allocated_seconds
         daily_costs.append(
             (cursor.date(), max(1, _ceil_fraction(hourly_cost * segment_seconds / 3600)))
         )
+        allocated_seconds += segment_seconds
         cursor = segment_end
     estimated_microusd = sum(amount for _, amount in daily_costs)
     payload = {
