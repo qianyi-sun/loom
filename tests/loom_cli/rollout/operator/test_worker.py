@@ -256,6 +256,21 @@ def worker_fakes(*, driver_rc: int = 0) -> Bundle:
     return Bundle(deps, store, order)
 
 
+def advanced_epoch_resume_fakes() -> tuple[Bundle, DriverEnvelope]:
+    bundle = worker_fakes()
+    envelope = replace(valid_envelope(), attempt_number=2, resume=True)
+    pointer = ActivePointer(
+        request_id=envelope.request_id,
+        attempt_number=envelope.attempt_number,
+        unit_name=f"loom-staging-rollout-{envelope.request_id}-2.service",
+        status="pending",
+    )
+    bundle.store.envelope = envelope
+    bundle.store.active = pointer
+    bundle.store.active_history = [pointer]
+    return bundle, envelope
+
+
 @pytest.mark.parametrize("driver_rc", [0, 1])
 def test_attempt_releases_guard_before_every_terminal_event(driver_rc: int) -> None:
     bundle = worker_fakes(driver_rc=driver_rc)
@@ -280,6 +295,78 @@ def test_attempt_claims_guard_and_validates_original_binding_before_store_or_dri
     assert bundle.order.index("guard-ready") < bundle.order.index("preflight-request-read")
     assert bundle.order.index("guard-ready") < bundle.order.index("envelope-read")
     assert bundle.order.index("guard-ready") < bundle.order.index("driver-lock-acquire")
+
+
+def test_attempt_accepts_exact_advanced_epoch_resume_before_driver_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, envelope = advanced_epoch_resume_fakes()
+    guard = FakeMutationGuard(bundle.order, mutation_epoch=8)
+
+    def find_recovery(state_root: Path, **bindings: object) -> int:
+        assert state_root == Path("/var/lib/loom-staging-rollout")
+        assert bindings == {
+            "request_id": REQUEST_ID,
+            "through_attempt": 1,
+            "candidate_sha": "a" * 40,
+            "attestation_digest": "3" * 64,
+            "starting_mutation_epoch": 7,
+            "service_uid": os.geteuid(),
+        }
+        return 1
+
+    monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", find_recovery)
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    assert run_attempt(envelope, dependencies) == 0
+
+    assert "driver-run" in bundle.order
+    assert guard.released == [REQUEST_ID]
+
+
+@pytest.mark.parametrize("recovery_attempt", [None, 1])
+def test_attempt_rejects_unproven_or_over_advanced_epoch_resume_before_driver_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_attempt: int | None,
+) -> None:
+    bundle, envelope = advanced_epoch_resume_fakes()
+    guard = FakeMutationGuard(
+        bundle.order,
+        mutation_epoch=8 if recovery_attempt is None else 9,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "find_advanced_epoch_attempt",
+        lambda *_args, **_kwargs: recovery_attempt,
+    )
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    with pytest.raises(ValueError, match="staging mutation guard binding drifted"):
+        run_attempt(envelope, dependencies)
+
+    assert "driver-lock-acquire" not in bundle.order
+    assert "driver-run" not in bundle.order
+    assert guard.released == [REQUEST_ID]
+
+
+def test_attempt_rejects_invalid_advanced_epoch_recovery_before_driver_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, envelope = advanced_epoch_resume_fakes()
+    guard = FakeMutationGuard(bundle.order, mutation_epoch=8)
+
+    def reject_recovery(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("protected apply recovery plan binding drifted")
+
+    monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", reject_recovery)
+    dependencies = replace(bundle.deps, mutation_guard=guard)
+
+    with pytest.raises(ValueError, match="protected apply recovery plan binding drifted"):
+        run_attempt(envelope, dependencies)
+
+    assert "driver-lock-acquire" not in bundle.order
+    assert "driver-run" not in bundle.order
+    assert guard.released == [REQUEST_ID]
 
 
 @pytest.mark.parametrize("drift", ["tree", "epoch"])
