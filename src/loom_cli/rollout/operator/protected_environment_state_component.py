@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,11 +40,14 @@ from .protected_apply_journal import (
     ProtectedApplyComponent,
 )
 
-_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-environment-state-v4").hexdigest()
+_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-environment-state-v5").hexdigest()
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _MAX_TOKEN_BYTES = 64 * 1024
 _REQUEST_TIMEOUT_SECONDS = 10.0
+_TRANSIENT_ATTEMPTS = 13
+_TRANSIENT_INTERVAL_SECONDS = 5.0
+_TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _DESIRED_DRIFT_PREFIXES = (
     "worker_pool_autoscaler_policies[",
     "gb10_worker_pool_desired_states[",
@@ -483,6 +487,10 @@ class HttpxProtectedEnvironmentStateTransport:
 
     @staticmethod
     def _response_json(response: httpx.Response) -> Mapping[str, Any]:
+        if response.status_code in _TRANSIENT_HTTP_STATUS_CODES:
+            raise httpx.TransportError(
+                "protected environment-state observation is temporarily unavailable"
+            )
         if response.status_code != 200 or len(response.content) > _MAX_RESPONSE_BYTES:
             raise RuntimeError("protected environment-state observation failed safely")
         try:
@@ -497,6 +505,10 @@ class HttpxProtectedEnvironmentStateTransport:
 
     @staticmethod
     def _expect_ok(response: httpx.Response) -> None:
+        if response.status_code in _TRANSIENT_HTTP_STATUS_CODES:
+            raise httpx.TransportError(
+                "protected environment-state mutation is temporarily unavailable"
+            )
         if response.status_code != 200 or len(response.content) > _MAX_RESPONSE_BYTES:
             raise RuntimeError("protected environment-state mutation failed safely")
 
@@ -536,22 +548,38 @@ class ProtectedEnvironmentStateComponent:
         return self._classify(plan, include_runtime=True)
 
     def apply(self, plan: FinalGatePlan) -> None:
-        epoch = self.epoch_guard(plan)
-        if epoch.state is not ComponentState.EXACT:
-            raise RuntimeError("protected environment-state epoch ownership changed before apply")
-        evidence = self.transport.observe(plan, include_runtime=False)
-        if evidence.desired_exact:
-            # Idempotent: the desired environment-state is already at the target
-            # for this candidate — e.g. a prior or concurrent same-candidate
-            # apply advanced it, or this is a rollout re-run after the state was
-            # already advanced (#1081). Applying is a no-op and the post-apply
-            # re-classify confirms EXACT, so return rather than failing the whole
-            # protected apply. The epoch guard above still fail-closes on any
-            # real mutation-epoch change, so this cannot mask a conflicting
-            # mutation — desired_exact means the live desired state equals this
-            # plan's own target.
+        for attempt in range(_TRANSIENT_ATTEMPTS):
+            epoch = self.epoch_guard(plan)
+            if epoch.state is not ComponentState.EXACT:
+                raise RuntimeError(
+                    "protected environment-state epoch ownership changed before apply"
+                )
+            try:
+                evidence = self.transport.observe(plan, include_runtime=False)
+            except httpx.TransportError:
+                if attempt + 1 == _TRANSIENT_ATTEMPTS:
+                    raise
+                time.sleep(_TRANSIENT_INTERVAL_SECONDS)
+                continue
+            if evidence.desired_exact:
+                # Idempotent: a prior PUT may have committed even when endpoint
+                # turnover lost its response. Re-observe before retrying and
+                # accept only this candidate's exact desired state (#1081).
+                return
+            epoch = self.epoch_guard(plan)
+            if epoch.state is not ComponentState.EXACT:
+                raise RuntimeError(
+                    "protected environment-state epoch ownership changed before apply"
+                )
+            try:
+                self.transport.apply(plan)
+            except httpx.TransportError:
+                if attempt + 1 == _TRANSIENT_ATTEMPTS:
+                    raise
+                time.sleep(_TRANSIENT_INTERVAL_SECONDS)
+                continue
             return
-        self.transport.apply(plan)
+        raise RuntimeError("protected environment-state retry bound is invalid")
 
     def _classify(
         self,
@@ -559,15 +587,25 @@ class ProtectedEnvironmentStateComponent:
         *,
         include_runtime: bool,
     ) -> ComponentObservation:
-        epoch = self.epoch_guard(plan)
-        if epoch.state is not ComponentState.EXACT:
-            return self._observation(
-                plan,
-                ComponentState.DRIFTED,
-                epoch.evidence_digest,
-                "0" * 64,
-            )
-        evidence = self.transport.observe(plan, include_runtime=include_runtime)
+        for attempt in range(_TRANSIENT_ATTEMPTS):
+            epoch = self.epoch_guard(plan)
+            if epoch.state is not ComponentState.EXACT:
+                return self._observation(
+                    plan,
+                    ComponentState.DRIFTED,
+                    epoch.evidence_digest,
+                    "0" * 64,
+                )
+            try:
+                evidence = self.transport.observe(plan, include_runtime=include_runtime)
+            except httpx.TransportError:
+                if attempt + 1 == _TRANSIENT_ATTEMPTS:
+                    raise
+                time.sleep(_TRANSIENT_INTERVAL_SECONDS)
+                continue
+            break
+        else:  # pragma: no cover - finite range and terminal final attempt
+            raise RuntimeError("protected environment-state retry bound is invalid")
         if include_runtime and not evidence.desired_exact:
             state = ComponentState.DRIFTED
         else:

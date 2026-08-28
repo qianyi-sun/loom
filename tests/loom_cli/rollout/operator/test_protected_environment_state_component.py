@@ -5,10 +5,12 @@ import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import pytest
 
+import loom_cli.rollout.operator.protected_environment_state_component as environment_state_component
 from loom_cli.environment_state import load_environment_state_profile
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.operator.protected_apply_journal import (
@@ -125,6 +127,143 @@ def test_apply_still_fails_closed_when_epoch_ownership_changed() -> None:
 
     with pytest.raises(RuntimeError, match="epoch ownership changed before apply"):
         component.apply(_plan())
+
+
+def test_desired_classification_retries_transient_control_plane_turnover() -> None:
+    class TransientObservationTransport(_StateTransport):
+        def observe(self, plan, *, include_runtime):
+            if not self.calls:
+                self.calls.append("transient-desired-read")
+                raise httpx.ConnectError("control plane is restarting")
+            self.desired_exact = True
+            return super().observe(plan, include_runtime=include_runtime)
+
+    transport = TransientObservationTransport()
+    epoch_calls = 0
+
+    def epoch(plan) -> ComponentObservation:
+        nonlocal epoch_calls
+        epoch_calls += 1
+        return _epoch(plan)
+
+    sleeps: list[float] = []
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=epoch,
+    )
+
+    with patch("time.sleep", side_effect=sleeps.append):
+        observation = component.classify_desired(_plan())
+
+    assert observation.state is ComponentState.EXACT
+    assert transport.calls == ["transient-desired-read", "desired-read"]
+    assert epoch_calls == 2
+    assert len(sleeps) == 1 and 0 < sleeps[0] <= 30
+
+
+def test_apply_recovers_when_idempotent_put_commits_before_transport_failure() -> None:
+    class LostMutationResponseTransport(_StateTransport):
+        def apply(self, _plan):
+            self.calls.append("apply-response-lost")
+            self.desired_exact = True
+            raise httpx.ConnectError("mutation response was lost during restart")
+
+    transport = LostMutationResponseTransport()
+    epoch_calls = 0
+
+    def epoch(plan) -> ComponentObservation:
+        nonlocal epoch_calls
+        epoch_calls += 1
+        return _epoch(plan)
+
+    sleeps: list[float] = []
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=epoch,
+    )
+
+    with patch("time.sleep", side_effect=sleeps.append):
+        component.apply(_plan())
+
+    assert transport.calls == [
+        "desired-read",
+        "apply-response-lost",
+        "desired-read",
+    ]
+    assert epoch_calls == 3
+    assert len(sleeps) == 1 and 0 < sleeps[0] <= 30
+
+
+def test_transient_observation_retry_stops_when_epoch_ownership_changes() -> None:
+    class TransientObservationTransport(_StateTransport):
+        def observe(self, _plan, *, include_runtime):
+            self.calls.append("transient-desired-read")
+            raise httpx.ConnectError("control plane is restarting")
+
+    transport = TransientObservationTransport()
+    epoch_states = iter((ComponentState.EXACT, ComponentState.DRIFTED))
+    epoch_calls = 0
+
+    def epoch(_plan) -> ComponentObservation:
+        nonlocal epoch_calls
+        epoch_calls += 1
+        return ComponentObservation(
+            state=next(epoch_states),
+            evidence_digest="b" * 64,
+            observed_epoch=8,
+        )
+
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=epoch,
+    )
+
+    with patch("time.sleep"):
+        observation = component.classify_desired(_plan())
+
+    assert observation.state is ComponentState.DRIFTED
+    assert transport.calls == ["transient-desired-read"]
+    assert epoch_calls == 2
+
+
+def test_transient_observation_retry_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    class UnavailableTransport(_StateTransport):
+        def observe(self, _plan, *, include_runtime):
+            self.calls.append("transient-desired-read")
+            raise httpx.ConnectError("control plane remains unavailable")
+
+    monkeypatch.setattr(environment_state_component, "_TRANSIENT_ATTEMPTS", 3)
+    transport = UnavailableTransport()
+    epoch_calls = 0
+
+    def epoch(plan) -> ComponentObservation:
+        nonlocal epoch_calls
+        epoch_calls += 1
+        return _epoch(plan)
+
+    sleeps: list[float] = []
+    component = ProtectedEnvironmentStateComponent(
+        transport=transport,
+        epoch_guard=epoch,
+    )
+
+    with patch("time.sleep", side_effect=sleeps.append):
+        with pytest.raises(httpx.ConnectError, match="remains unavailable"):
+            component.classify_desired(_plan())
+
+    assert transport.calls == ["transient-desired-read"] * 3
+    assert epoch_calls == 3
+    assert len(sleeps) == 2
+
+
+@pytest.mark.parametrize("status_code", (408, 425, 429, 500, 502, 503, 504))
+def test_http_transport_classifies_readiness_status_as_transient(status_code: int) -> None:
+    response = httpx.Response(status_code, content=b"temporarily unavailable")
+
+    with pytest.raises(httpx.TransportError):
+        HttpxProtectedEnvironmentStateTransport._response_json(response)
+    with pytest.raises(httpx.TransportError):
+        HttpxProtectedEnvironmentStateTransport._expect_ok(response)
 
 
 def test_runtime_classification_stays_nonexact_after_desired_state_is_written() -> None:

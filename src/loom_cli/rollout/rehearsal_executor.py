@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -118,6 +119,8 @@ _REHEARSAL_DUMP_TRANSFER_TIMEOUT = 600
 _REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
 _REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
 _EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS = 180
+_NAMESPACE_DELETE_TIMEOUT_SECONDS = 300.0
+_NAMESPACE_DELETE_POLL_SECONDS = 1.0
 _GB10_CONTROLLER_PROOF_TIMEOUT_SECONDS = 1740
 _API_SMOKE_REQUEST_IDS = frozenset(
     {
@@ -2190,27 +2193,14 @@ class IsolatedRehearsalExecutor:
             timeout=30,
         ):
             return _blocked("cleanup", "namespace-delete-failed")
-        wait_succeeded = self._status(
-            (
-                "kubectl",
-                "--kubeconfig",
-                str(self.kubeconfig),
-                "wait",
-                "--for=delete",
-                f"namespace/{plan.resources.namespace}",
-                "--timeout=300s",
-            ),
-            timeout=315,
-        )
-        final_state, _final = self._namespace_observation(plan)
+        final_state = self._wait_namespace_absent(plan, expected_uid=uid)
         if final_state == "absent":
             return _cleanup_ready(plan)
         if final_state == "unavailable":
             return _blocked("cleanup", "namespace-final-readback-failed")
-        return _blocked(
-            "cleanup",
-            "namespace-remains" if wait_succeeded else "namespace-delete-timeout",
-        )
+        if final_state == "drifted":
+            return _blocked("cleanup", "namespace-identity-drift")
+        return _blocked("cleanup", "namespace-delete-timeout")
 
     def _cleanup_external_supervisor_validation_units(
         self,
@@ -2284,6 +2274,34 @@ class IsolatedRehearsalExecutor:
         except (json.JSONDecodeError, ValueError):
             return "unavailable", None
         return ("present", value) if isinstance(value, dict) else ("unavailable", None)
+
+    def _wait_namespace_absent(
+        self,
+        plan: RehearsalPlan,
+        *,
+        expected_uid: str,
+    ) -> str:
+        """Poll exact live namespace state until absence or an absolute bound."""
+
+        started = self.monotonic()
+        if not math.isfinite(started):
+            return "unavailable"
+        deadline = started + _NAMESPACE_DELETE_TIMEOUT_SECONDS
+        while True:
+            state, observed = self._namespace_observation(plan)
+            if state != "present":
+                return state
+            if observed is None or not _namespace_matches(observed, plan):
+                return "drifted"
+            metadata = observed.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("uid") != expected_uid:
+                return "drifted"
+            now = self.monotonic()
+            if not math.isfinite(now):
+                return "unavailable"
+            if now >= deadline:
+                return "present"
+            self.sleep(_NAMESPACE_DELETE_POLL_SECONDS)
 
     def _wait_systemd_absent(self, contract: RehearsalSystemdActivation) -> bool:
         deadline = self.monotonic() + 5.0

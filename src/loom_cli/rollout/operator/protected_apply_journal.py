@@ -417,7 +417,13 @@ class ProtectedApplyJournal:
         else:
             if terminal.intent_digest != intent.intent_digest:
                 raise ProtectedApplyJournalError("protected component terminal identity drifted")
-            observed = component.classify(plan)
+            observed = self._classify_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+                failure_code="terminal-classify-failed",
+            )
             if (
                 observed.state is not ComponentState.EXACT
                 or observed.evidence_digest != terminal.evidence_digest
@@ -428,7 +434,13 @@ class ProtectedApplyJournal:
                 )
             return terminal
 
-        before = component.classify(plan)
+        before = self._classify_with_diagnostic(
+            component_root,
+            component,
+            ordinal,
+            plan,
+            failure_code="pre-classify-failed",
+        )
         if before.state is ComponentState.DRIFTED:
             raise ProtectedApplyJournalError(
                 f"protected component {component.component_id} live state drifted"
@@ -465,7 +477,13 @@ class ProtectedApplyJournal:
                     )
                 raise
             applied = True
-        after = component.classify(plan)
+        after = self._classify_with_diagnostic(
+            component_root,
+            component,
+            ordinal,
+            plan,
+            failure_code="post-classify-failed",
+        )
         if after.state is not ComponentState.EXACT:
             self._publish_failure_diagnostic(
                 component_root,
@@ -480,6 +498,30 @@ class ProtectedApplyJournal:
         terminal = ComponentTerminal.build(intent, after, applied=applied)
         self._publish_or_match(terminal_path, terminal.to_dict())
         return terminal
+
+    def _classify_with_diagnostic(
+        self,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        plan: FinalGatePlan,
+        *,
+        failure_code: str,
+    ) -> ComponentObservation:
+        try:
+            return component.classify(plan)
+        except BaseException as exc:
+            self._publish_failure_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                failure_code=failure_code,
+                diagnostic=unclassified_failure_diagnostic(
+                    exc,
+                    activity=component.component_id,
+                ),
+            )
+            raise
 
     def _publish_failure_diagnostic(
         self,
