@@ -100,6 +100,7 @@ MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS = (
     MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS + MUTATION_GUARD_STOP_POST_BOUND_SECONDS + 1
 )
 _SHOW_PROPERTIES = (
+    "LoadState",
     "ActiveState",
     "SubState",
     "Result",
@@ -484,7 +485,7 @@ def _parse_timestamp(value: str, property_name: str) -> str | None:
     return value
 
 
-def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
+def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus | None:
     values: dict[str, str] = {}
     for line in stdout.splitlines():
         name, separator, value = line.partition("=")
@@ -493,6 +494,22 @@ def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
         values[name] = value
     if set(values) != set(_SHOW_PROPERTIES):
         raise SystemdQueryError("systemd unit status output is incomplete")
+    load_state = values["LoadState"]
+    if load_state == "not-found":
+        if values != {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "MainPID": "0",
+            "ExecMainStartTimestamp": "",
+            "ExecMainExitTimestamp": "",
+        }:
+            raise SystemdQueryError("LoadState contradicts systemd unit status")
+        return None
+    if load_state != "loaded":
+        raise SystemdQueryError("LoadState is malformed")
     active_state = values["ActiveState"]
     if active_state not in _ACTIVE_STATES:
         raise SystemdQueryError("ActiveState is malformed")
@@ -1022,7 +1039,7 @@ class SystemdUserManager:
             raise SystemdQueryError("systemd unit status could not be queried") from exc
         if result.returncode == 4:
             return None
-        if result.returncode != 0:
+        if result.returncode != 0 or result.stderr.strip():
             raise SystemdQueryError("systemd unit status query failed")
         return _parse_show_output(unit_name, result.stdout)
 
