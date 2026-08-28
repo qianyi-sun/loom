@@ -310,3 +310,99 @@ def test_records_failure_diagnostic_when_a_component_does_not_converge(
     record = json.loads((root / "failure-diagnostic.json").read_text())
     assert record["failure_code"] == "did-not-converge"
     assert record["diagnostic"] == "component classified ready after apply"
+
+
+def test_records_secret_safe_failure_diagnostic_when_pre_classification_raises(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+
+    def classify(_plan):
+        raise RuntimeError("pre-classification secret must never be recorded")
+
+    component = ProtectedApplyComponent(
+        component_id="environment-state",
+        implementation_digest="7" * 64,
+        input_fingerprint="8" * 64,
+        classify=classify,
+        apply=lambda _plan: None,
+    )
+
+    with pytest.raises(RuntimeError, match="pre-classification secret"):
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    record = json.loads((root / "failure-diagnostic.json").read_text())
+    assert record["failure_code"] == "pre-classify-failed"
+    assert record["diagnostic"].startswith(
+        "unclassified environment-state failure: RuntimeError at "
+    )
+    assert "pre-classification secret" not in (root / "failure-diagnostic.json").read_text()
+
+
+def test_records_secret_safe_failure_diagnostic_when_post_classification_raises(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    classify_calls = 0
+
+    def classify(_plan):
+        nonlocal classify_calls
+        classify_calls += 1
+        if classify_calls == 1:
+            return ComponentObservation(
+                state=ComponentState.READY,
+                evidence_digest="9" * 64,
+                observed_epoch=7,
+            )
+        raise RuntimeError("post-classification secret must never be recorded")
+
+    component = ProtectedApplyComponent(
+        component_id="environment-state",
+        implementation_digest="a" * 64,
+        input_fingerprint="b" * 64,
+        classify=classify,
+        apply=lambda _plan: None,
+    )
+
+    with pytest.raises(RuntimeError, match="post-classification secret"):
+        journal.execute(_plan(tmp_path), (component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    record = json.loads((root / "failure-diagnostic.json").read_text())
+    assert record["failure_code"] == "post-classify-failed"
+    assert record["diagnostic"].startswith(
+        "unclassified environment-state failure: RuntimeError at "
+    )
+    assert "post-classification secret" not in (root / "failure-diagnostic.json").read_text()
+
+
+def test_records_secret_safe_failure_diagnostic_when_terminal_reclassification_raises(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    backend = _Backend()
+    component = backend.component("environment-state", 0)
+    journal.execute(_plan(tmp_path), (component,))
+
+    def classify(_plan):
+        raise RuntimeError("terminal-classification secret must never be recorded")
+
+    drifted_component = ProtectedApplyComponent(
+        component_id=component.component_id,
+        implementation_digest=component.implementation_digest,
+        input_fingerprint=component.input_fingerprint,
+        classify=classify,
+        apply=component.apply,
+    )
+
+    with pytest.raises(RuntimeError, match="terminal-classification secret"):
+        journal.execute(_plan(tmp_path), (drifted_component,))
+
+    root = tmp_path / "state/requests/req-alpha/attempts/1/protected-apply/00-environment-state"
+    record = json.loads((root / "failure-diagnostic.json").read_text())
+    assert record["failure_code"] == "terminal-classify-failed"
+    assert record["diagnostic"].startswith(
+        "unclassified environment-state failure: RuntimeError at "
+    )
+    assert "terminal-classification secret" not in (root / "failure-diagnostic.json").read_text()
