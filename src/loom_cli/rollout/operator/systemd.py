@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
+from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
+from loom_cli.rollout.final_gate_command_runner import FINAL_GATE_MAX_ELAPSED_SECONDS
+
 from ..systemd_readiness import parse_systemctl_properties
 from .config import OperatorConfig
 from .model import validate_safe_identifier
@@ -86,8 +89,14 @@ _TRANSIENT_UNIT_RE = re.compile(
     r"|loom-staging-rollout-[a-z0-9][a-z0-9-]{7,79}-[1-9][0-9]*"
     r"|loom-preflight-lifecycle-[0-9a-f]{16})[.]service\Z"
 )
-_MUTATION_GUARD_RUNTIME_SECONDS = 14_400
 _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS = 1_500
+_MUTATION_GUARD_OPERATIONAL_MARGIN_SECONDS = 5 * 60 * 60
+_MUTATION_GUARD_RUNTIME_SECONDS = (
+    DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
+    + FINAL_GATE_MAX_ELAPSED_SECONDS
+    + _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS
+    + _MUTATION_GUARD_OPERATIONAL_MARGIN_SECONDS
+)
 _MUTATION_GUARD_STOP_WAIT_SECONDS = 60
 _SHOW_PROPERTIES = (
     "ActiveState",

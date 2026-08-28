@@ -10,12 +10,15 @@ from typing import Literal, cast
 
 import pytest
 
+from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
+from loom_cli.rollout.final_gate_command_runner import FINAL_GATE_MAX_ELAPSED_SECONDS
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.staging_mutation_guard import (
     MutationGuardEvidence,
     guard_evidence_path,
 )
 from loom_cli.rollout.operator.systemd import (
+    _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS,
     JournalStreamRunner,
     SystemdOperationError,
     SystemdQueryError,
@@ -483,7 +486,9 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
     assert "RestartSec=5s" in launch
     assert "KillMode=mixed" in launch
     assert "TimeoutStopSec=120s" in launch
-    assert "RuntimeMaxSec=14400s" in launch
+    runtime_property = next(item for item in launch if item.startswith("RuntimeMaxSec="))
+    assert runtime_property.endswith("s")
+    assert int(runtime_property.removeprefix("RuntimeMaxSec=").removesuffix("s")) > 0
     assert launch[-5:] == [
         "-m",
         "loom_cli.rollout.operator.staging_mutation_guard",
@@ -496,6 +501,23 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
     assert not any("SECRET" in item or "TOKEN" in item for item in launch)
     status = manager.show_mutation_guard("req-alpha")
     assert status is not None and status.is_running
+
+
+def test_mutation_guard_start_covers_complete_protected_ownership_window(tmp_path: Path) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+
+    manager.start_mutation_guard("req-alpha")
+
+    launch = next(call for call in runner.calls if call[0] == "systemd-run")
+    runtime_property = next(item for item in launch if item.startswith("RuntimeMaxSec="))
+    runtime_seconds = int(runtime_property.removeprefix("RuntimeMaxSec=").removesuffix("s"))
+    protected_ownership_window = (
+        DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
+        + FINAL_GATE_MAX_ELAPSED_SECONDS
+        + _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS
+    )
+
+    assert runtime_seconds > protected_ownership_window
 
 
 def test_mutation_guard_stop_requires_release_evidence_and_absent_unit(tmp_path: Path) -> None:
