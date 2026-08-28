@@ -27,6 +27,7 @@ from loom_cli.rollout.operator.backup_rotation import (
     begin_candidate,
     record_manifest_verified,
 )
+from loom_cli.rollout.operator.config import CandidateSourceMode, OperatorConfig
 from loom_cli.rollout.operator.installed_backup_retention import (
     InstalledBackupRecoveryError,
     InstalledBackupRecoveryService,
@@ -45,14 +46,28 @@ from tests.loom_cli.rollout.operator.test_store import (
 )
 
 
-def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Path, Path]]:
-    config = replace(
-        make_config(tmp_path),
-        source_mode="sealed-cumulative",
-        source_commit_sha="a" * 40,
-        source_tree_sha="b" * 40,
-        source_base_sha="c" * 40,
-    )
+def _maintenance_config(
+    tmp_path: Path,
+    *,
+    source_mode: CandidateSourceMode,
+) -> OperatorConfig:
+    config = replace(make_config(tmp_path), source_mode=source_mode)
+    if source_mode == "sealed-cumulative":
+        config = replace(
+            config,
+            source_commit_sha="a" * 40,
+            source_tree_sha="b" * 40,
+            source_base_sha="c" * 40,
+        )
+    return config
+
+
+def _service(
+    tmp_path: Path,
+    *,
+    source_mode: CandidateSourceMode = "sealed-cumulative",
+) -> tuple[InstalledBackupRetentionService, tuple[Path, Path]]:
+    config = _maintenance_config(tmp_path, source_mode=source_mode)
 
     store = RequestStore(config.state_root)
     backups = config.rollout_root / "backups"
@@ -119,14 +134,10 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
 
 def _verified_candidate_recovery_service(
     tmp_path: Path,
+    *,
+    source_mode: CandidateSourceMode = "sealed-cumulative",
 ) -> tuple[InstalledBackupRecoveryService, BackupPayloadRecord, BackupPayloadRecord, list[str]]:
-    config = replace(
-        make_config(tmp_path),
-        source_mode="sealed-cumulative",
-        source_commit_sha="a" * 40,
-        source_tree_sha="b" * 40,
-        source_base_sha="c" * 40,
-    )
+    config = _maintenance_config(tmp_path, source_mode=source_mode)
     store = RequestStore(config.state_root)
     assessment = make_assessment(tmp_path)
     request_id = "req-20260713-abcdef12"
@@ -273,6 +284,33 @@ def _verified_candidate_recovery_service(
         lease=lease,
     )
     return service, old_active, recovered, activated
+
+
+def test_backup_retention_inventory_accepts_a_pinned_merged_dev_install(
+    tmp_path: Path,
+) -> None:
+    service, roots = _service(tmp_path, source_mode="merged-dev")
+
+    plan = service.inventory()
+
+    assert plan.environment == "staging"
+    assert plan.namespace == "loom-staging"
+    assert plan.desired_latest_bundle == roots[0].name
+
+
+def test_backup_recovery_inventory_accepts_a_pinned_merged_dev_install(
+    tmp_path: Path,
+) -> None:
+    service, _old_active, recovered, _activated = _verified_candidate_recovery_service(
+        tmp_path,
+        source_mode="merged-dev",
+    )
+
+    plan = service.inventory()
+
+    assert plan.environment == "staging"
+    assert plan.namespace == "loom-staging"
+    assert plan.recovered_active == recovered
 
 
 def test_verified_candidate_recovery_promotes_without_deleting_payloads(
