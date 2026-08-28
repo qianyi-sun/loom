@@ -33,6 +33,16 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _MAX_RECORD_BYTES = 256 * 1024
+_MAX_FAILURE_DIAGNOSTIC_CHARS = 512
+_FAILURE_DIAGNOSTIC_CODES = frozenset(
+    {
+        "apply-failed",
+        "did-not-converge",
+        "post-classify-failed",
+        "pre-classify-failed",
+        "terminal-classify-failed",
+    }
+)
 
 
 class ProtectedApplyJournalError(RuntimeError):
@@ -197,6 +207,46 @@ class ComponentFailure:
             component_id=_string(value, "component_id"),
             failure_code=_string(value, "failure_code"),
             failed_hosts=tuple(hosts),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentFailureDiagnostic:
+    schema_version: int
+    component_id: str
+    ordinal: int
+    failure_code: str
+    diagnostic: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or _COMPONENT_RE.fullmatch(self.component_id) is None
+            or type(self.ordinal) is not int
+            or not 0 <= self.ordinal < 32
+            or self.failure_code not in _FAILURE_DIAGNOSTIC_CODES
+            or not self.diagnostic
+            or len(self.diagnostic) > _MAX_FAILURE_DIAGNOSTIC_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.diagnostic)
+        ):
+            raise ValueError("protected component failure diagnostic is invalid")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ComponentFailureDiagnostic:
+        if set(value) != {
+            "schema_version",
+            "component_id",
+            "ordinal",
+            "failure_code",
+            "diagnostic",
+        }:
+            raise ValueError("protected component failure diagnostic fields are invalid")
+        return cls(
+            schema_version=_integer(value, "schema_version"),
+            component_id=_string(value, "component_id"),
+            ordinal=_integer(value, "ordinal"),
+            failure_code=_string(value, "failure_code"),
+            diagnostic=_string(value, "diagnostic"),
         )
 
 
@@ -733,15 +783,14 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
     return value
 
 
-def read_component_failure(path: Path, *, service_uid: int) -> ComponentFailure:
-    """Read one bounded service-owned failure record for the public broker."""
-    if (
-        not path.is_absolute()
-        or ".." in path.parts
-        or path.name != "failure.json"
-        or service_uid < 0
-    ):
-        raise ProtectedApplyJournalError("protected component failure path is invalid")
+def _read_service_component_record(
+    path: Path,
+    *,
+    service_uid: int,
+    filename: str,
+) -> dict[str, object]:
+    if not path.is_absolute() or ".." in path.parts or path.name != filename or service_uid < 0:
+        raise ProtectedApplyJournalError("protected component record path is invalid")
     fd = os.open(
         path,
         os.O_RDONLY
@@ -753,23 +802,58 @@ def read_component_failure(path: Path, *, service_uid: int) -> ComponentFailure:
         _require_regular(fd, uid=service_uid)
         metadata = os.fstat(fd)
         if metadata.st_size > _MAX_RECORD_BYTES:
-            raise ProtectedApplyJournalError("protected component failure record is too large")
+            raise ProtectedApplyJournalError("protected component record is too large")
         payload = os.read(fd, _MAX_RECORD_BYTES + 1)
     finally:
         os.close(fd)
     if len(payload) > _MAX_RECORD_BYTES:
-        raise ProtectedApplyJournalError("protected component failure record is too large")
+        raise ProtectedApplyJournalError("protected component record is too large")
     try:
         value = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
         if not isinstance(value, dict):
-            raise ValueError("failure record must be an object")
-        return ComponentFailure.from_dict(value)
+            raise ValueError("component record must be an object")
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ProtectedApplyJournalError("protected component record is invalid") from exc
+    return value
+
+
+def read_component_failure(path: Path, *, service_uid: int) -> ComponentFailure:
+    """Read one bounded service-owned failure record for the public broker."""
+    try:
+        return ComponentFailure.from_dict(
+            _read_service_component_record(
+                path,
+                service_uid=service_uid,
+                filename="failure.json",
+            )
+        )
+    except ValueError as exc:
         raise ProtectedApplyJournalError("protected component failure record is invalid") from exc
+
+
+def read_component_failure_diagnostic(
+    path: Path,
+    *,
+    service_uid: int,
+) -> ComponentFailureDiagnostic:
+    """Read one bounded service-owned secret-safe failure diagnostic."""
+    try:
+        return ComponentFailureDiagnostic.from_dict(
+            _read_service_component_record(
+                path,
+                service_uid=service_uid,
+                filename="failure-diagnostic.json",
+            )
+        )
+    except ValueError as exc:
+        raise ProtectedApplyJournalError(
+            "protected component failure diagnostic is invalid"
+        ) from exc
 
 
 __all__ = [
     "ComponentFailure",
+    "ComponentFailureDiagnostic",
     "ComponentIntent",
     "ComponentObservation",
     "ComponentState",
@@ -778,4 +862,5 @@ __all__ = [
     "ProtectedApplyJournal",
     "ProtectedApplyJournalError",
     "read_component_failure",
+    "read_component_failure_diagnostic",
 ]
