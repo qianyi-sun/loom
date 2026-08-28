@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,9 +12,11 @@ import pytest
 from loom import personal_dev_acceptance_evidence as acceptance_evidence
 from loom.personal_dev_acceptance_evidence import (
     PersonalDevAcceptanceEvidenceError,
+    PersonalDevAcceptanceResultV2,
     build_personal_dev_backup_restore_evidence,
     build_personal_dev_scanner_finding_policy,
     build_personal_dev_trusted_launcher_profile,
+    load_personal_dev_acceptance_result,
     load_personal_dev_backup_restore_evidence,
     validate_personal_dev_policy_evidence,
 )
@@ -40,6 +43,271 @@ def _write_owner_only(path: Path, value: object) -> str:
     path.write_bytes(payload)
     path.chmod(0o600)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _rollback_shadow_status_value() -> dict[str, object]:
+    return {
+        "blockers": [],
+        "components": [
+            {"name": "cluster-resources", "observed": 6, "ready": True},
+            {"name": "manager", "observed": 1, "ready": True},
+            {"name": "namespaced-resources", "observed": 31, "ready": True},
+            {"name": "namespaces", "observed": 1, "ready": True},
+            {"name": "personal-workers", "observed": 0, "ready": True},
+            {"name": "runtime-class", "observed": 1, "ready": True},
+        ],
+        "input_sha256": "1" * 64,
+        "manager_ceiling": 0,
+        "mode": "shadow",
+        "ready": True,
+        "release_sha256": "2" * 64,
+        "schema": "loom-personal-dev-control-plane-status-v1",
+        "worker_available": False,
+    }
+
+
+def _rollback_shadow_manifest_payload(
+    *,
+    input_sha256: str,
+    release_sha256: str,
+) -> bytes:
+    return (
+        "apiVersion: v1\n"
+        "kind: Namespace\n"
+        "metadata:\n"
+        "  annotations:\n"
+        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
+        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        "  name: loom-dev\n"
+        "---\n"
+        "apiVersion: apps/v1\n"
+        "kind: Deployment\n"
+        "metadata:\n"
+        "  annotations:\n"
+        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
+        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        "  name: loom-personal-dev-management\n"
+        "  namespace: loom-dev\n"
+    ).encode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("expected_input_sha256", "expected_release_sha256"),
+    [
+        ("3" * 64, "2" * 64),
+        ("1" * 64, "3" * 64),
+    ],
+    ids=["status-input-drift", "release-drift"],
+)
+def test_rollback_shadow_manifest_rejects_annotation_binding_drift(
+    tmp_path: Path,
+    expected_input_sha256: str,
+    expected_release_sha256: str,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+            path,
+            hashlib.sha256(payload).hexdigest(),
+            expected_input_sha256=expected_input_sha256,
+            expected_release_sha256=expected_release_sha256,
+        )
+
+
+def test_rollback_shadow_manifest_rejects_duplicate_yaml_bindings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    valid_binding = (
+        '    loom.dev/render-input-sha256: "' + "1" * 64 + '"\n'
+    ).encode("ascii")
+    duplicate_bindings = (
+        '    loom.dev/render-input-sha256: "'
+        + "3" * 64
+        + '"\n    loom.dev/render-input-sha256: "'
+        + "1" * 64
+        + '"\n'
+    ).encode("ascii")
+    payload = payload.replace(valid_binding, duplicate_bindings, 1)
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+            path,
+            hashlib.sha256(payload).hexdigest(),
+            expected_input_sha256="1" * 64,
+            expected_release_sha256="2" * 64,
+        )
+
+
+def test_rollback_shadow_manifest_accepts_exact_status_and_release_bindings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.yaml"
+    payload = _rollback_shadow_manifest_payload(
+        input_sha256="1" * 64,
+        release_sha256="2" * 64,
+    )
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    acceptance_evidence.validate_personal_dev_rollback_shadow_manifest(
+        path,
+        hashlib.sha256(payload).hexdigest(),
+        expected_input_sha256="1" * 64,
+        expected_release_sha256="2" * 64,
+    )
+
+
+def test_rollback_shadow_status_loads_canonical_zero_capacity_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollback-shadow.status.json"
+    value = _rollback_shadow_status_value()
+    sha256 = _write_owner_only(path, value)
+
+    loaded = acceptance_evidence.load_personal_dev_rollback_shadow_status(
+        path,
+        sha256,
+    )
+
+    assert loaded == value
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    [
+        "wrong-digest",
+        "malformed-json",
+        "duplicate-key",
+        "noncanonical",
+        "unsafe-mode",
+        "status-extra-field",
+        "wrong-schema",
+        "invalid-input-digest",
+        "invalid-release-digest",
+        "non-shadow-mode",
+        "not-ready",
+        "blockers",
+        "nonzero-ceiling",
+        "worker-available",
+        "component-not-ready",
+        "component-extra-field",
+        "duplicate-component",
+        "malformed-component",
+        "empty-components",
+        "missing-canonical-component",
+        "missing-personal-workers",
+        "noncanonical-component-order",
+        "invalid-cluster-resource-count",
+        "invalid-manager-count",
+        "invalid-namespaced-resource-count",
+        "invalid-namespace-count",
+        "personal-workers-nonzero",
+        "invalid-runtime-class-count",
+    ],
+)
+def test_rollback_shadow_status_rejects_untrusted_or_nonzero_capacity_evidence(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    path = tmp_path / "rollback-shadow.status.json"
+    value = _rollback_shadow_status_value()
+
+    if invalid_kind == "status-extra-field":
+        value["unexpected"] = False
+    elif invalid_kind == "wrong-schema":
+        value["schema"] = "loom-personal-dev-control-plane-status-v2"
+    elif invalid_kind == "invalid-input-digest":
+        value["input_sha256"] = None
+    elif invalid_kind == "invalid-release-digest":
+        value["release_sha256"] = "0" * 64
+    elif invalid_kind == "non-shadow-mode":
+        value["mode"] = "operational"
+    elif invalid_kind == "not-ready":
+        value["ready"] = False
+    elif invalid_kind == "blockers":
+        value["blockers"] = ["capacity is not inert"]
+    elif invalid_kind == "nonzero-ceiling":
+        value["manager_ceiling"] = 1
+    elif invalid_kind == "worker-available":
+        value["worker_available"] = True
+    elif invalid_kind == "component-not-ready":
+        value["components"][0]["ready"] = False  # type: ignore[index]
+    elif invalid_kind == "component-extra-field":
+        value["components"][0]["unexpected"] = False  # type: ignore[index]
+    elif invalid_kind == "duplicate-component":
+        value["components"].append(  # type: ignore[union-attr]
+            {"name": "personal-workers", "observed": 0, "ready": True}
+        )
+    elif invalid_kind == "malformed-component":
+        value["components"].append("not-a-component")  # type: ignore[union-attr]
+    elif invalid_kind == "empty-components":
+        value["components"] = []
+    elif invalid_kind == "missing-canonical-component":
+        value["components"] = value["components"][1:]  # type: ignore[index]
+    elif invalid_kind == "missing-personal-workers":
+        value["components"] = [  # type: ignore[index]
+            component
+            for component in value["components"]  # type: ignore[union-attr]
+            if component["name"] != "personal-workers"  # type: ignore[index]
+        ]
+    elif invalid_kind == "noncanonical-component-order":
+        value["components"][0], value["components"][1] = (  # type: ignore[index]
+            value["components"][1],  # type: ignore[index]
+            value["components"][0],  # type: ignore[index]
+        )
+    elif invalid_kind == "invalid-cluster-resource-count":
+        value["components"][0]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-manager-count":
+        value["components"][1]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-namespaced-resource-count":
+        value["components"][2]["observed"] = 0  # type: ignore[index]
+    elif invalid_kind == "invalid-namespace-count":
+        value["components"][3]["observed"] = 2  # type: ignore[index]
+    elif invalid_kind == "personal-workers-nonzero":
+        value["components"][4]["observed"] = 1  # type: ignore[index]
+    elif invalid_kind == "invalid-runtime-class-count":
+        value["components"][5]["observed"] = 0  # type: ignore[index]
+
+    sha256 = _write_owner_only(path, value)
+    if invalid_kind == "wrong-digest":
+        sha256 = "f" * 64
+    elif invalid_kind == "malformed-json":
+        path.write_bytes(b"{")
+        sha256 = hashlib.sha256(b"{").hexdigest()
+    elif invalid_kind == "duplicate-key":
+        payload = path.read_bytes().replace(
+            b'"schema":',
+            b'"schema":"loom-personal-dev-control-plane-status-v1","schema":',
+            1,
+        )
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_kind == "noncanonical":
+        payload = path.read_bytes() + b"\n"
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    elif invalid_kind == "unsafe-mode":
+        path.chmod(0o644)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        acceptance_evidence.load_personal_dev_rollback_shadow_status(
+            path,
+            sha256,
+        )
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -479,14 +747,8 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         "secret-inventory.json",
         json.dumps(secret_inventory, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n",
     )
-    shadow_status = {
-        "blockers": [],
-        "components": [{"name": "personal-workers", "observed": 0}],
-        "manager_ceiling": 0,
-        "mode": "shadow",
-        "ready": True,
-        "worker_available": False,
-    }
+    shadow_status = _rollback_shadow_status_value()
+    shadow_status["release_sha256"] = release_sha256
     status_payload = json.dumps(shadow_status).encode("ascii") + b"\n"
     pre_status = owner_file("pre-status.json", status_payload)
     post_status = owner_file("post-status.json", status_payload)
@@ -655,3 +917,562 @@ def test_postgres_state_accepts_canonical_sequence_and_table_inventory() -> None
 def test_postgres_state_rejects_incomplete_or_noncanonical_inventory(payload: str) -> None:
     with pytest.raises(PersonalDevAcceptanceEvidenceError):
         acceptance_evidence._validate_postgres_state(payload.encode("ascii"))
+
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_DENIAL_RECEIPT_SHA256S = {
+    "read": "5221aecb79691760f14503ae676f2741375d052ee5e2f02724c179b52a32deba",
+    "update": "e7e5b514f646a59d310af7cdfcdaa57ec1aca3255e6f742c1fda5a83e0356123",
+    "destroy": "da570383210d38d6392b19185ed0d2bddd72a9e8c4f6200733d00c811197e822",
+}
+_RESULT_IDENTITIES = (
+    {
+        "artifacts_bucket": "loom-dev-owner-a-artifacts",
+        "database": "loom_dev_owner_a",
+        "environment": "dev-owner-a",
+        "namespace": "loom-dev-owner-a",
+        "route_host": "owner-a.dev.yylx.world",
+        "route_path": "/dev-owner-a",
+        "task_bucket": "loom-dev-owner-a-tasks",
+        "trajectories_bucket": "loom-dev-owner-a-trajectories",
+        "worker_control_plane_host": "cp-owner-a.dev.yylx.world",
+        "worker_gateway_host": "gw-owner-a.dev.yylx.world",
+        "worker_pool": "dev-owner-a",
+    },
+    {
+        "artifacts_bucket": "loom-dev-owner-b-artifacts",
+        "database": "loom_dev_owner_b",
+        "environment": "dev-owner-b",
+        "namespace": "loom-dev-owner-b",
+        "route_host": "owner-b.dev.yylx.world",
+        "route_path": "/dev-owner-b",
+        "task_bucket": "loom-dev-owner-b-tasks",
+        "trajectories_bucket": "loom-dev-owner-b-trajectories",
+        "worker_control_plane_host": "cp-owner-b.dev.yylx.world",
+        "worker_gateway_host": "gw-owner-b.dev.yylx.world",
+        "worker_pool": "dev-owner-b",
+    },
+)
+
+
+def _result_plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+    (
+        _profile,
+        _release,
+        _release_sha256,
+        v1_plan,
+        _source_root,
+        _launcher_path,
+        _scanner_path,
+        _backup_path,
+    ) = _inputs(tmp_path)
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    value["acceptance_owners"] = sorted(
+        [
+            owner_0,
+            {
+                "team_id": "00000000-0000-0000-0000-000000000006",
+                "user_id": "00000000-0000-0000-0000-000000000005",
+            },
+        ],
+        key=lambda owner: (owner["team_id"], owner["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    plan_root = tmp_path / "result-plan"
+    plan_root.mkdir()
+    plan_path, plan_sha256 = _write_plan(plan_root, value)
+    plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
+    return plan, v1_plan
+
+
+def _result_snapshot(
+    plan,  # type: ignore[no-untyped-def]
+    owner_index: int,
+    *,
+    phase: str,
+) -> dict[str, object]:
+    owner = plan.acceptance_owners[owner_index]
+    name = f"owner-{'a' if owner_index == 0 else 'b'}"
+    subject = f"00000000-0000-0000-0000-000000000{100 if owner_index == 0 else 200}"
+    incarnation = f"00000000-0000-0000-0000-000000000{101 if owner_index == 0 else 201}"
+    initial_candidate = "9" * 64 if owner_index == 0 else "b" * 64
+    updated_candidate = "a" * 64 if owner_index == 0 else "c" * 64
+    updated_max = 3 if owner_index == 0 else 4
+    values = {
+        "initial": {
+            "candidate_sha": initial_candidate,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 1,
+            "status": "ready",
+        },
+        "updated": {
+            "candidate_sha": updated_candidate,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 2,
+            "keep_data": False,
+            "max_slots": updated_max,
+            "operation_epoch": 2,
+            "status": "ready",
+        },
+        "destroyed": {
+            "candidate_sha": updated_candidate,
+            "capacity_prepared": False,
+            "capacity_status": "shadow",
+            "deployment_generation": 2,
+            "keep_data": owner_index == 1,
+            "max_slots": updated_max,
+            "operation_epoch": 3,
+            "status": "deleted",
+        },
+        "redeployed": {
+            "candidate_sha": "d" * 64,
+            "capacity_prepared": True,
+            "capacity_status": "prepared",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 4,
+            "status": "ready",
+        },
+        "final_destroyed": {
+            "candidate_sha": "d" * 64,
+            "capacity_prepared": False,
+            "capacity_status": "shadow",
+            "deployment_generation": 1,
+            "keep_data": False,
+            "max_slots": 2,
+            "operation_epoch": 5,
+            "status": "deleted",
+        },
+    }
+    selected = values[phase]
+    if owner_index == 1 and phase in {"redeployed", "final_destroyed"}:
+        incarnation = "00000000-0000-0000-0000-000000000202"
+    return {
+        "application_status": selected["status"],
+        "candidate_sha": selected["candidate_sha"],
+        "capacity_prepared": selected["capacity_prepared"],
+        "capacity_status": selected["capacity_status"],
+        "deployment_generation": selected["deployment_generation"],
+        "identity": deepcopy(_RESULT_IDENTITIES[owner_index]),
+        "keep_data": selected["keep_data"],
+        "max_slots": selected["max_slots"],
+        "min_slots": 0,
+        "name": name,
+        "operation_epoch": selected["operation_epoch"],
+        "owner_team_id": str(owner.team_id),
+        "owner_user_id": str(owner.user_id),
+        "status": selected["status"],
+        "subject_id": subject,
+        "subject_incarnation": incarnation,
+        "worker_available": False,
+    }
+
+
+def _result_value(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    owner_results: list[dict[str, object]] = []
+    for owner_index in range(2):
+        owner_results.append(
+            {
+                "destroyed": _result_snapshot(plan, owner_index, phase="destroyed"),
+                "final_destroyed": (
+                    _result_snapshot(plan, owner_index, phase="final_destroyed")
+                    if owner_index == 1
+                    else None
+                ),
+                "initial": _result_snapshot(plan, owner_index, phase="initial"),
+                "redeployed": (
+                    _result_snapshot(plan, owner_index, phase="redeployed")
+                    if owner_index == 1
+                    else None
+                ),
+                "updated": _result_snapshot(plan, owner_index, phase="updated"),
+            }
+        )
+    denials: list[dict[str, object]] = []
+    for actor_index, target_index in ((0, 1), (1, 0)):
+        actor = plan.acceptance_owners[actor_index]
+        target = plan.acceptance_owners[target_index]
+        for operation in ("read", "update", "destroy"):
+            denials.append(
+                {
+                    "actor_team_id": str(actor.team_id),
+                    "actor_user_id": str(actor.user_id),
+                    "exit_code": 1,
+                    "operation": operation,
+                    "stderr_sha256": _DENIAL_RECEIPT_SHA256S[operation],
+                    "stdout_sha256": _EMPTY_SHA256,
+                    "target_after_sha256": "e" * 64,
+                    "target_before_sha256": "e" * 64,
+                    "target_environment": f"owner-{'a' if target_index == 0 else 'b'}",
+                    "target_team_id": str(target.team_id),
+                    "target_user_id": str(target.user_id),
+                }
+            )
+    return {
+        "acceptance_manifest_sha256": "a" * 64,
+        "acceptance_plan_sha256": plan.sha256,
+        "cross_owner_denials": denials,
+        "owners": owner_results,
+        "release_sha256": plan.release.trusted_release_sha256,
+        "schema": "loom-personal-dev-zero-capacity-acceptance-result-v2",
+        "shadow_manifest_sha256": plan.release.shadow_manifest_sha256,
+        "status_sha256s": {
+            "after_denials": "1" * 64,
+            "after_destroy": "2" * 64,
+            "after_initial": "3" * 64,
+            "after_redeploy": "4" * 64,
+            "after_updates": "5" * 64,
+            "pre_deploy": "6" * 64,
+            "pre_rollback": "7" * 64,
+            "rollback_shadow": "8" * 64,
+        },
+    }
+
+
+def _load_result(tmp_path: Path, value: object, plan) -> PersonalDevAcceptanceResultV2:  # type: ignore[no-untyped-def]
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, value)
+    return load_personal_dev_acceptance_result(
+        path,
+        sha256,
+        plan=plan,
+        expected_acceptance_manifest_sha256="a" * 64,
+    )
+
+
+def test_acceptance_result_v2_loads_canonical_concurrent_owner_evidence(
+    tmp_path: Path,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+
+    result = _load_result(tmp_path, value, plan)
+
+    assert result.canonical_bytes() == json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    assert result.owners[0].updated.max_slots == 3
+    assert result.owners[1].updated.max_slots == 4
+    assert result.owners[1].redeployed is not None
+    assert result.owners[1].redeployed.subject_id == result.owners[1].initial.subject_id
+    assert (
+        result.owners[1].redeployed.subject_incarnation
+        != result.owners[1].initial.subject_incarnation
+    )
+
+
+def test_acceptance_result_v2_rejects_equal_updated_candidates_across_owners(
+    tmp_path: Path,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    owners = value["owners"]  # type: ignore[assignment]
+    owner_0_updated_candidate = owners[0]["updated"]["candidate_sha"]
+    owners[1]["updated"]["candidate_sha"] = owner_0_updated_candidate
+    owners[1]["destroyed"]["candidate_sha"] = owner_0_updated_candidate
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+@pytest.mark.parametrize("denial_index", range(6))
+def test_acceptance_result_v2_rejects_empty_denial_target_status_evidence(
+    tmp_path: Path,
+    denial_index: int,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    denials = value["cross_owner_denials"]  # type: ignore[assignment]
+    denials[denial_index]["target_before_sha256"] = _EMPTY_SHA256
+    denials[denial_index]["target_after_sha256"] = _EMPTY_SHA256
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+@pytest.mark.parametrize(
+    "status_field",
+    [
+        "after_denials",
+        "after_destroy",
+        "after_initial",
+        "after_redeploy",
+        "after_updates",
+        "pre_deploy",
+        "pre_rollback",
+        "rollback_shadow",
+    ],
+)
+def test_acceptance_result_v2_rejects_empty_mandatory_status_evidence(
+    tmp_path: Path,
+    status_field: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    status_sha256s = value["status_sha256s"]  # type: ignore[assignment]
+    status_sha256s[status_field] = _EMPTY_SHA256
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+@pytest.mark.parametrize("unsafe_kind", ["mode", "hardlink", "symlink", "race"])
+def test_acceptance_result_v2_rejects_unsafe_file_metadata_or_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_kind: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, _result_value(plan))
+    if unsafe_kind == "mode":
+        path.chmod(0o644)
+    elif unsafe_kind == "hardlink":
+        (tmp_path / "acceptance-result-link.json").hardlink_to(path)
+    elif unsafe_kind == "symlink":
+        target = path
+        path = tmp_path / "acceptance-result-symlink.json"
+        path.symlink_to(target)
+    else:
+        replacement = tmp_path / "acceptance-result-replacement.json"
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        assert replacement.stat().st_ino != path.stat().st_ino
+        real_read = acceptance_evidence.os.read
+        changed = False
+
+        def racing_read(descriptor: int, size: int) -> bytes:
+            nonlocal changed
+            payload = real_read(descriptor, size)
+            if not changed:
+                changed = True
+                replacement.replace(path)
+            return payload
+
+        monkeypatch.setattr(acceptance_evidence.os, "read", racing_read)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize("encoding", ["wrong-digest", "duplicate", "noncanonical"])
+def test_acceptance_result_v2_rejects_untrusted_json_encoding(
+    tmp_path: Path,
+    encoding: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    path = tmp_path / "acceptance-result.json"
+    sha256 = _write_owner_only(path, _result_value(plan))
+    if encoding == "wrong-digest":
+        sha256 = "f" * 64
+    elif encoding == "duplicate":
+        payload = path.read_bytes().replace(
+            b'"schema":',
+            b'"schema":"loom-personal-dev-zero-capacity-acceptance-result-v2","schema":',
+            1,
+        )
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+    else:
+        payload = path.read_bytes() + b"\n"
+        path.write_bytes(payload)
+        sha256 = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+_RESULT_MUTATIONS = (
+    "extra-field",
+    "missing-field",
+    "snapshot-extra-field",
+    "snapshot-missing-field",
+    "owner-order",
+    "identity-mismatch",
+    "malformed-name",
+    "malformed-uuid",
+    "malformed-digest",
+    "manifest-binding",
+    "release-binding",
+    "plan-binding",
+    "shadow-binding",
+    "denial-incomplete",
+    "denial-duplicate",
+    "denial-reordered",
+    "denial-wrong-target",
+    "denial-success",
+    "denial-wrong-exit",
+    "denial-nonempty-stdout",
+    "denial-empty-stderr",
+    "denial-wrong-phase-receipt",
+    "denial-candidate-receipt",
+    "denial-401-receipt",
+    "denial-403-receipt",
+    "denial-500-receipt",
+    "denial-target-detail",
+    "denial-state-change",
+    "worker-available",
+    "nonzero-minimum",
+    "wrong-initial-maximum",
+    "wrong-updated-maximum",
+    "candidate-regression",
+    "generation-regression",
+    "epoch-regression",
+    "cross-owner-identity-equality",
+    "owner0-keep-data",
+    "owner1-no-keep-data",
+    "owner0-redeploy",
+    "rotated-subject",
+    "unrotated-incarnation",
+    "missing-final-destroy",
+)
+
+
+def _mutate_result(value: dict[str, object], mutation: str) -> None:
+    owners = value["owners"]  # type: ignore[assignment]
+    denials = value["cross_owner_denials"]  # type: ignore[assignment]
+    if mutation == "extra-field":
+        value["unexpected"] = True
+    elif mutation == "missing-field":
+        del value["status_sha256s"]
+    elif mutation == "snapshot-extra-field":
+        owners[0]["initial"]["unexpected"] = True
+    elif mutation == "snapshot-missing-field":
+        del owners[0]["initial"]["capacity_prepared"]
+    elif mutation == "owner-order":
+        owners.reverse()
+    elif mutation == "identity-mismatch":
+        owners[0]["initial"]["identity"]["namespace"] = "loom-dev-wrong"
+    elif mutation == "malformed-name":
+        owners[0]["initial"]["name"] = "INVALID"
+    elif mutation == "malformed-uuid":
+        owners[0]["initial"]["subject_id"] = "not-a-uuid"
+    elif mutation == "malformed-digest":
+        owners[0]["initial"]["candidate_sha"] = "A" * 64
+    elif mutation == "manifest-binding":
+        value["acceptance_manifest_sha256"] = "9" * 64
+    elif mutation == "release-binding":
+        value["release_sha256"] = "9" * 64
+    elif mutation == "plan-binding":
+        value["acceptance_plan_sha256"] = "9" * 64
+    elif mutation == "shadow-binding":
+        value["shadow_manifest_sha256"] = "9" * 64
+    elif mutation == "denial-incomplete":
+        denials.pop()
+    elif mutation == "denial-duplicate":
+        denials[-1] = deepcopy(denials[0])
+    elif mutation == "denial-reordered":
+        denials[0], denials[1] = denials[1], denials[0]
+    elif mutation == "denial-wrong-target":
+        denials[0]["target_environment"] = "owner-a"
+    elif mutation == "denial-success":
+        denials[0]["exit_code"] = 0
+    elif mutation == "denial-wrong-exit":
+        denials[0]["exit_code"] = 2
+    elif mutation == "denial-nonempty-stdout":
+        denials[0]["stdout_sha256"] = "1" * 64
+    elif mutation == "denial-empty-stderr":
+        denials[0]["stderr_sha256"] = _EMPTY_SHA256
+    elif mutation == "denial-wrong-phase-receipt":
+        denials[0]["stderr_sha256"] = (
+            "e7e5b514f646a59d310af7cdfcdaa57ec1aca3255e6f742c1fda5a83e0356123"
+        )
+    elif mutation == "denial-candidate-receipt":
+        denials[0]["stderr_sha256"] = (
+            "1bf777bf8fa65daf05519e35e21c5070000dd44e3ab6c4eb5ab816aaafff1869"
+        )
+    elif mutation == "denial-401-receipt":
+        denials[0]["stderr_sha256"] = (
+            "7f2f198b538da2eb84861d3b8cb11a2a9bf4048e3c7e16653d4d9299825a98db"
+        )
+    elif mutation == "denial-403-receipt":
+        denials[0]["stderr_sha256"] = (
+            "88c06651a7a64419e5ec7b19d615d3a2edecafa3eb04c44e7ace70a32068a3ca"
+        )
+    elif mutation == "denial-500-receipt":
+        denials[0]["stderr_sha256"] = (
+            "e912f9365fee2e45c3965a237fce784c4e910ff5fa618c710d0ff5a80b252194"
+        )
+    elif mutation == "denial-target-detail":
+        denials[0]["stderr_sha256"] = (
+            "04bb25735501a6b19809e2ce2e672a76e222e8ff48b943b75a614bccc883ae52"
+        )
+    elif mutation == "denial-state-change":
+        denials[0]["target_after_sha256"] = "d" * 64
+    elif mutation == "worker-available":
+        owners[0]["updated"]["worker_available"] = True
+    elif mutation == "nonzero-minimum":
+        owners[0]["initial"]["min_slots"] = 1
+    elif mutation == "wrong-initial-maximum":
+        owners[0]["initial"]["max_slots"] = 1
+    elif mutation == "wrong-updated-maximum":
+        owners[1]["updated"]["max_slots"] = 3
+    elif mutation == "candidate-regression":
+        owners[0]["updated"]["candidate_sha"] = owners[0]["initial"]["candidate_sha"]
+    elif mutation == "generation-regression":
+        owners[0]["updated"]["deployment_generation"] = 1
+    elif mutation == "epoch-regression":
+        owners[0]["updated"]["operation_epoch"] = 1
+    elif mutation == "cross-owner-identity-equality":
+        for phase in ("initial", "updated", "destroyed", "redeployed", "final_destroyed"):
+            owners[1][phase]["name"] = "owner-a"
+            owners[1][phase]["identity"] = deepcopy(_RESULT_IDENTITIES[0])
+        for denial in denials[:3]:
+            denial["target_environment"] = "owner-a"
+    elif mutation == "owner0-keep-data":
+        owners[0]["destroyed"]["keep_data"] = True
+    elif mutation == "owner1-no-keep-data":
+        owners[1]["destroyed"]["keep_data"] = False
+    elif mutation == "owner0-redeploy":
+        owners[0]["redeployed"] = deepcopy(owners[1]["redeployed"])
+    elif mutation == "rotated-subject":
+        owners[1]["redeployed"]["subject_id"] = (
+            "00000000-0000-0000-0000-000000000999"
+        )
+    elif mutation == "unrotated-incarnation":
+        owners[1]["redeployed"]["subject_incarnation"] = owners[1]["destroyed"][
+            "subject_incarnation"
+        ]
+    elif mutation == "missing-final-destroy":
+        owners[1]["final_destroyed"] = None
+
+
+@pytest.mark.parametrize("mutation", _RESULT_MUTATIONS)
+def test_acceptance_result_v2_rejects_contract_or_transition_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = _result_value(plan)
+    _mutate_result(value, mutation)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, value, plan)
+
+
+def test_acceptance_result_v2_rejects_single_owner_v1_plan(tmp_path: Path) -> None:
+    plan, v1_plan = _result_plan(tmp_path)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        _load_result(tmp_path, _result_value(plan), v1_plan)

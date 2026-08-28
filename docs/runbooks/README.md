@@ -31,8 +31,17 @@ capacity workflow.
   — measured gVisor installation, sequential OLDLAB agent rollout,
   RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
 - **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
-  — plan-bound enablement, single-owner two-environment lifecycle acceptance, exact
+  — the approved #1280 sole-owner/two-environment lifecycle acceptance, exact
   zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
+- **[Personal-development durable zero-capacity launch](personal-dev-durable-launch.md)**
+  — the corresponding #1280 sole-owner durable application-plane launch and
+  byte-reviewed rollback at executable ceiling zero.
+- **[Personal-development concurrent-owner zero-capacity acceptance](personal-dev-concurrent-owner-zero-capacity-acceptance.md)**
+  — the separate schema-v2 two-owner concurrency, cross-owner isolation,
+  retained-name lifecycle, cleanup, and inert-rollback certification.
+- **[Personal-development multi-owner durable zero-capacity launch](personal-dev-multi-owner-durable-launch.md)**
+  — the second-owner launch gate that verifies the exact schema-v2 result
+  before any operational render or apply.
 - **[Personal-development backup and isolated restore evidence](personal-dev-backup-restore-evidence.md)**
   — owner-only Postgres and MinIO backup, isolated exact-image restore, semantic
   state comparison, cleanup proof, and canonical plan-bound evidence.

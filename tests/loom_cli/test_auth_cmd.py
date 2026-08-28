@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from stat import S_IMODE
@@ -551,12 +553,339 @@ def test_whoami_prints_legacy_team_token_scopes_and_prefix(
         f"Bearer {raw_token}"
     )
     out = capsys.readouterr().out
-    assert "Server:    https://loom.test" in out
-    assert "Principal: legacy team token" in out
-    assert "Team:      Team Alpha (owner)" in out
-    assert "Scopes:    providers:manage, read:own, submit" in out
-    assert "Token:     loom_api_abcd1234" in out
+    assert out == (
+        "Server:    https://loom.test\n"
+        "Principal: legacy team token\n"
+        "Team:      Team Alpha (owner)\n"
+        "Scopes:    providers:manage, read:own, submit\n"
+        "Token:     loom_api_abcd1234\n"
+        "Expires:   2026-07-22T00:00:00Z\n"
+    )
     assert raw_token not in out
+
+
+def test_whoami_json_projects_only_allowlisted_identity_fields(
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(
+        LoomConfig(
+            server_url="https://loom.example",
+            auth_session_cookie="loom_session_private_value",
+            auth_csrf_token="loom_csrf_private_value",
+        )
+    )
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={
+            "auth_kind": "session",
+            "credential_type": None,
+            "csrf_token": "loom_csrf_rotated_private_value",
+            "expires_at": None,
+            "full_token": "loom_api_full_private_value_abcdef",
+            "principal_type": "user",
+            "role": "owner",
+            "scopes": ["submit", "read:own", "submit"],
+            "team_id": "00000000-0000-0000-0000-000000000002",
+            "team_name": "Private Team Name",
+            "token_prefix": None,
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "username": "private-user-name",
+            "unexpected": {"secret": "private-extra-value"},
+        },
+    )
+
+    rc = main(["auth", "whoami", "--format", "json"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out == (
+        '{"auth_kind":"session","credential_type":null,"expires_at":null,'
+        '"principal_type":"user","role":"owner","scopes":["read:own","submit"],'
+        '"server":"https://loom.example","team_id":"00000000-0000-0000-0000-'
+        '000000000002","token_prefix":null,"user_id":"00000000-0000-0000-0000-'
+        '000000000001"}\n'
+    )
+    record = json.loads(captured.out)
+    assert set(record) == {
+        "auth_kind", "credential_type", "expires_at", "principal_type", "role",
+        "scopes", "server", "team_id", "token_prefix", "user_id",
+    }
+    for omitted in (
+        "loom_session_private_value", "loom_csrf_private_value",
+        "loom_csrf_rotated_private_value", "loom_api_full_private_value_abcdef",
+        "Private Team Name", "private-user-name", "private-extra-value",
+    ):
+        assert omitted not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("server_url", "marker"),
+    [
+        pytest.param(
+            "https://loom_api_userinfo_secret@loom.example",
+            "loom_api_userinfo_secret",
+            id="userinfo",
+        ),
+        pytest.param(
+            "https://loom.example/loom_api_path_secret",
+            "loom_api_path_secret",
+            id="path",
+        ),
+        pytest.param(
+            "https://loom.example?token=loom_api_query_secret",
+            "loom_api_query_secret",
+            id="query",
+        ),
+        pytest.param(
+            "https://loom.example#loom_api_fragment_secret",
+            "loom_api_fragment_secret",
+            id="fragment",
+        ),
+    ],
+)
+def test_whoami_json_rejects_credential_markers_in_origin_before_http_without_leak(
+    server_url: str,
+    marker: str,
+    mock_auth_server: MockAuthServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(LoomConfig(server_url=server_url, auth_token="private"))
+    evidence = tmp_path / "whoami.json"
+
+    with evidence.open("w") as output, redirect_stdout(output):
+        rc = main(["auth", "whoami", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "error: invalid whoami JSON projection\n"
+    assert evidence.read_text() == ""
+    assert mock_auth_server.requests == []
+    assert marker not in captured.out
+    assert marker not in captured.err
+    assert marker not in evidence.read_text()
+
+
+@pytest.mark.parametrize(
+    "server_url",
+    [
+        pytest.param("ftp://loom.example", id="scheme"),
+        pytest.param("https://", id="missing-host"),
+        pytest.param(" https://loom.example", id="leading-whitespace"),
+        pytest.param("https://loom.example\n", id="control"),
+        pytest.param("HTTPS://loom.example", id="uppercase-scheme"),
+        pytest.param("https://LOOM.example", id="uppercase-host"),
+        pytest.param("https://loom.example/", id="trailing-slash"),
+        pytest.param("https://bad_host.example", id="invalid-host"),
+        pytest.param("https://" + "a" * 254, id="oversized-host"),
+        pytest.param("https://loom.example:0", id="zero-port"),
+        pytest.param("https://loom.example:65536", id="oversized-port"),
+        pytest.param("https://loom.example:not-a-port", id="invalid-port"),
+        pytest.param("https://loom.example:080", id="noncanonical-port"),
+    ],
+)
+def test_whoami_json_rejects_invalid_or_noncanonical_bounded_origin_before_http(
+    server_url: str,
+    mock_auth_server: MockAuthServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(LoomConfig(server_url=server_url, auth_token="private"))
+    evidence = tmp_path / "whoami.json"
+
+    with evidence.open("w") as output, redirect_stdout(output):
+        rc = main(["auth", "whoami", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "error: invalid whoami JSON projection\n"
+    assert evidence.read_text() == ""
+    assert mock_auth_server.requests == []
+
+
+def _valid_whoami_json_payload() -> dict[str, object]:
+    return {
+        "auth_kind": "bearer",
+        "credential_type": "user_owned_api_token",
+        "expires_at": "2026-07-22T00:00:00Z",
+        "principal_type": "team",
+        "role": None,
+        "scopes": ["submit", "read:own", "submit"],
+        "team_id": "00000000-0000-0000-0000-000000000002",
+        "token_prefix": "abcdef12",
+        "user_id": "00000000-0000-0000-0000-000000000001",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("auth_kind", "token", id="auth-kind-enum"),
+        pytest.param("auth_kind", "x" * 1024, id="oversized-enum-string"),
+        pytest.param("auth_kind", 7, id="auth-kind-type"),
+        pytest.param("credential_type", "unknown", id="credential-type-enum"),
+        pytest.param("principal_type", "guest", id="principal-type-enum"),
+        pytest.param("role", "super-owner", id="role-enum"),
+        pytest.param("role", 7, id="role-type"),
+        pytest.param(
+            "user_id",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            id="uppercase-user-uuid",
+        ),
+        pytest.param(
+            "team_id",
+            "00000000-0000-0000-0000-000000000000",
+            id="zero-team-uuid",
+        ),
+        pytest.param("user_id", 7, id="uuid-type"),
+        pytest.param(
+            "expires_at",
+            "2026-02-30T00:00:00Z",
+            id="invalid-timestamp-date",
+        ),
+        pytest.param(
+            "expires_at",
+            "2026-07-22T00:00:00Ztrailing",
+            id="timestamp-trailing-data",
+        ),
+        pytest.param(
+            "expires_at",
+            "2026-07-22T00:00:00Z\nprivate",
+            id="timestamp-control",
+        ),
+        pytest.param("expires_at", "2" * 128, id="oversized-timestamp"),
+        pytest.param("expires_at", 7, id="timestamp-type"),
+        pytest.param("token_prefix", "ABCDEF12", id="token-prefix-uppercase"),
+        pytest.param("token_prefix", 7, id="token-prefix-type"),
+        pytest.param("scopes", "read:own", id="scope-container-string"),
+        pytest.param("scopes", ["read:own", 7], id="scope-member-type"),
+        pytest.param("scopes", ["Read:own"], id="scope-grammar"),
+        pytest.param("scopes", ["a" * 129], id="scope-member-oversized"),
+        pytest.param(
+            "scopes",
+            [f"scope{index}" for index in range(65)],
+            id="scope-count-oversized",
+        ),
+    ],
+)
+def test_whoami_json_rejects_malformed_allowlisted_projection_before_persistence(
+    field: str,
+    value: object,
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(
+        LoomConfig(
+            server_url="https://loom.example",
+            auth_session_cookie="loom_session_old",
+            auth_csrf_token="loom_csrf_old",
+        )
+    )
+    payload = _valid_whoami_json_payload()
+    payload[field] = value
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={**payload, "csrf_token": "loom_csrf_rotated_private"},
+        headers={
+            "set-cookie": "loom_session=loom_session_rotated_private; Path=/; HttpOnly",
+        },
+    )
+
+    rc = main(["auth", "whoami", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "error: invalid whoami JSON projection\n"
+    persisted = load_config()
+    assert persisted.auth_session_cookie == "loom_session_old"
+    assert persisted.auth_csrf_token == "loom_csrf_old"
+
+
+def test_whoami_json_rejects_full_token_prefix_without_leak_or_persistence(
+    mock_auth_server: MockAuthServer,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "loom_api_full_private_value_abcdef"
+    save_config(
+        LoomConfig(
+            server_url="https://loom.example",
+            auth_session_cookie="loom_session_old",
+            auth_csrf_token="loom_csrf_old",
+        )
+    )
+    payload = _valid_whoami_json_payload()
+    payload["token_prefix"] = marker
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        json={**payload, "csrf_token": "loom_csrf_rotated_private"},
+        headers={
+            "set-cookie": "loom_session=loom_session_rotated_private; Path=/; HttpOnly",
+        },
+    )
+    evidence = tmp_path / "whoami.json"
+
+    with evidence.open("w") as output, redirect_stdout(output):
+        rc = main(["auth", "whoami", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "error: invalid whoami JSON projection\n"
+    assert evidence.read_text() == ""
+    persisted = load_config()
+    assert persisted.auth_session_cookie == "loom_session_old"
+    assert persisted.auth_csrf_token == "loom_csrf_old"
+    assert marker not in captured.out
+    assert marker not in captured.err
+    assert marker not in evidence.read_text()
+
+
+def test_whoami_json_rejects_invalid_json_response_without_persistence(
+    mock_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_config(
+        LoomConfig(
+            server_url="https://loom.example",
+            auth_session_cookie="loom_session_old",
+            auth_csrf_token="loom_csrf_old",
+        )
+    )
+    mock_auth_server.canned[("GET", "/api/v1/auth/whoami")] = httpx.Response(
+        200,
+        content=b'{"auth_kind":',
+        headers={
+            "set-cookie": "loom_session=loom_session_rotated_private; Path=/; HttpOnly",
+        },
+    )
+
+    rc = main(["auth", "whoami", "--format", "json"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "error: invalid whoami JSON projection\n"
+    persisted = load_config()
+    assert persisted.auth_session_cookie == "loom_session_old"
+    assert persisted.auth_csrf_token == "loom_csrf_old"
+
+
+def test_whoami_rejects_invalid_format_before_http(
+    mock_auth_server: MockAuthServer,
+) -> None:
+    save_config(LoomConfig(server_url="https://loom.example", auth_token="private"))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["auth", "whoami", "--format", "yaml"])
+
+    assert exc.value.code == 2
+    assert mock_auth_server.requests == []
 
 
 def test_whoami_persists_rotated_session_csrf(

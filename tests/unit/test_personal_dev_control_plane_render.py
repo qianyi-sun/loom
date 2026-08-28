@@ -492,6 +492,51 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             assert template["annotations"]["loom.dev/acceptance-plan-sha256"] == plan.sha256
 
 
+def test_acceptance_render_v2_two_owners_preserves_resource_shape(tmp_path: Path) -> None:
+    profile, release, v1_plan, _shadow, v1_rendered, v1_documents = _acceptance_render(
+        tmp_path
+    )
+    profile = replace(
+        profile,
+        limits=replace(
+            profile.limits,
+            global_live_instances=2,
+            builder_global_concurrency=2,
+        ),
+    )
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    value = v1_plan.canonical_value()
+    value["schema_version"] = 2
+    owner_0 = value.pop("acceptance_owner")
+    owner_1 = {
+        "team_id": "00000000-0000-0000-0000-000000000006",
+        "user_id": "00000000-0000-0000-0000-000000000005",
+    }
+    value["acceptance_owners"] = sorted(
+        [owner_0, owner_1],
+        key=lambda item: (item["team_id"], item["user_id"]),
+    )
+    value["quotas"]["global_live_instances"] = 2
+    value["quotas"]["builder_global_concurrency"] = 2
+    value["release"]["shadow_manifest_sha256"] = hashlib.sha256(
+        shadow.yaml_text.encode("utf-8")
+    ).hexdigest()
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "acceptance-plan-v2.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    plan = load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
+
+    rendered = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+
+    assert plan.acceptance_owners[0].team_id != plan.acceptance_owners[1].team_id
+    assert rendered.resource_count == v1_rendered.resource_count
+    assert {_identity(item) for item in documents if item["kind"] != "Job"} == {
+        _identity(item) for item in v1_documents if item["kind"] != "Job"
+    }
+
+
 def test_acceptance_render_preserves_shadow_claim_template_lineage(
     tmp_path: Path,
 ) -> None:

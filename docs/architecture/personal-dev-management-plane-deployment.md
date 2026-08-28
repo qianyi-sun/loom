@@ -57,15 +57,17 @@ The package is delivered in three repository increments:
    restricted-builder authority, activation-agent authority, RBAC, and network
    policy with personal lifecycle mutation disabled and the activation agent
    at zero replicas. Prove deployment and rollback at this state.
-2. **Zero-capacity personal acceptance interlock.** Accept one canonical,
+2. **Zero-capacity personal acceptance interlocks.** Accept one canonical,
    digest-pinned operator plan and render the same release with the personal
    controller and builder enabled and the activation agent at one replica.
    Runtime startup and operator status both recheck the global manager and
-   refuse any nonzero executable ceiling. This increment supports #1280's
-   single-owner application acceptance but still cannot allocate a worker.
-3. **Durable zero-capacity operational contract.** After the complete
-   acceptance runbook has retired both owner-controlled environments and restored the
-   reviewed shadow, accept a separate canonical operational plan.
+   refuse any nonzero executable ceiling. Schema v1 preserves the #1280
+   sole-owner/two-environment authority; schema v2 authorizes exactly two
+   distinct owners only through a separate gate before a second person is
+   onboarded. Neither contract can allocate a worker.
+3. **Durable zero-capacity operational contracts.** After the applicable
+   acceptance runbook has retired every owner-controlled environment and
+   restored the reviewed shadow, accept a separate canonical operational plan.
    `render-operational` enables the same personal application authorities
    without retaining the expiring acceptance binding. `status-operational`
    continuously verifies the immutable release and plan, the global-manager
@@ -246,7 +248,9 @@ binds:
 - global-manager authority incarnation, configuration epoch, execution state,
   execution epoch, and executable ceiling `0`;
 - exact lifecycle and reporter principal identifiers;
-- one exact acceptance-owner identifier pair and finite quotas; and
+- one exact acceptance-owner identifier pair for historical schema v1, or two
+  canonically ordered distinct owner pairs for schema v2, plus finite quotas;
+  and
 - change-window, rollback-manifest, and expiry timestamps.
 
 Operational rendering is a separate third mode. It requires an owner-only
@@ -254,11 +258,16 @@ canonical operational plan and its independently supplied SHA-256. The
 operational plan binds the same immutable source, release, storage,
 RuntimeClass, scanner, publisher, registry, activation, quota, principal, and
 global-manager zero-capacity boundaries needed for acceptance. It also binds
-the completed single-owner acceptance result and the exact byte-reviewed shadow
-rollback manifest. It does not contain acceptance owners or an acceptance
-window, and an operator must not simulate durability by choosing a distant
-acceptance expiry. Configuration-epoch advancement is permitted only as the
-same monotonic progress accepted during the bounded test; authority
+the exact byte-reviewed shadow rollback manifest. For the multi-owner durable
+launch route, it binds the completed, strictly verified schema-v2 two-owner
+acceptance result. The preserved #1280 sole-owner/two-environment route instead
+binds its historical schema-v1 result under the separately reviewed sole-owner
+durable-launch procedure. Neither result substitutes for the other: v1 cannot
+authorize final multi-person launch, and v2 does not retroactively authorize
+the #1280 window. The operational plan does not contain acceptance owners or
+an acceptance window, and an operator must not simulate durability by choosing
+a distant acceptance expiry. Configuration-epoch advancement is permitted
+only as the same monotonic progress accepted during the bounded test; authority
 incarnation, execution state and epoch, observer principal, and executable
 ceiling remain exact fail-closed bindings.
 
@@ -282,11 +291,13 @@ claim.
 
 Repository implementation does not establish the live prerequisites by
 itself. DNS and TLS, provisioned Secret inventories, the measured gVisor
-RuntimeClass, candidate GHCR publication, backup/restore evidence, single-owner
-acceptance, and a successful operational apply/status remain separate
-operational gates. None may be inferred from a successful render or from
-scanner-cache preparation, and the executable ceiling remains zero throughout
-these gates.
+RuntimeClass, candidate GHCR publication, backup/restore evidence, the
+applicable verified acceptance gate (schema v1 for the reviewed #1280
+sole-owner route, or schema v2 before a multi-person launch), and a successful
+operational apply/status remain separate operational gates. Neither acceptance
+schema supersedes the other route's authority. None of these gates may be
+inferred from a successful render or from scanner-cache preparation, and the
+executable ceiling remains zero throughout them.
 
 ## Credential boundaries
 
@@ -415,35 +426,53 @@ a namespace or PVC directly. If an environment cannot be retired safely, keep
 the zero-capacity operational plane fail closed, retain its data and evidence,
 and do not apply shadow over unresolved dynamic authority.
 
-## Live acceptance
+## Live acceptance authorities
 
-After the shadow rehearsal and acceptance interlock are merged, published, and
-deployed, #1280 closes only after this controlled test:
+The #1280 owner may complete the approved
+[sole-owner zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
+and corresponding
+[sole-owner durable launch](../runbooks/personal-dev-durable-launch.md). That
+sole-owner/two-environment procedure proves one authenticated owner can exercise
+two isolated arbitrary-source deployments at ceiling zero; it does not certify
+cross-owner isolation.
 
-1. The exact acceptance owner authenticates to the management API.
-2. The owner deploys two distinctly named arbitrary source snapshots with
-   `loom service up --environment dev-<name> --min-slots 0`.
-3. Both builds and lifecycle operations run concurrently without shared mutable
-   candidate, attempt, registry, database, bucket, credential, or namespace
-   authority.
-4. The owner performs independent source and capacity-policy updates for both
-   environments.
-5. Candidate, subject, Secret, database, bucket, route, worker-pool, and
-   namespace identities remain disjoint across the two environments.
-6. Application readiness and initial non-executable demand publication succeed,
-   while worker availability remains false and the manager ceiling remains `0`.
-7. The owner destroys one environment with data deletion and the other with
-   `--keep-data`; neither operation mutates `loom-dev` or the sibling namespace.
-8. The retained environment name is redeployed and proves authority rotation.
+Before a second person is onboarded, the plane must return to the exact inert
+shadow and a separately reviewed window must execute the
+[concurrent-owner zero-capacity acceptance](../runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md):
+
+1. Two exact plan owners authenticate through separate pinned owner-only XDG
+   roots using existing non-rotating user-owned API bearer tokens, and each
+   secret-free identity record matches its canonical v2 plan entry. Browser,
+   legacy team, service, and administrator credentials fail this bounded gate.
+2. Both owners start distinctly named arbitrary-source deploys before either
+   wait, using exact minimum `0` and maximum `2`.
+3. Both owners start independent arbitrary-source updates before either wait;
+   owner 0 moves to maximum `3` and owner 1 to maximum `4`.
+4. Candidate, subject, incarnation, database, bucket, host, route, worker-pool,
+   and namespace identities remain disjoint across owners.
+5. Owner 0 attempts read, update, and destroy against owner 1; then owner 1
+   attempts the same three operations against owner 0. Every call exits 1,
+   emits no stdout, emits the exact method/phase-bound hidden-resource receipt,
+   and leaves byte-exact target status unchanged.
+6. Application readiness and non-executable demand publication remain ready
+   after every denial, while worker availability is false and the manager
+   ceiling remains `0`.
+7. Owner 0 destroys normally. Owner 1 destroys with `--keep-data`, redeploys
+   the retained name with the same `subject_id` and a rotated
+   `subject_incarnation`, then destroys it normally.
+8. With every dynamic namespace absent, the operator reapplies and verifies the
+   byte-exact inert shadow, assembles the canonical v2 result, and runs the
+   strict read-only result verifier.
 
 Physical one-slot x86_64, arm64, and architecture-neutral task execution is not
 part of this acceptance. It follows the separately reviewed #906 activation
 interlock after both pool executors and no-dual-writer evidence are complete.
 
-After all eight steps, the acceptance runbook performs final manager-first
-cleanup and returns to the byte-reviewed shadow. Durable launch is a subsequent
+After all eight steps, the concurrent-owner acceptance runbook has completed
+final manager-first cleanup, returned to the byte-reviewed shadow, and produced
+a verified schema-v2 result. Multi-person durable launch is a subsequent
 operation under the
-[personal-development durable launch runbook](../runbooks/personal-dev-durable-launch.md):
+[multi-owner durable launch runbook](../runbooks/personal-dev-multi-owner-durable-launch.md):
 render and review both operational and shadow manifests, apply operational,
 prove `status-operational`, DNS/TLS, and stable-route behavior, and retain the
 operational manifest only while ceiling `0` and `worker_available=false` remain

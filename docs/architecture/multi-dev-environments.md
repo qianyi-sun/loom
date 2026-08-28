@@ -25,31 +25,45 @@ builder, activation agent, or physical capacity. Personal application
 acceptance remains a later gate after both the personal-management shadow and
 the separate global-capacity zero-ceiling shadow report ready.
 The controlled
-[zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
-then exercises two concurrent isolated environments under one authenticated
-acceptance owner, with distinct source snapshots, lifecycle operations,
-namespaces, storage identities, and capacity publications. Acceptance requires
-`worker_available=false` and an exact global executable-new-capacity ceiling of
-zero throughout. Its plan also binds the completed
+[sole-owner zero-capacity acceptance](../runbooks/personal-dev-zero-capacity-acceptance.md)
+retains the approved #1280 sole-owner/two-environment authority. It exercises
+two concurrent isolated environments for one authenticated acceptance owner,
+requires `worker_available=false` and an exact global executable-new-capacity
+ceiling of zero, performs manager-first cleanup, and restores the byte-reviewed
+inert shadow. Its schema-v1 result can authorize only the corresponding
+[sole-owner durable launch](../runbooks/personal-dev-durable-launch.md); it is
+not evidence of cross-owner isolation.
+
+Before a second person is onboarded, operators must restore the exact inert
+shadow and complete the separate
+[concurrent-owner zero-capacity acceptance](../runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md).
+That procedure uses two pinned authenticated acceptance owners with distinct
+source snapshots, lifecycle operations, namespaces, storage identities, and
+capacity publications. Each owner proves that read, update, and destroy
+attempts against the other owner's environment fail without changing the
+target. Its plan also binds the completed
 [owner-only isolated backup/restore evidence](../runbooks/personal-dev-backup-restore-evidence.md)
-and exact source-derived launcher and scanner policies. Its plan pins
-the manager configuration epoch as a monotonic floor rather than a constant:
+and exact source-derived launcher and scanner policies. The plan pins the
+manager configuration epoch as a monotonic floor rather than a constant:
 every personal projection advances the global epoch, and other environments
 share the same authority, so advancement is valid while regression fails the
 acceptance interlock.
 
-Acceptance is deliberately temporary. Its runbook destroys the acceptance
-environments and reapplies the byte-reviewed shadow before the bounded window
-closes; an acceptance manifest must not be left running as the development
-service. After that complete acceptance-and-rollback result exists, the
-[durable zero-capacity launch](../runbooks/personal-dev-durable-launch.md) uses
-a separate canonical operational plan. `render-operational` enables the
-personal controller and restricted builder and runs one activation-agent
-replica without an acceptance-window expiry. `status-operational` continuously
-rechecks the immutable release and operational-plan bindings, the exact global
-manager authority and execution boundary, executable ceiling `0`, and absence
-of a personal worker. Only after that status and the byte-reviewed shadow
-rollback evidence pass may the personal application plane remain enabled.
+Both acceptance procedures are deliberately temporary. They destroy their
+acceptance environments and reapply the byte-reviewed shadow before the
+bounded window closes; an acceptance manifest must not be left running as the
+development service. The multi-owner procedure requires two existing
+non-rotating user-owned API bearer credentials, all six exact target-request
+hidden-denial receipts, complete cleanup, and a verified schema-v2 result.
+Only that result may gate the
+[multi-owner durable zero-capacity launch](../runbooks/personal-dev-multi-owner-durable-launch.md).
+`render-operational` enables the personal controller and restricted builder and
+runs one activation-agent replica without an acceptance-window expiry.
+`status-operational` continuously rechecks the immutable release and
+operational-plan bindings, the exact global-manager authority and execution
+boundary, executable ceiling `0`, and absence of a personal worker. Only after
+that status and the byte-reviewed shadow rollback evidence pass may the
+personal application plane remain enabled for multiple people.
 
 Operational readiness means that authenticated owners may build, deploy,
 update, inspect, and destroy personal applications. It does not make a task

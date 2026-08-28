@@ -12,9 +12,12 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom.dev_instance import derive_identity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS, PERSONAL_DEV_PLATFORMS
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
@@ -22,8 +25,10 @@ from loom.personal_dev_control_plane_config import (
     PersonalDevOperationalPlan,
     PersonalDevTrustedRelease,
 )
+from loom.personal_dev_expected_denial import expected_hidden_denial_sha256
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _GIT_IDENTITY = re.compile(r"[0-9a-f]{40}")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
@@ -218,6 +223,225 @@ class PersonalDevBackupRestoreEvidence(_StrictModel):
         return self
 
 
+def _validated_digest(value: str) -> str:
+    if _DIGEST.fullmatch(value) is None or value == "0" * 64:
+        raise ValueError("evidence digest is invalid")
+    return value
+
+
+def _validated_nonempty_evidence_digest(value: str) -> str:
+    validated = _validated_digest(value)
+    if hmac.compare_digest(validated, _EMPTY_SHA256):
+        raise ValueError("nonempty evidence digest is invalid")
+    return validated
+
+
+def _validated_uuid(value: str) -> str:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        raise ValueError("evidence UUID is invalid") from None
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("evidence UUID is invalid")
+    return value
+
+
+class _AcceptanceResultIdentity(_StrictModel):
+    environment: str
+    namespace: str
+    database: str
+    task_bucket: str
+    trajectories_bucket: str
+    artifacts_bucket: str
+    route_host: str
+    worker_control_plane_host: str
+    worker_gateway_host: str
+    route_path: str
+    worker_pool: str
+
+
+class _AcceptanceResultSnapshot(_StrictModel):
+    application_status: Literal[
+        "provisioning",
+        "ready",
+        "updating",
+        "activating",
+        "deleting",
+        "draining",
+        "failed",
+        "deleted",
+    ]
+    candidate_sha: str
+    capacity_prepared: bool
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    deployment_generation: int = Field(gt=0)
+    identity: _AcceptanceResultIdentity
+    keep_data: bool
+    max_slots: int = Field(gt=0)
+    min_slots: int = Field(ge=0)
+    name: str
+    operation_epoch: int = Field(gt=0)
+    owner_team_id: str
+    owner_user_id: str
+    status: Literal[
+        "provisioning",
+        "ready",
+        "updating",
+        "activating",
+        "deleting",
+        "draining",
+        "failed",
+        "deleted",
+    ]
+    subject_id: str
+    subject_incarnation: str
+    worker_available: Literal[False]
+
+    @field_validator("candidate_sha")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_digest(value)
+
+    @field_validator(
+        "owner_team_id",
+        "owner_user_id",
+        "subject_id",
+        "subject_incarnation",
+    )
+    @classmethod
+    def _uuid(cls, value: str) -> str:
+        return _validated_uuid(value)
+
+    @model_validator(mode="after")
+    def _identity_is_derived(self) -> _AcceptanceResultSnapshot:
+        identity = derive_identity(self.name)
+        expected = {
+            "environment": identity.runtime_environment,
+            "namespace": identity.namespace,
+            "database": identity.database,
+            "task_bucket": identity.task_bucket,
+            "trajectories_bucket": identity.trajectories_bucket,
+            "artifacts_bucket": identity.artifacts_bucket,
+            "route_host": identity.route_host,
+            "worker_control_plane_host": identity.worker_control_plane_host,
+            "worker_gateway_host": identity.worker_gateway_host,
+            "route_path": identity.route_path,
+            "worker_pool": identity.worker_pool,
+        }
+        if self.identity.model_dump() != expected:
+            raise ValueError("acceptance result identity is invalid")
+        return self
+
+
+class _AcceptanceOwnerResult(_StrictModel):
+    initial: _AcceptanceResultSnapshot
+    updated: _AcceptanceResultSnapshot
+    destroyed: _AcceptanceResultSnapshot
+    redeployed: _AcceptanceResultSnapshot | None
+    final_destroyed: _AcceptanceResultSnapshot | None
+
+
+class _CrossOwnerDenial(_StrictModel):
+    actor_team_id: str
+    actor_user_id: str
+    operation: Literal["read", "update", "destroy"]
+    target_environment: str
+    target_team_id: str
+    target_user_id: str
+    exit_code: Literal[1]
+    stdout_sha256: str
+    stderr_sha256: str
+    target_before_sha256: str
+    target_after_sha256: str
+
+    @field_validator(
+        "stdout_sha256",
+        "stderr_sha256",
+    )
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_digest(value)
+
+    @field_validator("target_before_sha256", "target_after_sha256")
+    @classmethod
+    def _nonempty_evidence_digest(cls, value: str) -> str:
+        return _validated_nonempty_evidence_digest(value)
+
+    @field_validator(
+        "actor_team_id",
+        "actor_user_id",
+        "target_team_id",
+        "target_user_id",
+    )
+    @classmethod
+    def _uuid(cls, value: str) -> str:
+        return _validated_uuid(value)
+
+    @field_validator("target_environment")
+    @classmethod
+    def _environment_name(cls, value: str) -> str:
+        derive_identity(value)
+        return value
+
+
+class _AcceptanceStatusSha256s(_StrictModel):
+    pre_deploy: str
+    after_initial: str
+    after_updates: str
+    after_denials: str
+    after_destroy: str
+    after_redeploy: str
+    pre_rollback: str
+    rollback_shadow: str
+
+    @field_validator("*")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_nonempty_evidence_digest(value)
+
+
+class PersonalDevAcceptanceResultV2(_StrictModel):
+    """Canonical concurrent-owner zero-capacity acceptance result."""
+
+    schema_name: Literal["loom-personal-dev-zero-capacity-acceptance-result-v2"] = Field(
+        alias="schema"
+    )
+    acceptance_manifest_sha256: str
+    acceptance_plan_sha256: str
+    release_sha256: str
+    shadow_manifest_sha256: str
+    owners: tuple[_AcceptanceOwnerResult, _AcceptanceOwnerResult]
+    cross_owner_denials: tuple[
+        _CrossOwnerDenial,
+        _CrossOwnerDenial,
+        _CrossOwnerDenial,
+        _CrossOwnerDenial,
+        _CrossOwnerDenial,
+        _CrossOwnerDenial,
+    ]
+    status_sha256s: _AcceptanceStatusSha256s
+
+    @field_validator(
+        "acceptance_manifest_sha256",
+        "acceptance_plan_sha256",
+        "release_sha256",
+        "shadow_manifest_sha256",
+    )
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_digest(value)
+
+    @field_validator("owners", "cross_owner_denials", mode="before")
+    @classmethod
+    def _arrays_are_exact(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, list):
+            raise ValueError("acceptance result arrays are invalid")
+        return tuple(value)
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json(self.model_dump(mode="json", by_alias=True))
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value,
@@ -318,6 +542,243 @@ def _load_json(path: Path, expected_sha256: str) -> tuple[bytes, dict[str, Any]]
             "personal-dev acceptance evidence is invalid"
         ) from None
     return payload, value
+
+
+def _validate_ready_snapshot(
+    snapshot: _AcceptanceResultSnapshot,
+    *,
+    max_slots: int,
+) -> None:
+    if (
+        snapshot.status != "ready"
+        or snapshot.application_status != "ready"
+        or snapshot.capacity_status != "prepared"
+        or snapshot.capacity_prepared is not True
+        or snapshot.worker_available is not False
+        or snapshot.keep_data is not False
+        or snapshot.min_slots != 0
+        or snapshot.max_slots != max_slots
+    ):
+        raise ValueError("ready acceptance snapshot is invalid")
+
+
+def _validate_ready_transition(
+    initial: _AcceptanceResultSnapshot,
+    updated: _AcceptanceResultSnapshot,
+    *,
+    updated_max_slots: int,
+) -> None:
+    _validate_ready_snapshot(initial, max_slots=2)
+    _validate_ready_snapshot(updated, max_slots=updated_max_slots)
+    if (
+        initial.name != updated.name
+        or initial.owner_team_id != updated.owner_team_id
+        or initial.owner_user_id != updated.owner_user_id
+        or initial.identity != updated.identity
+        or initial.subject_id != updated.subject_id
+        or initial.subject_incarnation != updated.subject_incarnation
+        or initial.deployment_generation != 1
+        or updated.deployment_generation != initial.deployment_generation + 1
+        or initial.operation_epoch != 1
+        or updated.operation_epoch != initial.operation_epoch + 1
+        or hmac.compare_digest(initial.candidate_sha, updated.candidate_sha)
+    ):
+        raise ValueError("ready acceptance transition is invalid")
+
+
+def _validate_destroy(
+    updated: _AcceptanceResultSnapshot,
+    destroyed: _AcceptanceResultSnapshot,
+    *,
+    keep_data: bool,
+) -> None:
+    if (
+        destroyed.status != "deleted"
+        or destroyed.application_status != "deleted"
+        or destroyed.capacity_status != "shadow"
+        or destroyed.capacity_prepared is not False
+        or destroyed.worker_available is not False
+        or destroyed.keep_data is not keep_data
+        or destroyed.name != updated.name
+        or destroyed.owner_team_id != updated.owner_team_id
+        or destroyed.owner_user_id != updated.owner_user_id
+        or destroyed.identity != updated.identity
+        or destroyed.subject_id != updated.subject_id
+        or destroyed.subject_incarnation != updated.subject_incarnation
+        or destroyed.min_slots != updated.min_slots
+        or destroyed.max_slots != updated.max_slots
+        or destroyed.deployment_generation != updated.deployment_generation
+        or destroyed.operation_epoch != updated.operation_epoch + 1
+        or not hmac.compare_digest(destroyed.candidate_sha, updated.candidate_sha)
+    ):
+        raise ValueError("destroyed acceptance transition is invalid")
+
+
+def _validate_retained_redeploy(
+    destroyed: _AcceptanceResultSnapshot,
+    redeployed: _AcceptanceResultSnapshot,
+    final_destroyed: _AcceptanceResultSnapshot,
+) -> None:
+    _validate_ready_snapshot(redeployed, max_slots=2)
+    if (
+        destroyed.keep_data is not True
+        or redeployed.name != destroyed.name
+        or redeployed.owner_team_id != destroyed.owner_team_id
+        or redeployed.owner_user_id != destroyed.owner_user_id
+        or redeployed.identity != destroyed.identity
+        or redeployed.subject_id != destroyed.subject_id
+        or redeployed.subject_incarnation == destroyed.subject_incarnation
+        or redeployed.deployment_generation != 1
+        or redeployed.operation_epoch != destroyed.operation_epoch + 1
+    ):
+        raise ValueError("retained acceptance redeploy is invalid")
+    _validate_destroy(redeployed, final_destroyed, keep_data=False)
+
+
+def _validate_denial_matrix(
+    plan: PersonalDevAcceptancePlan,
+    denials: tuple[_CrossOwnerDenial, ...],
+) -> None:
+    expected = tuple(
+        (actor_index, target_index, operation)
+        for actor_index, target_index in ((0, 1), (1, 0))
+        for operation in ("read", "update", "destroy")
+    )
+    if len(denials) != len(expected):
+        raise ValueError("cross-owner denial matrix is incomplete")
+    for denial, (actor_index, target_index, operation) in zip(
+        denials,
+        expected,
+        strict=True,
+    ):
+        actor = plan.acceptance_owners[actor_index]
+        target = plan.acceptance_owners[target_index]
+        if (
+            denial.actor_team_id != str(actor.team_id)
+            or denial.actor_user_id != str(actor.user_id)
+            or denial.target_team_id != str(target.team_id)
+            or denial.target_user_id != str(target.user_id)
+            or denial.operation != operation
+            or denial.exit_code != 1
+            or not hmac.compare_digest(denial.stdout_sha256, _EMPTY_SHA256)
+            or not hmac.compare_digest(
+                denial.stderr_sha256,
+                expected_hidden_denial_sha256(operation),
+            )
+            or not hmac.compare_digest(
+                denial.target_before_sha256,
+                denial.target_after_sha256,
+            )
+        ):
+            raise ValueError("cross-owner denial matrix is invalid")
+
+
+def load_personal_dev_acceptance_result(
+    path: Path,
+    expected_sha256: str,
+    *,
+    plan: PersonalDevAcceptancePlan,
+    expected_acceptance_manifest_sha256: str,
+) -> PersonalDevAcceptanceResultV2:
+    """Load strict canonical read-only evidence for the two-owner acceptance run."""
+
+    payload, value = _load_json(path, expected_sha256)
+    try:
+        _validated_digest(expected_acceptance_manifest_sha256)
+        result = PersonalDevAcceptanceResultV2.model_validate(value)
+        if (
+            plan.schema_version != 2
+            or len(plan.acceptance_owners) != 2
+            or not hmac.compare_digest(
+                result.acceptance_manifest_sha256,
+                expected_acceptance_manifest_sha256,
+            )
+            or not hmac.compare_digest(result.acceptance_plan_sha256, plan.sha256)
+            or not hmac.compare_digest(
+                result.release_sha256,
+                plan.release.trusted_release_sha256,
+            )
+            or not hmac.compare_digest(
+                result.shadow_manifest_sha256,
+                plan.release.shadow_manifest_sha256,
+            )
+        ):
+            raise ValueError("acceptance result binding is invalid")
+
+        for owner_index, (owner_result, plan_owner) in enumerate(
+            zip(result.owners, plan.acceptance_owners, strict=True)
+        ):
+            initial = owner_result.initial
+            if (
+                initial.owner_team_id != str(plan_owner.team_id)
+                or initial.owner_user_id != str(plan_owner.user_id)
+            ):
+                raise ValueError("acceptance result owner order is invalid")
+            _validate_ready_transition(
+                initial,
+                owner_result.updated,
+                updated_max_slots=3 if owner_index == 0 else 4,
+            )
+            _validate_destroy(
+                owner_result.updated,
+                owner_result.destroyed,
+                keep_data=owner_index == 1,
+            )
+            if owner_index == 0:
+                if owner_result.redeployed is not None or owner_result.final_destroyed is not None:
+                    raise ValueError("default destroy result is invalid")
+            elif owner_result.redeployed is None or owner_result.final_destroyed is None:
+                raise ValueError("retained destroy result is incomplete")
+            else:
+                _validate_retained_redeploy(
+                    owner_result.destroyed,
+                    owner_result.redeployed,
+                    owner_result.final_destroyed,
+                )
+
+        owner_0 = result.owners[0].initial
+        owner_1 = result.owners[1].initial
+        if (
+            owner_0.name == owner_1.name
+            or owner_0.subject_id == owner_1.subject_id
+            or owner_0.subject_incarnation == owner_1.subject_incarnation
+            or any(
+                getattr(owner_0.identity, field) == getattr(owner_1.identity, field)
+                for field in _AcceptanceResultIdentity.model_fields
+            )
+        ):
+            raise ValueError("acceptance result owner identities are not disjoint")
+        if hmac.compare_digest(
+            result.owners[0].updated.candidate_sha,
+            result.owners[1].updated.candidate_sha,
+        ):
+            raise ValueError("acceptance result owner candidates are not independent")
+
+        _validate_denial_matrix(plan, result.cross_owner_denials)
+        expected_targets = (
+            result.owners[1].initial.name,
+            result.owners[1].initial.name,
+            result.owners[1].initial.name,
+            result.owners[0].initial.name,
+            result.owners[0].initial.name,
+            result.owners[0].initial.name,
+        )
+        if any(
+            denial.target_environment != target
+            for denial, target in zip(
+                result.cross_owner_denials,
+                expected_targets,
+                strict=True,
+            )
+        ):
+            raise ValueError("cross-owner denial target is invalid")
+        if result.canonical_bytes() != payload:
+            raise ValueError("acceptance result is not canonical")
+    except ValueError:
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+    return result
 
 
 def _parse_json_document(path: Path, *, canonical: bool) -> tuple[bytes, Any]:
@@ -759,24 +1220,138 @@ def _validate_minio_manifest(value: Any) -> int:
 
 
 def _validate_shadow_status(value: Any) -> None:
+    expected_components = (
+        "cluster-resources",
+        "manager",
+        "namespaced-resources",
+        "namespaces",
+        "personal-workers",
+        "runtime-class",
+    )
+    expected_fields = {
+        "blockers",
+        "components",
+        "input_sha256",
+        "manager_ceiling",
+        "mode",
+        "ready",
+        "release_sha256",
+        "schema",
+        "worker_available",
+    }
     if (
         not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("schema") != "loom-personal-dev-control-plane-status-v1"
         or value.get("mode") != "shadow"
         or value.get("ready") is not True
         or value.get("blockers") != []
+        or not isinstance(value.get("input_sha256"), str)
+        or _DIGEST.fullmatch(value["input_sha256"]) is None
+        or value["input_sha256"] == "0" * 64
+        or not isinstance(value.get("release_sha256"), str)
+        or _DIGEST.fullmatch(value["release_sha256"]) is None
+        or value["release_sha256"] == "0" * 64
         or type(value.get("manager_ceiling")) is not int
         or value.get("manager_ceiling") != 0
         or value.get("worker_available") is not False
         or not isinstance(value.get("components"), list)
-        or not any(
-            isinstance(component, dict)
-            and component.get("name") == "personal-workers"
-            and type(component.get("observed")) is int
-            and component.get("observed") == 0
-            for component in value["components"]
-        )
+        or not value["components"]
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+
+    component_names: list[str] = []
+    component_observed: dict[str, int] = {}
+    for component in value["components"]:
+        if (
+            not isinstance(component, dict)
+            or set(component) != {"name", "observed", "ready"}
+            or not isinstance(component.get("name"), str)
+            or not component["name"]
+            or type(component.get("observed")) is not int
+            or component["observed"] < 0
+            or component.get("ready") is not True
+        ):
+            raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+        component_names.append(component["name"])
+        component_observed[component["name"]] = component["observed"]
+    if (
+        tuple(component_names) != expected_components
+        or component_observed["cluster-resources"] <= 0
+        or component_observed["manager"] != 1
+        or component_observed["namespaced-resources"] <= 0
+        or component_observed["namespaces"] != 1
+        or component_observed["personal-workers"] != 0
+        or component_observed["runtime-class"] != 1
+    ):
+        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):  # type: ignore[misc]
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        mapping: dict[Any, Any] = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                if key in mapping:
+                    raise ValueError("duplicate YAML mapping key")
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            except TypeError:
+                raise ValueError("unhashable YAML mapping key") from None
+        return mapping
+
+
+def validate_personal_dev_rollback_shadow_manifest(
+    path: Path,
+    expected_sha256: str,
+    *,
+    expected_input_sha256: str,
+    expected_release_sha256: str,
+) -> None:
+    """Bind one exact shadow manifest to its observed render and release digests."""
+
+    try:
+        _validated_digest(expected_sha256)
+        _validated_digest(expected_input_sha256)
+        _validated_digest(expected_release_sha256)
+        payload = _read_owner_only(path)
+        if not hmac.compare_digest(
+            hashlib.sha256(payload).hexdigest(),
+            expected_sha256,
+        ):
+            raise ValueError
+        documents = list(yaml.load_all(payload, Loader=_UniqueKeySafeLoader))
+        if not documents:
+            raise ValueError
+        for document in documents:
+            if not isinstance(document, dict):
+                raise ValueError
+            metadata = document.get("metadata")
+            annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+            if (
+                not isinstance(annotations, dict)
+                or annotations.get("loom.dev/render-input-sha256")
+                != expected_input_sha256
+                or annotations.get("loom.dev/trusted-release-sha256")
+                != expected_release_sha256
+            ):
+                raise ValueError
+    except (OSError, RecursionError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+
+
+def load_personal_dev_rollback_shadow_status(
+    path: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Load canonical owner-only evidence for the final inert shadow state."""
+
+    _, value = _load_json(path, expected_sha256)
+    _validate_shadow_status(value)
+    return value
 
 
 def _validate_storage_inventory(
@@ -969,10 +1544,13 @@ def load_personal_dev_backup_restore_evidence(
 
 __all__ = [
     "PersonalDevAcceptanceEvidenceError",
+    "PersonalDevAcceptanceResultV2",
     "PersonalDevBackupRestoreEvidence",
     "build_personal_dev_backup_restore_evidence",
     "build_personal_dev_scanner_finding_policy",
     "build_personal_dev_trusted_launcher_profile",
+    "load_personal_dev_acceptance_result",
     "load_personal_dev_backup_restore_evidence",
     "validate_personal_dev_policy_evidence",
+    "validate_personal_dev_rollback_shadow_manifest",
 ]
