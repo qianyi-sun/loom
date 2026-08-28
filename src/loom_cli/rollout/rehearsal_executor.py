@@ -83,6 +83,7 @@ from loom_cli.rollout.rehearsal_browser import (
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 from loom_cli.rollout.rehearsal_release import (
+    REHEARSAL_TERMINATION_GRACE_SECONDS,
     RehearsalReleaseArtifact,
     build_rehearsal_release_artifact,
     rehearsal_deployment_ready,
@@ -2670,7 +2671,7 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
                 "seccompProfile": {"type": "RuntimeDefault"},
             },
             "serviceAccountName": "default",
-            "terminationGracePeriodSeconds": 30,
+            "terminationGracePeriodSeconds": REHEARSAL_TERMINATION_GRACE_SECONDS,
             "volumes": [
                 {"emptyDir": {"sizeLimit": "50Gi"}, "name": "data"},
                 {"emptyDir": {"medium": "Memory", "sizeLimit": "16Mi"}, "name": "socket"},
