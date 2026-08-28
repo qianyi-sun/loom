@@ -43,18 +43,12 @@ INSTALL_ASSETS = MappingProxyType(
             False,
         ),
         "mutation-guard-reconcile-service": (
-            Path(
-                "/etc/systemd/system/"
-                "loom-staging-rollout-mutation-guard-reconcile.service"
-            ),
+            Path("/etc/systemd/system/loom-staging-rollout-mutation-guard-reconcile.service"),
             0o644,
             False,
         ),
         "mutation-guard-reconcile-timer": (
-            Path(
-                "/etc/systemd/system/"
-                "loom-staging-rollout-mutation-guard-reconcile.timer"
-            ),
+            Path("/etc/systemd/system/loom-staging-rollout-mutation-guard-reconcile.timer"),
             0o644,
             False,
         ),
