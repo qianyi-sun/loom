@@ -1039,7 +1039,7 @@ class SystemdUserManager:
             raise SystemdQueryError("systemd unit status could not be queried") from exc
         if result.returncode == 4:
             return None
-        if result.returncode != 0:
+        if result.returncode != 0 or result.stderr.strip():
             raise SystemdQueryError("systemd unit status query failed")
         return _parse_show_output(unit_name, result.stdout)
 

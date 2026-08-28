@@ -443,7 +443,16 @@ class MutationGuardRunner:
             if not self.running and self.absence_delay > 0:
                 self.absence_delay -= 1
             elif not self.running:
-                return subprocess.CompletedProcess(argv, 4, "", "unit absent")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                        "Result=success\nExecMainStatus=0\nMainPID=0\n"
+                        "ExecMainStartTimestamp=\nExecMainExitTimestamp=\n"
+                    ),
+                    "",
+                )
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -1250,6 +1259,25 @@ def test_show_returns_none_for_exit_zero_not_found_load_state() -> None:
     assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
 
 
+def test_show_rejects_exit_zero_not_found_with_diagnostic_stderr() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
+            "ExecMainExitTimestamp=\n"
+        ),
+        stderr="systemd diagnostic",
+    )
+
+    with pytest.raises(SystemdQueryError, match="query failed"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
+
+
 def test_show_rejects_contradictory_not_found_load_state() -> None:
     runner = RecordingRunner(
         stdout=(
@@ -1260,6 +1288,24 @@ def test_show_rejects_contradictory_not_found_load_state() -> None:
             "ExecMainStatus=0\n"
             "MainPID=4321\n"
             "ExecMainStartTimestamp=Mon 2026-07-13 20:00:00 UTC\n"
+            "ExecMainExitTimestamp=\n"
+        )
+    )
+
+    with pytest.raises(SystemdQueryError, match="LoadState"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
+
+
+def test_show_rejects_alternate_systemd_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=masked\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
             "ExecMainExitTimestamp=\n"
         )
     )
