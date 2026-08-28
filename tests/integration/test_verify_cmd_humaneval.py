@@ -169,6 +169,73 @@ name = "main"
     assert "verify pipeline error" in bad["stderr_tail"]
 
 
+async def test_verify_ignores_immutable_publication_revisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical and orphan publication revisions are not live tasks."""
+    store = FakeObjectStore()
+    task_toml = b"""schema_version = "1"
+[task]
+id = "humaneval/good"
+name = "good"
+[environment]
+os = "linux"
+docker_image = "python:3.11-slim"
+[agent]
+name = "oracle"
+[verifier]
+name = "pytest"
+[[steps]]
+name = "main"
+"""
+    store.objects[("loom-benchmarks", "humaneval/good/task.toml")] = task_toml
+    store.objects[
+        (
+            "loom-benchmarks",
+            "humaneval/good/.loom-revisions/checksum-a/modes-a/task.toml",
+        )
+    ] = task_toml
+    store.objects[
+        (
+            "loom-benchmarks",
+            "humaneval/good/.loom-revisions/checksum-b/modes-b/task.toml",
+        )
+    ] = task_toml
+
+    async def _fake_oracle(
+        *,
+        task_id: str,
+        task_dir: Path,
+        image: str,
+    ) -> OracleResult:
+        return OracleResult(
+            task_id=task_id,
+            passed=True,
+            return_code=0,
+            stdout_tail="ok",
+            stderr_tail="",
+        )
+
+    monkeypatch.setattr(
+        "loom_benchmark_tool.verify_cmd.run_oracle_for_task",
+        _fake_oracle,
+    )
+
+    report = await run_verify(
+        benchmark="humaneval",
+        object_store=store,
+        bucket="loom-benchmarks",
+        limit=10,
+    )
+
+    assert report["total"] == 1
+    assert report["passed"] == 1
+    assert report["failed"] == 0
+    assert [result["task_id"] for result in report["results"]] == [
+        "humaneval/good",
+    ]
+
+
 async def test_verify_rejects_unsafe_prefix_slug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

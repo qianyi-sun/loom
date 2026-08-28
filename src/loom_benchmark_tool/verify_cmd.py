@@ -43,9 +43,15 @@ async def run_verify(
     """Sample `limit` task prefixes under `<bucket>/<benchmark>/`, pull
     each to a tempdir, validate `task.toml` against `TaskConfig`, run
     the Oracle baseline. Returns an aggregate report."""
-    all_prefixes = await object_store.list_task_prefixes(
-        bucket=bucket, benchmark=benchmark,
-    )
+    all_prefixes = [
+        prefix
+        for prefix in await object_store.list_task_prefixes(
+            bucket=bucket, benchmark=benchmark,
+        )
+        # Immutable publication history is not a set of live tasks. The
+        # registered task rows are the authority for the current revision.
+        if ".loom-revisions" not in prefix.rstrip("/").split("/")
+    ]
     if not all_prefixes:
         return {"total": 0, "passed": 0, "failed": 0, "results": []}
 
