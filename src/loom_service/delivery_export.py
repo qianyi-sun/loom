@@ -1581,7 +1581,7 @@ def _add_raw_harbor_entries(
         trajectory_artifacts: list[dict[str, str]]
         if openhands_profile:
             events = _load_trajectory_events(client, item.trajectory)
-            bundle = build_per_trial_openhands_bundle(
+            openhands_bundle = build_per_trial_openhands_bundle(
                 trial=item.trial,
                 events=events,
                 calls=calls,
@@ -1592,33 +1592,33 @@ def _add_raw_harbor_entries(
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "trajectory.json"),
-                _public_json_bytes(bundle.execution_trajectory),
+                _public_json_bytes(openhands_bundle.execution_trajectory),
             )
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "model_input_trajectory.json"),
-                _public_json_bytes(bundle.model_input_trajectory),
+                _public_json_bytes(openhands_bundle.model_input_trajectory),
             )
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "export_provenance.json"),
-                _public_json_bytes(bundle.export_provenance),
+                _public_json_bytes(openhands_bundle.export_provenance),
             )
             add_ref(
                 tar,
                 _raw_agent_run_path(item, "loom_trajectory.jsonl"),
                 item.trajectory,
             )
-            for archive_path, data in bundle.native_artifacts.items():
+            for archive_path, data in openhands_bundle.native_artifacts.items():
                 add_bytes(
                     tar,
                     _raw_agent_run_path(item, archive_path),
                     data,
                 )
-            trajectory_artifacts = list(bundle.artifact_manifest_entries)
+            trajectory_artifacts = list(openhands_bundle.artifact_manifest_entries)
         elif tb2_v2_profile:
             events = _load_trajectory_events(client, item.trajectory)
-            bundle = build_per_trial_v2_bundle(
+            tb2_v2_bundle = build_per_trial_v2_bundle(
                 trial=item.trial,
                 events=events,
                 calls=calls,
@@ -1629,35 +1629,35 @@ def _add_raw_harbor_entries(
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "trajectory.json"),
-                _public_json_bytes(bundle.execution_trajectory),
+                _public_json_bytes(tb2_v2_bundle.execution_trajectory),
             )
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "model_input_trajectory.json"),
-                _public_json_bytes(bundle.model_input_trajectory),
+                _public_json_bytes(tb2_v2_bundle.model_input_trajectory),
             )
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "terminal_transcript.jsonl"),
-                bundle.terminal_transcript,
+                tb2_v2_bundle.terminal_transcript,
             )
             add_bytes(
                 tar,
                 _raw_agent_run_path(item, "export_provenance.json"),
-                _public_json_bytes(bundle.export_provenance),
+                _public_json_bytes(tb2_v2_bundle.export_provenance),
             )
             add_ref(
                 tar,
                 _raw_agent_run_path(item, "loom_trajectory.jsonl"),
                 item.trajectory,
             )
-            for archive_path, data in bundle.native_artifacts.items():
+            for archive_path, data in tb2_v2_bundle.native_artifacts.items():
                 add_bytes(
                     tar,
                     _raw_agent_run_path(item, archive_path),
                     data,
                 )
-            trajectory_artifacts = list(bundle.artifact_manifest_entries)
+            trajectory_artifacts = list(tb2_v2_bundle.artifact_manifest_entries)
         elif tb2_v1_profile:
             add_bytes(
                 tar,
