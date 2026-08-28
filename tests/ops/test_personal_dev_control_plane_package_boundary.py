@@ -24,6 +24,15 @@ from loom.personal_dev_builder_manifest import personal_dev_builder_manifest_doc
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+def _synthetic_checkout_env(**overrides: str) -> dict[str, str]:
+    env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("COV_CORE_"):
+            del env[key]
+    env.update(overrides)
+    return env
+
+
 def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
 
@@ -127,10 +136,7 @@ def _run_backup_schema_head_resolver(
         f"python_cli={shlex.quote(sys.executable)}\n"
         "resolve_expected_service_schema_head\n"
     )
-    env = {
-        **os.environ,
-        "PYTHONPATH": str(stale_repo / "src"),
-    }
+    env = _synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src"))
     if schema_module_override is not None:
         env["LOOM_TEST_SCHEMA_MODULE_FILE"] = str(schema_module_override)
     return subprocess.run(
@@ -172,7 +178,7 @@ def _run_backup_selected_source_binding(
     result = subprocess.run(
         ["bash", "-c", program],
         cwd=selected_repo,
-        env={**os.environ, "PYTHONPATH": str(stale_repo / "src")},
+        env=_synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src")),
         check=False,
         capture_output=True,
         text=True,
@@ -227,7 +233,7 @@ def _run_backup_schema_head_comparison(
     return subprocess.run(
         ["bash", "-c", program],
         cwd=_ROOT,
-        env={**os.environ, "PYTHONPATH": str(stale_repo / "src")},
+        env=_synthetic_checkout_env(PYTHONPATH=str(stale_repo / "src")),
         check=False,
         capture_output=True,
         text=True,
