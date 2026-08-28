@@ -100,6 +100,7 @@ MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS = (
     MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS + MUTATION_GUARD_STOP_POST_BOUND_SECONDS + 1
 )
 _SHOW_PROPERTIES = (
+    "LoadState",
     "ActiveState",
     "SubState",
     "Result",
@@ -107,6 +108,8 @@ _SHOW_PROPERTIES = (
     "MainPID",
     "ExecMainStartTimestamp",
     "ExecMainExitTimestamp",
+    "ExecMainStartTimestampMonotonic",
+    "ExecMainExitTimestampMonotonic",
 )
 
 
@@ -155,10 +158,25 @@ class SystemdUnitStatus:
     main_pid: int
     exec_main_start_timestamp: str | None
     exec_main_exit_timestamp: str | None
+    exec_main_start_timestamp_monotonic: int
+    exec_main_exit_timestamp_monotonic: int
 
     @property
     def is_running(self) -> bool:
         return self.active_state in {"activating", "active", "reloading", "deactivating"}
+
+    @property
+    def is_cleanly_inactive(self) -> bool:
+        return (
+            self.active_state == "inactive"
+            and self.sub_state == "dead"
+            and self.result == "success"
+            and self.exec_main_status == 0
+            and self.main_pid == 0
+            and 0
+            < self.exec_main_start_timestamp_monotonic
+            <= self.exec_main_exit_timestamp_monotonic
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,7 +502,7 @@ def _parse_timestamp(value: str, property_name: str) -> str | None:
     return value
 
 
-def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
+def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus | None:
     values: dict[str, str] = {}
     for line in stdout.splitlines():
         name, separator, value = line.partition("=")
@@ -493,6 +511,24 @@ def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
         values[name] = value
     if set(values) != set(_SHOW_PROPERTIES):
         raise SystemdQueryError("systemd unit status output is incomplete")
+    load_state = values["LoadState"]
+    if load_state == "not-found":
+        if values != {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+            "MainPID": "0",
+            "ExecMainStartTimestamp": "",
+            "ExecMainExitTimestamp": "",
+            "ExecMainStartTimestampMonotonic": "0",
+            "ExecMainExitTimestampMonotonic": "0",
+        }:
+            raise SystemdQueryError("LoadState contradicts systemd unit status")
+        return None
+    if load_state != "loaded":
+        raise SystemdQueryError("LoadState is malformed")
     active_state = values["ActiveState"]
     if active_state not in _ACTIVE_STATES:
         raise SystemdQueryError("ActiveState is malformed")
@@ -519,6 +555,14 @@ def _parse_show_output(unit_name: str, stdout: str) -> SystemdUnitStatus:
         exec_main_exit_timestamp=_parse_timestamp(
             values["ExecMainExitTimestamp"],
             "ExecMainExitTimestamp",
+        ),
+        exec_main_start_timestamp_monotonic=_parse_nonnegative_int(
+            values["ExecMainStartTimestampMonotonic"],
+            "ExecMainStartTimestampMonotonic",
+        ),
+        exec_main_exit_timestamp_monotonic=_parse_nonnegative_int(
+            values["ExecMainExitTimestampMonotonic"],
+            "ExecMainExitTimestampMonotonic",
         ),
     )
 
@@ -1022,7 +1066,7 @@ class SystemdUserManager:
             raise SystemdQueryError("systemd unit status could not be queried") from exc
         if result.returncode == 4:
             return None
-        if result.returncode != 0:
+        if result.returncode != 0 or result.stderr.strip():
             raise SystemdQueryError("systemd unit status query failed")
         return _parse_show_output(unit_name, result.stdout)
 
@@ -1096,14 +1140,16 @@ class SystemdUserManager:
                 ready_evidence = observed_ready
         try:
             stopped = self._run(["systemctl", "--user", "stop", unit_name])
-            reset = self._run(["systemctl", "--user", "reset-failed", unit_name])
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SystemdOperationError("mutation guard stop could not be verified") from exc
-        if stopped.returncode != 0 or reset.returncode not in {0, 1}:
+        if stopped.returncode != 0:
             raise SystemdOperationError("mutation guard stop failed")
         for attempt in range(_MUTATION_GUARD_STOP_WAIT_SECONDS):
-            if self._show_validated(unit_name) is None:
+            stopped_status = self._show_validated(unit_name)
+            if stopped_status is None or stopped_status.is_cleanly_inactive:
                 break
+            if not stopped_status.is_running:
+                raise SystemdOperationError("mutation guard did not stop cleanly")
             if attempt + 1 < _MUTATION_GUARD_STOP_WAIT_SECONDS:
                 self._sleep(1.0)
         else:

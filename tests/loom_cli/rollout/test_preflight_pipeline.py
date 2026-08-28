@@ -20,7 +20,12 @@ from loom_cli.rollout.preflight_contract import (
     external_supervisor_unit_set_digest,
 )
 from loom_cli.rollout.preflight_coverage import load_coverage_manifest
-from loom_cli.rollout.preflight_pipeline import PreflightAssessment, PreflightPipeline
+from loom_cli.rollout.preflight_pipeline import (
+    PreflightAssessment,
+    PreflightAssessmentDriftError,
+    PreflightAssessmentDriftReason,
+    PreflightPipeline,
+)
 from loom_cli.rollout.preflight_registry import PreflightRegistry
 
 
@@ -288,6 +293,41 @@ def test_rehearsal_accepts_fresh_volatile_evidence_for_same_input(
 
     assert rehearsal.passed
     assert calls == 2
+
+
+def test_rehearsal_identifies_refreshed_failed_assessment_check(
+    tmp_path: Path,
+) -> None:
+    registry = _registry()
+    checks = list(registry.checks)
+    target = next(check for check in checks if check.spec.check_id == "candidate.identity")
+    calls = 0
+
+    def probe(_context: CheckContext) -> CheckProbe:
+        nonlocal calls
+        calls += 1
+        return CheckProbe(passed=calls == 1, evidence={"result": "ok"})
+
+    checks[checks.index(target)] = RegisteredCheck(
+        spec=target.spec,
+        implementation_version=target.implementation_version,
+        operations={CheckOperation.PROBE: probe},
+    )
+    registry = PreflightRegistry.build(checks, through_tier=3)
+    pipeline = PreflightPipeline(
+        registry=registry,
+        store=PreflightAttestationStore(tmp_path / "state"),
+        now=lambda: datetime(2026, 7, 19, 10, tzinfo=UTC),
+    )
+    context = _context(registry)
+    assessment = pipeline.assess(context=context)
+
+    with pytest.raises(PreflightAssessmentDriftError) as exc_info:
+        pipeline.rehearse(context=context, assessment=assessment)
+
+    error = exc_info.value
+    assert error.check_id == "candidate.identity"
+    assert error.reason is PreflightAssessmentDriftReason.FAILED
 
 
 def test_rehearsal_accepts_checkpoint_transition_for_backup_lease(

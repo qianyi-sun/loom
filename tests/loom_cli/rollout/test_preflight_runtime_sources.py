@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
 import loom_cli.rollout.preflight_runtime_sources as runtime_sources_module
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
-from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
+from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES, image_plan_digest
+from loom_cli.rollout.manifest_readiness import (
+    inspect_rendered_manifests,
+    render_checkpoint_guard_field_ownership_payload,
+)
 from loom_cli.rollout.migration_readiness import DEFAULT_MIGRATION_POLICY
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
-from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
-from loom_cli.rollout.preflight_contract import EXTERNAL_SUPERVISOR_ABSENT_DIGEST
+from loom_cli.rollout.preflight_artifact_store import (
+    LoadedPreflightArtifacts,
+    PreflightArtifactPublication,
+    PreflightArtifactStore,
+)
+from loom_cli.rollout.preflight_contract import (
+    EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+    CheckOperation,
+)
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     ExternalSupervisorPredecessorSnapshot,
@@ -26,6 +39,14 @@ from loom_cli.rollout.preflight_runtime_sources import (
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
+from tests.loom_cli.rollout.test_manifest_readiness import (
+    _rendered_with_lifecycle_cronjob,
+)
+from tests.loom_cli.rollout.test_preflight_artifact_store import (
+    _images,
+    _migration,
+    _production_defaults,
+)
 
 
 def _candidate() -> CandidateBinding:
@@ -82,7 +103,7 @@ def test_unavailable_authority_builds_a_fail_closed_registered_check() -> None:
         raise AssertionError("unavailable backup authority returned a lease")
 
 
-def test_sources_build_complete_exact_registry_without_running_probes(
+def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,6 +119,8 @@ def test_sources_build_complete_exact_registry_without_running_probes(
     gb10_concurrency: dict[str, int] = {}
     candidate_source_options: dict[str, object] = {}
     host_readiness_options: dict[str, object] = {}
+    missing_retry = object()
+    manifest_retries: list[object] = []
     for builder_name in (
         "build_gb10_ssh_topology_check",
         "build_gb10_candidate_source_check",
@@ -127,6 +150,18 @@ def test_sources_build_complete_exact_registry_without_running_probes(
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(runtime_sources_module, builder_name, record_concurrency)
+
+    original_manifest_builder = runtime_sources_module.build_manifest_preflight_checks
+
+    def record_manifest_retry(*args, **kwargs):
+        manifest_retries.append(kwargs.get("field_ownership_retry_render", missing_retry))
+        return original_manifest_builder(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime_sources_module,
+        "build_manifest_preflight_checks",
+        record_manifest_retry,
+    )
 
     def candidate_source_command(*_args, **_kwargs):
         return _result()
@@ -261,3 +296,106 @@ def test_sources_build_complete_exact_registry_without_running_probes(
         "settle_attempts": 2,
         "settle_interval_seconds": 1.0,
     }
+
+    checkpoint_runtime = replace(
+        sources,
+        permit_reserved_rotation_candidate=True,
+    ).build(mutation_epoch=9)
+    checkpoint_runtime.prebackup_plan(candidate)
+
+    assert manifest_retries[:3] == [None, None, None]
+    assert manifest_retries[3:] == [render_checkpoint_guard_field_ownership_payload] * 3
+
+    detached_candidate = replace(candidate, resolved_tree="f" * 40)
+    assert detached_candidate.resolved_tree is not None
+    images = replace(_images(), plan_digest=image_plan_digest())
+    rendered = _rendered_with_lifecycle_cronjob().replace(
+        "staging-1111111",
+        detached_candidate.image_tag,
+    )
+    manifests = inspect_rendered_manifests(
+        rendered,
+        image_tag=detached_candidate.image_tag,
+        namespace="loom-staging",
+        image_digests=images.image_digests,
+    )
+    migration = _migration(
+        images,
+        candidate_tree=detached_candidate.resolved_tree,
+        image_tag=detached_candidate.image_tag,
+    )
+    production_defaults = _production_defaults(
+        candidate_tree=detached_candidate.resolved_tree,
+    )
+    artifact_root = (tmp_path / "loaded-artifacts").resolve()
+    publication = PreflightArtifactPublication(
+        candidate_sha=detached_candidate.resolved_sha,
+        candidate_tree=detached_candidate.resolved_tree,
+        mutation_epoch=9,
+        bundle_digest="8" * 64,
+        descriptor_path=artifact_root / "artifact.json",
+        rendered_manifest_path=artifact_root / "rendered.yaml",
+        migration_manifest_path=artifact_root / "migration.yaml",
+        production_defaults_path=artifact_root / "production-defaults.json",
+        image_artifact_sha256=images.artifact_digest,
+        manifest_artifact_sha256=manifests.artifact_digest,
+        rendered_manifest_sha256=manifests.rendered_sha256,
+        migration_manifest_artifact_sha256=migration.artifact_digest,
+        migration_manifest_sha256=migration.rendered_sha256,
+        migration_job_name=migration.job_name,
+        migration_image_id=migration.image_id,
+        migration_plan_sha256=migration.migration_plan_sha256,
+        migration_target_revision=migration.migration_target_revision,
+        browser_report_schema_sha256="9" * 64,
+        production_defaults_sha256=production_defaults.artifact_digest,
+    )
+    loaded = LoadedPreflightArtifacts(
+        publication=publication,
+        images=images,
+        manifests=manifests,
+        migration=migration,
+        production_defaults=production_defaults,
+    )
+    ownership_payloads: list[str] = []
+
+    def field_ownership_dry_run(payload: str):
+        ownership_payloads.append(payload)
+        lifecycle = next(
+            document
+            for document in yaml.safe_load_all(payload)
+            if document.get("kind") == "CronJob"
+        )
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0 if lifecycle["spec"]["suspend"] is True else 1,
+                "stdout": "",
+            },
+        )()
+
+    detached_runtime = replace(
+        sources,
+        candidate=detached_candidate,
+        loaded_artifacts=loaded,
+        permit_reserved_rotation_candidate=True,
+        server_dry_run=field_ownership_dry_run,
+    ).build(mutation_epoch=9)
+    detached_plan = detached_runtime.prebackup_plan(detached_candidate)
+    ownership_check = next(
+        check
+        for check in detached_plan.registry.checks
+        if check.spec.check_id == "manifests.field-ownership"
+    )
+
+    probe = ownership_check.operations[CheckOperation.PROBE](detached_plan.context)
+
+    assert probe.passed
+    assert [
+        next(
+            document["spec"]["suspend"]
+            for document in yaml.safe_load_all(payload)
+            if document.get("kind") == "CronJob"
+        )
+        for payload in ownership_payloads
+    ] == [False, True]

@@ -31,6 +31,10 @@ from loom_cli.rollout.operator.worker import (
 )
 from loom_cli.rollout.operator.worker import main as worker_main
 from loom_cli.rollout.preflight_contract import CheckOperation, StageCapability
+from loom_cli.rollout.preflight_pipeline import (
+    PreflightAssessmentDriftError,
+    PreflightAssessmentDriftReason,
+)
 from tests.loom_cli.rollout.operator.test_backup import RecordingRunner
 from tests.loom_cli.rollout.operator.test_backup import make_config as make_backup_config
 from tests.loom_cli.rollout.operator.test_broker import fakes as broker_fakes
@@ -977,6 +981,42 @@ def test_backup_worker_unclassified_failure_pinpoints_raise_site(tmp_path: Path)
     event = store.read_events(REQUEST_ID)[-1]
     assert event.event == "backup_failed"
     assert event.reason == "backup_failed"
+
+
+def test_backup_worker_classifies_assessment_drift_with_safe_check_detail(
+    tmp_path: Path,
+) -> None:
+    store, job = _backup_worker_store(tmp_path)
+
+    def fail_backup(_request, _job, _cancelled):  # type: ignore[no-untyped-def]
+        raise PreflightAssessmentDriftError(
+            check_id="systemd.user-manager",
+            reason=PreflightAssessmentDriftReason.FAILED,
+        )
+
+    stderr = io.StringIO()
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=fail_backup,
+        mutation_guard=_backup_mutation_guard(job),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=stderr,
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert state.failure_code == "preflight_assessment_drift"
+    event = store.read_events(REQUEST_ID)[-1]
+    assert event.event == "backup_failed"
+    assert event.reason == "backup_precondition_failed"
+    payload = json.loads(stderr.getvalue().strip())
+    assert payload["failure_code"] == "preflight_assessment_drift"
+    assert payload["diagnostic"] == (
+        "pre-backup assessment evidence drifted: check_id=systemd.user-manager reason=failed"
+    )
 
 
 def _install_fake_signal_handlers(

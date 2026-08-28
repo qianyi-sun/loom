@@ -407,6 +407,9 @@ class MutationGuardRunner:
         self.evidence_pid = 4321
         self.generation: str | None = None
         self.absence_delay = 0
+        self.retain_clean_inactive_unit = False
+        self.retain_failed_unit = False
+        self.failed_unit_sanitized = False
         self.calls: list[list[str]] = []
 
     def _publish(self, state: Literal["ready", "released"]) -> None:
@@ -442,16 +445,59 @@ class MutationGuardRunner:
         if argv[:3] == ["systemctl", "--user", "show"]:
             if not self.running and self.absence_delay > 0:
                 self.absence_delay -= 1
+            elif not self.running and self.retain_failed_unit and not self.failed_unit_sanitized:
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                        "Result=exit-code\nExecMainStatus=0\nMainPID=0\n"
+                        "ExecMainStartTimestamp=Mon 2026-08-27 20:00:00 UTC\n"
+                        "ExecMainExitTimestamp=Mon 2026-08-27 20:01:00 UTC\n"
+                        "ExecMainStartTimestampMonotonic=100\n"
+                        "ExecMainExitTimestampMonotonic=200\n"
+                    ),
+                    "",
+                )
+            elif not self.running and (
+                self.retain_clean_inactive_unit or self.failed_unit_sanitized
+            ):
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=loaded\nActiveState=inactive\nSubState=dead\n"
+                        "Result=success\nExecMainStatus=0\nMainPID=0\n"
+                        "ExecMainStartTimestamp=Mon 2026-08-27 20:00:00 UTC\n"
+                        "ExecMainExitTimestamp=Mon 2026-08-27 20:01:00 UTC\n"
+                        "ExecMainStartTimestampMonotonic=100\n"
+                        "ExecMainExitTimestampMonotonic=200\n"
+                    ),
+                    "",
+                )
             elif not self.running:
-                return subprocess.CompletedProcess(argv, 4, "", "unit absent")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    (
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+                        "Result=success\nExecMainStatus=0\nMainPID=0\n"
+                        "ExecMainStartTimestamp=\nExecMainExitTimestamp=\n"
+                        "ExecMainStartTimestampMonotonic=0\n"
+                        "ExecMainExitTimestampMonotonic=0\n"
+                    ),
+                    "",
+                )
             return subprocess.CompletedProcess(
                 argv,
                 0,
                 (
-                    "ActiveState=active\nSubState=running\nResult=success\n"
+                    "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
                     "ExecMainStatus=0\nMainPID=4321\n"
                     "ExecMainStartTimestamp=Mon 2026-08-27 20:00:00 UTC\n"
                     "ExecMainExitTimestamp=\n"
+                    "ExecMainStartTimestampMonotonic=100\n"
+                    "ExecMainExitTimestampMonotonic=0\n"
                 ),
                 "",
             )
@@ -460,6 +506,9 @@ class MutationGuardRunner:
             self.running = False
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:3] == ["systemctl", "--user", "reset-failed"]:
+            if self.retain_failed_unit:
+                self.failed_unit_sanitized = True
+                return subprocess.CompletedProcess(argv, 0, "", "")
             return subprocess.CompletedProcess(argv, 1, "", "")
         raise AssertionError(argv)
 
@@ -1003,8 +1052,7 @@ def test_mutation_guard_stop_requires_release_evidence_and_absent_unit(tmp_path:
     evidence = manager.stop_mutation_guard("req-alpha")
 
     assert evidence is not None and evidence.state == "released"
-    assert runner.calls[-3][0:3] == ["systemctl", "--user", "stop"]
-    assert runner.calls[-2][0:3] == ["systemctl", "--user", "reset-failed"]
+    assert runner.calls[-2][0:3] == ["systemctl", "--user", "stop"]
     assert runner.calls[-1][0:3] == ["systemctl", "--user", "show"]
 
 
@@ -1018,6 +1066,68 @@ def test_mutation_guard_stop_waits_for_collected_unit_absence(tmp_path: Path) ->
     assert evidence is not None and evidence.state == "released"
     show_calls = [call for call in runner.calls if call[0:3] == ["systemctl", "--user", "show"]]
     assert len(show_calls) == 5
+
+
+def test_mutation_guard_stop_accepts_clean_inactive_unit_with_exact_release(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    manager.start_mutation_guard("req-alpha")
+    runner.retain_clean_inactive_unit = True
+
+    evidence = manager.stop_mutation_guard("req-alpha")
+
+    assert evidence is not None and evidence.state == "released"
+
+
+def test_mutation_guard_stop_rejects_drifted_release_for_clean_inactive_unit(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    manager.start_mutation_guard("req-alpha")
+    runner.retain_clean_inactive_unit = True
+    runner.evidence_pid = 9999
+
+    with pytest.raises(SystemdOperationError, match="release was not verified"):
+        manager.stop_mutation_guard("req-alpha")
+
+
+def test_mutation_guard_stop_observes_failure_before_reset_can_sanitize_it(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_manager(tmp_path)
+    manager.start_mutation_guard("req-alpha")
+    runner.retain_failed_unit = True
+
+    with pytest.raises(SystemdOperationError, match="cleanly"):
+        manager.stop_mutation_guard("req-alpha")
+
+    assert runner.failed_unit_sanitized is False
+
+
+def test_clean_inactive_status_requires_complete_ordered_monotonic_exit() -> None:
+    clean = SystemdUnitStatus(
+        unit_name="loom-staging-mutation-guard-req-alpha.service",
+        active_state="inactive",
+        sub_state="dead",
+        result="success",
+        exec_main_status=0,
+        main_pid=0,
+        exec_main_start_timestamp="Mon 2026-08-27 20:00:00 UTC",
+        exec_main_exit_timestamp="Mon 2026-08-27 20:01:00 UTC",
+        exec_main_start_timestamp_monotonic=100,
+        exec_main_exit_timestamp_monotonic=200,
+    )
+
+    assert clean.is_cleanly_inactive
+    assert not replace(clean, active_state="failed").is_cleanly_inactive
+    assert not replace(clean, sub_state="exited").is_cleanly_inactive
+    assert not replace(clean, result="exit-code").is_cleanly_inactive
+    assert not replace(clean, exec_main_status=1).is_cleanly_inactive
+    assert not replace(clean, main_pid=4321).is_cleanly_inactive
+    assert not replace(clean, exec_main_start_timestamp_monotonic=0).is_cleanly_inactive
+    assert not replace(clean, exec_main_exit_timestamp_monotonic=0).is_cleanly_inactive
+    assert not replace(clean, exec_main_exit_timestamp_monotonic=99).is_cleanly_inactive
 
 
 def test_mutation_guard_start_rejects_stale_ready_evidence_from_prior_pid(
@@ -1183,6 +1293,7 @@ def test_start_failure_does_not_expose_captured_output() -> None:
 def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status() -> None:
     runner = RecordingRunner(
         stdout=(
+            "LoadState=loaded\n"
             "ActiveState=active\n"
             "SubState=running\n"
             "Result=success\n"
@@ -1190,6 +1301,8 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
             "MainPID=4321\n"
             "ExecMainStartTimestamp=Mon 2026-07-13 20:00:00 UTC\n"
             "ExecMainExitTimestamp=\n"
+            "ExecMainStartTimestampMonotonic=100\n"
+            "ExecMainExitTimestampMonotonic=0\n"
         )
     )
     manager = make_manager(runner)
@@ -1205,6 +1318,8 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
         main_pid=4321,
         exec_main_start_timestamp="Mon 2026-07-13 20:00:00 UTC",
         exec_main_exit_timestamp=None,
+        exec_main_start_timestamp_monotonic=100,
+        exec_main_exit_timestamp_monotonic=0,
     )
     assert status.is_running
     assert runner.argvs == [
@@ -1213,6 +1328,7 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
             "--user",
             "show",
             "--no-pager",
+            "--property=LoadState",
             "--property=ActiveState",
             "--property=SubState",
             "--property=Result",
@@ -1220,15 +1336,97 @@ def test_show_requests_only_the_allowlisted_properties_and_parses_typed_status()
             "--property=MainPID",
             "--property=ExecMainStartTimestamp",
             "--property=ExecMainExitTimestamp",
+            "--property=ExecMainStartTimestampMonotonic",
+            "--property=ExecMainExitTimestampMonotonic",
             "loom-staging-rollout-req-alpha-1.service",
         ]
     ]
 
 
-def test_show_returns_none_only_for_systemctl_not_found_status() -> None:
+def test_show_returns_none_for_systemctl_not_found_exit_status() -> None:
     runner = RecordingRunner(returncode=4, stderr="Unit does not exist")
 
     assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
+
+
+def test_show_returns_none_for_exit_zero_not_found_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
+            "ExecMainExitTimestamp=\n"
+            "ExecMainStartTimestampMonotonic=0\n"
+            "ExecMainExitTimestampMonotonic=0\n"
+        )
+    )
+
+    assert make_manager(runner).show("loom-staging-rollout-req-alpha-1.service") is None
+
+
+def test_show_rejects_exit_zero_not_found_with_diagnostic_stderr() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
+            "ExecMainExitTimestamp=\n"
+            "ExecMainStartTimestampMonotonic=0\n"
+            "ExecMainExitTimestampMonotonic=0\n"
+        ),
+        stderr="systemd diagnostic",
+    )
+
+    with pytest.raises(SystemdQueryError, match="query failed"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
+
+
+def test_show_rejects_contradictory_not_found_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=not-found\n"
+            "ActiveState=active\n"
+            "SubState=running\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=4321\n"
+            "ExecMainStartTimestamp=Mon 2026-07-13 20:00:00 UTC\n"
+            "ExecMainExitTimestamp=\n"
+            "ExecMainStartTimestampMonotonic=100\n"
+            "ExecMainExitTimestampMonotonic=0\n"
+        )
+    )
+
+    with pytest.raises(SystemdQueryError, match="LoadState"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
+
+
+def test_show_rejects_alternate_systemd_load_state() -> None:
+    runner = RecordingRunner(
+        stdout=(
+            "LoadState=masked\n"
+            "ActiveState=inactive\n"
+            "SubState=dead\n"
+            "Result=success\n"
+            "ExecMainStatus=0\n"
+            "MainPID=0\n"
+            "ExecMainStartTimestamp=\n"
+            "ExecMainExitTimestamp=\n"
+            "ExecMainStartTimestampMonotonic=0\n"
+            "ExecMainExitTimestampMonotonic=0\n"
+        )
+    )
+
+    with pytest.raises(SystemdQueryError, match="LoadState"):
+        make_manager(runner).show("loom-staging-rollout-req-alpha-1.service")
 
 
 def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
@@ -1248,6 +1446,7 @@ def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
             "--user",
             "show",
             "--no-pager",
+            "--property=LoadState",
             "--property=ActiveState",
             "--property=SubState",
             "--property=Result",
@@ -1255,6 +1454,8 @@ def test_show_backup_binds_status_query_to_exact_preflight_job() -> None:
             "--property=MainPID",
             "--property=ExecMainStartTimestamp",
             "--property=ExecMainExitTimestamp",
+            "--property=ExecMainStartTimestampMonotonic",
+            "--property=ExecMainExitTimestampMonotonic",
             "loom-staging-backup-req-alpha.service",
         ]
     ]
@@ -1278,17 +1479,17 @@ def test_show_backup_rejects_job_unit_identity_mismatch_before_query() -> None:
     [
         "",
         (
-            "ActiveState=active\nSubState=running\nResult=success\n"
+            "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
             "ExecMainStatus=0\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nUnknownProperty=value\n"
         ),
         (
-            "ActiveState=active\nActiveState=inactive\nSubState=running\n"
+            "LoadState=loaded\nActiveState=active\nActiveState=inactive\nSubState=running\n"
             "Result=success\nExecMainStatus=0\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nExecMainExitTimestamp=\n"
         ),
         (
-            "ActiveState=active\nSubState=running\nResult=success\n"
+            "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
             "ExecMainStatus=not-an-int\nMainPID=1\n"
             "ExecMainStartTimestamp=now\nExecMainExitTimestamp=\n"
         ),
@@ -1303,6 +1504,7 @@ def test_show_rejects_missing_malformed_or_extra_properties(stdout: str) -> None
 
 def test_show_wraps_oversized_numeric_property_as_query_error() -> None:
     stdout = (
+        "LoadState=loaded\n"
         "ActiveState=active\n"
         "SubState=running\n"
         "Result=success\n"
@@ -1310,6 +1512,8 @@ def test_show_wraps_oversized_numeric_property_as_query_error() -> None:
         f"MainPID={'1' * 5000}\n"
         "ExecMainStartTimestamp=now\n"
         "ExecMainExitTimestamp=\n"
+        "ExecMainStartTimestampMonotonic=100\n"
+        "ExecMainExitTimestampMonotonic=0\n"
     )
 
     with pytest.raises(SystemdQueryError):

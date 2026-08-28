@@ -258,6 +258,8 @@ def unit_status(
         exec_main_exit_timestamp=(
             None if active_state == "active" else "Mon 2026-07-13 20:05:00 UTC"
         ),
+        exec_main_start_timestamp_monotonic=100,
+        exec_main_exit_timestamp_monotonic=0 if active_state == "active" else 200,
     )
 
 

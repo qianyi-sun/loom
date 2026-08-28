@@ -26,6 +26,7 @@ from loom_cli.rollout.preflight_contract import (
     PreflightAttestation,
     StageCapability,
 )
+from loom_cli.rollout.preflight_pipeline import PreflightAssessmentDriftError
 
 from .backup import BackupCreator, BackupError, backup_public_reason_for_code
 from .backup_job import (
@@ -70,7 +71,9 @@ _FAILURE_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 
 
 def _backup_failure_code(error: BaseException) -> str:
-    """Retain only the secret-safe stage code already owned by BackupError."""
+    """Classify only explicitly secret-safe backup failure identities."""
+    if isinstance(error, PreflightAssessmentDriftError):
+        return "preflight_assessment_drift"
     if isinstance(error, BackupError) and _FAILURE_CODE_RE.fullmatch(error.code) is not None:
         return error.code
     return "backup_failed"
@@ -79,8 +82,9 @@ def _backup_failure_code(error: BaseException) -> str:
 def _backup_failure_diagnostic_text(error: BaseException) -> str | None:
     """Secret-safe diagnostic text for a sealed backup failure.
 
-    A ``BackupError`` carries a curated, already-secret-safe ``diagnostic``.
-    An unanticipated (non-``BackupError``) failure previously produced no
+    A ``BackupError`` carries a curated, already-secret-safe ``diagnostic``;
+    ``PreflightAssessmentDriftError`` carries only a validated check ID and a
+    fixed reason enum. An unanticipated failure previously produced no
     diagnostic at all, so the worker collapsed it to a bare ``backup_failed``
     with no operator-visible reason (#924) — leaving the real cause
     unrecoverable.
@@ -94,6 +98,11 @@ def _backup_failure_diagnostic_text(error: BaseException) -> str | None:
     attribute a generic ``backup_failed`` to a specific point in the source and
     distinguish an unclassified crash from a handled backup outcome.
     """
+    if isinstance(error, PreflightAssessmentDriftError):
+        return (
+            "pre-backup assessment evidence drifted: "
+            f"check_id={error.check_id} reason={error.reason.value}"
+        )
     if isinstance(error, BackupError):
         return error.diagnostic
     return unclassified_failure_diagnostic(error, activity="backup")

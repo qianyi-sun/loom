@@ -12,6 +12,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import cast
 
 from loom_cli.rollout.preflight_attestation_store import (
@@ -31,6 +32,29 @@ from loom_cli.rollout.preflight_registry import PreflightRegistry
 _CHECKPOINT_TRANSITION_CHECK_IDS = frozenset(
     {"backup.lease-eligibility", "backup.rotation-capacity"}
 )
+
+
+class PreflightAssessmentDriftReason(StrEnum):
+    """Secret-safe reason a refreshed assessment execution no longer matches."""
+
+    EXPIRED = "expired"
+    FAILED = "failed"
+    IMPLEMENTATION = "implementation"
+    INPUT = "input"
+
+
+class PreflightAssessmentDriftError(ValueError):
+    """One validated preflight check drifted across the backup checkpoint."""
+
+    def __init__(
+        self,
+        *,
+        check_id: str,
+        reason: PreflightAssessmentDriftReason,
+    ) -> None:
+        super().__init__("pre-backup assessment evidence drifted")
+        self.check_id = check_id
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,13 +545,20 @@ class PreflightPipeline:
                 # backup admission.
                 continue
             later = current[check_id]
-            if (
-                later.expires_at <= now
-                or not later.passed
-                or earlier.implementation_digest != later.implementation_digest
-                or earlier.input_fingerprint != later.input_fingerprint
-            ):
-                raise ValueError("pre-backup assessment evidence drifted")
+            reason: PreflightAssessmentDriftReason | None = None
+            if later.expires_at <= now:
+                reason = PreflightAssessmentDriftReason.EXPIRED
+            elif not later.passed:
+                reason = PreflightAssessmentDriftReason.FAILED
+            elif earlier.implementation_digest != later.implementation_digest:
+                reason = PreflightAssessmentDriftReason.IMPLEMENTATION
+            elif earlier.input_fingerprint != later.input_fingerprint:
+                reason = PreflightAssessmentDriftReason.INPUT
+            if reason is not None:
+                raise PreflightAssessmentDriftError(
+                    check_id=check_id,
+                    reason=reason,
+                )
 
     def _require_reusable_assessment(
         self,
