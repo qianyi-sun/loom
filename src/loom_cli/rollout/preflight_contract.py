@@ -776,6 +776,15 @@ class PreflightDag:
                 )
             ):
                 raise ValueError("prior check execution is expired or drifted")
+        if on_execution is None and set(operations.values()) == {CheckOperation.PROBE}:
+            return self._run_continuously(
+                selected=selected,
+                context=context,
+                operations=operations,
+                clock=clock,
+                prior=prior,
+                freshness_exempt_prior_executions=freshness_exempt_prior_executions,
+            )
         pending = {check_id: check for check_id, check in selected.items() if check_id not in prior}
         results: dict[str, CheckExecution] = dict(prior)
         while pending:
@@ -835,6 +844,221 @@ class PreflightDag:
                     on_execution(result)
             for check in ready:
                 pending.pop(check.spec.check_id)
+        return tuple(sorted(results.values(), key=lambda result: (result.tier, result.check_id)))
+
+    def _run_continuously(
+        self,
+        *,
+        selected: Mapping[str, RegisteredCheck],
+        context: CheckContext,
+        operations: Mapping[str, CheckOperation],
+        clock: Callable[[], datetime],
+        prior: Mapping[str, CheckExecution],
+        freshness_exempt_prior_executions: frozenset[str],
+    ) -> tuple[CheckExecution, ...]:
+        """Start newly ready consumers without waiting for unrelated checks."""
+        pending = {check_id: check for check_id, check in selected.items() if check_id not in prior}
+        results: dict[str, CheckExecution] = dict(prior)
+        if not pending:
+            return tuple(
+                sorted(results.values(), key=lambda result: (result.tier, result.check_id))
+            )
+
+        selected_order = {check_id: index for index, check_id in enumerate(selected)}
+        depths: dict[str, int] = {}
+
+        def depth(check_id: str) -> int:
+            existing = depths.get(check_id)
+            if existing is not None:
+                return existing
+            dependencies = [
+                dependency
+                for dependency in selected[check_id].spec.dependencies
+                if dependency in selected
+            ]
+            value = 0 if not dependencies else 1 + max(depth(item) for item in dependencies)
+            depths[check_id] = value
+            return value
+
+        for check_id in selected:
+            depth(check_id)
+
+        def require_fresh_dependencies(check: RegisteredCheck) -> None:
+            dependency_time = clock()
+            expired_dependencies = tuple(
+                dependency
+                for dependency in check.spec.dependencies
+                if dependency in results
+                and results[dependency].passed
+                and dependency not in freshness_exempt_prior_executions
+                and results[dependency].expires_at <= dependency_time
+            )
+            if expired_dependencies:
+                raise ValueError(
+                    "dependency execution expired before dependent execution: "
+                    + ",".join(expired_dependencies)
+                )
+
+        worker_count = min(self._max_concurrency, len(pending))
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="loom-preflight",
+        )
+        active_checks: dict[str, RegisteredCheck] = {}
+        cancellations: dict[str, _CheckCancellation] = {}
+        futures: dict[str, Future[_CheckCompletion]] = {}
+        timed_out: set[str] = set()
+        cancellation_deadlines: dict[str, float] = {}
+        try:
+            self._prewarm_executor(
+                executor,
+                worker_count=worker_count,
+                fatal_check=next(iter(pending.values())),
+            )
+            while pending or futures:
+                while True:
+                    blocked_progress = False
+                    ready = [
+                        check
+                        for check in pending.values()
+                        if set(check.spec.dependencies)
+                        <= (results.keys() | self._attested_dependencies)
+                    ]
+                    for check in ready:
+                        require_fresh_dependencies(check)
+                        blocked_by = tuple(
+                            dependency
+                            for dependency in check.spec.dependencies
+                            if dependency not in self._attested_dependencies
+                            and not results[dependency].passed
+                        )
+                        if blocked_by and not check.spec.run_after_failed_dependencies:
+                            results[check.spec.check_id] = self._blocked_execution(
+                                check,
+                                context=context,
+                                operation=operations[check.spec.check_id],
+                                blocked_by=blocked_by,
+                                at=clock(),
+                            )
+                            pending.pop(check.spec.check_id)
+                            blocked_progress = True
+                    if not blocked_progress:
+                        break
+
+                available_workers = worker_count - len(futures)
+                if available_workers > 0:
+                    ready = [
+                        check
+                        for check in pending.values()
+                        if set(check.spec.dependencies)
+                        <= (results.keys() | self._attested_dependencies)
+                    ]
+                    ready.sort(
+                        key=lambda check: (
+                            -depth(check.spec.check_id),
+                            selected_order[check.spec.check_id],
+                        )
+                    )
+                    for check in ready[:available_workers]:
+                        require_fresh_dependencies(check)
+                        cancellation = _CheckCancellation(check.spec.timeout_seconds)
+                        check_id = check.spec.check_id
+                        active_checks[check_id] = check
+                        cancellations[check_id] = cancellation
+                        futures[check_id] = executor.submit(
+                            self._run_one_cancellable,
+                            check,
+                            context,
+                            operations[check_id],
+                            clock,
+                            cancellation,
+                            dict(results),
+                            freshness_exempt_prior_executions,
+                        )
+                        pending.pop(check_id)
+
+                completed = [check_id for check_id, future in futures.items() if future.done()]
+                errors: list[BaseException] = []
+                for check_id in completed:
+                    completion = futures[check_id].result()
+                    deadline = cancellations[check_id].deadline
+                    if deadline is None:
+                        errors.append(RuntimeError("preflight check omitted its start deadline"))
+                    elif completion.finished_monotonic > deadline:
+                        cancellations[check_id].request()
+                        results[check_id] = self._timeout_execution(
+                            active_checks[check_id],
+                            context=context,
+                            operation=operations[check_id],
+                            started_at=completion.started_at,
+                            finished_at=completion.finished_at,
+                        )
+                    elif completion.error is not None:
+                        errors.append(completion.error)
+                    elif completion.result is None:
+                        errors.append(RuntimeError("preflight check completed without a result"))
+                    else:
+                        results[check_id] = completion.result
+                    futures.pop(check_id)
+                    active_checks.pop(check_id)
+                    cancellations.pop(check_id)
+                    timed_out.discard(check_id)
+                    cancellation_deadlines.pop(check_id, None)
+                if errors:
+                    raise errors[0]
+                if completed:
+                    continue
+
+                now_monotonic = monotonic()
+                for check_id in tuple(futures.keys() - timed_out):
+                    deadline = cancellations[check_id].deadline
+                    if deadline is not None and now_monotonic >= deadline:
+                        cancellations[check_id].request()
+                        timed_out.add(check_id)
+                        cancellation_deadlines[check_id] = (
+                            now_monotonic + self._cancellation_grace_seconds
+                        )
+
+                now_monotonic = monotonic()
+                for check_id in tuple(futures.keys() & timed_out):
+                    if now_monotonic >= cancellation_deadlines[check_id]:
+                        check = active_checks[check_id]
+                        self._fatal_timeout(
+                            check_id,
+                            check.spec.failure_code,
+                            check.spec.stage.value,
+                        )
+
+                if futures:
+                    next_deadlines = [
+                        cancellation_deadlines[check_id]
+                        if check_id in timed_out
+                        else cancellations[check_id].deadline
+                        for check_id in futures
+                    ]
+                    known_deadlines = [value for value in next_deadlines if value is not None]
+                    poll_seconds = 0.05
+                    if known_deadlines:
+                        poll_seconds = min(
+                            poll_seconds,
+                            max(0.0, min(known_deadlines) - monotonic()),
+                        )
+                    wait(
+                        tuple(futures.values()),
+                        timeout=poll_seconds,
+                        return_when=FIRST_COMPLETED,
+                    )
+                elif pending:
+                    raise RuntimeError("preflight DAG made no progress")
+        except BaseException:
+            self._cancel_and_quiesce_submitted(
+                checks=active_checks,
+                cancellations=cancellations,
+                futures=futures,
+            )
+            raise
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
         return tuple(sorted(results.values(), key=lambda result: (result.tier, result.check_id)))
 
     def _run_wave(

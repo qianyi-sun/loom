@@ -242,6 +242,132 @@ def test_dag_executes_independent_wave_concurrently() -> None:
     assert elapsed < 0.14
 
 
+def test_dag_starts_fresh_consumer_before_slow_independent_branch_finishes() -> None:
+    consumer_started = Event()
+    slow_finished = Event()
+    dependency = _check("fast.dependency", freshness_ttl_seconds=1)
+
+    def slow_probe(_context: CheckContext) -> CheckProbe:
+        consumer_started.wait(timeout=0.5)
+        slow_finished.set()
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    slow = RegisteredCheck(
+        spec=_spec("slow.independent"),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: slow_probe},
+    )
+
+    def consume(_context: CheckContext) -> CheckProbe:
+        consumer_started.set()
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    consumer = RegisteredCheck(
+        spec=_spec("fast.consumer", dependencies=("fast.dependency",)),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: consume},
+    )
+
+    results = PreflightDag(
+        (dependency, slow, consumer),
+        max_concurrency=2,
+    ).run(
+        _context(),
+        now=lambda: NOW + timedelta(seconds=2 if slow_finished.is_set() else 0),
+    )
+
+    assert consumer_started.is_set()
+    assert {result.check_id: result.outcome for result in results} == {
+        "fast.consumer": CheckOutcome.PASS,
+        "fast.dependency": CheckOutcome.PASS,
+        "slow.independent": CheckOutcome.PASS,
+    }
+
+
+def test_dag_prioritizes_fresh_consumer_over_queued_independent_probe() -> None:
+    consumer_started = Event()
+    dependency = _check("fast.dependency", freshness_ttl_seconds=1)
+
+    def wait_for_consumer(_context: CheckContext) -> CheckProbe:
+        assert consumer_started.wait(timeout=0.5)
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    slow = RegisteredCheck(
+        spec=_spec("slow.independent"),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: wait_for_consumer},
+    )
+    queued = RegisteredCheck(
+        spec=_spec("queued.independent"),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: wait_for_consumer},
+    )
+
+    def consume(_context: CheckContext) -> CheckProbe:
+        consumer_started.set()
+        return CheckProbe(passed=True, evidence={"status.value": "ready"})
+
+    consumer = RegisteredCheck(
+        spec=_spec("fast.consumer", dependencies=("fast.dependency",)),
+        implementation_version="v1",
+        operations={CheckOperation.PROBE: consume},
+    )
+
+    results = PreflightDag(
+        (dependency, slow, queued, consumer),
+        max_concurrency=2,
+    ).run(_context())
+
+    assert consumer_started.is_set()
+    assert all(result.passed for result in results)
+
+
+def test_continuous_dag_quiesces_running_probe_before_raising_error() -> None:
+    running = Event()
+    finished = Event()
+    mutation_ticks: list[float] = []
+
+    def runs_until_cancelled(context: CheckContext) -> CheckProbe:
+        running.set()
+        deadline = time.monotonic() + 1
+        while not context.cancellation_requested and time.monotonic() < deadline:
+            mutation_ticks.append(time.monotonic())
+            time.sleep(0.01)
+        if context.cancellation_requested:
+            finished.set()
+        return CheckProbe(passed=False, evidence={"status.value": "cancelled"})
+
+    def returns_invalid_evidence(_context: CheckContext) -> CheckProbe:
+        assert running.wait(timeout=0.5)
+        return CheckProbe(passed=True, evidence={"status.value": 123})
+
+    checks = (
+        RegisteredCheck(
+            spec=_spec(
+                "running.probe",
+                tier=3,
+                stage=StageCapability.ISOLATED_REHEARSAL,
+                mutation_class=MutationClass.ISOLATED,
+            ),
+            implementation_version="v1",
+            operations={CheckOperation.PROBE: runs_until_cancelled},
+        ),
+        RegisteredCheck(
+            spec=_spec("invalid.probe"),
+            implementation_version="v1",
+            operations={CheckOperation.PROBE: returns_invalid_evidence},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="wrong type"):
+        PreflightDag(checks, max_concurrency=2).run(_context(), through_tier=3)
+
+    assert finished.is_set()
+    ticks_after_return = len(mutation_ticks)
+    time.sleep(0.05)
+    assert len(mutation_ticks) == ticks_after_return
+
+
 def test_dag_times_each_started_check_and_quiesces_mutations_before_reporting() -> None:
     finished = {
         "slow.first": Event(),
