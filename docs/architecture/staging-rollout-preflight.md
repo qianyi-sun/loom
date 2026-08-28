@@ -358,12 +358,18 @@ lifecycle. Resume reloads the immutable original preflight request, reacquires
 the guard, and refuses original-epoch or current-epoch drift before launch.
 
 The guard CLI keeps fixed Kubernetes subprocesses at 120 seconds and caps each
-fixed systemd inventory or kill at 30 seconds. Its largest immediate unsafe
-fence is one inventory plus two exact kills, or 90 seconds, below
-`TimeoutStopSec=180s`. The reconciliation service allows 12 minutes for its
-conservative 571-second sequence: three Kubernetes commands, two 15-second
-candidate-identity commands, six systemd commands, and the stable-absence
-poll. Any timeout still preserves the freeze for the next minute-timer retry.
+fixed systemd inventory or kill at 30 seconds. A stop arriving just after a
+false stop check can wait through one 30-second owner inventory, the one-second
+poll sleep, and the next 15-second lock-health query. CronJob restoration,
+advisory unlock, database-tunnel teardown, and the evidence-publication margin
+raise the complete normal-release bound to 342 seconds, so the guard emits
+`TimeoutStopSec=343s`. Its largest immediate unsafe fence is one inventory plus
+two exact kills, or 90 seconds; broker and worker systemd clients use 434
+seconds, strictly above the service stop plus that stop-post fence. The
+reconciliation service allows 12 minutes for its conservative 571-second
+sequence: three Kubernetes commands, two 15-second candidate-identity
+commands, six systemd commands, and the stable-absence poll. Any timeout still
+preserves the freeze for the next minute-timer retry.
 
 Preview is deliberately narrower. `start --dry-run` performs normal admission,
 candidate resolution, assessment, and final epoch-drift checking, then writes a

@@ -981,8 +981,9 @@ def test_mutation_guard_stop_timeout_exceeds_normal_release_and_complete_unsafe_
         .removesuffix("s")
     )
     complete_normal_release = (
-        1  # worst-case reaction delay before the hold loop observes SIGTERM
-        + 15  # lock-health statement
+        30  # in-flight owner inventory after the false stop check
+        + 1  # steady-state poll sleep
+        + 15  # next lock-health statement before the next stop check
         + 2 * 120  # CronJob GET plus PATCH
         + 15  # advisory unlock statement
         + 2 * 5  # graceful then forced database tunnel process teardown

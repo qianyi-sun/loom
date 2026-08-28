@@ -113,9 +113,15 @@ owners for reconciliation. Binding, owner-inventory, or restoration drift
 fails closed rather than resuming a different CronJob or candidate.
 
 The guard CLI retains a 120-second ceiling for each fixed Kubernetes command
-and caps every fixed systemd owner inventory or kill at 30 seconds. An unsafe
-stop fence can issue at most one inventory and two exact owner kills, so its
-90-second command bound stays below the guard unit's `TimeoutStopSec=180s`.
+and caps every fixed systemd owner inventory or kill at 30 seconds. If a stop
+arrives just after a false stop check, reaction can include one 30-second owner
+inventory, the one-second poll sleep, and the next 15-second lock-health query.
+Including CronJob restoration, advisory unlock, database-tunnel teardown, and
+the evidence-publication margin makes the complete normal-release bound 342
+seconds, so the guard emits `TimeoutStopSec=343s`. An unsafe stop fence can
+issue at most one inventory and two exact owner kills, for a 90-second command
+bound. Broker and worker systemd operations use a 434-second client ceiling,
+strictly above the 343-second service stop plus that stop-post fence.
 
 The transient guard has a finite `RuntimeMaxSec` of 30 hours, derived from the
 bounded backup and final-gate budgets, readiness allowance, and operational

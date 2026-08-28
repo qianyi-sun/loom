@@ -139,9 +139,15 @@ kill or gracefully stops an owner, which would recurse into the same release
 path. A failed pre-handoff backup releases the guard instead.
 
 Fixed Kubernetes commands retain a 120-second subprocess ceiling, while fixed
-systemd owner inventories and kills are capped at 30 seconds each. The largest
-immediate unsafe fence performs one inventory and two exact kills, so its
-90-second maximum remains below the guard unit's `TimeoutStopSec=180s`.
+systemd owner inventories and kills are capped at 30 seconds each. If a stop
+arrives just after a false stop check, reaction can include one 30-second owner
+inventory, the one-second poll sleep, and the next 15-second lock-health query.
+CronJob restoration, advisory unlock, database-tunnel teardown, and the
+evidence-publication margin make the complete normal-release bound 342
+seconds, so the guard emits `TimeoutStopSec=343s`. The largest immediate unsafe
+fence performs one inventory and two exact kills, for a 90-second maximum.
+Broker and worker systemd clients use a 434-second ceiling, strictly above the
+service stop plus that stop-post fence.
 
 The guard's 30-hour finite systemd lifetime prevents an indefinite maintenance
 freeze. It uses `Restart=no`, anchors its lifetime before Kubernetes or database

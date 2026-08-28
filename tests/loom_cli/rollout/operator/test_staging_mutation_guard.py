@@ -337,6 +337,85 @@ def test_guard_suspends_waits_locks_and_restores_before_unlock(tmp_path: Path) -
     assert "--field-manager=loom-staging-rollout" in suspend_patch
 
 
+def test_guard_stop_timeout_covers_signal_during_owner_inventory(tmp_path: Path) -> None:
+    from loom_cli.rollout.operator.systemd import SystemdUserManager
+
+    cluster = _Cluster()
+    config = _config(tmp_path)
+    evidence_path = guard_evidence_path(config, _REQUEST_ID)
+    stop_signal_pending = False
+
+    def stop_requested() -> bool:
+        nonlocal stop_signal_pending
+        if not evidence_path.exists():
+            return False
+        if not stop_signal_pending:
+            cluster.events.append("stop-check-false-then-signal")
+            stop_signal_pending = True
+            return False
+        cluster.events.append("stop-observed")
+        return True
+
+    def owner_running(request_id: str) -> bool:
+        assert request_id == _REQUEST_ID
+        cluster.events.append("owner-inventory")
+        return True
+
+    def sleep(seconds: float) -> None:
+        if evidence_path.exists():
+            assert seconds == 1.0
+            cluster.events.append("poll-sleep")
+
+    evidence = hold_request_guard(
+        config=config,
+        request_id=_REQUEST_ID,
+        generation=_GENERATION,
+        service_uid=os.getuid(),
+        run=cluster,
+        query_context=lambda **_kwargs: _query_context([True], cluster.events),
+        resolve_candidate=lambda _config: (_CANDIDATE_SHA, _CANDIDATE_TREE),
+        stop_requested=stop_requested,
+        sleep=sleep,
+        owner_running=owner_running,
+        owner_launch_grace_seconds=0,
+        max_active_waits=4,
+        max_lock_attempts=4,
+    )
+    launch = SystemdUserManager(
+        config,
+        service_uid=os.getuid(),
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+    ).start_mutation_guard_argv(_REQUEST_ID, _GENERATION)
+    stop_timeout = int(
+        next(item for item in launch if item.startswith("TimeoutStopSec="))
+        .removeprefix("TimeoutStopSec=")
+        .removesuffix("s")
+    )
+    complete_normal_release = (
+        30  # in-flight owner inventory after the false stop check
+        + 1  # steady-state poll sleep
+        + 15  # next lock-health statement before the next stop check
+        + 2 * 120  # CronJob GET plus PATCH
+        + 15  # advisory unlock statement
+        + 2 * 5  # graceful then forced database tunnel process teardown
+        + 1  # bounded stderr-drain teardown
+        + 30  # released-evidence publication margin
+    )
+
+    assert evidence.state == "released"
+    assert cluster.events[-8:] == [
+        "lock-health",
+        "stop-check-false-then-signal",
+        "owner-inventory",
+        "poll-sleep",
+        "lock-health",
+        "stop-observed",
+        "restore",
+        "unlock",
+    ]
+    assert stop_timeout > complete_normal_release
+
+
 def test_guard_lists_exact_owner_uid_jobs_and_requires_stable_empty_before_and_after_lock(
     tmp_path: Path,
 ) -> None:
