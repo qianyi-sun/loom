@@ -177,6 +177,19 @@ def validate_final_attestation(
         str(key): (str(value) if str(value).startswith("sha256:") else f"sha256:{value}")
         for key, value in current_secret_metadata.items()
     }
+    volatile_controller_binding_suffixes = (
+        "/transition-digest",
+        "/live-evidence-digest",
+        "/runtime-state",
+    )
+
+    def stable_controller_bindings(values: Mapping[str, str]) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in values.items()
+            if not key.endswith(volatile_controller_binding_suffixes)
+        }
+
     exact_evidence = (
         evidence("candidate.identity", "resolved-sha") == bindings.candidate_sha,
         evidence("candidate.identity", "resolved-tree") == bindings.candidate_tree,
@@ -213,18 +226,14 @@ def validate_final_attestation(
         == dict(bindings.supervisor_predecessor_unit_sha256),
         evidence("external-supervisor.predecessor", "unit-set-digest")
         == bindings.supervisor_predecessor_unit_set_digest,
-        evidence("external-supervisor.predecessor", "live-evidence-digest")
-        == bindings.supervisor_predecessor_live_evidence_digest,
         evidence("external-supervisor.predecessor", "pending-transition-digest")
         == bindings.supervisor_predecessor_pending_transition_digest,
         evidence("external-supervisor.predecessor", "transition-clear") is True,
         evidence("external-supervisor.predecessor", "runtime-ready") is True,
-        string_map("external-supervisor.predecessor", "controller-bindings")
-        == {
-            key: value
-            for key, value in bindings.supervisor_controller_bindings.items()
-            if not key.endswith("/transition-digest")
-        },
+        stable_controller_bindings(
+            string_map("external-supervisor.predecessor", "controller-bindings")
+        )
+        == stable_controller_bindings(bindings.supervisor_controller_bindings),
     )
     # The drift-sensitive external-supervisor.predecessor *authority* and
     # transition fields are re-checked individually above. We deliberately do
@@ -233,11 +242,14 @@ def validate_final_attestation(
     # a live count of external-supervisor worker rows per pool (legacy `gb10-arm64`
     # vs target `gb10`). Ordinary worker registration between the restore
     # rehearsal (which mints the attestation) and this final admission shifts that
-    # count, so a fixed attestation snapshot of live operational data can never
-    # re-match in a running system; gating on it fails every deploy whose window
-    # sees any worker activity while adding no authority-drift safety the fields
-    # above miss. (Concurrent legacy->target migration remains coordinated by the
-    # rollout itself and by the transition-clear/pending-transition digests.)
+    # count. The top-level and per-controller ``live-evidence-digest`` also fold
+    # in supervisor runtime state, which can legitimately converge from
+    # ``repairable`` to ``ready`` in this window. Those live observations cannot
+    # be frozen against a running fleet. Meaningful authority, pointer, unit,
+    # unit-set, and pending-transition fields remain exact above, while the
+    # freshly passing check still requires every controller to be runtime-ready
+    # and transition-clear. (Concurrent legacy->target migration remains
+    # coordinated by the rollout itself and by the pending-transition digests.)
     if not all(exact_evidence):
         raise ValueError("final admission drift-sensitive evidence changed")
     for execution in tier2:
