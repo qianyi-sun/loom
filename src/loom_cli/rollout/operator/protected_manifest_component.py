@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Protocol
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.manifest_readiness import (
+    render_checkpoint_guard_field_ownership_payload,
+)
 
 from .final_gate_plan import FinalGatePlan
 from .manifest_apply_contract import (
@@ -27,7 +30,7 @@ _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 _DIFF_TIMEOUT_SECONDS = 120.0
 _APPLY_TIMEOUT_SECONDS = 300.0
 _IMPLEMENTATION_DIGEST = hashlib.sha256(
-    f"protected-manifest-component-v2|{MANIFEST_APPLY_CONTRACT_DIGEST}".encode()
+    f"protected-manifest-component-v3|{MANIFEST_APPLY_CONTRACT_DIGEST}".encode()
 ).hexdigest()
 
 
@@ -89,7 +92,7 @@ class KubernetesProtectedManifestComponent:
         epoch = self.epoch_guard(plan)
         if epoch.state is not ComponentState.EXACT:
             return self._observation(plan, ComponentState.DRIFTED, epoch.evidence_digest)
-        payload = self._read_manifest(plan)
+        payload = self._read_guarded_manifest(plan)
         status = self.runner.run_status(
             self._diff_argv(plan),
             env=self.environment,
@@ -103,7 +106,7 @@ class KubernetesProtectedManifestComponent:
         epoch = self.epoch_guard(plan)
         if epoch.state is not ComponentState.EXACT:
             raise RuntimeError("protected manifest epoch ownership changed before apply")
-        payload = self._read_manifest(plan)
+        payload = self._read_guarded_manifest(plan)
         if (
             self.runner.run_status(
                 self._diff_argv(plan),
@@ -124,7 +127,7 @@ class KubernetesProtectedManifestComponent:
     def _diff_argv(self, plan: FinalGatePlan) -> tuple[str, ...]:
         return server_side_diff_argv(plan.namespace)
 
-    def _read_manifest(self, plan: FinalGatePlan) -> bytes:
+    def _read_guarded_manifest(self, plan: FinalGatePlan) -> bytes:
         trusted = read_trusted_file(
             Path(plan.rendered_manifest_path),
             service_uid=self.service_uid,
@@ -134,7 +137,11 @@ class KubernetesProtectedManifestComponent:
         )
         if hashlib.sha256(trusted.payload).hexdigest() != plan.rendered_manifest_sha256:
             raise ValueError("protected rendered manifest content drifted")
-        return trusted.payload
+        try:
+            rendered = trusted.payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("protected rendered manifest content is not UTF-8") from exc
+        return render_checkpoint_guard_field_ownership_payload(rendered).encode("utf-8")
 
     def _observation(
         self,
