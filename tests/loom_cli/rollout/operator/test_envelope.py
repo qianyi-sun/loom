@@ -14,7 +14,11 @@ from loom_cli.cluster_backup_guard import BackupTraversalLimits, write_backup_ma
 from loom_cli.rollout.operator import envelope as envelope_module
 from loom_cli.rollout.operator.backup_limits import operator_backup_traversal_limits
 from loom_cli.rollout.operator.config import OperatorConfig
-from loom_cli.rollout.operator.envelope import EnvelopeValidationError, load_validated_envelope
+from loom_cli.rollout.operator.envelope import (
+    EnvelopeValidationError,
+    load_validated_envelope,
+    load_validated_envelope_with_config,
+)
 from loom_cli.rollout.operator.model import (
     CallerIdentity,
     CandidateBinding,
@@ -159,6 +163,9 @@ def _publish(config: OperatorConfig, envelope: DriverEnvelope) -> Path:
             resolved_sha=envelope.resolved_sha,
             image_tag=envelope.image_tag,
             fetched_at=envelope.fetched_at,
+            source_mode=envelope.source_mode,
+            resolved_tree=envelope.resolved_tree,
+            approved_base_sha=envelope.approved_base_sha,
         ),
         requested_at="2026-07-13T20:00:01Z",
         runner_config_sha256=envelope.runner_config_sha256,
@@ -188,6 +195,53 @@ def test_load_validated_envelope_accepts_exact_private_binding(tmp_path: Path) -
     loaded = load_validated_envelope(path, config, effective_uid=os.geteuid())
 
     assert loaded == envelope
+
+
+def test_load_validated_envelope_resolves_forward_runner_upgrade_config(
+    tmp_path: Path,
+) -> None:
+    historical_config = _config(tmp_path)
+    first = _envelope(historical_config, resolved_tree="2" * 40)
+    _publish(historical_config, first)
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2501,
+        resume=True,
+    )
+    path = _publish(historical_config, resumed)
+    current_repo = tmp_path / "current" / "repo"
+    current_config = replace(
+        historical_config,
+        runner_repo=current_repo,
+        cluster_config_path=current_repo / "deploy/environments/staging.cluster.toml",
+        config_sha256="f" * 64,
+    )
+    resolved: list[dict[str, object]] = []
+
+    def resolve_runtime(config: OperatorConfig, **bindings: object) -> OperatorConfig:
+        resolved.append({"config": config, **bindings})
+        return historical_config
+
+    loaded, effective_config = load_validated_envelope_with_config(
+        path,
+        current_config,
+        effective_uid=os.geteuid(),
+        resume_runtime_upgrade=type("Authority", (), {"resolve": staticmethod(resolve_runtime)})(),
+    )
+
+    assert loaded == resumed
+    assert effective_config == historical_config
+    assert resolved == [
+        {
+            "config": current_config,
+            "candidate_sha": resumed.resolved_sha,
+            "candidate_tree": resumed.resolved_tree,
+            "runner_config_sha256": resumed.runner_config_sha256,
+            "cluster_config_path": resumed.cluster_config_path,
+        }
+    ]
 
 
 def test_driver_envelope_round_trips_merged_resolved_tree(tmp_path: Path) -> None:

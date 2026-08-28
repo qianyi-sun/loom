@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +98,15 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
+    installed_config = replace(
+        config,
+        runner_repo=tmp_path / "installed" / "repo",
+        cluster_config_path=tmp_path
+        / "installed"
+        / "repo"
+        / "deploy/environments/staging.cluster.toml",
+        config_sha256="f" * 64,
+    )
     candidate = _candidate()
     inputs = SimpleNamespace(
         gb10_targets=tuple(SimpleNamespace(ssh_target=host) for host in ACTIVE_GB10_HOSTS),
@@ -172,7 +182,10 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "sanitized_child_environment",
-        lambda *_args, **_kwargs: {},
+        lambda found_config, **_kwargs: (
+            captured.setdefault("sanitized_config", found_config),
+            {},
+        )[1],
     )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
@@ -269,9 +282,11 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         service_gid=2007,
         store=SimpleNamespace(),  # type: ignore[arg-type]
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        installed_config=installed_config,
     )
     rehearsal_factory = captured["composition"]["rehearsal_factory"]  # type: ignore[index]
     assert callable(rehearsal_factory)
+    assert captured["sanitized_config"] == installed_config
     assert rehearsal_factory(candidate, 8, RuntimePurpose.DETACHED_REHEARSAL, loaded) == (  # type: ignore[operator]
         "actions",
         "identity",

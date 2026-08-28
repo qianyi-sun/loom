@@ -89,6 +89,10 @@ from .readonly_database_client import (
     probe_installed_readonly_database_baseline,
 )
 from .redaction import known_secrets_from_sources, redact_rollout_text
+from .resume_runtime_upgrade import (
+    ResumeRuntimeUpgradeAuthority,
+    build_installed_resume_runtime_upgrade_authority,
+)
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore, RequestStoreError
 from .systemd import (
@@ -280,6 +284,7 @@ class BrokerDependencies:
     backup_retention: Any | None = None
     backup_recovery: Any | None = None
     preflight_artifact_retention: Any | None = None
+    resume_runtime_upgrade: ResumeRuntimeUpgradeAuthority | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -1163,9 +1168,23 @@ def _resume(
             )
         except Exception:
             return _safe_error(dependencies, "first finalized attempt is unavailable")
-        if not resume_binding_matches(dependencies.config, request, first):
+        effective_config = dependencies.config
+        if not resume_binding_matches(effective_config, request, first):
+            if dependencies.resume_runtime_upgrade is None:
+                return _safe_error(dependencies, "request config binding no longer matches")
+            try:
+                effective_config = dependencies.resume_runtime_upgrade.resolve(
+                    dependencies.config,
+                    candidate_sha=request.candidate.resolved_sha,
+                    candidate_tree=request.candidate.resolved_tree,
+                    runner_config_sha256=request.runner_config_sha256,
+                    cluster_config_path=first.cluster_config_path,
+                )
+            except Exception:
+                return _safe_error(dependencies, "request config binding no longer matches")
+        if not resume_binding_matches(effective_config, request, first):
             return _safe_error(dependencies, "request config binding no longer matches")
-        if not resume_binding_matches(dependencies.config, request, latest_envelope):
+        if not resume_binding_matches(effective_config, request, latest_envelope):
             return _safe_error(dependencies, "request config binding no longer matches")
         if (
             original.request_id != request_id
@@ -2230,6 +2249,15 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         if config.backup_rotation_maintenance_permitted()
         else None
     )
+    resume_runtime_upgrade = (
+        build_installed_resume_runtime_upgrade_authority(
+            config,
+            service_uid=service_uid,
+            run=run,
+        )
+        if config.source_mode == "merged-dev"
+        else None
+    )
     preflight_artifact_retention = None
     if config.source_mode == "sealed-cumulative":
         artifact_references = InstalledPreflightArtifactReferenceInventory(
@@ -2290,6 +2318,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         backup_retention=backup_retention,
         backup_recovery=backup_recovery,
         preflight_artifact_retention=preflight_artifact_retention,
+        resume_runtime_upgrade=resume_runtime_upgrade,
     )
 
 

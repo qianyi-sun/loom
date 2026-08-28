@@ -15,6 +15,7 @@ from loom_cli.cluster_backup_guard import validate_backup_manifest
 from .backup_limits import operator_backup_traversal_limits
 from .config import OperatorConfig, environment_authority
 from .model import DriverEnvelope, RolloutRequest
+from .resume_runtime_upgrade import ResumeRuntimeUpgradeAuthority
 
 DEFAULT_OPERATOR_CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 OPERATOR_CONFIG_ENV = "LOOM_STAGING_ROLLOUT_CONFIG"
@@ -350,22 +351,51 @@ def _validate_backup(
         raise EnvelopeValidationError("backup manifest digest does not match driver envelope")
 
 
+def load_validated_envelope_with_config(
+    path: Path,
+    config: OperatorConfig,
+    *,
+    effective_uid: int,
+    resume_runtime_upgrade: ResumeRuntimeUpgradeAuthority | None = None,
+) -> tuple[DriverEnvelope, OperatorConfig]:
+    """Load an envelope and return its proven historical-or-current config."""
+    try:
+        envelope = _read_envelope(Path(path), config, effective_uid=effective_uid)
+        effective_config = config
+        try:
+            _validate_config_binding(envelope, effective_config)
+        except EnvelopeValidationError:
+            if resume_runtime_upgrade is None:
+                raise
+            effective_config = resume_runtime_upgrade.resolve(
+                config,
+                candidate_sha=envelope.resolved_sha,
+                candidate_tree=envelope.resolved_tree,
+                runner_config_sha256=envelope.runner_config_sha256,
+                cluster_config_path=envelope.cluster_config_path,
+            )
+            _validate_config_binding(envelope, effective_config)
+        _validate_backup(envelope, effective_config, effective_uid=effective_uid)
+        return envelope, effective_config
+    except EnvelopeValidationError as exc:
+        raise EnvelopeValidationError(str(exc)) from None
+    except Exception:
+        raise EnvelopeValidationError("driver envelope validation failed safely") from None
+
+
 def load_validated_envelope(
     path: Path,
     config: OperatorConfig,
     *,
     effective_uid: int,
 ) -> DriverEnvelope:
-    """Load a private immutable envelope and revalidate all protected bindings."""
-    try:
-        envelope = _read_envelope(Path(path), config, effective_uid=effective_uid)
-        _validate_config_binding(envelope, config)
-        _validate_backup(envelope, config, effective_uid=effective_uid)
-        return envelope
-    except EnvelopeValidationError as exc:
-        raise EnvelopeValidationError(str(exc)) from None
-    except Exception:
-        raise EnvelopeValidationError("driver envelope validation failed safely") from None
+    """Load a private immutable envelope against the currently installed config."""
+    envelope, _effective_config = load_validated_envelope_with_config(
+        path,
+        config,
+        effective_uid=effective_uid,
+    )
+    return envelope
 
 
 __all__ = [
@@ -374,4 +404,5 @@ __all__ = [
     "EnvelopeValidationError",
     "fixed_operator_config_path",
     "load_validated_envelope",
+    "load_validated_envelope_with_config",
 ]

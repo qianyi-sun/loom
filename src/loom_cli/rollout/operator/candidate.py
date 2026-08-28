@@ -334,14 +334,16 @@ def bind_configured_candidate(
     return binding
 
 
-def verify_bound_candidate(
+def _verify_bound_candidate(
     config: OperatorConfig,
     binding: CandidateBinding,
     *,
     run: GitRunner,
+    validate_protected_config: bool,
 ) -> CandidateIdentityEvidence:
     """Prove one already-resolved candidate through the shared read-only predicate."""
-    _validate_protected_config(config)
+    if validate_protected_config:
+        _validate_protected_config(config)
     expected_sha = _validate_installed_runtime(config)
     if binding.resolved_sha != expected_sha:
         raise CandidateBindingError("candidate binding does not match its immutable runtime path")
@@ -475,6 +477,46 @@ def verify_bound_candidate(
     )
 
 
+def verify_bound_candidate(
+    config: OperatorConfig,
+    binding: CandidateBinding,
+    *,
+    run: GitRunner,
+) -> CandidateIdentityEvidence:
+    """Prove a candidate and its currently installed protected config."""
+    return _verify_bound_candidate(
+        config,
+        binding,
+        run=run,
+        validate_protected_config=True,
+    )
+
+
+def verify_resume_runtime_candidate(
+    config: OperatorConfig,
+    candidate_sha: str,
+    candidate_tree: str | None,
+    *,
+    run: GitRunner,
+) -> CandidateIdentityEvidence:
+    """Prove a historical runtime after its reconstructed config was verified."""
+    authority = environment_authority(config.short_name)
+    binding = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref=authority.pinned_target_ref,
+        resolved_sha=candidate_sha,
+        image_tag=f"{authority.short_name}-{candidate_sha[:7]}",
+        fetched_at="1970-01-01T00:00:00Z",
+        resolved_tree=candidate_tree,
+    )
+    return _verify_bound_candidate(
+        config,
+        binding,
+        run=run,
+        validate_protected_config=False,
+    )
+
+
 __all__ = [
     "CandidateBindingError",
     "CandidateIdentityEvidence",
@@ -484,4 +526,5 @@ __all__ = [
     "bind_configured_candidate",
     "bind_fresh_origin_dev",
     "verify_bound_candidate",
+    "verify_resume_runtime_candidate",
 ]
