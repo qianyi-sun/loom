@@ -11,6 +11,7 @@ from loom_cli.rollout.manifest_readiness import (
     ManifestRenderSession,
     inspect_rendered_manifests,
     pin_rendered_manifest_images,
+    render_checkpoint_guard_field_ownership_payload,
 )
 
 
@@ -37,6 +38,25 @@ spec:
       containers:
 {containers}
 """
+
+
+def _rendered_with_lifecycle_cronjob() -> str:
+    return (
+        _rendered()
+        + """---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: loom-staging-data-lifecycle
+  name: loom-staging-data-lifecycle
+  namespace: loom-staging
+spec:
+  concurrencyPolicy: Forbid
+  schedule: '*/5 * * * *'
+  suspend: false
+"""
+    )
 
 
 def test_manifest_render_binds_every_local_image_to_exact_id() -> None:
@@ -351,6 +371,116 @@ def test_manifest_server_validation_fails_closed_without_rerender() -> None:
 
     with pytest.raises(ValueError, match="server-side dry-run"):
         session.server_validate()
+
+
+def test_checkpoint_field_ownership_retry_changes_only_lifecycle_suspension() -> None:
+    original = list(yaml.safe_load_all(_rendered_with_lifecycle_cronjob()))
+    guarded = list(
+        yaml.safe_load_all(
+            render_checkpoint_guard_field_ownership_payload(_rendered_with_lifecycle_cronjob())
+        )
+    )
+    original[1]["spec"]["suspend"] = True
+
+    assert guarded == original
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        _rendered(),
+        _rendered_with_lifecycle_cronjob().replace("suspend: false", "suspend: true"),
+        _rendered_with_lifecycle_cronjob()
+        + "---"
+        + _rendered_with_lifecycle_cronjob().split("---", maxsplit=1)[1],
+        _rendered_with_lifecycle_cronjob() + "---\nscalar\n",
+    ],
+    ids=("missing", "already-suspended", "duplicate", "non-resource"),
+)
+def test_checkpoint_field_ownership_retry_rejects_ambiguous_guard_state(
+    rendered: str,
+) -> None:
+    with pytest.raises(ValueError, match="checkpoint guard"):
+        render_checkpoint_guard_field_ownership_payload(rendered)
+
+
+def test_manifest_field_ownership_does_not_retry_a_passing_original() -> None:
+    payloads: list[str] = []
+
+    def field_ownership_dry_run(payload: str):
+        payloads.append(payload)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    session = ManifestRenderSession(
+        _rendered_with_lifecycle_cronjob,
+        lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+        field_ownership_dry_run=field_ownership_dry_run,
+        field_ownership_retry_render=render_checkpoint_guard_field_ownership_payload,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    artifact = session.render()
+
+    assert session.field_ownership_validate() is artifact
+    assert payloads == [_rendered_with_lifecycle_cronjob()]
+
+
+def test_manifest_field_ownership_retries_exact_guard_held_payload() -> None:
+    payloads: list[str] = []
+
+    def field_ownership_dry_run(payload: str):
+        payloads.append(payload)
+        cronjob = next(
+            document
+            for document in yaml.safe_load_all(payload)
+            if document.get("kind") == "CronJob"
+        )
+        return subprocess.CompletedProcess(
+            [],
+            0 if cronjob["spec"]["suspend"] is True else 1,
+            "",
+            "",
+        )
+
+    session = ManifestRenderSession(
+        _rendered_with_lifecycle_cronjob,
+        lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+        field_ownership_dry_run=field_ownership_dry_run,
+        field_ownership_retry_render=render_checkpoint_guard_field_ownership_payload,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    artifact = session.render()
+
+    assert session.field_ownership_validate() is artifact
+    assert [
+        next(
+            document["spec"]["suspend"]
+            for document in yaml.safe_load_all(payload)
+            if document.get("kind") == "CronJob"
+        )
+        for payload in payloads
+    ] == [False, True]
+
+
+def test_manifest_field_ownership_guard_retry_does_not_hide_other_conflicts() -> None:
+    session = ManifestRenderSession(
+        _rendered_with_lifecycle_cronjob,
+        lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+        field_ownership_dry_run=lambda _payload: subprocess.CompletedProcess(
+            [], 1, "", "unrelated conflict"
+        ),
+        field_ownership_retry_render=render_checkpoint_guard_field_ownership_payload,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+    session.render()
+
+    with pytest.raises(ValueError, match="field-ownership dry-run"):
+        session.field_ownership_validate()
 
 
 def test_seeded_manifest_session_never_rerenders_exact_artifact() -> None:

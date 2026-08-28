@@ -33,6 +33,7 @@ from loom_cli.rollout.manifest_readiness import (
     ManifestRenderSession,
     RenderManifest,
     ServerDryRun,
+    render_checkpoint_guard_field_ownership_payload,
 )
 from loom_cli.rollout.migration_manifest_readiness import MigrationManifestArtifact
 from loom_cli.rollout.migration_readiness import MigrationPlanEvidence
@@ -315,6 +316,11 @@ class PreflightRuntimeSources:
                 self.render_manifest,
                 self.server_schema_dry_run,
                 field_ownership_dry_run=self.server_dry_run,
+                field_ownership_retry_render=(
+                    render_checkpoint_guard_field_ownership_payload
+                    if self.permit_reserved_rotation_candidate
+                    else None
+                ),
                 image_tag=self.candidate.image_tag,
                 namespace=self.config.namespace,
                 image_digests=self.loaded_artifacts.images.image_digests,
@@ -548,6 +554,11 @@ class PreflightRuntimeSources:
             self.server_schema_dry_run,
             image_session.verify,
             field_ownership_dry_run=self.server_dry_run,
+            field_ownership_retry_render=(
+                render_checkpoint_guard_field_ownership_payload
+                if self.permit_reserved_rotation_candidate
+                else None
+            ),
             image_tag=self.candidate.image_tag,
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,
