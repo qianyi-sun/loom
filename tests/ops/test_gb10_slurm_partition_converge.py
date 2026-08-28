@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import grp
+import hashlib
 import os
 import pwd
 import stat
@@ -112,6 +113,9 @@ def _run_converger(
     node16_partitions: str = "gb10",
     partition_state: str = LIVE_PARTITION,
     reconfigure_fail_at: str = "",
+    conflicting_archive_text: str | None = None,
+    archive_mode: int = 0o600,
+    history_mode: int | None = None,
     runs: int = 1,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
     fake_bin = tmp_path / "bin"
@@ -126,6 +130,16 @@ def _run_converger(
         backup = authority / "slurm.conf.before-loom-staging-partition"
         backup.write_text(backup_text, encoding="utf-8")
         backup.chmod(backup_mode)
+        history = authority / "slurm.conf.before-loom-staging-partition.history"
+        if history_mode is not None:
+            history.mkdir(mode=history_mode)
+            history.chmod(history_mode)
+        if conflicting_archive_text is not None:
+            history.mkdir(mode=0o700, exist_ok=True)
+            digest = hashlib.sha256(backup_text.encode()).hexdigest()
+            archive = history / digest
+            archive.write_text(conflicting_archive_text, encoding="utf-8")
+            archive.chmod(archive_mode)
     reconfigure_count = tmp_path / "reconfigure-count"
     scontrol_log = tmp_path / "scontrol.log"
     owner = pwd.getpwuid(os.getuid()).pw_name
@@ -218,17 +232,28 @@ def test_second_convergence_is_idempotent(tmp_path: Path) -> None:
     assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
-def test_stale_backup_fails_before_partition_mutation(tmp_path: Path) -> None:
-    stale_backup = f"{INITIAL_CONFIG}# stale\n"
-    result, config, _authority, reconfigure_count, _scontrol_log = _run_converger(
+def test_stale_backup_is_archived_before_current_foreign_state_is_adopted(
+    tmp_path: Path,
+) -> None:
+    current = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    expected = EXPECTED_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
         tmp_path,
-        backup_text=stale_backup,
+        config_text=current,
+        backup_text=INITIAL_CONFIG,
     )
 
-    assert result.returncode == 1
-    assert "backup is unsafe or stale" in result.stderr
-    assert config.read_text(encoding="utf-8") == INITIAL_CONFIG
-    assert not reconfigure_count.exists()
+    assert result.returncode == 0, result.stderr
+    assert config.read_text(encoding="utf-8") == expected
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == current
+    digest = hashlib.sha256(INITIAL_CONFIG.encode()).hexdigest()
+    history = authority / "slurm.conf.before-loom-staging-partition.history"
+    assert stat.S_IMODE(history.stat().st_mode) == 0o700
+    archived = history / digest
+    assert archived.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert stat.S_IMODE(archived.stat().st_mode) == 0o600
+    assert reconfigure_count.read_text(encoding="utf-8") == "1\n"
 
 
 def test_unsafe_backup_mode_fails_before_partition_mutation(tmp_path: Path) -> None:
@@ -239,8 +264,64 @@ def test_unsafe_backup_mode_fails_before_partition_mutation(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "backup is unsafe or stale" in result.stderr
+    assert "backup is unsafe" in result.stderr
     assert config.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert not reconfigure_count.exists()
+
+
+def test_conflicting_content_addressed_archive_fails_before_mutation(
+    tmp_path: Path,
+) -> None:
+    current = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
+        tmp_path,
+        config_text=current,
+        backup_text=INITIAL_CONFIG,
+        conflicting_archive_text="foreign bytes at claimed digest\n",
+    )
+
+    assert result.returncode == 1
+    assert "backup archive is unsafe or conflicting" in result.stderr
+    assert config.read_text(encoding="utf-8") == current
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert not reconfigure_count.exists()
+
+
+def test_unsafe_content_addressed_archive_mode_fails_before_mutation(
+    tmp_path: Path,
+) -> None:
+    current = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
+        tmp_path,
+        config_text=current,
+        backup_text=INITIAL_CONFIG,
+        conflicting_archive_text=INITIAL_CONFIG,
+        archive_mode=0o644,
+    )
+
+    assert result.returncode == 1
+    assert "backup archive is unsafe or conflicting" in result.stderr
+    assert config.read_text(encoding="utf-8") == current
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert not reconfigure_count.exists()
+
+
+def test_unsafe_backup_history_directory_fails_before_mutation(tmp_path: Path) -> None:
+    current = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
+        tmp_path,
+        config_text=current,
+        backup_text=INITIAL_CONFIG,
+        history_mode=0o755,
+    )
+
+    assert result.returncode == 1
+    assert "backup history is unsafe" in result.stderr
+    assert config.read_text(encoding="utf-8") == current
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == INITIAL_CONFIG
     assert not reconfigure_count.exists()
 
 
@@ -288,6 +369,28 @@ def test_rejected_reconfigure_restores_exact_backup(tmp_path: Path) -> None:
     assert config.read_text(encoding="utf-8") == INITIAL_CONFIG
     backup = authority / "slurm.conf.before-loom-staging-partition"
     assert backup.read_text(encoding="utf-8") == INITIAL_CONFIG
+    assert reconfigure_count.read_text(encoding="utf-8") == "2\n"
+
+
+def test_rejected_reconfigure_after_backup_refresh_restores_current_foreign_state(
+    tmp_path: Path,
+) -> None:
+    current = INITIAL_CONFIG.replace(SHARED_LINE, CURRENT_FOREIGN_SHARED_LINE)
+    result, config, authority, reconfigure_count, _scontrol_log = _run_converger(
+        tmp_path,
+        config_text=current,
+        backup_text=INITIAL_CONFIG,
+        reconfigure_fail_at="1",
+    )
+
+    assert result.returncode == 1
+    assert "restored backup" in result.stderr
+    assert config.read_text(encoding="utf-8") == current
+    backup = authority / "slurm.conf.before-loom-staging-partition"
+    assert backup.read_text(encoding="utf-8") == current
+    digest = hashlib.sha256(INITIAL_CONFIG.encode()).hexdigest()
+    archived = authority / "slurm.conf.before-loom-staging-partition.history" / digest
+    assert archived.read_text(encoding="utf-8") == INITIAL_CONFIG
     assert reconfigure_count.read_text(encoding="utf-8") == "2\n"
 
 
