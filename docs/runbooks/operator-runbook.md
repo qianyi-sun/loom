@@ -86,6 +86,12 @@ loom-staging-rollout --env staging backup-retention apply --approved-plan-sha256
 `start` accepts no ref, SHA, image tag, checkout, secret, or passthrough
 argument. `--dry-run` validates authority and resolves the current candidate
 without mutating staging. `status` and `logs` expose redacted request evidence.
+When a protected component is incomplete, `status` includes
+`protected_component` and `protected_component_status`. If that component
+published a validated service-owned failure diagnostic, the response also
+includes its closed-schema `protected_failure_code` and certified secret-safe
+`protected_failure_diagnostic`; missing or invalid diagnostic records remain
+private.
 Use the `preflight_artifact_bundle_sha256` value returned by a passing
 `preflight` or `start` command as `DIGEST`; use the same value for inventory and
 apply.
