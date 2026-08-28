@@ -65,6 +65,143 @@ def _fenced_bash(document: str) -> str:
     return "\n".join(blocks)
 
 
+_WEB_V2_COMPONENT_NAMES = (
+    "cluster-resources",
+    "manager",
+    "namespaced-resources",
+    "namespaces",
+    "personal-workers",
+    "runtime-class",
+    "web",
+)
+
+
+def _web_v2_rollback_status(mode: str, mutation: str) -> dict[str, object]:
+    ready = dict.fromkeys(_WEB_V2_COMPONENT_NAMES, True)
+    blockers: list[str] = []
+
+    if mutation == "allowed-web-failure":
+        blockers = ["web_not_ready"]
+        if mode == "acceptance":
+            blockers.insert(0, "acceptance_window_expired")
+        ready["namespaced-resources"] = False
+        ready["web"] = False
+    elif mutation == "acceptance-window-expired":
+        blockers = ["acceptance_window_expired"]
+    elif mutation == "non-web-blocker":
+        blockers = ["namespace_missing"]
+        ready["namespaces"] = False
+    elif mutation == "non-web-component":
+        blockers = ["resource_inventory_drift"]
+        ready["namespaced-resources"] = False
+    elif mutation == "missing-component":
+        ready.pop("runtime-class")
+    elif mutation == "duplicate-component":
+        pass
+    elif mutation == "extra-component":
+        pass
+    elif mutation == "web-blocker-with-ready-web":
+        blockers = ["web_not_ready"]
+        ready["namespaced-resources"] = False
+    elif mutation == "web-blocker-with-ready-namespaced-resources":
+        blockers = ["web_not_ready"]
+        ready["web"] = False
+    elif mutation == "web-unready-without-blocker":
+        ready["namespaced-resources"] = False
+        ready["web"] = False
+    elif mutation != "all-ready":
+        raise AssertionError(f"unknown status mutation: {mutation}")
+
+    observed = {
+        "cluster-resources": 10,
+        "manager": 1,
+        "namespaced-resources": 35,
+        "namespaces": 1,
+        "personal-workers": 0,
+        "runtime-class": 1,
+        "web": 1,
+    }
+    components = [
+        {"name": name, "observed": observed[name], "ready": is_ready}
+        for name, is_ready in ready.items()
+    ]
+    if mutation == "duplicate-component":
+        components.append(dict(components[-1]))
+    if mutation == "extra-component":
+        components.append({"name": "unexpected", "observed": 1, "ready": True})
+
+    plan_key = f"{mode}_plan_sha256"
+    status: dict[str, object] = {
+        "application_ready": not blockers,
+        "blockers": blockers,
+        "capacity_publication_ready": True,
+        "components": components,
+        "input_sha256": "c" * 64,
+        "manager_ceiling": 0,
+        "mode": mode,
+        plan_key: "a" * 64,
+        "ready": not blockers,
+        "release_sha256": "b" * 64,
+        "schema": "loom-personal-dev-control-plane-status-v1",
+        "worker_available": False,
+    }
+    return status
+
+
+def _run_web_v2_rollback_interlocks(
+    tmp_path: Path,
+    relative: str,
+    status: dict[str, object],
+) -> subprocess.CompletedProcess[str]:
+    runbook = _read(relative)
+    durable = "durable" in relative
+    function_names = (
+        ("assert_operational_manager_boundary", "assert_rollback_interlocks")
+        if durable
+        else ("assert_rollback_interlocks",)
+    )
+    function_reader = _fenced_shell_function if durable else _indented_shell_function
+    functions = "\n".join(function_reader(runbook, name) for name in function_names)
+    status_command = "status-operational" if durable else "status-acceptance"
+    plan_variable = "operational" if durable else "acceptance"
+    stubs = (
+        "assert_current_artifacts assert_reviewed_kubeconfig "
+        "assert_secret_key_inventory assert_storage_and_migration "
+        "assert_no_dynamic_namespaces assert_no_dynamic_namespaces_or_workers "
+        "assert_runtime_scanner_release_bindings"
+    )
+    program = (
+        "set -euo pipefail\n"
+        + functions
+        + "\n"
+        + "\n".join(f"{name}() {{ :; }}" for name in stubs.split())
+        + "\nassert_rollback_window() { :; }\n"
+        + "assert_canonical_json_line() { :; }\n"
+        + f"status_json={shlex.quote(json.dumps(status))}\n"
+        + "loom_cli_stub() {\n"
+        + f"  case \" $* \" in *\" {status_command} \"*) ;; *) return 91 ;; esac\n"
+        + "  printf '%s\\n' \"$status_json\"\n"
+        + "  return 1\n"
+        + "}\n"
+        + "loom_cli=loom_cli_stub\n"
+        + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        + "kubeconfig=/unused/kubeconfig\nprofile=/unused/profile\n"
+        + "trusted_release=/unused/release\ntrusted_release_sha256=" + "b" * 64 + "\n"
+        + f"{plan_variable}_plan=/unused/plan\n"
+        + f"{plan_variable}_plan_sha256=" + "a" * 64 + "\n"
+        + f"{plan_variable}_evidence_args=()\n"
+        + ("rollback_pre_status=" + shlex.quote(str(tmp_path / "rollback.json")) + "\n" if not durable else "")
+        + "assert_rollback_interlocks\n"
+    )
+    return subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def _executable_calls_are_ordered(
     document: str,
     *,
@@ -1039,9 +1176,10 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
 
 
 def test_approved_solo_owner_acceptance_runbook_is_byte_preserved() -> None:
-    assert _document_sha256(
-        "docs/runbooks/personal-dev-zero-capacity-acceptance.md"
-    ) == "dc9da9db4a6a54ba7ca0d3eba8ba35b647fb45ad2f56f4dc855f3b1d7d7d6bbf"
+    assert (
+        _document_sha256("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
+        == "743a75eb27d536aa61e929e605f060ea3367e3d80c40f6ef23a4ef1a88a40a24"
+    )
 
 
 def test_zero_capacity_acceptance_runbook_has_exact_single_owner_workflow() -> None:
@@ -1728,9 +1866,10 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
 
 
 def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
-    assert _document_sha256(
-        "docs/runbooks/personal-dev-durable-launch.md"
-    ) == "46ca8f8dcc0bdcc6f0a0ab673ad08921bb9e48d5585bbd90f51a07515ec87c8f"
+    assert (
+        _document_sha256("docs/runbooks/personal-dev-durable-launch.md")
+        == "2cfc900de577e7a88f17fa3fff10145d25eed7a9d5a8d83f0159ca01ee746c38"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1858,7 +1997,7 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert '--trusted-launcher-profile-file "$trusted_launcher_profile"' in runbook
     assert '--scanner-finding-policy-file "$scanner_finding_policy"' in runbook
     assert '--backup-restore-evidence-file "$backup_restore_evidence"' in runbook
-    assert runbook.count('"${operational_evidence_args[@]}"') == 4
+    assert runbook.count('"${operational_evidence_args[@]}"') == 5
     assert 'test "$solver_port" = 8089' in runbook
     assert "networkpolicy/loom-personal-dev-acme-http01-ingress" in runbook
     assert "networkpolicy/loom-personal-dev-management-ingress" in runbook
@@ -1898,6 +2037,335 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     assert ".rollback_shadow_status_sha256 == $rollback_shadow_status_sha256" in runbook
     assert ".owner_count == 2" in runbook
     assert ".cross_owner_denial_count == 6" in runbook
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+        "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+    ],
+)
+@pytest.mark.parametrize(
+    ("mutation", "expected_returncode"),
+    [
+        ("exact", 0),
+        ("web-port", 1),
+        ("web-selector", 1),
+        ("ingress-backend", 1),
+        ("frontend-config", 1),
+        ("reset-route", 1),
+        ("setup-route", 1),
+        ("api-health", 1),
+        ("api-health-payload", 1),
+    ],
+)
+def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
+    tmp_path: Path,
+    relative: str,
+    mutation: str,
+    expected_returncode: int,
+) -> None:
+    runbook = _read(relative)
+    if "concurrent-owner" in relative:
+        function = _indented_shell_function(runbook, "assert_web_api_route_contract")
+    else:
+        function = _fenced_shell_function(runbook, "assert_web_api_route_contract")
+
+    web_port = 80 if mutation == "web-port" else 8080
+    api_service = (
+        "loom-personal-dev-web"
+        if mutation == "ingress-backend"
+        else ("loom-personal-dev-management")
+    )
+    frontend_api = (
+        "https://wrong.example/api"
+        if mutation == "frontend-config"
+        else "https://loom-service.dev.yylx.world/api"
+    )
+    reset_page = "<html></html>" if mutation == "reset-route" else '<div id="root"></div>'
+    setup_page = "<html></html>" if mutation == "setup-route" else '<div id="root"></div>'
+    web_selector: dict[str, object] = {
+        "matchLabels": {"app": "loom-personal-dev-web"}
+    }
+    if mutation == "web-selector":
+        web_selector["matchExpressions"] = [
+            {"key": "loom.dev/never", "operator": "Exists"}
+        ]
+    network_policy = {
+        "spec": {
+            "podSelector": web_selector,
+            "policyTypes": ["Ingress"],
+            "ingress": [{"ports": [{"port": web_port, "protocol": "TCP"}]}],
+        }
+    }
+    ingress = {
+        "spec": {
+            "rules": [
+                {
+                    "host": "loom-service.dev.yylx.world",
+                    "http": {
+                        "paths": [
+                            {
+                                "backend": {
+                                    "service": {
+                                        "name": api_service,
+                                        "port": {"number": 8090},
+                                    }
+                                },
+                                "path": "/api",
+                                "pathType": "Prefix",
+                            },
+                            {
+                                "backend": {
+                                    "service": {
+                                        "name": "loom-personal-dev-web",
+                                        "port": {"number": 80},
+                                    }
+                                },
+                                "path": "/",
+                                "pathType": "Prefix",
+                            },
+                        ]
+                    },
+                }
+            ],
+            "tls": [{"hosts": ["loom-service.dev.yylx.world"]}],
+        }
+    }
+    frontend = {
+        "apiBase": "",
+        "apiRouteBase": frontend_api,
+        "environment": "development",
+        "environmentLabel": "Personal development",
+        "routePath": "",
+    }
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(mode=0o700)
+    program = (
+        "set -euo pipefail\n"
+        + function
+        + "\n"
+        + f"network_policy={shlex.quote(json.dumps(network_policy))}\n"
+        + f"ingress={shlex.quote(json.dumps(ingress))}\n"
+        + f"frontend={shlex.quote(json.dumps(frontend))}\n"
+        + f"reset_page={shlex.quote(reset_page)}\n"
+        + f"setup_page={shlex.quote(setup_page)}\n"
+        + f"health_rc={22 if mutation == 'api-health' else 0}\n"
+        + f"health_payload={shlex.quote(json.dumps({'status': 'unavailable' if mutation == 'api-health-payload' else 'ok'}))}\n"
+        + f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+        + "kubeconfig=/unused/kubeconfig\n"
+        + "management_host=loom-service.dev.yylx.world\n"
+        + "reviewed_server=https://loom-service.dev.yylx.world\n"
+        + "kubectl() {\n"
+        + '  case "$*" in\n'
+        + "    *networkpolicy/loom-personal-dev-web-ingress*) printf '%s\\n' \"$network_policy\" ;;\n"
+        + "    *ingress/loom-personal-dev-management*) printf '%s\\n' \"$ingress\" ;;\n"
+        + "    *) return 91 ;;\n"
+        + "  esac\n"
+        + "}\n"
+        + "curl() {\n"
+        + "  test \"$1\" = --disable || return 93\n"
+        + '  case " $* " in\n'
+        + "    *' --connect-timeout 10 --max-time 30 '*) ;;\n"
+        + "    *) return 94 ;;\n"
+        + "  esac\n"
+        + '  local url="${!#}"\n'
+        + '  case "$url" in\n'
+        + '    */api/v1/health) test "$health_rc" -eq 0 || return "$health_rc"; printf \'%s\\n\' "$health_payload" ;;\n'
+        + "    */loom-frontend-config.json) printf '%s\\n' \"$frontend\" ;;\n"
+        + "    */auth/reset) printf '%s\\n' \"$reset_page\" ;;\n"
+        + "    */auth/setup) printf '%s\\n' \"$setup_page\" ;;\n"
+        + "    *) return 92 ;;\n"
+        + "  esac\n"
+        + "}\n"
+        + "assert_web_api_route_contract\n"
+    )
+
+    completed = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stderr
+
+
+def test_multi_owner_runbooks_bind_web_release_render_and_rollout() -> None:
+    for relative in (
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+        "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+    ):
+        runbook = _read(relative)
+        assert 'test "$(jq -r .schema_version "$trusted_release")" = 3' in runbook
+        assert ".resource_count == 38" in runbook
+        assert runbook.count("deployment/loom-personal-dev-web --timeout=300s") >= 2
+        assert runbook.count("assert_web_api_route_contract") >= 3
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+        "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+    ],
+)
+def test_multi_owner_rollback_does_not_depend_on_public_route_availability(
+    relative: str,
+) -> None:
+    runbook = _read(relative)
+    rollback_interlocks = (
+        _indented_shell_function(runbook, "assert_rollback_interlocks")
+        if "concurrent-owner" in relative
+        else _fenced_shell_function(runbook, "assert_rollback_interlocks")
+    )
+
+    assert "assert_web_api_route_contract" not in rollback_interlocks
+    assert "assert_dns_tls_ingress" not in rollback_interlocks
+    rollback_apply = runbook.index(
+        '> "$evidence_dir/rollback.server-side-apply.txt"'
+    )
+    web_rollout = runbook.index(
+        "deployment/loom-personal-dev-web --timeout=300s",
+        rollback_apply,
+    )
+    route_contract = runbook.index("assert_web_api_route_contract", web_rollout)
+
+    assert rollback_apply < web_rollout < route_contract
+
+
+@pytest.mark.parametrize(
+    ("relative", "mode", "expected_returncode"),
+    [
+        (
+            "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+            "acceptance",
+            0,
+        ),
+        (
+            "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+            "operational",
+            0,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "all-ready",
+        "allowed-web-failure",
+    ],
+)
+def test_web_v2_rollback_accepts_only_consistent_web_unavailability(
+    tmp_path: Path,
+    relative: str,
+    mode: str,
+    expected_returncode: int,
+    mutation: str,
+) -> None:
+    result = _run_web_v2_rollback_interlocks(
+        tmp_path,
+        relative,
+        _web_v2_rollback_status(mode, mutation),
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("relative", "mode", "expected_returncode"),
+    [
+        (
+            "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+            "acceptance",
+            0,
+        ),
+        (
+            "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+            "operational",
+            1,
+        ),
+    ],
+)
+def test_web_v2_rollback_acceptance_window_expiry_is_acceptance_only(
+    tmp_path: Path,
+    relative: str,
+    mode: str,
+    expected_returncode: int,
+) -> None:
+    result = _run_web_v2_rollback_interlocks(
+        tmp_path,
+        relative,
+        _web_v2_rollback_status(mode, "acceptance-window-expired"),
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "non-web-blocker",
+        "non-web-component",
+        "missing-component",
+        "duplicate-component",
+        "extra-component",
+        "web-blocker-with-ready-web",
+        "web-blocker-with-ready-namespaced-resources",
+        "web-unready-without-blocker",
+    ],
+)
+@pytest.mark.parametrize(
+    ("relative", "mode"),
+    [
+        (
+            "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+            "acceptance",
+        ),
+        (
+            "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+            "operational",
+        ),
+    ],
+)
+def test_web_v2_rollback_rejects_non_web_or_inconsistent_statuses(
+    tmp_path: Path,
+    relative: str,
+    mode: str,
+    mutation: str,
+) -> None:
+    result = _run_web_v2_rollback_interlocks(
+        tmp_path,
+        relative,
+        _web_v2_rollback_status(mode, mutation),
+    )
+
+    assert result.returncode == 1, result.stderr
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/runbooks/personal-dev-concurrent-owner-zero-capacity-acceptance.md",
+        "docs/runbooks/personal-dev-multi-owner-durable-launch.md",
+    ],
+)
+def test_multi_owner_runbook_curl_is_bounded_and_ignores_user_config(
+    relative: str,
+) -> None:
+    runbook = _read(relative)
+    curl_lines = [
+        line.strip() for line in runbook.splitlines() if re.search(r"\bcurl\s", line)
+    ]
+    required = (
+        "curl --disable --fail --silent --show-error --proto '=https' "
+        "--tlsv1.2 --connect-timeout 10 --max-time 30"
+    )
+
+    assert curl_lines
+    assert all(required in line for line in curl_lines), curl_lines
 
 
 @pytest.mark.parametrize(
@@ -2085,72 +2553,6 @@ def test_multi_owner_durable_launch_diff_recheck_helper_requires_exact_reviewed_
         f'--kubeconfig {tmp_path / "kubeconfig"} diff --server-side '
         f'--field-manager=loom-personal-dev-control-plane -f {manifest}\n'
     )
-
-
-def test_multi_owner_durable_launch_rollback_accepts_fail_closed_operational_status(
-    tmp_path: Path,
-) -> None:
-    runbook = _read("docs/runbooks/personal-dev-multi-owner-durable-launch.md")
-    functions = "\n".join(
-        _fenced_shell_function(runbook, name)
-        for name in ("assert_operational_manager_boundary", "assert_rollback_interlocks")
-    )
-    calls = tmp_path / "calls.txt"
-    status = {
-        "schema": "loom-personal-dev-control-plane-status-v1",
-        "mode": "operational",
-        "operational_plan_sha256": "a" * 64,
-        "capacity_publication_ready": True,
-        "manager_ceiling": 0,
-        "worker_available": False,
-        "components": [
-            {"name": "manager", "ready": True},
-            {"name": "runtime-class", "ready": True},
-            {"name": "personal-workers", "observed": 0, "ready": True},
-        ],
-    }
-    program = (
-        "set -euo pipefail\n"
-        + functions
-        + "\n"
-        + "assert_current_artifacts() { :; }\n"
-        + "assert_reviewed_kubeconfig() { :; }\n"
-        + "assert_secret_key_inventory() { :; }\n"
-        + "assert_storage_and_migration() { :; }\n"
-        + "assert_runtime_scanner_release_bindings() { :; }\n"
-        + "assert_no_dynamic_namespaces_or_workers() { :; }\n"
-        + "assert_dns_tls_ingress() { :; }\n"
-        + f"calls={shlex.quote(str(calls))}\n"
-        + f"status_json={shlex.quote(json.dumps(status))}\n"
-        + "loom_cli_stub() {\n"
-        + "  printf 'status-operational\\n' >> \"$calls\"\n"
-        + "  printf '%s\\n' \"$status_json\"\n"
-        + "  return 1\n"
-        + "}\n"
-        + "loom_cli=loom_cli_stub\n"
-        + f"evidence_dir={shlex.quote(str(tmp_path))}\n"
-        + "kubeconfig=/unused/kubeconfig\n"
-        + "profile=/unused/profile\n"
-        + "trusted_release=/unused/release\n"
-        + "trusted_release_sha256=" + "b" * 64 + "\n"
-        + "operational_plan=/unused/plan\n"
-        + "operational_plan_sha256=" + "a" * 64 + "\n"
-        + "operational_evidence_args=()\n"
-        + "assert_rollback_interlocks\n"
-        + "printf 'rollback-safe\\n'\n"
-    )
-
-    result = subprocess.run(
-        ["bash"],
-        input=program,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "rollback-safe\n"
-    assert calls.read_text() == "status-operational\n"
 
 
 @pytest.mark.parametrize(

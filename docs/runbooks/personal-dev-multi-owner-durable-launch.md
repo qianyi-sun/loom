@@ -428,12 +428,14 @@ backup/restore, storage-lineage, migration, scanner-cache, RuntimeClass,
 global-manager, source, and kubeconfig interlocks. Do not shorten them to the
 illustrative observations above.
 
-## 3. Prove DNS, TLS, and management ingress before enablement
+## 3. Prove DNS, TLS, Web, and API ingress before enablement
 
-The shadow already renders the management Ingress, so DNS and certificate
-readiness can be established without enabling personal mutation. Record the
-reviewed DNS answers and require the exact cert-manager Certificate and Ingress
-host before the operational apply.
+The shadow already renders the public Web and API Ingress, so DNS, certificate,
+and account-action route readiness can be established without enabling personal
+mutation. Record the reviewed DNS answers and require the exact cert-manager
+Certificate, Web NetworkPolicy, and Ingress path split before the operational
+apply. The Web image is the existing Loom SPA; this package does not implement
+a second account, setup, or reset flow.
 
 ```bash
 management_host="$(python3 -c '
@@ -449,6 +451,83 @@ with open(sys.argv[1], "rb") as stream:
     print(tomllib.load(stream)["network"]["acme_http01_solver_port"])
 ' "$profile")"
 test "$solver_port" = 8089
+
+assert_web_api_route_contract() {
+  local route_frontend route_health route_ingress route_network_policy
+  local route_reset_page route_setup_page
+  route_network_policy="$(mktemp "$evidence_dir/web-policy-recheck.XXXXXX.json")"
+  route_ingress="$(mktemp "$evidence_dir/web-ingress-recheck.XXXXXX.json")"
+  route_frontend="$(mktemp "$evidence_dir/frontend-config-recheck.XXXXXX.json")"
+  route_health="$(mktemp "$evidence_dir/api-health-recheck.XXXXXX.json")"
+  route_reset_page="$(mktemp "$evidence_dir/reset-spa-recheck.XXXXXX.html")"
+  route_setup_page="$(mktemp "$evidence_dir/setup-spa-recheck.XXXXXX.html")"
+
+  if ! kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace loom-dev get networkpolicy/loom-personal-dev-web-ingress \
+    -o json > "$route_network_policy"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! jq -e '
+    .spec.podSelector == {"matchLabels":{"app":"loom-personal-dev-web"}} and
+    .spec.policyTypes == ["Ingress"] and
+    (.spec | has("egress") | not) and
+    (.spec.ingress[0] | has("from") | not) and
+    .spec.ingress == [{ports:[{port:8080,protocol:"TCP"}]}]
+  ' "$route_network_policy" >/dev/null; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace loom-dev get ingress/loom-personal-dev-management \
+    -o json > "$route_ingress"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! jq -e --arg host "$management_host" '
+    .spec.rules == [{host:$host,http:{paths:[
+      {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
+      {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
+    ]}}] and .spec.tls[0].hosts == [$host]
+  ' "$route_ingress" >/dev/null; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+    "$reviewed_server/api/v1/health" > "$route_health"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! jq -e '.status == "ok"' "$route_health" >/dev/null; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+    "$reviewed_server/loom-frontend-config.json" > "$route_frontend"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! jq -e --arg origin "$reviewed_server" '
+    .environment == "development" and .routePath == "" and
+    .apiBase == "" and .apiRouteBase == ($origin + "/api")
+  ' "$route_frontend" >/dev/null; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+    "$reviewed_server/auth/reset" > "$route_reset_page" ||
+    ! grep -Fq '<div id="root">' "$route_reset_page"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  if ! curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+    "$reviewed_server/auth/setup" > "$route_setup_page" ||
+    ! grep -Fq '<div id="root">' "$route_setup_page"; then
+    rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+    return 1
+  fi
+  rm -f -- "$route_network_policy" "$route_ingress" "$route_frontend" "$route_health" "$route_reset_page" "$route_setup_page"
+}
 
 getent ahosts "$management_host" > "$evidence_dir/management.dns.txt"
 test -s "$evidence_dir/management.dns.txt"
@@ -473,20 +552,47 @@ jq -e '
   .spec.ingress == [{ports:[{port:8090,protocol:"TCP"}]}]
 ' "$evidence_dir/management.network-policy.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+  networkpolicy/loom-personal-dev-web-ingress -o json \
+  > "$evidence_dir/web.network-policy.json"
+jq -e '
+  .spec.podSelector == {"matchLabels":{"app":"loom-personal-dev-web"}} and
+  .spec.policyTypes == ["Ingress"] and
+  (.spec | has("egress") | not) and
+  (.spec.ingress[0] | has("from") | not) and
+  .spec.ingress == [{ports:[{port:8080,protocol:"TCP"}]}]
+' "$evidence_dir/web.network-policy.json" >/dev/null
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   ingress/loom-personal-dev-management -o json \
   > "$evidence_dir/management.ingress.json"
 jq -e --arg host "$management_host" '
-  .spec.rules == [{host:$host,http:.spec.rules[0].http}] and
-  .spec.tls[0].hosts == [$host]
+  .spec.rules == [{host:$host,http:{paths:[
+    {backend:{service:{name:"loom-personal-dev-management",port:{number:8090}}},path:"/api",pathType:"Prefix"},
+    {backend:{service:{name:"loom-personal-dev-web",port:{number:80}}},path:"/",pathType:"Prefix"}
+  ]}}] and .spec.tls[0].hosts == [$host]
 ' "$evidence_dir/management.ingress.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   certificate/loom-personal-dev-management-tls -o json \
   > "$evidence_dir/management.certificate.json"
 jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' \
   "$evidence_dir/management.certificate.json" >/dev/null
-curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
   "https://$management_host/api/v1/health" \
   > "$evidence_dir/management.shadow-health.json"
+jq -e '.status == "ok"' "$evidence_dir/management.shadow-health.json" >/dev/null
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "$reviewed_server/loom-frontend-config.json" \
+  > "$evidence_dir/management.frontend-config.json"
+jq -e --arg origin "$reviewed_server" '
+  .environment == "development" and .routePath == "" and
+  .apiBase == "" and .apiRouteBase == ($origin + "/api")
+' "$evidence_dir/management.frontend-config.json" >/dev/null
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "$reviewed_server/auth/reset" > "$evidence_dir/management.reset-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.reset-spa.html"
+curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
+  "$reviewed_server/auth/setup" > "$evidence_dir/management.setup-spa.html"
+grep -Fq '<div id="root">' "$evidence_dir/management.setup-spa.html"
+assert_web_api_route_contract
 
 secret_keys() {
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
@@ -541,7 +647,7 @@ assert_runtime_scanner_release_bindings() {
   local runtime_class
   local runtime_handler
   local runtime_profile_sha256
-  test "$(jq -r .schema_version "$trusted_release")" = 2
+  test "$(jq -r .schema_version "$trusted_release")" = 3
   test "$(jq -cS .images "$trusted_release")" = \
     "$(jq -cS .release.images "$operational_plan")"
   for field in \
@@ -647,7 +753,7 @@ assert_dns_tls_ingress() {
     (.spec.dnsNames | index($host)) != null and
     any(.status.conditions[]?; .type == "Ready" and .status == "True")
   ' "$certificate" >/dev/null
-  curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+  curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 \
     "https://$management_host/api/v1/health" > "$health"
   rm -f -- "$dns_addresses" "$solver_policy" "$network_policy" \
     "$ingress" "$certificate" "$health"
@@ -725,19 +831,60 @@ assert_operational_interlocks() {
   assert_runtime_scanner_release_bindings
   assert_no_dynamic_namespaces_or_workers
   assert_dns_tls_ingress
+  assert_web_api_route_contract
   assert_ready_shadow_status
   assert_operational_manager_boundary
 }
 
 assert_rollback_interlocks() {
+  local output
+  local status_rc=0
   assert_current_artifacts
   assert_reviewed_kubeconfig
   assert_secret_key_inventory
   assert_storage_and_migration
   assert_runtime_scanner_release_bindings
   assert_no_dynamic_namespaces_or_workers
-  assert_dns_tls_ingress
-  assert_operational_manager_boundary
+  output="$(mktemp "$evidence_dir/rollback-operational-boundary.XXXXXX.json")"
+  "$loom_cli" admin personal-dev-control-plane status-operational \
+    --namespace loom-dev \
+    --kubeconfig "$kubeconfig" \
+    --file "$profile" \
+    --trusted-release-file "$trusted_release" \
+    --trusted-release-sha256 "$trusted_release_sha256" \
+    --operational-plan-file "$operational_plan" \
+    --operational-plan-sha256 "$operational_plan_sha256" \
+    "${operational_evidence_args[@]}" > "$output" || status_rc=$?
+  test "$status_rc" -eq 0 || test "$status_rc" -eq 1
+  chmod 0600 "$output"
+  jq -e --arg plan "$operational_plan_sha256" '
+    .schema == "loom-personal-dev-control-plane-status-v1" and
+    .mode == "operational" and .operational_plan_sha256 == $plan and
+    .capacity_publication_ready == true and .worker_available == false and
+    .manager_ceiling == 0 and
+    (.blockers | type == "array") and
+    (.blockers as $blockers |
+      ($blockers | unique | length) == ($blockers | length)) and
+    ([.blockers[] | select(. != "web_not_ready")] | length == 0) and
+    (.components | type == "array" and length == 7 and
+      (map(.name) | sort) == [
+        "cluster-resources", "manager", "namespaced-resources",
+        "namespaces", "personal-workers", "runtime-class", "web"
+      ]) and
+    any(.components[];
+      .name == "personal-workers" and .observed == 0 and .ready == true) and
+    (if (.blockers | index("web_not_ready")) != null then
+      all(.components[];
+        if .name == "web" or .name == "namespaced-resources" then
+          .ready == false
+        else
+          .ready == true
+        end)
+     else
+      all(.components[]; .ready == true)
+     end)
+  ' "$output" >/dev/null
+  rm -f -- "$output"
 }
 ```
 
@@ -790,11 +937,11 @@ test "$shadow_render_sha256" = \
 jq -e --arg plan "$operational_plan_sha256" --arg yaml "$operational_render_sha256" '
   .schema == "loom-personal-dev-control-plane-render-v1" and
   .mode == "operational" and .operational_plan_sha256 == $plan and
-  .yaml_sha256 == $yaml
+  .yaml_sha256 == $yaml and .resource_count == 38
 ' "$operational_render_evidence" >/dev/null
 jq -e --arg yaml "$shadow_render_sha256" '
   .schema == "loom-personal-dev-control-plane-render-v1" and
-  .mode == "shadow" and .yaml_sha256 == $yaml
+  .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38
 ' "$shadow_render_evidence" >/dev/null
 
 capture_file_binding "$operational_render" 16777216
@@ -812,7 +959,7 @@ assert_operational_render_binding() {
     --arg yaml "$operational_render_sha256" '
       .schema == "loom-personal-dev-control-plane-render-v1" and
       .mode == "operational" and .operational_plan_sha256 == $plan and
-      .yaml_sha256 == $yaml
+      .yaml_sha256 == $yaml and .resource_count == 38
     ' "$operational_render_evidence" >/dev/null
 }
 
@@ -824,7 +971,7 @@ assert_shadow_render_binding() {
     "$(jq -r .release.shadow_manifest_sha256 "$operational_plan")"
   jq -e --arg yaml "$shadow_render_sha256" '
     .schema == "loom-personal-dev-control-plane-render-v1" and
-    .mode == "shadow" and .yaml_sha256 == $yaml
+    .mode == "shadow" and .yaml_sha256 == $yaml and .resource_count == 38
   ' "$shadow_render_evidence" >/dev/null
 }
 ```
@@ -858,7 +1005,10 @@ chmod 0600 "$evidence_dir/operational.server-side-apply.txt"
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-activation-agent --timeout=300s
+assert_web_api_route_contract
 
 "$loom_cli" admin personal-dev-control-plane \
   status-operational \
@@ -934,7 +1084,7 @@ for url in \
   "https://$owner_name.dev.yylx.world/" \
   "https://cp-$owner_name.dev.yylx.world/healthz" \
   "https://gw-$owner_name.dev.yylx.world/healthz"; do
-  curl --fail --silent --show-error --proto '=https' --tlsv1.2 "$url" \
+  curl --disable --fail --silent --show-error --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 "$url" \
     >> "$evidence_dir/launch-owner.routes.txt"
 done
 chmod 0600 "$evidence_dir/launch-owner.routes.txt"
@@ -1070,6 +1220,9 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
 
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-web --timeout=300s
+assert_web_api_route_contract
 test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
   deployment/loom-personal-dev-activation-agent \
   -o jsonpath='{.spec.replicas}')" = 0
