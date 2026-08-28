@@ -44,6 +44,7 @@ _STATEFULSET_UIDS = {
     "loom-dev-postgres": "00000000-0000-0000-0000-000000000101",
     "loom-dev-minio": "00000000-0000-0000-0000-000000000102",
 }
+_MIGRATION_JOB_UID = "00000000-0000-0000-0000-000000000103"
 
 _CONTEXT = ("config", "current-context")
 _NAMESPACES = ("get", "namespaces", "--output=json")
@@ -245,6 +246,17 @@ def _pod_for(item: dict[str, Any], suffix: str, *, phase: str) -> dict[str, Any]
     }
     if item["kind"] == "Job":
         pod["metadata"]["labels"]["job-name"] = item["metadata"]["name"]
+        pod["metadata"]["labels"]["batch.kubernetes.io/job-name"] = item["metadata"]["name"]
+        pod["metadata"]["ownerReferences"] = [
+            {
+                "apiVersion": "batch/v1",
+                "blockOwnerDeletion": True,
+                "controller": True,
+                "kind": "Job",
+                "name": item["metadata"]["name"],
+                "uid": item["metadata"]["uid"],
+            }
+        ]
     elif item["kind"] == "StatefulSet":
         pod["metadata"]["ownerReferences"] = [
             {
@@ -387,13 +399,16 @@ def _healthy_fixture(
                 "updatedReplicas": 0,
             }
         elif kind == "Job":
+            metadata["uid"] = _MIGRATION_JOB_UID
             item["status"] = {
                 "active": 0,
                 "failed": 0,
                 "succeeded": 1,
                 "conditions": [{"type": "Complete", "status": "True"}],
             }
-            generated.append(_pod_for(item, "abcde", phase="Succeeded"))
+            migration_pod = _pod_for(item, "abcde", phase="Succeeded")
+            _materialize_migration_api_defaults(item, migration_pod)
+            generated.append(migration_pod)
         elif kind == "PersistentVolumeClaim":
             item["status"] = {"phase": "Bound"}
 
@@ -643,13 +658,16 @@ def _enabled_healthy_runner(
             if replicas:
                 generated.append(_pod_for(item, "abcde", phase="Running"))
         elif kind == "Job":
+            metadata["uid"] = _MIGRATION_JOB_UID
             item["status"] = {
                 "active": 0,
                 "failed": 0,
                 "succeeded": 1,
                 "conditions": [{"type": "Complete", "status": "True"}],
             }
-            generated.append(_pod_for(item, "abcde", phase="Succeeded"))
+            migration_pod = _pod_for(item, "abcde", phase="Succeeded")
+            _materialize_migration_api_defaults(item, migration_pod)
+            generated.append(migration_pod)
         elif kind == "PersistentVolumeClaim":
             item["status"] = {"phase": "Bound"}
 
@@ -2351,25 +2369,33 @@ def test_observer_rejects_untrusted_generated_resource_drift(
     assert "resource_inventory_drift" in result.blockers
 
 
-def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -> None:
-    expected, runner = _healthy_fixture(tmp_path)
-    items = _items(runner, _NAMESPACED)
-    current_job = next(item for item in items if item["kind"] == "Job")
-    current_pod = next(
-        item
-        for item in items
-        if item["kind"] == "Pod"
-        and item["metadata"]["labels"].get("app") == "loom-personal-dev-migration"
-    )
+def _historical_migration_pair(
+    current_job: dict[str, Any],
+    current_pod: dict[str, Any],
+    *,
+    index: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     historical_job = copy.deepcopy(current_job)
     historical_pod = copy.deepcopy(current_pod)
-    historical_input = "a" * 64
-    historical_release = "b" * 64
+    historical_input = hashlib.sha256(f"historical-input-{index}".encode()).hexdigest()
+    historical_release = hashlib.sha256(f"historical-release-{index}".encode()).hexdigest()
     historical_name = f"loom-personal-dev-migrate-{historical_input[:16]}-{historical_release[:16]}"
 
     historical_job["metadata"]["name"] = historical_name
+    historical_job["metadata"]["uid"] = f"00000000-0000-0000-0000-{index + 200:012d}"
     historical_pod["metadata"]["name"] = f"{historical_name}-abcde"
     historical_pod["metadata"]["labels"]["job-name"] = historical_name
+    historical_pod["metadata"]["labels"]["batch.kubernetes.io/job-name"] = historical_name
+    historical_pod["metadata"]["ownerReferences"] = [
+        {
+            "apiVersion": "batch/v1",
+            "blockOwnerDeletion": True,
+            "controller": True,
+            "kind": "Job",
+            "name": historical_name,
+            "uid": historical_job["metadata"]["uid"],
+        }
+    ]
     for metadata in (
         historical_job["metadata"],
         historical_job["spec"]["template"]["metadata"],
@@ -2380,14 +2406,633 @@ def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -
         metadata["annotations"]["loom.dev/render-input-sha256"] = historical_input
         metadata["annotations"]["loom.dev/trusted-release-sha256"] = historical_release
     historical_pod["spec"] = copy.deepcopy(historical_job["spec"]["template"]["spec"])
-    items.extend([historical_job, historical_pod])
+    _materialize_migration_api_defaults(historical_job, historical_pod)
+    return historical_job, historical_pod
+
+
+def _current_migration_pair(
+    items: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    current_job = next(item for item in items if item["kind"] == "Job")
+    current_pod = next(
+        item
+        for item in items
+        if item["kind"] == "Pod"
+        and item["metadata"]["labels"].get("app") == "loom-personal-dev-migration"
+    )
+    return current_job, current_pod
+
+
+def _mutate_historical_migration_workload(
+    job: dict[str, Any],
+    pod: dict[str, Any],
+    mutation: str,
+) -> None:
+    pod_spec = job["spec"]["template"]["spec"]
+    observed_pod_defaults = {
+        key: copy.deepcopy(value) for key, value in pod["spec"].items() if key not in pod_spec
+    }
+    container = pod_spec["containers"][0]
+    environment = {entry["name"]: entry for entry in container["env"]}
+    if mutation == "arbitrary-command":
+        container["command"] = ["/bin/sh", "-c", "sleep 3600"]
+    elif mutation == "untrusted-immutable-image":
+        container["image"] = "ghcr.io/example/attacker@sha256:" + "e" * 64
+    elif mutation == "sidecar":
+        sidecar = copy.deepcopy(container)
+        sidecar["name"] = "sidecar"
+        sidecar["command"] = ["/bin/sh", "-c", "sleep 3600"]
+        pod_spec["containers"].append(sidecar)
+    elif mutation == "init-container":
+        init_container = copy.deepcopy(container)
+        init_container["name"] = "init"
+        init_container["command"] = ["/bin/sh", "-c", "sleep 3600"]
+        pod_spec["initContainers"] = [init_container]
+    elif mutation == "secret-name":
+        environment["LOOM_DB_URL"]["valueFrom"]["secretKeyRef"]["name"] = "attacker-controlled"
+    elif mutation == "secret-key":
+        environment["LOOM_DB_URL"]["valueFrom"]["secretKeyRef"]["key"] = "cp-db-url"
+    elif mutation == "pg-timeout":
+        environment["PGCONNECT_TIMEOUT"]["value"] = "30"
+    elif mutation == "extra-environment":
+        container["env"].append({"name": "LD_PRELOAD", "value": "/tmp/injected.so"})
+    elif mutation == "privileged":
+        container["securityContext"]["privileged"] = True
+    elif mutation == "privilege-escalation":
+        container["securityContext"]["allowPrivilegeEscalation"] = True
+    elif mutation == "privilege-escalation-integer":
+        container["securityContext"]["allowPrivilegeEscalation"] = 0
+    elif mutation == "added-capability":
+        container["securityContext"]["capabilities"]["add"] = ["NET_ADMIN"]
+    elif mutation == "container-root":
+        container["securityContext"]["runAsUser"] = 0
+        container["securityContext"]["runAsNonRoot"] = False
+    elif mutation == "container-user-float":
+        container["securityContext"]["runAsUser"] = 65532.0
+    elif mutation == "pod-unconfined":
+        pod_spec["securityContext"]["seccompProfile"]["type"] = "Unconfined"
+    elif mutation == "pod-non-root-integer":
+        pod_spec["securityContext"]["runAsNonRoot"] = 1
+    elif mutation == "pod-user-float":
+        pod_spec["securityContext"]["runAsUser"] = 65532.0
+    elif mutation == "service-account-token":
+        pod_spec["automountServiceAccountToken"] = True
+    elif mutation == "service-links":
+        pod_spec["enableServiceLinks"] = True
+    elif mutation == "management-service-account":
+        pod_spec["serviceAccountName"] = "loom-personal-dev-management"
+    elif mutation == "host-path":
+        pod_spec["volumes"] = [{"name": "tmp", "hostPath": {"path": "/"}}]
+    elif mutation == "projected-volume":
+        pod_spec["volumes"] = [
+            {
+                "name": "tmp",
+                "projected": {
+                    "sources": [{"serviceAccountToken": {"path": "token"}}],
+                },
+            }
+        ]
+    elif mutation == "csi-volume":
+        pod_spec["volumes"] = [
+            {"name": "tmp", "csi": {"driver": "attacker.example", "readOnly": False}}
+        ]
+    elif mutation == "extra-volume":
+        pod_spec["volumes"].append({"name": "host", "hostPath": {"path": "/"}})
+    elif mutation == "wrong-volume-mount":
+        container["volumeMounts"] = [{"name": "tmp", "mountPath": "/host"}]
+    elif mutation == "forced-node":
+        pod_spec["nodeName"] = "attacker-chosen-node"
+    elif mutation == "forced-node-selector":
+        pod_spec["nodeSelector"] = {"kubernetes.io/hostname": "attacker-chosen-node"}
+    elif mutation == "restart-policy":
+        pod_spec["restartPolicy"] = "OnFailure"
+    elif mutation == "image-pull-policy":
+        container["imagePullPolicy"] = "Always"
+    elif mutation == "container-name":
+        container["name"] = "not-migrate"
+    elif mutation == "resource-envelope":
+        container["resources"]["limits"]["cpu"] = "100"
+    elif mutation == "job-parallelism":
+        job["spec"]["parallelism"] = 2
+    elif mutation == "job-backoff-bool":
+        job["spec"]["backoffLimit"] = True
+    elif mutation == "job-suspended":
+        job["spec"]["suspend"] = True
+    elif mutation == "job-ttl":
+        job["spec"]["ttlSecondsAfterFinished"] = 60
+    elif mutation == "template-annotation":
+        job["spec"]["template"]["metadata"]["annotations"][
+            "container.apparmor.security.beta.kubernetes.io/migrate"
+        ] = "unconfined"
+        pod["metadata"]["annotations"]["container.apparmor.security.beta.kubernetes.io/migrate"] = (
+            "unconfined"
+        )
+    elif mutation == "missing-controller-labels":
+        for key in (
+            "batch.kubernetes.io/controller-uid",
+            "batch.kubernetes.io/job-name",
+            "controller-uid",
+            "job-name",
+        ):
+            job["spec"]["template"]["metadata"]["labels"].pop(key)
+        for key in (
+            "batch.kubernetes.io/controller-uid",
+            "controller-uid",
+        ):
+            pod["metadata"]["labels"].pop(key)
+    elif mutation in {
+        "pod-management-service-account",
+        "pod-host-alias",
+        "pod-extra-toleration",
+        "pod-name",
+        "pod-generate-name",
+        "missing-pod-service-account",
+        "missing-pod-node",
+        "pod-priority-bool",
+        "pod-toleration-seconds-float",
+    }:
+        pass
+    elif mutation == "missing-job-selector":
+        job["spec"].pop("selector")
+    elif mutation == "missing-job-default":
+        job["spec"].pop("parallelism")
+    else:  # pragma: no cover - caller table is exhaustive
+        raise AssertionError(mutation)
+    pod["spec"] = copy.deepcopy(pod_spec)
+    for key, value in observed_pod_defaults.items():
+        pod["spec"].setdefault(key, value)
+    if mutation == "pod-management-service-account":
+        pod["spec"]["serviceAccount"] = "loom-personal-dev-management"
+        pod["spec"]["serviceAccountName"] = "loom-personal-dev-management"
+    elif mutation == "pod-host-alias":
+        pod["spec"]["hostAliases"] = [{"ip": "127.0.0.1", "hostnames": ["postgres"]}]
+    elif mutation == "pod-extra-toleration":
+        pod["spec"]["tolerations"] = [{"operator": "Exists"}]
+    elif mutation == "pod-name":
+        pod["metadata"]["name"] = "unbound-migration-pod"
+    elif mutation == "pod-generate-name":
+        pod["metadata"]["generateName"] = "unbound-migration-pod-"
+    elif mutation == "missing-pod-service-account":
+        pod["spec"].pop("serviceAccountName")
+    elif mutation == "missing-pod-node":
+        pod["spec"].pop("nodeName")
+    elif mutation == "pod-priority-bool":
+        pod["spec"]["priority"] = False
+    elif mutation == "pod-toleration-seconds-float":
+        pod["spec"]["tolerations"][0]["tolerationSeconds"] = 300.0
+
+
+def _materialize_migration_api_defaults(
+    job: dict[str, Any],
+    pod: dict[str, Any],
+) -> None:
+    job_name = job["metadata"]["name"]
+    job_uid = job["metadata"]["uid"]
+    job_spec = job["spec"]
+    job_spec.update(
+        {
+            "completionMode": "NonIndexed",
+            "completions": 1,
+            "manualSelector": False,
+            "parallelism": 1,
+            "podReplacementPolicy": "TerminatingOrFailed",
+            "selector": {
+                "matchLabels": {"batch.kubernetes.io/controller-uid": job_uid},
+            },
+            "suspend": False,
+        }
+    )
+    controller_labels = {
+        "batch.kubernetes.io/controller-uid": job_uid,
+        "batch.kubernetes.io/job-name": job_name,
+        "controller-uid": job_uid,
+        "job-name": job_name,
+    }
+    job_spec["template"]["metadata"]["labels"].update(controller_labels)
+    template_spec = job_spec["template"]["spec"]
+    template_spec.update(
+        {
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "terminationGracePeriodSeconds": 30,
+        }
+    )
+    template_spec["containers"][0].update(
+        {
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+        }
+    )
+    pod["metadata"]["labels"].update(controller_labels)
+    pod["metadata"]["generateName"] = f"{job_name}-"
+    pod["metadata"]["name"] = f"{job_name}-"[:58] + "abcde"
+    pod["spec"] = copy.deepcopy(template_spec)
+    pod["spec"].update(
+        {
+            "nodeName": "scheduler-selected-node",
+            "preemptionPolicy": "PreemptLowerPriority",
+            "priority": 0,
+            "serviceAccount": "default",
+            "serviceAccountName": "default",
+            "tolerations": [
+                {
+                    "effect": "NoExecute",
+                    "key": "node.kubernetes.io/not-ready",
+                    "operator": "Exists",
+                    "tolerationSeconds": 300,
+                },
+                {
+                    "effect": "NoExecute",
+                    "key": "node.kubernetes.io/unreachable",
+                    "operator": "Exists",
+                    "tolerationSeconds": 300,
+                },
+            ],
+        }
+    )
+
+
+def test_observer_accepts_all_valid_retained_migration_history(tmp_path: Path) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    for index in range(9):
+        items.extend(_historical_migration_pair(current_job, current_pod, index=index))
 
     result = _observe(expected, runner)
 
     assert result.ready is True
     assert result.blockers == ()
     components = {component.name: component for component in result.components}
-    assert components["namespaced-resources"].observed == 36
+    assert components["namespaced-resources"].observed == 52
+
+
+@pytest.mark.parametrize("mode", ["shadow", "acceptance", "operational"])
+def test_observer_accepts_valid_retained_migration_history_in_every_mode(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    if mode == "shadow":
+        expected, runner = _healthy_fixture(tmp_path)
+        plan = None
+    elif mode == "acceptance":
+        expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    elif mode == "operational":
+        expected, plan, runner = _operational_healthy_fixture(tmp_path)
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mode)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    items.extend(_historical_migration_pair(current_job, current_pod, index=0))
+
+    if mode == "shadow":
+        result = _observe(expected, runner)
+    elif mode == "acceptance":
+        assert isinstance(plan, PersonalDevAcceptancePlan)
+        result = _observe_acceptance(expected, plan, runner)
+    else:
+        assert isinstance(plan, PersonalDevOperationalPlan)
+        result = _observe_operational(expected, plan, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "arbitrary-command",
+        "untrusted-immutable-image",
+        "sidecar",
+        "init-container",
+        "secret-name",
+        "secret-key",
+        "pg-timeout",
+        "extra-environment",
+        "privileged",
+        "privilege-escalation",
+        "privilege-escalation-integer",
+        "added-capability",
+        "container-root",
+        "container-user-float",
+        "pod-unconfined",
+        "pod-non-root-integer",
+        "pod-user-float",
+        "service-account-token",
+        "service-links",
+        "management-service-account",
+        "host-path",
+        "projected-volume",
+        "csi-volume",
+        "extra-volume",
+        "wrong-volume-mount",
+        "forced-node",
+        "forced-node-selector",
+        "restart-policy",
+        "image-pull-policy",
+        "container-name",
+        "resource-envelope",
+        "job-parallelism",
+        "job-backoff-bool",
+        "job-suspended",
+        "job-ttl",
+        "template-annotation",
+        "missing-controller-labels",
+        "pod-management-service-account",
+        "pod-host-alias",
+        "pod-extra-toleration",
+        "pod-name",
+        "pod-generate-name",
+        "missing-job-selector",
+        "missing-job-default",
+        "missing-pod-service-account",
+        "missing-pod-node",
+        "pod-priority-bool",
+        "pod-toleration-seconds-float",
+    ],
+)
+def test_observer_rejects_retained_migration_workload_contract_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    historical_job, historical_pod = _historical_migration_pair(
+        current_job,
+        current_pod,
+        index=0,
+    )
+    _mutate_historical_migration_workload(
+        historical_job,
+        historical_pod,
+        mutation,
+    )
+    items.extend((historical_job, historical_pod))
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
+
+
+@pytest.mark.parametrize("scope", ["current", "historical"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("failed", True),
+        ("failed", "0"),
+        ("failed", -1),
+        ("active", True),
+        ("active", "0"),
+        ("active", -1),
+    ],
+)
+def test_observer_rejects_malformed_migration_status_counters(
+    tmp_path: Path,
+    scope: str,
+    field: str,
+    value: object,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    if scope == "current":
+        target_job = current_job
+        blocker = "migration_incomplete"
+    elif scope == "historical":
+        target_job, historical_pod = _historical_migration_pair(
+            current_job,
+            current_pod,
+            index=0,
+        )
+        items.extend((target_job, historical_pod))
+        blocker = "resource_inventory_drift"
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(scope)
+    target_job["status"][field] = value
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+
+
+@pytest.mark.parametrize("scope", ["current", "historical"])
+@pytest.mark.parametrize(
+    ("target_kind", "field", "value"),
+    [
+        ("job", "deletionTimestamp", "2026-08-28T16:00:00Z"),
+        ("job", "deletionGracePeriodSeconds", 30),
+        (
+            "job",
+            "ownerReferences",
+            [
+                {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "name": "garbage-collection-owner",
+                    "uid": "00000000-0000-0000-0000-000000000999",
+                }
+            ],
+        ),
+        ("job", "ownerReferences", {}),
+        ("job", "finalizers", ["attacker.example/retain-or-delete"]),
+        ("job", "finalizers", ""),
+        ("pod", "deletionTimestamp", "2026-08-28T16:00:00Z"),
+        ("pod", "deletionGracePeriodSeconds", 30),
+        ("pod", "finalizers", ["attacker.example/retain-or-delete"]),
+        ("pod", "finalizers", {}),
+    ],
+)
+def test_observer_rejects_migration_evidence_with_destructive_lifecycle_metadata(
+    tmp_path: Path,
+    scope: str,
+    target_kind: str,
+    field: str,
+    value: object,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    if scope == "current":
+        target_job, target_pod = current_job, current_pod
+    elif scope == "historical":
+        target_job, target_pod = _historical_migration_pair(
+            current_job,
+            current_pod,
+            index=0,
+        )
+        items.extend((target_job, target_pod))
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(scope)
+    if target_kind == "job":
+        target = target_job
+    elif target_kind == "pod":
+        target = target_pod
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(target_kind)
+    target["metadata"][field] = copy.deepcopy(value)
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
+
+
+@pytest.mark.parametrize("scope", ["current", "historical"])
+def test_observer_accepts_empty_migration_evidence_lifecycle_lists(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    if scope == "current":
+        target_job, target_pod = current_job, current_pod
+    elif scope == "historical":
+        target_job, target_pod = _historical_migration_pair(
+            current_job,
+            current_pod,
+            index=0,
+        )
+        items.extend((target_job, target_pod))
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(scope)
+    target_job["metadata"]["ownerReferences"] = []
+    target_job["metadata"]["finalizers"] = []
+    target_pod["metadata"]["finalizers"] = []
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "job-name-label",
+        "batch-job-name-label",
+        "owner-name",
+        "owner-uid",
+        "owner-shape",
+        "owner-boolean-integer",
+        "phase-running",
+        "phase-failed",
+        "phase-pending",
+    ],
+)
+def test_observer_rejects_current_migration_pod_pairing_or_phase_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    _current_job, current_pod = _current_migration_pair(items)
+    orphan_name = "loom-personal-dev-migrate-" + "c" * 16 + "-" + "d" * 16
+    labels = current_pod["metadata"]["labels"]
+    owner_references = current_pod["metadata"]["ownerReferences"]
+    if mutation == "job-name-label":
+        labels["job-name"] = orphan_name
+    elif mutation == "batch-job-name-label":
+        labels["batch.kubernetes.io/job-name"] = orphan_name
+    elif mutation == "owner-name":
+        owner_references[0]["name"] = orphan_name
+    elif mutation == "owner-uid":
+        owner_references[0]["uid"] = "00000000-0000-0000-0000-000000000999"
+    elif mutation == "owner-shape":
+        owner_references[0]["controller"] = False
+    elif mutation == "owner-boolean-integer":
+        owner_references[0]["blockOwnerDeletion"] = 1
+        owner_references[0]["controller"] = 1
+    elif mutation.startswith("phase-"):
+        current_pod["status"]["phase"] = mutation.removeprefix("phase-").title()
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "digest-mismatch",
+        "failed",
+        "running-job",
+        "running-pod",
+        "mutable-image",
+        "pod-template-drift",
+        "unpaired",
+        "duplicate-pod",
+        "owner-name",
+        "owner-uid",
+        "host-network",
+        "invalid-job-api-version",
+    ],
+)
+def test_observer_rejects_invalid_retained_migration_history(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job, current_pod = _current_migration_pair(items)
+    historical_job, historical_pod = _historical_migration_pair(
+        current_job,
+        current_pod,
+        index=0,
+    )
+    if mutation == "digest-mismatch":
+        historical_job["metadata"]["annotations"]["loom.dev/trusted-release-sha256"] = "f" * 64
+    elif mutation == "failed":
+        historical_job["status"] = {"active": 0, "failed": 1, "succeeded": 0}
+    elif mutation == "running-job":
+        historical_job["status"] = {"active": 1, "failed": 0, "succeeded": 0}
+    elif mutation == "running-pod":
+        historical_pod["status"]["phase"] = "Running"
+    elif mutation == "mutable-image":
+        historical_job["spec"]["template"]["spec"]["containers"][0]["image"] = (
+            "ghcr.io/qianyi-sun/loom-service:latest"
+        )
+        historical_pod["spec"] = copy.deepcopy(historical_job["spec"]["template"]["spec"])
+    elif mutation == "pod-template-drift":
+        historical_pod["spec"]["containers"][0]["image"] = (
+            "ghcr.io/qianyi-sun/loom-service@sha256:" + "e" * 64
+        )
+    elif mutation == "owner-name":
+        historical_pod["metadata"]["ownerReferences"][0]["name"] = (
+            "loom-personal-dev-migrate-" + "c" * 16 + "-" + "d" * 16
+        )
+    elif mutation == "owner-uid":
+        historical_pod["metadata"]["ownerReferences"][0]["uid"] = (
+            "00000000-0000-0000-0000-000000000999"
+        )
+    elif mutation == "host-network":
+        historical_job["spec"]["template"]["spec"]["hostNetwork"] = True
+        historical_pod["spec"] = copy.deepcopy(historical_job["spec"]["template"]["spec"])
+    elif mutation == "invalid-job-api-version":
+        historical_job["apiVersion"] = "batch/v2"
+        historical_pod["metadata"]["ownerReferences"][0]["apiVersion"] = "batch/v2"
+    elif mutation == "duplicate-pod":
+        pass
+    elif mutation != "unpaired":  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+    items.append(historical_job)
+    if mutation != "unpaired":
+        items.append(historical_pod)
+    if mutation == "duplicate-pod":
+        duplicate = copy.deepcopy(historical_pod)
+        duplicate["metadata"]["name"] = f"{historical_job['metadata']['name']}-fghij"
+        items.append(duplicate)
+
+    result = _observe(expected, runner)
+
+    assert result.ready is False
+    assert "resource_inventory_drift" in result.blockers
 
 
 @pytest.mark.parametrize(

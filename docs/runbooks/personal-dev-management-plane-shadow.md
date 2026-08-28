@@ -613,9 +613,29 @@ test "$(
 )" = 0
 ```
 
-The retained immutable migration Jobs are evidence. Status accepts only a
-bounded history of successful terminal Job/Pod pairs and still requires the
-exact current trusted migration to complete.
+The retained immutable migration Jobs are evidence. Status validates every
+retained terminal Job/Pod pair and still requires the exact current trusted
+migration to complete with exactly one Succeeded Pod. Each current or
+historical Pod must carry both exact Job-name labels and the exact controller
+owner reference, including the live Job UID; the Job, Pod, immutable images,
+digests, template, and pod security boundary must all agree. Each retained Job
+must be ownerless, and neither Job nor Pod may be pending deletion or carry a
+finalizer; otherwise the purported durable evidence can disappear or depends
+on an untrusted lifecycle controller. Retained evidence is admitted only by
+the closed migration-v1 contract: the exact Alembic
+command, Loom service digest repository, Secret-backed database environment,
+single container, resource envelope, security contexts, default service
+account without token mounting, `/tmp` emptyDir, and Kubernetes 1.36
+API-materialized Job/Pod defaults. Scheduler-assigned `Pod.spec.nodeName` is
+evidence of placement; forced placement fields in the Job template are
+forbidden.
+
+Do not loosen migration-v1 or delete retained evidence when the renderer or
+Kubernetes defaults change. Add a separately tested later contract before
+applying the new shape so old evidence keeps its original meaning. The
+inventory remains bounded by the observer's 4 MiB response and 4,096-item
+limits; a malformed, failed, running, orphaned, duplicated, unpaired,
+mutable-image, or security-widened pair blocks readiness.
 
 ## 7. Capture canonical shadow status
 
@@ -661,9 +681,10 @@ The successful canonical shape is:
 {"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":34,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
-The namespaced observed count may include bounded retained successful migration
-evidence after a later upgrade or rollback. All component names, blocker codes,
-and digest fields remain bounded.
+The namespaced observed count may include retained successful migration
+evidence after later upgrades or rollbacks. The observer validates every pair
+within its bounded response and item limits; all component names, blocker
+codes, and digest fields remain bounded.
 
 ## 8. Roll back without deleting durable state
 

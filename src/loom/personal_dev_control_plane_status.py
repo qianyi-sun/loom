@@ -32,6 +32,69 @@ _DIGEST = re.compile(r"[0-9a-f]{64}")
 _IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _CONTEXT = re.compile(r"[A-Za-z0-9_.:@/-]{1,253}")
 _MIGRATION_JOB = re.compile(r"loom-personal-dev-migrate-([0-9a-f]{16})-([0-9a-f]{16})")
+_MIGRATION_V1_IMAGE = re.compile(r"ghcr\.io/qianyi-sun/loom-service@sha256:[0-9a-f]{64}")
+_MIGRATION_V1_COMMAND = (
+    "/bin/sh",
+    "-euc",
+    "\n".join(
+        (
+            "attempt=0",
+            "until alembic -c migrations/alembic.ini current >/dev/null 2>&1; do",
+            "  attempt=$((attempt + 1))",
+            '  test "$attempt" -lt 100',
+            "  sleep 2",
+            "done",
+            "exec alembic -c migrations/alembic.ini upgrade head",
+        )
+    ),
+)
+_MIGRATION_V1_ENVIRONMENT = [
+    {
+        "name": "LOOM_DB_URL",
+        "valueFrom": {
+            "secretKeyRef": {
+                "key": "svc-db-url",
+                "name": "loom-personal-dev-management",
+            }
+        },
+    },
+    {"name": "PGCONNECT_TIMEOUT", "value": "3"},
+]
+_MIGRATION_V1_CONTAINER_SECURITY = {
+    "allowPrivilegeEscalation": False,
+    "capabilities": {"drop": ["ALL"]},
+    "readOnlyRootFilesystem": True,
+    "runAsNonRoot": True,
+    "runAsUser": 65532,
+}
+_MIGRATION_V1_POD_SECURITY = {
+    "fsGroup": 65532,
+    "fsGroupChangePolicy": "OnRootMismatch",
+    "runAsGroup": 65532,
+    "runAsNonRoot": True,
+    "runAsUser": 65532,
+    "seccompProfile": {"type": "RuntimeDefault"},
+}
+_MIGRATION_V1_RESOURCES = {
+    "limits": {"cpu": "1", "memory": "1Gi"},
+    "requests": {"cpu": "50m", "memory": "128Mi"},
+}
+_MIGRATION_V1_VOLUMES = [{"name": "tmp", "emptyDir": {"sizeLimit": "128Mi"}}]
+_MIGRATION_V1_VOLUME_MOUNTS = [{"name": "tmp", "mountPath": "/tmp"}]
+_MIGRATION_V1_DEFAULT_TOLERATIONS = [
+    {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "tolerationSeconds": 300,
+    },
+    {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "tolerationSeconds": 300,
+    },
+]
 _PERSONAL_NAMESPACE = re.compile(r"loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?")
 _RESERVED_PERSONAL_NAMESPACE = re.compile(
     r"loom-dev-(dev|development|staging|production|prod|local|loom|shared|default)"
@@ -58,8 +121,6 @@ _BUILDER_IDENTITY_LABELS = {
     "loom.dev/build-lease-epoch",
     *(label for label, _expected in _BUILDER_POD_SECURITY_LABELS),
 }
-_MAX_MIGRATION_HISTORY = 8
-
 _CONTEXT_COMMAND = ("config", "current-context")
 _NAMESPACE_COMMAND = ("get", "namespaces", "--output=json")
 _NAMESPACED_COMMAND = (
@@ -1028,7 +1089,11 @@ def _migration_state(item: Mapping[str, Any] | None) -> str:
     status = item.get("status")
     if not isinstance(status, Mapping):
         return "incomplete"
-    if (_integer(status.get("failed")) or 0) > 0:
+    failed = 0 if "failed" not in status else _integer(status.get("failed"))
+    active = 0 if "active" not in status else _integer(status.get("active"))
+    if failed is None or active is None or failed < 0 or active < 0:
+        return "incomplete"
+    if failed > 0:
         return "failed"
     conditions = status.get("conditions", [])
     complete = isinstance(conditions, list) and any(
@@ -1037,13 +1102,374 @@ def _migration_state(item: Mapping[str, Any] | None) -> str:
         and condition.get("status") == "True"
         for condition in conditions
     )
-    if (
-        _integer(status.get("succeeded")) == 1
-        and (_integer(status.get("active")) or 0) == 0
-        and complete
-    ):
+    if _integer(status.get("succeeded")) == 1 and active == 0 and complete:
         return "succeeded"
     return "incomplete"
+
+
+def _migration_v1_exact_value(expected: object, actual: object) -> bool:
+    """Compare parsed JSON without Python's bool/int/float coercion."""
+
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(actual, Mapping)
+            and set(actual) == set(expected)
+            and all(
+                _migration_v1_exact_value(value, actual[key]) for key, value in expected.items()
+            )
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(
+                _migration_v1_exact_value(left, right)
+                for left, right in zip(expected, actual, strict=True)
+            )
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
+def _migration_v1_lineage_metadata(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    metadata = _metadata(job)
+    digests = _observed_digests(job)
+    if metadata is None or digests is None:
+        return None
+    labels = metadata.get("labels")
+    annotations = metadata.get("annotations")
+    if not isinstance(labels, Mapping) or not isinstance(annotations, Mapping):
+        return None
+    input_sha256, release_sha256 = digests
+    expected_labels: dict[str, object] = {
+        "app": "loom-personal-dev-migration",
+        "app.kubernetes.io/managed-by": _MANAGED_BY,
+        "app.kubernetes.io/part-of": "loom",
+        "loom.dev/render-input": input_sha256[:32],
+        "loom.dev/trusted-release": release_sha256[:32],
+    }
+    expected_annotations: dict[str, object] = {
+        "loom.dev/render-input-sha256": input_sha256,
+        "loom.dev/trusted-release-sha256": release_sha256,
+    }
+    plan_digests = 0
+    for key in (
+        "loom.dev/acceptance-plan-sha256",
+        "loom.dev/operational-plan-sha256",
+    ):
+        if key not in labels and key not in annotations:
+            continue
+        value = annotations.get(key)
+        if (
+            not isinstance(value, str)
+            or _DIGEST.fullmatch(value) is None
+            or labels.get(key) != value[:32]
+        ):
+            return None
+        plan_digests += 1
+        expected_labels[key] = value[:32]
+        expected_annotations[key] = value
+    if (
+        plan_digests > 1
+        or dict(labels) != expected_labels
+        or dict(annotations) != expected_annotations
+    ):
+        return None
+    return expected_labels, expected_annotations
+
+
+def _migration_v1_container_valid(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    expected_fields = {
+        "command",
+        "env",
+        "image",
+        "imagePullPolicy",
+        "name",
+        "resources",
+        "securityContext",
+        "terminationMessagePath",
+        "terminationMessagePolicy",
+        "volumeMounts",
+    }
+    image = value.get("image")
+    security_context = value.get("securityContext")
+    return (
+        set(value) == expected_fields
+        and value.get("name") == "migrate"
+        and isinstance(image, str)
+        and _MIGRATION_V1_IMAGE.fullmatch(image) is not None
+        and value.get("imagePullPolicy") == "IfNotPresent"
+        and _migration_v1_exact_value(list(_MIGRATION_V1_COMMAND), value.get("command"))
+        and _migration_v1_exact_value(_MIGRATION_V1_ENVIRONMENT, value.get("env"))
+        and _migration_v1_exact_value(_MIGRATION_V1_RESOURCES, value.get("resources"))
+        and _migration_v1_exact_value(_MIGRATION_V1_CONTAINER_SECURITY, security_context)
+        and isinstance(security_context, Mapping)
+        and security_context.get("allowPrivilegeEscalation") is False
+        and security_context.get("readOnlyRootFilesystem") is True
+        and security_context.get("runAsNonRoot") is True
+        and _migration_v1_exact_value(
+            _MIGRATION_V1_VOLUME_MOUNTS,
+            value.get("volumeMounts"),
+        )
+        and value.get("terminationMessagePath") == "/dev/termination-log"
+        and value.get("terminationMessagePolicy") == "File"
+    )
+
+
+def _migration_v1_pod_spec_valid(
+    value: object,
+    *,
+    observed_pod: bool,
+) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    expected_fields = {
+        "automountServiceAccountToken",
+        "containers",
+        "dnsPolicy",
+        "enableServiceLinks",
+        "restartPolicy",
+        "schedulerName",
+        "securityContext",
+        "terminationGracePeriodSeconds",
+        "volumes",
+    }
+    if observed_pod:
+        expected_fields |= {
+            "nodeName",
+            "preemptionPolicy",
+            "priority",
+            "serviceAccount",
+            "serviceAccountName",
+            "tolerations",
+        }
+    containers = value.get("containers")
+    security_context = value.get("securityContext")
+    if (
+        set(value) != expected_fields
+        or value.get("automountServiceAccountToken") is not False
+        or value.get("enableServiceLinks") is not False
+        or value.get("restartPolicy") != "Never"
+        or not _migration_v1_exact_value(_MIGRATION_V1_POD_SECURITY, security_context)
+        or not isinstance(security_context, Mapping)
+        or security_context.get("runAsNonRoot") is not True
+        or not _migration_v1_exact_value(_MIGRATION_V1_VOLUMES, value.get("volumes"))
+        or not isinstance(containers, list)
+        or len(containers) != 1
+        or not _migration_v1_container_valid(containers[0])
+        or value.get("dnsPolicy") != "ClusterFirst"
+        or value.get("schedulerName") != "default-scheduler"
+        or _integer(value.get("terminationGracePeriodSeconds")) != 30
+    ):
+        return False
+    if not observed_pod:
+        return True
+    node_name = value.get("nodeName")
+    return (
+        isinstance(node_name, str)
+        and bool(node_name)
+        and value.get("preemptionPolicy") == "PreemptLowerPriority"
+        and _integer(value.get("priority")) == 0
+        and value.get("serviceAccount") == "default"
+        and value.get("serviceAccountName") == "default"
+        and _migration_v1_exact_value(
+            _MIGRATION_V1_DEFAULT_TOLERATIONS,
+            value.get("tolerations"),
+        )
+    )
+
+
+def _migration_v1_workload_contract_valid(
+    job: Mapping[str, Any],
+    pod: Mapping[str, Any],
+    *,
+    job_name: str,
+    job_uid: str,
+) -> bool:
+    """Validate the closed Kubernetes-1.36 migration-v1 evidence schema.
+
+    Historical Jobs cannot be compared with the current rendered release, so
+    retained evidence must match this versioned allowlist instead. A future
+    renderer shape needs a separate contract; widening v1 would silently
+    reinterpret evidence that was already admitted.
+    """
+
+    lineage = _migration_v1_lineage_metadata(job)
+    job_metadata = _metadata(job)
+    pod_metadata = _metadata(pod)
+    job_spec = job.get("spec")
+    pod_spec = pod.get("spec")
+    if (
+        lineage is None
+        or job_metadata is None
+        or pod_metadata is None
+        or not isinstance(job_spec, Mapping)
+        or not isinstance(pod_spec, Mapping)
+    ):
+        return False
+    expected_labels, expected_annotations = lineage
+    expected_job_fields = {
+        "activeDeadlineSeconds",
+        "backoffLimit",
+        "completionMode",
+        "completions",
+        "manualSelector",
+        "parallelism",
+        "podReplacementPolicy",
+        "selector",
+        "suspend",
+        "template",
+    }
+    if (
+        set(job_spec) != expected_job_fields
+        or _integer(job_spec.get("activeDeadlineSeconds")) != 600
+        or _integer(job_spec.get("backoffLimit")) != 1
+        or job_spec.get("completionMode") != "NonIndexed"
+        or _integer(job_spec.get("completions")) != 1
+        or job_spec.get("manualSelector") is not False
+        or _integer(job_spec.get("parallelism")) != 1
+        or job_spec.get("podReplacementPolicy") != "TerminatingOrFailed"
+        or job_spec.get("suspend") is not False
+    ):
+        return False
+    selector = job_spec.get("selector")
+    if selector != {"matchLabels": {"batch.kubernetes.io/controller-uid": job_uid}}:
+        return False
+    template = job_spec.get("template")
+    if not isinstance(template, Mapping) or set(template) != {"metadata", "spec"}:
+        return False
+    template_metadata = _metadata(template)
+    template_spec = template.get("spec")
+    if template_metadata is None or not _migration_v1_pod_spec_valid(
+        template_spec,
+        observed_pod=False,
+    ):
+        return False
+    controller_labels = {
+        "batch.kubernetes.io/controller-uid": job_uid,
+        "batch.kubernetes.io/job-name": job_name,
+        "controller-uid": job_uid,
+        "job-name": job_name,
+    }
+    template_labels = template_metadata.get("labels")
+    template_annotations = template_metadata.get("annotations")
+    if (
+        set(template_metadata) != {"annotations", "labels"}
+        or not isinstance(template_labels, Mapping)
+        or dict(template_labels) != {**expected_labels, **controller_labels}
+        or not isinstance(template_annotations, Mapping)
+        or dict(template_annotations) != expected_annotations
+    ):
+        return False
+    pod_labels = pod_metadata.get("labels")
+    pod_annotations = pod_metadata.get("annotations")
+    if (
+        not isinstance(pod_labels, Mapping)
+        or dict(pod_labels) != {**expected_labels, **controller_labels}
+        or not isinstance(pod_annotations, Mapping)
+        or dict(pod_annotations) != expected_annotations
+        or not _migration_v1_pod_spec_valid(pod_spec, observed_pod=True)
+        or not _expected_subset(
+            {"metadata": template_metadata, "spec": template_spec},
+            pod,
+        )
+    ):
+        return False
+    pod_name = pod_metadata.get("name")
+    generate_name = pod_metadata.get("generateName")
+    expected_generate_name = f"{job_name}-"
+    return (
+        isinstance(pod_name, str)
+        and generate_name == expected_generate_name
+        and pod_name.startswith(expected_generate_name[:58])
+        and re.fullmatch(r"[a-z0-9]{5}", pod_name[58:]) is not None
+    )
+
+
+def _migration_evidence_lifecycle_valid(
+    metadata: Mapping[str, Any],
+    *,
+    require_ownerless: bool,
+) -> bool:
+    finalizers = metadata.get("finalizers")
+    owner_references = metadata.get("ownerReferences")
+    return (
+        metadata.get("deletionTimestamp") is None
+        and metadata.get("deletionGracePeriodSeconds") is None
+        and (finalizers is None or (isinstance(finalizers, list) and not finalizers))
+        and (
+            not require_ownerless
+            or owner_references is None
+            or (isinstance(owner_references, list) and not owner_references)
+        )
+    )
+
+
+def _migration_job_pod_pair_valid(
+    job: Mapping[str, Any],
+    pod: Mapping[str, Any],
+) -> bool:
+    job_metadata = _metadata(job)
+    pod_metadata = _metadata(pod)
+    if job_metadata is None or pod_metadata is None:
+        return False
+    job_name = job_metadata.get("name")
+    job_uid = job_metadata.get("uid")
+    job_namespace = job_metadata.get("namespace")
+    job_labels = job_metadata.get("labels")
+    pod_labels = pod_metadata.get("labels")
+    pod_owner_references = pod_metadata.get("ownerReferences")
+    pod_status = pod.get("status")
+    return (
+        job.get("apiVersion") == "batch/v1"
+        and job.get("kind") == "Job"
+        and pod.get("apiVersion") == "v1"
+        and pod.get("kind") == "Pod"
+        and isinstance(job_name, str)
+        and _MIGRATION_JOB.fullmatch(job_name) is not None
+        and isinstance(job_uid, str)
+        and bool(job_uid)
+        and job_namespace == _NAMESPACE
+        and pod_metadata.get("namespace") == job_namespace
+        and _migration_evidence_lifecycle_valid(job_metadata, require_ownerless=True)
+        and _migration_evidence_lifecycle_valid(pod_metadata, require_ownerless=False)
+        and isinstance(job_labels, Mapping)
+        and job_labels.get("app") == "loom-personal-dev-migration"
+        and isinstance(pod_labels, Mapping)
+        and pod_labels.get("app") == "loom-personal-dev-migration"
+        and pod_labels.get("job-name") == job_name
+        and pod_labels.get("batch.kubernetes.io/job-name") == job_name
+        and isinstance(pod_owner_references, list)
+        and len(pod_owner_references) == 1
+        and isinstance(pod_owner_references[0], Mapping)
+        and pod_owner_references[0].get("blockOwnerDeletion") is True
+        and pod_owner_references[0].get("controller") is True
+        and pod_owner_references
+        == [
+            {
+                "apiVersion": "batch/v1",
+                "blockOwnerDeletion": True,
+                "controller": True,
+                "kind": "Job",
+                "name": job_name,
+                "uid": job_uid,
+            }
+        ]
+        and isinstance(pod_status, Mapping)
+        and pod_status.get("phase") == "Succeeded"
+        and _observed_digests(pod) == _observed_digests(job)
+        and _migration_v1_workload_contract_valid(
+            job,
+            pod,
+            job_name=job_name,
+            job_uid=job_uid,
+        )
+        and _security_boundary_matches(job, job)
+        and _security_boundary_matches({"kind": "Pod"}, pod)
+    )
 
 
 def _init_failed(pods: Sequence[Mapping[str, Any]]) -> bool:
@@ -1535,11 +1961,13 @@ def _observe_personal_dev_status(
                         "spec": claim_template["spec"],
                     }
         generated_pvcs = set(expected_generated_pvcs)
-        current_migration_name = next(
-            _metadata(item).get("name")  # type: ignore[union-attr]
-            for item in expected_namespaced
+        current_migration_identity = next(
+            identity
+            for identity, item in expected_namespaced_index.items()
             if item.get("kind") == "Job"
         )
+        current_migration_name = current_migration_identity[3]
+        current_migration = live_namespaced.get(current_migration_identity)
         historical_jobs = {
             identity: item
             for identity, item in live_namespaced.items()
@@ -1548,44 +1976,77 @@ def _observe_personal_dev_status(
             and isinstance(_metadata(item).get("name"), str)  # type: ignore[union-attr]
             and _MIGRATION_JOB.fullmatch(_metadata(item)["name"]) is not None  # type: ignore[index]
         }
-        historical_job_names = {
-            _metadata(item)["name"]: (identity, item)  # type: ignore[index]
-            for identity, item in historical_jobs.items()
-        }
-        historical_pods: dict[
+        historical_job_names: dict[
             str,
             list[tuple[tuple[str, str, str, str], dict[str, Any]]],
-        ] = {name: [] for name in historical_job_names}
+        ] = {}
+        for identity, item in historical_jobs.items():
+            name = _metadata(item)["name"]  # type: ignore[index]
+            historical_job_names.setdefault(name, []).append((identity, item))
+        migration_pods_by_job_name: dict[
+            str,
+            list[tuple[tuple[str, str, str, str], dict[str, Any]]],
+        ] = {name: [] for name in {*historical_job_names, current_migration_name}}
+        migration_pod_identities: set[tuple[str, str, str, str]] = set()
         for identity, pod in live_namespaced.items():
             if pod.get("kind") != "Pod":
                 continue
             metadata = _metadata(pod)
             labels = metadata.get("labels") if metadata else None
+            owner_references = metadata.get("ownerReferences") if metadata else None
+            referenced_names: set[str] = set()
+            if isinstance(labels, Mapping):
+                for key in ("job-name", "batch.kubernetes.io/job-name"):
+                    value = labels.get(key)
+                    if isinstance(value, str) and _MIGRATION_JOB.fullmatch(value) is not None:
+                        referenced_names.add(value)
+            if isinstance(owner_references, list):
+                for reference in owner_references:
+                    value = reference.get("name") if isinstance(reference, Mapping) else None
+                    if (
+                        isinstance(reference, Mapping)
+                        and reference.get("kind") == "Job"
+                        and isinstance(value, str)
+                        and _MIGRATION_JOB.fullmatch(value) is not None
+                    ):
+                        referenced_names.add(value)
+            if (
+                not (
+                    isinstance(labels, Mapping)
+                    and labels.get("app") == "loom-personal-dev-migration"
+                )
+                and not referenced_names
+            ):
+                continue
+            migration_pod_identities.add(identity)
             job_name = labels.get("job-name") if isinstance(labels, Mapping) else None
-            if isinstance(job_name, str) and job_name in historical_pods:
-                historical_pods[job_name].append((identity, pod))
-        history_drift = len(historical_jobs) > _MAX_MIGRATION_HISTORY
-        for name, (_identity_value, job) in historical_job_names.items():
+            if isinstance(job_name, str) and job_name in migration_pods_by_job_name:
+                migration_pods_by_job_name[job_name].append((identity, pod))
+        history_drift = False
+        for name, job_entries in historical_job_names.items():
             match = _MIGRATION_JOB.fullmatch(name)
+            pod_entries = migration_pods_by_job_name[name]
+            if len(job_entries) != 1 or len(pod_entries) != 1:
+                history_drift = True
+                continue
+            _identity_value, job = job_entries[0]
             digests = _observed_digests(job)
-            pod_entries = historical_pods[name]
             if (
                 match is None
                 or digests is None
                 or match.groups() != (digests[0][:16], digests[1][:16])
                 or _migration_state(job) != "succeeded"
                 or not _images_are_immutable(job)
-                or len(pod_entries) != 1
             ):
                 history_drift = True
                 continue
             _pod_identity, pod = pod_entries[0]
             job_spec = job.get("spec")
             template = job_spec.get("template") if isinstance(job_spec, Mapping) else None
-            pod_status = pod.get("status")
             if (
                 not isinstance(template, Mapping)
                 or _observed_digests(pod) != digests
+                or not _migration_job_pod_pair_valid(job, pod)
                 or not _expected_subset(
                     {
                         "metadata": template.get("metadata"),
@@ -1593,12 +2054,29 @@ def _observe_personal_dev_status(
                     },
                     pod,
                 )
-                or not isinstance(pod_status, Mapping)
-                or pod_status.get("phase") != "Succeeded"
             ):
                 history_drift = True
+        current_pod_entries = migration_pods_by_job_name[current_migration_name]
+        if (
+            current_migration is None
+            or len(current_pod_entries) != 1
+            or not _migration_job_pod_pair_valid(
+                current_migration,
+                current_pod_entries[0][1],
+            )
+        ):
+            history_drift = True
+        associated_migration_pod_identities = {
+            identity
+            for entries in migration_pods_by_job_name.values()
+            for identity, _pod in entries
+        }
+        if migration_pod_identities != associated_migration_pod_identities:
+            history_drift = True
         historical_identities = set(historical_jobs) | {
-            identity for entries in historical_pods.values() for identity, _pod in entries
+            identity
+            for name in historical_job_names
+            for identity, _pod in migration_pods_by_job_name[name]
         }
         current_pods = [pod for pod in pods if _identity(pod) not in historical_identities]
         allowed_extra = (

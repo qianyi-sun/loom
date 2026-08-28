@@ -592,15 +592,31 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   git commit -m "feat(dev): observe personal management shadow status"
   ```
 
-  Post-review correction: the observer retains at most eight internally
-  consistent, immutable, successful terminal migration Job/Pod pairs as
+  Post-review correction: the observer retains and validates every internally
+  consistent, immutable, successful terminal migration Job/Pod pair as
   historical evidence while still requiring the exact current trusted
-  migration. Malformed, failed, running, unpaired, or excess history blocks
-  readiness. It also accepts Kubernetes' exact `NamespaceList` shape, requires
-  exact list API versions, rejects pathologically nested JSON, and runs every
-  kubectl command against a read-only anonymous snapshot of one owner-only,
-  flattened, self-contained kubeconfig with no external credential files or
-  plugins.
+  migration and its exact Succeeded Pod. Both Job-name labels and the
+  controller owner reference bind each Pod to one live Job UID; duplicate,
+  orphaned, malformed, failed, running, unpaired, mutable-image, template-drifted,
+  or security-widened evidence blocks readiness. The existing 4 MiB response
+  and 4,096-item limits keep the complete inventory bounded without forcing
+  operators to delete durable evidence. It also accepts Kubernetes' exact
+  `NamespaceList` shape, requires exact list API versions, rejects
+  pathologically nested JSON, and runs every kubectl command against a read-only
+  anonymous snapshot of one owner-only, flattened, self-contained kubeconfig
+  with no external credential files or plugins.
+
+  Historical workload validation uses a closed migration-v1 allowlist rather
+  than treating each retained Job as its own expected template. It fixes the
+  Alembic command, Loom service digest repository, environment, container and
+  pod security contexts, service-account/token policy, resource envelope,
+  volumes, Job-controller bindings, and Kubernetes 1.36 API-materialized
+  defaults. Retained Jobs are ownerless; retained Jobs and Pods must not be
+  pending deletion or carry finalizers. Scheduler-assigned Pod placement is
+  accepted only on the observed Pod; forced placement fields in the Job
+  template are rejected. Future
+  renderer or Kubernetes shapes add a separately tested contract instead of
+  widening v1.
 
   Post-review input correction: the non-secret TOML profile is also read from
   one current-user-owned, single-link descriptor-stable regular file so a path
