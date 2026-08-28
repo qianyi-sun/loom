@@ -42,7 +42,7 @@ def test_pod_is_digest_pinned_and_restricted() -> None:
 
 
 def test_network_policy_allows_only_dns() -> None:
-    document = _MODULE.network_policy("b" * 40)
+    document = _MODULE.network_policy("b" * 40, "172.20.0.10")
     spec = document["spec"]
 
     assert spec["ingress"] == []
@@ -56,7 +56,8 @@ def test_network_policy_allows_only_dns() -> None:
                         "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                     },
                     "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
-                }
+                },
+                {"ipBlock": {"cidr": "172.20.0.10/32"}},
             ],
             "ports": [
                 {"port": 53, "protocol": "UDP"},

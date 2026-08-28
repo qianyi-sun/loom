@@ -9,6 +9,7 @@ execution node. All Kubernetes resources are removed before exit.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import subprocess
@@ -243,7 +244,10 @@ def service_account(candidate_sha: str) -> dict[str, Any]:
     }
 
 
-def network_policy(candidate_sha: str) -> dict[str, Any]:
+def network_policy(candidate_sha: str, dns_service_ip: str) -> dict[str, Any]:
+    dns_ip = ipaddress.ip_address(dns_service_ip)
+    if dns_ip.version != 4:
+        raise ValueError("CoreDNS service must use an IPv4 cluster IP")
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -259,8 +263,9 @@ def network_policy(candidate_sha: str) -> dict[str, Any]:
                             "namespaceSelector": {
                                 "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
                             },
-                    "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
-                        }
+                            "podSelector": {"matchLabels": {"k8s-app": "coredns"}},
+                        },
+                        {"ipBlock": {"cidr": f"{dns_ip}/32"}},
                     ],
                     "ports": [
                         {"port": 53, "protocol": "UDP"},
@@ -385,7 +390,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         kubectl.create(namespace(args.candidate_sha))
         created_namespace = True
         kubectl.create(service_account(args.candidate_sha))
-        kubectl.create(network_policy(args.candidate_sha))
+        dns_service = kubectl.get_json("--namespace", "kube-system", "service", "coredns")
+        dns_service_ip = dns_service.get("spec", {}).get("clusterIP")
+        if not isinstance(dns_service_ip, str) or not dns_service_ip:
+            raise RuntimeError("CoreDNS service has no cluster IP")
+        kubectl.create(network_policy(args.candidate_sha, dns_service_ip))
 
         denied: dict[str, str] = {}
         for name, document in forbidden_pods(args.candidate_sha, args.image).items():
@@ -451,6 +460,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "image": args.image,
             "image_id": container_status.get("imageID"),
             "container_id": container_status.get("containerID"),
+            "dns_service_ip": dns_service_ip,
             "node": node_name,
             "pod_uid": observed_pod.get("metadata", {}).get("uid"),
             "probe": probe,
