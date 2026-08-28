@@ -1630,6 +1630,175 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
         _assert_no_secret_patterns(rendered)
 
 
+def _openhands_events_jsonl(*, trial_id: UUID, artifact_hash: str) -> bytes:
+    emitted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    common = {
+        "trial_id": str(trial_id),
+        "step_id": "main",
+        "emitted_at": emitted_at,
+    }
+    lines = [
+        {
+            "seq": 1,
+            "kind": "openhands_sdk_runtime_provenance",
+            **common,
+            "sdk_version": "1.34.0",
+            "openhands_tools_version": "1.34.0",
+            "loom_bridge_revision": "1.0",
+        },
+        {
+            "seq": 2,
+            "kind": "openhands_sdk_artifact_ref",
+            **common,
+            "artifact_kind": "openhands_sdk.events",
+            "sandbox_path": ".loom/agent/openhands_sdk_events.json",
+            "content_hash": artifact_hash,
+            "size_bytes": 128,
+            "share_policy": "restricted",
+        },
+    ]
+    return b"".join((json.dumps(line) + "\n").encode() for line in lines)
+
+
+def _seed_openhands_trial(
+    *,
+    conn: object,
+    fake_s3: _FakeS3Client,
+    settings: LoomServiceSettings,
+    team_id: UUID,
+    trial_id: UUID,
+    task_id: str,
+) -> bytes:
+    native = json.dumps(
+        [
+            {
+                "event_type": "ActionEvent",
+                "tool_call_id": "call-1",
+                "tool_name": "terminal",
+                "reasoning_content": "inspect workspace",
+                "thought": [],
+                "tool_call": {
+                    "function": {
+                        "arguments": '{"command": "pwd"}',
+                    }
+                },
+            }
+        ]
+    ).encode()
+    artifact_hash = hashlib.sha256(native).hexdigest()
+    prefix = f"{team_id}/{trial_id}"
+    artifact_key = f"{prefix}/main/.loom/agent/openhands_sdk_events.json"
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
+        _openhands_events_jsonl(trial_id=trial_id, artifact_hash=artifact_hash)
+    )
+    fake_s3.objects[(settings.artifacts_bucket, artifact_key)] = native
+    conn.execute(
+        update(Trial)
+        .where(Trial.id == trial_id)
+        .values(
+            config={
+                "agent_name": "openhands-sdk",
+                "agent_model": {"provider": "yibu", "name": "gpt-4o"},
+            },
+            trajectory_index={
+                "trajectory_uri": (f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"),
+                "atif_uri": f"s3://{settings.trajectories_bucket}/{prefix}/atif.json",
+                "artifacts": [
+                    {
+                        "step_name": "main",
+                        "bucket": settings.artifacts_bucket,
+                        "key": artifact_key,
+                        "size": len(native),
+                        "content_hash": f"sha256:{artifact_hash}",
+                    },
+                ],
+            },
+        )
+    )
+    return native
+
+
+async def test_openhands_export_from_typed_events(
+    delivery_setup: dict[str, object],
+    postgres_url: str,
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    supplemental_batch_id = delivery_setup["supplemental_batch_id"]
+    targeted_batch_id = delivery_setup["targeted_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    fake_s3: _FakeS3Client = delivery_setup["fake_s3"]  # type: ignore[assignment]
+    settings: LoomServiceSettings = delivery_setup["settings"]  # type: ignore[assignment]
+    team_id: UUID = delivery_setup["team_id"]  # type: ignore[assignment]
+
+    task_bundle_key = f"{task_ids[0]}/task.toml"
+    fake_s3.objects[("task-bundles", task_bundle_key)] = (f'id = "{task_ids[0]}"\n').encode()
+    fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = b"solve the task\n"
+
+    sync_engine = create_engine(postgres_url)
+    native_by_trial: dict[UUID, bytes] = {}
+    try:
+        with sync_engine.begin() as conn:
+            for task_id in task_ids:
+                trial_id = selected_trials[task_id]
+                native_by_trial[trial_id] = _seed_openhands_trial(
+                    conn=conn,
+                    fake_s3=fake_s3,
+                    settings=settings,
+                    team_id=team_id,
+                    trial_id=trial_id,
+                    task_id=task_id,
+                )
+    finally:
+        sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "mode": "openhands-export",
+                "supplemental_batch_ids": [
+                    str(supplemental_batch_id),
+                    str(targeted_batch_id),
+                ],
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["manifest"]["mode"] == "openhands-export"
+    assert body["manifest"]["export_profile"] == {
+        "name": "openhands-export",
+        "version": "1",
+        "source_of_truth": "native/openhands_sdk_events.json",
+        "audit_spine": "loom_trajectory.jsonl",
+        "model_input_trajectory": "model_input_trajectory.json",
+        "execution_trajectory": "trajectory.json",
+    }
+    assert body["archive_filename"].endswith("-openhands-export.tar.gz")
+
+    first_task = task_ids[0]
+    first_trial = selected_trials[first_task]
+    archive_bytes = fake_s3.objects[(body["storage"]["bucket"], body["storage"]["key"])]
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        names = set(tar.getnames())
+        assert "derived/sft_messages.jsonl" not in names
+        assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/native/openhands_sdk_events.json" in names
+        trajectory = json.load(
+            tar.extractfile(f"agent_runs/{first_task}/{first_trial}/trajectory.json")  # type: ignore[arg-type]
+        )
+        assert trajectory["schema_version"] == "openhands-export-projection"
+        assert trajectory["events"][0]["reasoning_content"] == "inspect workspace"
+        native = tar.extractfile(  # type: ignore[union-attr]
+            f"agent_runs/{first_task}/{first_trial}/native/openhands_sdk_events.json"
+        ).read()
+        assert native == native_by_trial[first_trial]
+
+
 async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
     delivery_setup: dict[str, object],
     postgres_url: str,
