@@ -15,9 +15,7 @@ from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
 
 _MAX_RESPONSE_BYTES = 1 << 20
 _VALUE_RE = re.compile(r"^[a-z0-9*][a-z0-9*/.:-]{0,127}$")
-_NON_RESOURCE_URL_RE = re.compile(
-    r"^/(?:\.well-known/)?[a-z0-9*][a-z0-9*/.:-]{0,126}$"
-)
+_NON_RESOURCE_URL_RE = re.compile(r"^/(?:\.well-known/)?[a-z0-9*][a-z0-9*/.:-]{0,126}$")
 _SAFE_REVIEW_RESOURCES = frozenset(
     {
         ("authentication.k8s.io", "selfsubjectreviews"),
@@ -168,6 +166,7 @@ def _protected_rules(payload: bytes) -> tuple[tuple[str, ...], tuple[str, ...], 
         if "*" in urls:
             protected_resources.add("*")
         canonical_rules.append({"nonResourceURLs": sorted(urls), "verbs": sorted(verbs)})
+    canonical_rules.sort(key=lambda rule: json.dumps(rule, sort_keys=True, separators=(",", ":")))
     digest = hashlib.sha256(
         json.dumps(canonical_rules, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
