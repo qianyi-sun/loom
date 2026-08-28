@@ -55,7 +55,7 @@ from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore
-from .systemd import SystemdUserManager
+from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
 
 
 class _ArgumentError(ValueError):
@@ -1050,7 +1050,7 @@ def _run(
         check=False,
         capture_output=True,
         text=True,
-        timeout=240,
+        timeout=MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS,
         env=environment,
     )
 

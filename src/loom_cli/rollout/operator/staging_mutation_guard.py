@@ -38,7 +38,11 @@ from .config import OperatorConfig, candidate_sha_from_runner_repo
 from .envelope import fixed_operator_config_path
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
-from .readonly_database_client import open_readonly_database_guard_query
+from .readonly_database_client import (
+    READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS,
+    READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
+    open_readonly_database_guard_query,
+)
 
 _NAMESPACE = "loom-staging"
 _CRONJOB_NAME = "loom-staging-data-lifecycle"
@@ -51,6 +55,7 @@ _CANDIDATE_ANNOTATION = "loom.carin.dev/staging-mutation-guard-candidate-sha"
 _TREE_ANNOTATION = "loom.carin.dev/staging-mutation-guard-candidate-tree"
 _GUARD_ANNOTATIONS = frozenset({_REQUEST_ANNOTATION, _CANDIDATE_ANNOTATION, _TREE_ANNOTATION})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _UID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _RESOURCE_VERSION_RE = re.compile(r"^[1-9][0-9]*$")
 _JOB_NAME_RE = re.compile(r"^loom-staging-data-lifecycle-[1-9][0-9]*$")
@@ -58,9 +63,21 @@ _MAX_KUBERNETES_OUTPUT = 1024 * 1024
 _MAX_EVIDENCE_BYTES = 64 * 1024
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
-_KUBERNETES_COMMAND_TIMEOUT_SECONDS = 120
-_SYSTEMD_COMMAND_TIMEOUT_SECONDS = 30
+MUTATION_GUARD_KUBERNETES_COMMAND_TIMEOUT_SECONDS = 120
+MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS = 30
+_KUBERNETES_COMMAND_TIMEOUT_SECONDS = MUTATION_GUARD_KUBERNETES_COMMAND_TIMEOUT_SECONDS
+_SYSTEMD_COMMAND_TIMEOUT_SECONDS = MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS
 _CANDIDATE_COMMAND_TIMEOUT_SECONDS = 15
+_STOP_REACTION_DELAY_SECONDS = 1
+_EVIDENCE_PUBLICATION_MARGIN_SECONDS = 30
+MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS = (
+    _STOP_REACTION_DELAY_SECONDS
+    + READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS  # final lock-health query
+    + 2 * MUTATION_GUARD_KUBERNETES_COMMAND_TIMEOUT_SECONDS  # CronJob GET plus PATCH
+    + READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS  # advisory unlock query
+    + READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS
+    + _EVIDENCE_PUBLICATION_MARGIN_SECONDS
+)
 _DEFAULT_ACTIVE_WAITS = 1320
 _DEFAULT_LOCK_ATTEMPTS = 120
 _DEFAULT_OWNER_LAUNCH_GRACE_SECONDS = 30
@@ -109,6 +126,14 @@ CandidateResolver = Callable[[OperatorConfig], tuple[str, str]]
 GuardState = Literal["ready", "released"]
 
 
+def validate_mutation_guard_generation(generation: str) -> str:
+    """Return one exact non-secret per-acquisition generation."""
+
+    if not isinstance(generation, str) or _GENERATION_RE.fullmatch(generation) is None:
+        raise MutationGuardError("mutation guard generation identity is invalid")
+    return generation
+
+
 def _hash_json(value: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(dict(value), sort_keys=True, separators=(",", ":")).encode()
@@ -121,6 +146,7 @@ class MutationGuardEvidence:
     request_id: str
     candidate_sha: str
     candidate_tree: str
+    generation: str
     mutation_epoch: int
     guard_pid: int
     database_backend_pid: int
@@ -139,6 +165,7 @@ class MutationGuardEvidence:
             self.schema_version != 1
             or _SHA_RE.fullmatch(self.candidate_sha) is None
             or _SHA_RE.fullmatch(self.candidate_tree) is None
+            or _GENERATION_RE.fullmatch(self.generation) is None
             or type(self.mutation_epoch) is not int
             or self.mutation_epoch < 0
             or type(self.guard_pid) is not int
@@ -163,6 +190,7 @@ class MutationGuardEvidence:
             "cronjob_uid": self.cronjob_uid,
             "database_backend_pid": self.database_backend_pid,
             "deadline_unix_seconds": self.deadline_unix_seconds,
+            "generation": self.generation,
             "guard_pid": self.guard_pid,
             "mutation_epoch": self.mutation_epoch,
             "request_id": self.request_id,
@@ -184,6 +212,7 @@ class MutationGuardEvidence:
         request_id: str,
         candidate_sha: str,
         candidate_tree: str,
+        generation: str,
         mutation_epoch: int,
         guard_pid: int,
         database_backend_pid: int,
@@ -198,6 +227,7 @@ class MutationGuardEvidence:
             "cronjob_uid": cronjob_uid,
             "database_backend_pid": database_backend_pid,
             "deadline_unix_seconds": deadline_unix_seconds,
+            "generation": generation,
             "guard_pid": guard_pid,
             "mutation_epoch": mutation_epoch,
             "request_id": request_id,
@@ -210,6 +240,7 @@ class MutationGuardEvidence:
             request_id=request_id,
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
+            generation=generation,
             mutation_epoch=mutation_epoch,
             guard_pid=guard_pid,
             database_backend_pid=database_backend_pid,
@@ -229,6 +260,7 @@ class MutationGuardEvidence:
             "database_backend_pid",
             "deadline_unix_seconds",
             "evidence_digest",
+            "generation",
             "guard_pid",
             "mutation_epoch",
             "request_id",
@@ -910,6 +942,7 @@ class MutationGuardManager:
             if (
                 released is None
                 or released.request_id != request_id
+                or released.generation != evidence.generation
                 or released.state != "released"
             ):
                 raise MutationGuardError(
@@ -1124,6 +1157,7 @@ def hold_request_guard(
     *,
     config: OperatorConfig,
     request_id: str,
+    generation: str,
     service_uid: int,
     run: KubernetesRunner,
     query_context: QueryContext = open_readonly_database_guard_query,
@@ -1152,6 +1186,7 @@ def hold_request_guard(
         validate_safe_identifier(request_id, "request_id")
     except ValueError as exc:
         raise MutationGuardError("mutation guard request identity is invalid") from exc
+    validate_mutation_guard_generation(generation)
     candidate_sha, candidate_tree = resolve_candidate(config)
     if _SHA_RE.fullmatch(candidate_sha) is None or _SHA_RE.fullmatch(candidate_tree) is None:
         raise MutationGuardError("mutation guard candidate identity is invalid")
@@ -1297,6 +1332,7 @@ def hold_request_guard(
                     request_id=request_id,
                     candidate_sha=candidate_sha,
                     candidate_tree=candidate_tree,
+                    generation=generation,
                     mutation_epoch=mutation_epoch,
                     guard_pid=os.getpid(),
                     database_backend_pid=backend_pid,
@@ -1403,6 +1439,7 @@ def hold_request_guard(
         request_id=ready.request_id,
         candidate_sha=ready.candidate_sha,
         candidate_tree=ready.candidate_tree,
+        generation=ready.generation,
         mutation_epoch=ready.mutation_epoch,
         guard_pid=ready.guard_pid,
         database_backend_pid=ready.database_backend_pid,
@@ -1436,8 +1473,10 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     hold = subparsers.add_parser("hold", allow_abbrev=False)
     hold.add_argument("--request-id", required=True)
+    hold.add_argument("--generation", required=True)
     fence = subparsers.add_parser("fence", allow_abbrev=False)
     fence.add_argument("--request-id", required=True)
+    fence.add_argument("--generation", required=True)
     subparsers.add_parser("reconcile", allow_abbrev=False)
     return parser
 
@@ -1486,13 +1525,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             hold_request_guard(
                 config=config,
                 request_id=args.request_id,
+                generation=args.generation,
                 service_uid=service_uid,
                 run=run,
                 stop_requested=stopped.is_set,
                 owner_running=systemd.mutation_guard_owner_running,
             )
         elif args.command == "fence":
-            systemd.fence_mutation_guard_owners(args.request_id)
+            systemd.fence_mutation_guard_owners(args.request_id, args.generation)
         else:
             result = reconcile_orphaned_guard(
                 config=config,
@@ -1517,6 +1557,10 @@ if __name__ == "__main__":  # pragma: no cover - service entrypoint
 
 
 __all__ = [
+    "MUTATION_GUARD_KUBERNETES_COMMAND_TIMEOUT_SECONDS",
+    "MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS",
+    "MUTATION_GUARD_RUNTIME_SECONDS",
+    "MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS",
     "MutationGuardError",
     "MutationGuardEvidence",
     "MutationGuardManager",
@@ -1525,4 +1569,5 @@ __all__ = [
     "main",
     "read_mutation_guard_evidence",
     "reconcile_orphaned_guard",
+    "validate_mutation_guard_generation",
 ]

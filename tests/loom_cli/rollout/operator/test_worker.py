@@ -1115,6 +1115,7 @@ def test_default_worker_run_uses_exact_sanitized_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom_cli.rollout.operator.systemd import SystemdUserManager
     from tests.loom_cli.rollout.operator.test_broker import make_config
 
     config = make_config(tmp_path)
@@ -1127,11 +1128,23 @@ def test_default_worker_run_uses_exact_sanitized_environment(
         timeouts.append(kwargs.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    guard_launch = SystemdUserManager(
+        config,
+        service_uid=1234,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+    ).start_mutation_guard_argv(REQUEST_ID, "1" * 32)
+    service_stop_timeout = int(
+        next(item for item in guard_launch if item.startswith("TimeoutStopSec="))
+        .removeprefix("TimeoutStopSec=")
+        .removesuffix("s")
+    )
     monkeypatch.setattr(subprocess, "run", fake_run)
     worker_module._run(["systemctl", "--user", "show"], environment=expected)
 
     assert environments == [expected]
-    assert timeouts == [240]
+    assert len(timeouts) == 1
+    assert type(timeouts[0]) is int
+    assert timeouts[0] > service_stop_timeout + 3 * 30
 
 
 @pytest.mark.parametrize(

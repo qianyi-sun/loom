@@ -16,7 +16,9 @@ from loom_cli.rollout.final_gate_command_runner import FINAL_GATE_MAX_ELAPSED_SE
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.staging_mutation_guard import (
     MutationGuardEvidence,
+    MutationGuardManager,
     guard_evidence_path,
+    read_mutation_guard_evidence,
 )
 from loom_cli.rollout.operator.systemd import (
     _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS,
@@ -35,6 +37,8 @@ CANDIDATE_SHA = "a" * 40
 CANDIDATE_RUNTIME = Path(f"/opt/loom-staging-runner/candidates/{CANDIDATE_SHA}")
 CANDIDATE_REPO = CANDIDATE_RUNTIME / "repo"
 CANDIDATE_VENV = CANDIDATE_RUNTIME / "venv"
+GENERATION_ONE = "1" * 32
+GENERATION_TWO = "2" * 32
 
 
 def make_config() -> OperatorConfig:
@@ -401,14 +405,17 @@ class MutationGuardRunner:
         self.service_uid = service_uid
         self.running = False
         self.evidence_pid = 4321
+        self.generation: str | None = None
         self.absence_delay = 0
         self.calls: list[list[str]] = []
 
     def _publish(self, state: Literal["ready", "released"]) -> None:
+        assert self.generation is not None
         evidence = MutationGuardEvidence.build(
             request_id="req-alpha",
             candidate_sha=CANDIDATE_SHA,
             candidate_tree="b" * 40,
+            generation=self.generation,
             mutation_epoch=100,
             guard_pid=self.evidence_pid,
             database_backend_pid=9876,
@@ -427,6 +434,8 @@ class MutationGuardRunner:
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
         if argv[0] == "systemd-run":
+            generation_index = argv.index("--generation")
+            self.generation = argv[generation_index + 1]
             self.running = True
             self._publish("ready")
             return subprocess.CompletedProcess(argv, 0, "", "")
@@ -455,17 +464,23 @@ class MutationGuardRunner:
         raise AssertionError(argv)
 
 
-def _mutation_guard_manager(tmp_path: Path):
+def _mutation_guard_manager(
+    tmp_path: Path,
+    *,
+    generations: list[str] | None = None,
+):
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700)
     config = replace(make_config(), runtime_root=runtime_root)
     runner = MutationGuardRunner(config, service_uid=os.getuid())
+    generation_values = iter(generations or [GENERATION_ONE, GENERATION_TWO])
     manager = SystemdUserManager(
         config,
         service_uid=os.getuid(),
         run=runner,
         sleep=lambda _seconds: None,
         guard_readiness_timeout_seconds=2,
+        guard_generation=lambda: next(generation_values),
     )
     return manager, runner
 
@@ -492,7 +507,8 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
     assert "Restart=no" in launch
     assert not any(item.startswith("RestartSec=") for item in launch)
     assert "KillMode=mixed" in launch
-    assert "TimeoutStopSec=180s" in launch
+    stop_timeout = next(item for item in launch if item.startswith("TimeoutStopSec="))
+    assert int(stop_timeout.removeprefix("TimeoutStopSec=").removesuffix("s")) > 0
     runtime_property = next(item for item in launch if item.startswith("RuntimeMaxSec="))
     assert runtime_property.endswith("s")
     assert int(runtime_property.removeprefix("RuntimeMaxSec=").removesuffix("s")) > 0
@@ -520,19 +536,115 @@ def test_mutation_guard_start_is_exact_sanitized_and_readiness_bound(tmp_path: P
         "fence",
         "--request-id",
         "req-alpha",
+        "--generation",
+        GENERATION_ONE,
     ]
-    assert launch[-5:] == [
+    assert launch[-7:] == [
         "-m",
         "loom_cli.rollout.operator.staging_mutation_guard",
         "hold",
         "--request-id",
         "req-alpha",
+        "--generation",
+        GENERATION_ONE,
     ]
     assert "/usr/bin/env" in launch
     assert "-i" in launch
     assert not any("SECRET" in item or "TOKEN" in item for item in launch)
     status = manager.show_mutation_guard("req-alpha")
     assert status is not None and status.is_running
+
+
+def test_mutation_guard_release_then_reacquire_retires_only_exact_released_generation(
+    tmp_path: Path,
+) -> None:
+    systemd, runner = _mutation_guard_manager(
+        tmp_path,
+        generations=[GENERATION_ONE, GENERATION_TWO],
+    )
+    guards = MutationGuardManager(
+        config=systemd.config,
+        service_uid=os.getuid(),
+        systemd=systemd,
+        resolve_candidate=lambda _config: (CANDIDATE_SHA, "b" * 40),
+        wall_time=lambda: 1_900_000_000.0,
+    )
+
+    first = guards.acquire("req-alpha")
+    released = guards.release("req-alpha")
+    second = guards.acquire("req-alpha")
+
+    assert (first.generation, released.generation, second.generation) == (
+        GENERATION_ONE,
+        GENERATION_ONE,
+        GENERATION_TWO,
+    )
+    assert first != second
+    assert len([call for call in runner.calls if call[0] == "systemd-run"]) == 2
+    assert (
+        read_mutation_guard_evidence(
+            guard_evidence_path(systemd.config, "req-alpha"),
+            service_uid=os.getuid(),
+        ).generation
+        == GENERATION_TWO
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_evidence",
+    [
+        pytest.param("ready", id="non-released"),
+        pytest.param("malformed", id="malformed"),
+        pytest.param("foreign-request", id="foreign-request"),
+        pytest.param("foreign-candidate", id="foreign-candidate"),
+    ],
+)
+def test_mutation_guard_reacquire_refuses_unsafe_preexisting_evidence(
+    tmp_path: Path,
+    unsafe_evidence: str,
+) -> None:
+    systemd, runner = _mutation_guard_manager(
+        tmp_path,
+        generations=[GENERATION_ONE, GENERATION_TWO],
+    )
+    guards = MutationGuardManager(
+        config=systemd.config,
+        service_uid=os.getuid(),
+        systemd=systemd,
+        resolve_candidate=lambda _config: (CANDIDATE_SHA, "b" * 40),
+        wall_time=lambda: 1_900_000_000.0,
+    )
+    guards.acquire("req-alpha")
+    guards.release("req-alpha")
+    evidence_path = guard_evidence_path(systemd.config, "req-alpha")
+    if unsafe_evidence == "ready":
+        runner._publish("ready")
+    elif unsafe_evidence == "malformed":
+        evidence_path.write_text("not-json\n")
+        evidence_path.chmod(0o600)
+    else:
+        foreign = MutationGuardEvidence.build(
+            request_id="req-other" if unsafe_evidence == "foreign-request" else "req-alpha",
+            candidate_sha=("c" * 40 if unsafe_evidence == "foreign-candidate" else CANDIDATE_SHA),
+            candidate_tree="b" * 40,
+            generation=GENERATION_ONE,
+            mutation_epoch=100,
+            guard_pid=4321,
+            database_backend_pid=9876,
+            deadline_unix_seconds=2_000_000_000,
+            cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+            suspended_resource_version="11",
+            state="released",
+        )
+        evidence_path.write_text(
+            json.dumps(foreign.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        evidence_path.chmod(0o600)
+
+    with pytest.raises(UnitLaunchError, match="evidence"):
+        guards.acquire("req-alpha")
+
+    assert len([call for call in runner.calls if call[0] == "systemd-run"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -631,12 +743,15 @@ def _mutation_guard_fence_manager(
     *,
     owner_stdout: str,
     evidence_state: Literal["ready", "released", "missing", "unsafe"],
+    evidence_generation: str = GENERATION_ONE,
 ) -> tuple[SystemdUserManager, MutationGuardFenceRunner]:
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir(mode=0o700)
     config = replace(make_config(), runtime_root=runtime_root)
     if evidence_state in {"ready", "released"}:
-        MutationGuardRunner(config, service_uid=os.getuid())._publish(evidence_state)
+        publisher = MutationGuardRunner(config, service_uid=os.getuid())
+        publisher.generation = evidence_generation
+        publisher._publish(evidence_state)
     elif evidence_state == "unsafe":
         path = guard_evidence_path(config, "req-alpha")
         path.parent.mkdir(mode=0o700)
@@ -656,9 +771,25 @@ def test_mutation_guard_fence_is_noop_after_exact_verified_release(tmp_path: Pat
         evidence_state="released",
     )
 
-    manager.fence_mutation_guard_owners("req-alpha")
+    manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
 
     assert runner.calls == []
+
+
+def test_mutation_guard_old_generation_stop_hook_cannot_authorize_new_release(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=("loom-staging-rollout-req-alpha-1.service loaded active running attempt\n"),
+        evidence_state="released",
+        evidence_generation=GENERATION_TWO,
+    )
+
+    manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
+
+    assert [call[2] for call in runner.calls] == ["list-units", "kill"]
+    assert runner.calls[-1][-1] == "loom-staging-rollout-req-alpha-1.service"
 
 
 @pytest.mark.parametrize(
@@ -682,6 +813,7 @@ def test_mutation_guard_fence_rejects_foreign_released_evidence_bindings(
         request_id=evidence_request_id,
         candidate_sha=evidence_candidate_sha,
         candidate_tree="b" * 40,
+        generation=GENERATION_ONE,
         mutation_epoch=100,
         guard_pid=4321,
         database_backend_pid=9876,
@@ -695,7 +827,7 @@ def test_mutation_guard_fence_rejects_foreign_released_evidence_bindings(
     path.write_text(json.dumps(evidence.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
     path.chmod(0o600)
 
-    manager.fence_mutation_guard_owners("req-alpha")
+    manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
 
     assert [call[2] for call in runner.calls] == ["list-units", "kill"]
     assert runner.calls[-1][-1] == "loom-staging-rollout-req-alpha-1.service"
@@ -723,7 +855,7 @@ def test_mutation_guard_fence_hard_kills_only_exact_live_owners(
         evidence_state=evidence_state,
     )
 
-    manager.fence_mutation_guard_owners("req-alpha")
+    manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
 
     assert runner.calls == [
         [
@@ -782,7 +914,7 @@ def test_mutation_guard_fence_attempts_every_exact_owner_without_recursive_stop(
     manager._run = fail_first_kill
 
     with pytest.raises(SystemdOperationError, match="fence"):
-        manager.fence_mutation_guard_owners("req-alpha")
+        manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
 
     assert [call[2] for call in runner.calls] == ["list-units", "kill", "kill"]
     assert [call[-1] for call in runner.calls[1:]] == [
@@ -813,7 +945,7 @@ def test_mutation_guard_fence_validates_complete_inventory_before_any_kill(
     )
 
     with pytest.raises(SystemdQueryError, match="owner"):
-        manager.fence_mutation_guard_owners("req-alpha")
+        manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
 
     assert len(runner.calls) == 1
     assert runner.calls[0][0:3] == ["systemctl", "--user", "list-units"]
@@ -836,19 +968,30 @@ def test_mutation_guard_start_covers_complete_protected_ownership_window(tmp_pat
     assert runtime_seconds > protected_ownership_window
 
 
-def test_mutation_guard_stop_timeout_exceeds_complete_unsafe_fence(tmp_path: Path) -> None:
-    manager, runner = _mutation_guard_manager(tmp_path)
-
-    manager.start_mutation_guard("req-alpha")
-
-    launch = next(call for call in runner.calls if call[0] == "systemd-run")
+def test_mutation_guard_stop_timeout_exceeds_normal_release_and_complete_unsafe_fence() -> None:
+    manager = SystemdUserManager(
+        make_config(),
+        service_uid=SERVICE_UID,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    launch = manager.start_mutation_guard_argv("req-alpha", GENERATION_ONE)
     stop_timeout = int(
         next(item for item in launch if item.startswith("TimeoutStopSec="))
         .removeprefix("TimeoutStopSec=")
         .removesuffix("s")
     )
+    complete_normal_release = (
+        1  # worst-case reaction delay before the hold loop observes SIGTERM
+        + 15  # lock-health statement
+        + 2 * 120  # CronJob GET plus PATCH
+        + 15  # advisory unlock statement
+        + 2 * 5  # graceful then forced database tunnel process teardown
+        + 1  # bounded stderr-drain teardown
+        + 30  # released-evidence publication margin
+    )
     complete_unsafe_fence = 3 * 30  # one inventory plus two exact owner kills
 
+    assert stop_timeout > complete_normal_release
     assert stop_timeout > complete_unsafe_fence
 
 

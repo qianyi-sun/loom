@@ -2643,6 +2643,8 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom_cli.rollout.operator.systemd import SystemdUserManager
+
     config = make_config(tmp_path)
     expected = sanitized_child_environment(config, service_uid=1234)
     run_environments: list[dict[str, str] | None] = []
@@ -2673,13 +2675,28 @@ def test_default_broker_run_and_stream_use_exact_sanitized_environment(
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(subprocess, "Popen", FakePopen)
 
+    guard_launch = SystemdUserManager(
+        config,
+        service_uid=1234,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+    ).start_mutation_guard_argv(REQUEST_ID, "1" * 32)
+    service_stop_timeout = int(
+        next(item for item in guard_launch if item.startswith("TimeoutStopSec="))
+        .removeprefix("TimeoutStopSec=")
+        .removesuffix("s")
+    )
+
     broker_module._run(["git", "status"], environment=expected)
     broker_module._run(["systemd-run", "--user"], environment=expected)
     broker_module._run(["systemctl", "--user", "show"], environment=expected)
     stream = broker_module._stream(["journalctl"], environment=expected)
     stream.close()
     assert run_environments == [expected, expected, expected]
-    assert run_timeouts == [30, 240, 240]
+    assert run_timeouts[0] == 30
+    assert all(
+        type(timeout) is int and timeout > service_stop_timeout + 3 * 30
+        for timeout in run_timeouts[1:]
+    )
     assert popen_environments == [expected]
 
 

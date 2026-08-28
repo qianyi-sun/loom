@@ -90,6 +90,7 @@ from .redaction import known_secrets_from_sources, redact_rollout_text
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore, RequestStoreError
 from .systemd import (
+    MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS,
     JournalLineStream,
     SystemdOperationError,
     SystemdUserManager,
@@ -1970,7 +1971,11 @@ def _run(
     *,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    timeout = 240 if argv and argv[0] in {"systemctl", "systemd-run"} else 30
+    timeout = (
+        MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS
+        if argv and argv[0] in {"systemctl", "systemd-run"}
+        else 30
+    )
     return subprocess.run(
         argv,
         check=False,

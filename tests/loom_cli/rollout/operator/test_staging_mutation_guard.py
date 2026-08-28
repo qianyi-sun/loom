@@ -29,6 +29,7 @@ from tests.loom_cli.rollout.operator.test_systemd import make_config
 _REQUEST_ID = "req-alpha"
 _CANDIDATE_SHA = "a" * 40
 _CANDIDATE_TREE = "b" * 40
+_GENERATION = "1" * 32
 _TRY_SQL = "SELECT pg_try_advisory_lock(5498691230183247727) AS acquired"
 _EPOCH_SQL = (
     "SELECT epoch AS mutation_epoch FROM staging_mutation_epochs "
@@ -254,6 +255,7 @@ def _hold(
     return hold_request_guard(
         config=config,
         request_id=_REQUEST_ID,
+        generation=_GENERATION,
         service_uid=os.getuid(),
         run=cluster,
         query_context=lambda **_kwargs: _query_context(
@@ -288,6 +290,7 @@ def test_guard_suspends_waits_locks_and_restores_before_unlock(tmp_path: Path) -
     evidence = hold_request_guard(
         config=config,
         request_id=_REQUEST_ID,
+        generation=_GENERATION,
         service_uid=os.getuid(),
         run=cluster,
         query_context=lambda **_kwargs: _query_context([False, True], cluster.events),
@@ -302,10 +305,12 @@ def test_guard_suspends_waits_locks_and_restores_before_unlock(tmp_path: Path) -
     assert ready_documents[0]["request_id"] == _REQUEST_ID
     assert ready_documents[0]["candidate_sha"] == _CANDIDATE_SHA
     assert ready_documents[0]["candidate_tree"] == _CANDIDATE_TREE
+    assert ready_documents[0]["generation"] == _GENERATION
     assert ready_documents[0]["mutation_epoch"] == 100
     assert ready_documents[0]["guard_pid"] == os.getpid()
     assert ready_documents[0]["database_backend_pid"] == 4321
     assert evidence.state == "released"
+    assert evidence.generation == _GENERATION
     assert (
         read_mutation_guard_evidence(
             guard_evidence_path(config, _REQUEST_ID), service_uid=os.getuid()
@@ -650,6 +655,7 @@ def test_guard_lock_exhaustion_restores_without_ready_evidence(tmp_path: Path) -
         hold_request_guard(
             config=config,
             request_id=_REQUEST_ID,
+            generation=_GENERATION,
             service_uid=os.getuid(),
             run=cluster,
             query_context=lambda **_kwargs: _query_context([False, False], cluster.events),
@@ -770,6 +776,43 @@ def test_guard_evidence_reader_rejects_digest_drift_and_symlink(tmp_path: Path) 
         read_mutation_guard_evidence(path, service_uid=os.getuid())
 
 
+def test_guard_evidence_round_trip_requires_exact_generation() -> None:
+    evidence = MutationGuardEvidence.build(
+        request_id=_REQUEST_ID,
+        candidate_sha=_CANDIDATE_SHA,
+        candidate_tree=_CANDIDATE_TREE,
+        generation=_GENERATION,
+        mutation_epoch=100,
+        guard_pid=4321,
+        database_backend_pid=9876,
+        deadline_unix_seconds=2_000_000_000,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="ready",
+    )
+
+    document = evidence.to_dict()
+    assert document["generation"] == _GENERATION
+    assert MutationGuardEvidence.from_dict(document) == evidence
+    document.pop("generation")
+    with pytest.raises(MutationGuardError, match="fields"):
+        MutationGuardEvidence.from_dict(document)
+    with pytest.raises(MutationGuardError, match="identity"):
+        MutationGuardEvidence.build(
+            request_id=_REQUEST_ID,
+            candidate_sha=_CANDIDATE_SHA,
+            candidate_tree=_CANDIDATE_TREE,
+            generation="A" * 32,
+            mutation_epoch=100,
+            guard_pid=4321,
+            database_backend_pid=9876,
+            deadline_unix_seconds=2_000_000_000,
+            cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+            suspended_resource_version="11",
+            state="ready",
+        )
+
+
 def test_guard_evidence_is_private_regular_service_state(tmp_path: Path) -> None:
     cluster = _Cluster()
     config = _config(tmp_path)
@@ -789,6 +832,7 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
         request_id=_REQUEST_ID,
         candidate_sha=_CANDIDATE_SHA,
         candidate_tree=_CANDIDATE_TREE,
+        generation=_GENERATION,
         mutation_epoch=100,
         guard_pid=4321,
         database_backend_pid=9876,
@@ -818,6 +862,7 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
                 request_id=ready.request_id,
                 candidate_sha=ready.candidate_sha,
                 candidate_tree=ready.candidate_tree,
+                generation=ready.generation,
                 mutation_epoch=ready.mutation_epoch,
                 guard_pid=ready.guard_pid,
                 database_backend_pid=ready.database_backend_pid,
@@ -847,6 +892,7 @@ def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_dri
         request_id=_REQUEST_ID,
         candidate_sha=_CANDIDATE_SHA,
         candidate_tree="c" * 40,
+        generation=_GENERATION,
         mutation_epoch=100,
         guard_pid=4321,
         database_backend_pid=9876,
@@ -870,6 +916,7 @@ def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_dri
                 request_id=drifted.request_id,
                 candidate_sha=drifted.candidate_sha,
                 candidate_tree=drifted.candidate_tree,
+                generation=drifted.generation,
                 mutation_epoch=drifted.mutation_epoch,
                 guard_pid=drifted.guard_pid,
                 database_backend_pid=drifted.database_backend_pid,
@@ -914,6 +961,7 @@ def _write_guard_evidence(
         request_id=_REQUEST_ID,
         candidate_sha=_CANDIDATE_SHA,
         candidate_tree=_CANDIDATE_TREE,
+        generation=_GENERATION,
         mutation_epoch=100,
         guard_pid=guard_pid,
         database_backend_pid=9876,
@@ -1242,11 +1290,16 @@ def test_fence_subcommand_dispatches_only_the_exact_request_bound_fence(
     )
     monkeypatch.setattr(
         "loom_cli.rollout.operator.systemd.SystemdUserManager.fence_mutation_guard_owners",
-        lambda _manager, request_id: fenced.append(request_id),
+        lambda _manager, request_id, generation: fenced.append(f"{request_id}:{generation}"),
     )
 
-    assert staging_mutation_guard.main(["fence", "--request-id", _REQUEST_ID]) == 0
-    assert fenced == [_REQUEST_ID]
+    assert (
+        staging_mutation_guard.main(
+            ["fence", "--request-id", _REQUEST_ID, "--generation", _GENERATION]
+        )
+        == 0
+    )
+    assert fenced == [f"{_REQUEST_ID}:{_GENERATION}"]
 
 
 def test_reconcile_subcommand_wires_retry_fence_and_owner_liveness(

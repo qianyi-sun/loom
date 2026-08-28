@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import time
@@ -19,11 +20,14 @@ from .config import OperatorConfig
 from .model import validate_safe_identifier
 from .policy import sanitized_child_environment
 from .staging_mutation_guard import (
+    MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS,
     MUTATION_GUARD_RUNTIME_SECONDS,
+    MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS,
     MutationGuardError,
     MutationGuardEvidence,
     guard_evidence_path,
     read_mutation_guard_evidence,
+    validate_mutation_guard_generation,
 )
 
 
@@ -90,6 +94,11 @@ _TRANSIENT_UNIT_RE = re.compile(
 )
 _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS = 1_500
 _MUTATION_GUARD_STOP_WAIT_SECONDS = 60
+MUTATION_GUARD_STOP_POST_BOUND_SECONDS = 3 * MUTATION_GUARD_SYSTEMD_COMMAND_TIMEOUT_SECONDS
+MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS = MUTATION_GUARD_NORMAL_RELEASE_BOUND_SECONDS + 1
+MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS = (
+    MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS + MUTATION_GUARD_STOP_POST_BOUND_SECONDS + 1
+)
 _SHOW_PROPERTIES = (
     "ActiveState",
     "SubState",
@@ -99,6 +108,39 @@ _SHOW_PROPERTIES = (
     "ExecMainStartTimestamp",
     "ExecMainExitTimestamp",
 )
+
+
+def _new_mutation_guard_generation() -> str:
+    return secrets.token_hex(16)
+
+
+def _same_mutation_guard_acquisition(
+    ready: MutationGuardEvidence,
+    released: MutationGuardEvidence,
+) -> bool:
+    return (
+        ready.request_id,
+        ready.candidate_sha,
+        ready.candidate_tree,
+        ready.generation,
+        ready.mutation_epoch,
+        ready.guard_pid,
+        ready.database_backend_pid,
+        ready.deadline_unix_seconds,
+        ready.cronjob_uid,
+        ready.suspended_resource_version,
+    ) == (
+        released.request_id,
+        released.candidate_sha,
+        released.candidate_tree,
+        released.generation,
+        released.mutation_epoch,
+        released.guard_pid,
+        released.database_backend_pid,
+        released.deadline_unix_seconds,
+        released.cronjob_uid,
+        released.suspended_resource_version,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,15 +593,19 @@ class SystemdUserManager:
         stream: JournalStreamRunner | None = None,
         sleep: Callable[[float], None] = time.sleep,
         guard_readiness_timeout_seconds: int = _MUTATION_GUARD_READINESS_TIMEOUT_SECONDS,
+        guard_generation: Callable[[], str] = _new_mutation_guard_generation,
     ) -> None:
         if not 1 <= guard_readiness_timeout_seconds <= 1_800:
             raise ValueError("mutation guard readiness timeout is invalid")
+        if not callable(guard_generation):
+            raise ValueError("mutation guard generation source is invalid")
         self.config = config
         self.service_uid = service_uid
         self._run = run
         self._stream = stream
         self._sleep = sleep
         self._guard_readiness_timeout_seconds = guard_readiness_timeout_seconds
+        self._guard_generation = guard_generation
 
     def start_argv(self, envelope_path: Path, unit_name: str) -> list[str]:
         request_id, _attempt_number = _attempt_identity(
@@ -641,8 +687,23 @@ class SystemdUserManager:
         if result.returncode != 0:
             raise UnitLaunchError("transient backup unit launch failed")
 
-    def start_mutation_guard_argv(self, request_id: str) -> list[str]:
+    def _new_guard_generation(self) -> str:
+        try:
+            generation = self._guard_generation()
+            return validate_mutation_guard_generation(generation)
+        except Exception as exc:
+            raise UnitLaunchError("mutation guard generation is unavailable") from exc
+
+    def start_mutation_guard_argv(
+        self,
+        request_id: str,
+        generation: str,
+    ) -> list[str]:
         unit_name = mutation_guard_unit_name(request_id)
+        try:
+            validate_mutation_guard_generation(generation)
+        except MutationGuardError as exc:
+            raise UnitLaunchError("mutation guard generation is invalid") from exc
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
@@ -661,6 +722,8 @@ class SystemdUserManager:
                 "hold",
                 "--request-id",
                 request_id,
+                "--generation",
+                generation,
             ),
         )
         fence_command = (
@@ -673,6 +736,8 @@ class SystemdUserManager:
             "fence",
             "--request-id",
             request_id,
+            "--generation",
+            generation,
         )
         argv[10:10] = [
             "--property",
@@ -680,7 +745,7 @@ class SystemdUserManager:
             "--property",
             "KillMode=mixed",
             "--property",
-            "TimeoutStopSec=180s",
+            f"TimeoutStopSec={MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS}s",
             "--property",
             f"RuntimeMaxSec={MUTATION_GUARD_RUNTIME_SECONDS}s",
             "--property",
@@ -778,9 +843,18 @@ class SystemdUserManager:
 
         return bool(self._mutation_guard_owner_units(request_id))
 
-    def fence_mutation_guard_owners(self, request_id: str) -> None:
+    def fence_mutation_guard_owners(
+        self,
+        request_id: str,
+        generation: str | None = None,
+    ) -> None:
         """Hard-fence exact owners unless normal guard release was verified."""
 
+        if generation is not None:
+            try:
+                validate_mutation_guard_generation(generation)
+            except MutationGuardError as exc:
+                raise SystemdOperationError("mutation guard fence generation is invalid") from exc
         evidence_path = guard_evidence_path(self.config, request_id)
         try:
             evidence = read_mutation_guard_evidence(
@@ -791,8 +865,10 @@ class SystemdUserManager:
             evidence = None
         if (
             evidence is not None
+            and generation is not None
             and evidence.request_id == request_id
             and evidence.candidate_sha == self.config.runner_repo.parent.name
+            and evidence.generation == generation
             and evidence.state == "released"
         ):
             return
@@ -818,10 +894,60 @@ class SystemdUserManager:
         if fence_failed:
             raise SystemdOperationError("mutation guard owner fence failed")
 
+    def _retire_released_mutation_guard_evidence(
+        self,
+        evidence_path: Path,
+        *,
+        request_id: str,
+        next_generation: str,
+    ) -> None:
+        try:
+            evidence = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError as exc:
+            raise UnitLaunchError("mutation guard evidence identity is already occupied") from exc
+        if (
+            evidence.request_id != request_id
+            or evidence.candidate_sha != self.config.runner_repo.parent.name
+            or evidence.generation == next_generation
+            or evidence.state != "released"
+        ):
+            raise UnitLaunchError("mutation guard evidence identity is already occupied")
+        try:
+            directory_fd = os.open(
+                evidence_path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise UnitLaunchError("mutation guard evidence authority is unavailable") from exc
+        try:
+            if (
+                read_mutation_guard_evidence(
+                    evidence_path,
+                    service_uid=self.service_uid,
+                )
+                != evidence
+            ):
+                raise UnitLaunchError("mutation guard evidence changed during retirement")
+            os.unlink(evidence_path.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except UnitLaunchError:
+            raise
+        except (MutationGuardError, OSError) as exc:
+            raise UnitLaunchError("mutation guard evidence retirement failed safely") from exc
+        finally:
+            os.close(directory_fd)
+
     def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
         mutation_guard_unit_name(request_id)
         if self.show_mutation_guard(request_id) is not None:
             raise UnitLaunchError("mutation guard unit identity is already occupied")
+        generation = self._new_guard_generation()
         evidence_path = guard_evidence_path(self.config, request_id)
         try:
             os.lstat(evidence_path)
@@ -830,9 +956,13 @@ class SystemdUserManager:
         except OSError as exc:
             raise UnitLaunchError("mutation guard evidence authority is unavailable") from exc
         else:
-            raise UnitLaunchError("mutation guard evidence identity is already occupied")
+            self._retire_released_mutation_guard_evidence(
+                evidence_path,
+                request_id=request_id,
+                next_generation=generation,
+            )
         try:
-            result = self._run(self.start_mutation_guard_argv(request_id))
+            result = self._run(self.start_mutation_guard_argv(request_id, generation))
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnitLaunchError("transient mutation guard could not be started") from exc
         if result.returncode != 0:
@@ -862,6 +992,7 @@ class SystemdUserManager:
             if (
                 evidence.request_id != request_id
                 or evidence.candidate_sha != self.config.runner_repo.parent.name
+                or evidence.generation != generation
                 or evidence.guard_pid != status.main_pid
                 or evidence.state != "ready"
             ):
@@ -947,6 +1078,22 @@ class SystemdUserManager:
             ):
                 raise SystemdOperationError("absent mutation guard was not released")
             return evidence
+        ready_evidence: MutationGuardEvidence | None = None
+        try:
+            observed_ready = read_mutation_guard_evidence(
+                evidence_path,
+                service_uid=self.service_uid,
+            )
+        except MutationGuardError:
+            pass
+        else:
+            if (
+                observed_ready.request_id == request_id
+                and observed_ready.candidate_sha == self.config.runner_repo.parent.name
+                and observed_ready.guard_pid == status.main_pid
+                and observed_ready.state == "ready"
+            ):
+                ready_evidence = observed_ready
         try:
             stopped = self._run(["systemctl", "--user", "stop", unit_name])
             reset = self._run(["systemctl", "--user", "reset-failed", unit_name])
@@ -969,9 +1116,11 @@ class SystemdUserManager:
         except MutationGuardError as exc:
             raise SystemdOperationError("mutation guard release evidence is invalid") from exc
         if (
-            evidence.request_id != request_id
+            ready_evidence is None
+            or evidence.request_id != request_id
             or evidence.candidate_sha != self.config.runner_repo.parent.name
             or evidence.state != "released"
+            or not _same_mutation_guard_acquisition(ready_evidence, evidence)
         ):
             raise SystemdOperationError("mutation guard release was not verified")
         return evidence
@@ -1029,6 +1178,9 @@ class SystemdUserManager:
 
 
 __all__ = [
+    "MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS",
+    "MUTATION_GUARD_SERVICE_STOP_TIMEOUT_SECONDS",
+    "MUTATION_GUARD_STOP_POST_BOUND_SECONDS",
     "ActiveState",
     "CommandResult",
     "CommandRunner",

@@ -35,7 +35,12 @@ _NAMESPACE = "loom-staging"
 _SERVICE = "service/loom-postgres-rw"
 _REMOTE_PORT = 5432
 _START_TIMEOUT_SECONDS = 15.0
-_STOP_TIMEOUT_SECONDS = 5.0
+READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS = 15
+READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS = 5
+_STDERR_FINISH_TIMEOUT_SECONDS = 1
+READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS = (
+    2 * READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS + _STDERR_FINISH_TIMEOUT_SECONDS
+)
 _DIAGNOSTIC_LIMIT = 8 * 1024
 _CHILD_ENVIRONMENT = {
     "HOME": "/var/lib/loom-staging-rollout",
@@ -149,7 +154,7 @@ class _BoundedStderrCapture:
 
     def finish(self) -> None:
         if self._stream is not None:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=_STDERR_FINISH_TIMEOUT_SECONDS)
 
 
 def _classify_tunnel_failure(
@@ -224,7 +229,10 @@ def _connect(
         user=credential.role,
         password=credential.password,
         connect_timeout=5,
-        options="-c default_transaction_read_only=on -c statement_timeout=15000",
+        options=(
+            "-c default_transaction_read_only=on "
+            f"-c statement_timeout={READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS * 1000}"
+        ),
         row_factory=dict_row,
     )
 
@@ -234,12 +242,12 @@ def _stop_exact(process: TunnelProcess) -> None:
         return
     process.terminate()
     try:
-        process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+        process.wait(timeout=READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         if process.poll() is None:
             process.kill()
             try:
-                process.wait(timeout=_STOP_TIMEOUT_SECONDS)
+                process.wait(timeout=READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("readonly database port-forward did not stop") from exc
 
@@ -508,6 +516,9 @@ class InstalledReadonlyMutationEpochSource:
 
 
 __all__ = [
+    "READONLY_DATABASE_STATEMENT_TIMEOUT_SECONDS",
+    "READONLY_DATABASE_TUNNEL_STOP_TIMEOUT_SECONDS",
+    "READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS",
     "Connect",
     "DatabaseConnection",
     "InstalledReadonlyDatabaseEvidenceSource",
