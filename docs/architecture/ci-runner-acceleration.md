@@ -20,13 +20,20 @@ Jobs that require macOS, arm64, deployment authority, publishing credentials,
 or another protected environment remain on their explicit hosted or protected
 runner class.
 
-The route publisher runs on hosted infrastructure and publishes the complete
-generation atomically. Before dispatching that publisher, the root-owned
-controller commits the canonical request, oldlab eligibility, capacity
-assignments, canonical response, and delivery state in the same SQLite
-transaction. The stored response is an immutable outbox item: restarts and
-publisher retries reuse it exactly and never recompute an age-sensitive route.
-Superseded generations cannot partially update the matrix.
+The root-owned controller publishes the complete route CheckRun directly with
+a dedicated GitHub App. The App is installed only on `qianyi-sun/loom`, has
+only metadata-read and Checks-write repository permissions, subscribes to no
+events, and has no webhook. The controller mints a repository-scoped,
+permission-reduced installation token from a systemd credential and verifies
+the returned CheckRun's exact App ID. Route delivery therefore does not wait in
+a GitHub-hosted workflow queue.
+
+Before publishing, the controller commits the canonical request, oldlab
+eligibility, capacity assignments, canonical response, exact trusted workflow
+generation, and delivery state in the same SQLite transaction. The stored
+response is an immutable outbox item: restarts and direct-publisher retries
+reuse it exactly and never recompute an age-sensitive route. Superseded
+generations cannot partially update the matrix.
 
 ## Isolated pool
 
@@ -63,10 +70,16 @@ observed within 30 seconds of its GitHub artifact creation may consume oldlab
 capacity. The controller discovers requests from the bounded inventories of the
 four active routed workflows and then performs an exact artifact-name lookup
 for each run. It does not walk repository-wide artifact history or rely on a
-global artifact cursor, so unrelated artifact bursts and one delayed publisher
+global artifact cursor, so unrelated artifact bursts and one failed delivery
 cannot block newer workflows.
 
-If the root-owned controller or its publisher remains unavailable, the pinned
+Route reconciliation has its own fifteen-second systemd timer and state-only
+service. It is not a second `ExecStart` behind runner-pool reconciliation and
+does not share the pool's QEMU, Docker, cache, or 300-second service deadline.
+Pool builds, guest cleanup, GitHub JIT registration, and drain work therefore
+cannot consume the route request's 30-second freshness window.
+
+If the root-owned controller or GitHub App remains unavailable, the pinned
 route action freezes the run onto the workflow's exact GitHub-hosted label after
 180 seconds. A later controller pass accepts an exact late CheckRun only when it
 matches the persisted response. If the route resolver has already completed
@@ -82,6 +95,45 @@ or emergency policy stop; restoring that policy is still an operator decision.
 Queue and runner metrics use bounded work-class labels. Dynamic PR, branch,
 actor, and repository-provided strings are not metric labels.
 
+## Trusted workflow generations
+
+The installed route runtime and the workflow eligibility baseline are separate
+trust identities. `LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA` pins the installed
+controller code. It moves only through an explicitly authorized controller
+rollout. The broker persists a
+monotonic trusted workflow generation independently: exact `dev` commit and
+tree SHAs, all four controlled workflow blob SHAs, predecessor identity,
+protected-merge evidence, canonical digest, and acceptance time.
+
+On each reconcile, the controller compares the current generation with `dev`
+and advances at most one first-parent commit. The successor must be an exact
+same-repository squash merge into `dev` with one associated merged PR. That PR's
+head must have exactly one terminal-successful direct `repository-checks`,
+`images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate` CheckRun from the
+GitHub Actions app (`app.id=15368`), each linked to its source Actions job. A
+direct push, rollback, non-linear successor, wrong-app or same-name status,
+missing or ambiguous check, malformed API response, or incomplete merge
+identity preserves the previous generation. Multiple protected merges converge
+one generation per timer pass, including after an API interruption or service
+restart.
+
+Every route decision records the exact trusted generation and structured
+eligibility reason used to freeze it. Publisher retries replay that stored
+response; a later generation never rewrites an older decision. Whole-workflow
+blob equality remains mandatory. The workflow-changing PR is hosted until its
+protected merge is accepted, while the first fresh request inheriting the
+accepted blob may use oldlab without editing `candidate.env`, reinstalling the
+controller, rebuilding runner images, or toggling route mode.
+
+The broker `status` command exposes the installed runtime SHA, exact publisher
+App ID, trusted generation SHA and digest, observed `dev` SHA, generation lag,
+per-workflow blob drift, last promotion result or blocker, and bounded numeric
+lag, blocked, and workflow-drift metrics. A blocked promotion is therefore
+diagnosable without changing trust state. Hosted fallback reasons are persisted
+on individual route decisions as `trusted_workflow_match`,
+`workflow_blob_drift`, `future_request`, `stale_request`, or
+`legacy_schema2_frozen`.
+
 ## Operations
 
 The pool tool exposes build, preflight, reconcile, status, and drain
@@ -93,30 +145,93 @@ job, teardown, and hosted fallback.
 The systemd service requires two independent exact commit identities in
 `candidate.env`. `LOOM_CI_RUNNER_POOL_CANDIDATE_SHA` is the commit bound into
 the current golden QEMU image and advances only with a matching image build and
-preflight. `LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA` is the merged commit used to
-validate workflow blobs and execute the trusted route publisher; it may advance
-without rebuilding unchanged runner capacity. Both values are mandatory. The
-service has no implicit shared-candidate fallback, so a missing or malformed
-identity fails closed instead of silently coupling the two release lifecycles.
-Write the file as:
+preflight. `LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA` is the installed controller
+runtime. The dedicated publisher App and installation IDs are also exact,
+non-secret configuration. All values are mandatory. The service has no
+implicit shared-candidate fallback, so a missing or malformed identity fails
+closed instead of silently coupling the two release lifecycles. Write the file
+as:
 
 ```text
 LOOM_CI_RUNNER_POOL_CANDIDATE_SHA=<full golden-image commit SHA>
-LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA=<full merged route-controller commit SHA>
+LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA=<full installed route-controller commit SHA>
+LOOM_CI_RUNNER_ROUTE_PUBLISHER_APP_ID=<dedicated GitHub App numeric ID>
+LOOM_CI_RUNNER_ROUTE_PUBLISHER_INSTALLATION_ID=<loom-only installation numeric ID>
 ```
 
-Install the route-controller modules, wrapper, and service unit from that exact
-route commit. The legacy `LOOM_CI_RUNNER_CANDIDATE_SHA` may coexist only while
-an old unit is retained for rollback; the split unit does not read it.
+Install the route-controller modules and service unit from that exact runtime
+commit. Build the root-owned
+`/usr/local/lib/loom-ci-runner-controller/.venv` from the exact `uv.lock` in the
+same commit and require the locked PyJWT and cryptography versions; the route
+unit invokes that interpreter directly and must not inherit the host's system
+Python packages. Ordinary protected workflow merges advance the database-backed
+workflow generation automatically and do not change this file. The legacy
+`LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA` and `LOOM_CI_RUNNER_CANDIDATE_SHA` may
+coexist only while an old unit is retained for rollback; the current unit reads
+neither variable.
 
-The broker upgrades an existing schema-1 lease database in place to schema 2 on
-the first controller start. Existing assignments and lease epochs are
-preserved; the new `route_decisions` table becomes the durable route/outbox
-authority. Keep the database and its WAL files on the service-owned persistent
-state volume. A pre-upgrade artifact cursor file may remain for rollback of the
-old binary, but schema 2 never reads or advances it. Published and abandoned
-decisions are retained for seven days after their terminal transition and are
-deleted only after every associated assignment is released.
+Install and enable `loom-ci-runner-route-controller.service` and
+`loom-ci-runner-route-controller.timer` independently of the existing pool
+service and timer. The pool unit must contain only the pool reconcile command;
+the route unit must contain only the route controller. During rollout, fail the
+preflight if either unit contains both commands or if the route timer is not
+active with a fifteen-second interval. A no-work pass performs five GitHub read
+requests (the trusted branch plus four bounded workflow inventories), keeping
+the steady-state budget at approximately 1,200 requests per hour while still
+leaving half of the 30-second freshness window for normal API and service
+latency.
+
+Store the App's unencrypted PEM private key at
+`/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem`, owned by root
+with mode `0600`. systemd exposes it only as the
+`route-publisher-app-private-key` credential. Do not place the key, a minted
+installation token, or the existing read token in `candidate.env`, command-line
+output, the SQLite database, GitHub artifacts, or repository secrets. Rotate by
+installing a second App key, validating a direct CheckRun and readback, then
+revoking the old key. The checked-in hosted publisher remains only as a
+pre-activation rollback path for the older installed controller; the current
+unit neither dispatches it nor waits for hosted runner capacity.
+
+Activation is one bounded transition:
+
+1. Create and install the dedicated App with only the permissions, repository,
+   and disabled webhook/event contract above. Record the App and installation
+   IDs without recording the private key in evidence.
+2. Stop both CI timers, wait for the pool and route oneshots to exit, and prove
+   there are no pending route decisions or active oldlab assignments. Back up
+   `leases.sqlite3` with its WAL/SHM files, `candidate.env`, both installed
+   units/timers, both controller wrappers/modules, and the old HMAC credential.
+3. Install the exact merged runtime, its lock-derived isolated Python
+   environment, the split units, and the App private-key credential; add the
+   runtime, App, and installation IDs to `candidate.env`; prove the service
+   interpreter reports the locked PyJWT and cryptography versions, then run
+   `systemd-analyze verify` and `daemon-reload` before starting anything.
+4. Start only the route service once. Require schema-3 readback, the exact
+   runtime/App/generation identities, zero generation lag/blob drift, and one
+   direct App-owned CheckRun that arrives before the pinned action deadline.
+5. Enable the fifteen-second route timer and the existing pool timer. Exercise
+   one fresh normal, image, cluster-smoke, and staging-smoke route; verify the
+   actual disposable runner identity and terminal lease release for every
+   oldlab job.
+
+Rollback stops both new timers, restores the pre-transition database and unit
+snapshot together, restores the prior candidate environment and HMAC
+credential, reloads systemd, and starts the old combined unit. Do not run an old
+schema-2 controller against a schema-3 database or mix the old combined unit
+with the new route timer.
+
+The broker upgrades schema-1 or schema-2 lease databases in place to schema 3
+on first controller start. Existing assignments, lease epochs, frozen route
+decisions, and pending publisher outbox entries are preserved. The controller
+then atomically bootstraps the initial trusted generation from the exact
+installed runtime commit/tree and four workflow blobs; legacy decisions are
+bound to that initial generation without changing their stored response or
+dispatch state. Keep the database and its WAL files on the service-owned
+persistent state volume. A pre-upgrade artifact cursor file may remain for
+rollback of the old binary, but schema 2 and later never read or advance it.
+Published and abandoned decisions are retained for seven days after their
+terminal transition and are deleted only after every associated assignment is
+released.
 
 Draining stops new self-hosted selection, waits for busy jobs, removes idle JIT
 registrations and guests, and leaves workflows using hosted runners. Do not

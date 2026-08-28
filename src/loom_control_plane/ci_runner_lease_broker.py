@@ -21,8 +21,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
+LEGACY_GITHUB_ACTIONS_APP_ID = 15368
 WORK_CLASSES = ("normal", "image", "smoke")
 EXPECTED_CAPACITIES = {"normal": 5, "image": 4, "smoke": 2}
 CLASS_LABELS = {
@@ -109,6 +110,23 @@ class RouteDecisionState(StrEnum):
     PENDING = "pending"
     PUBLISHED = "published"
     ABANDONED = "abandoned"
+
+
+TRUSTED_WORKFLOW_EVIDENCE_KINDS = {"installed_runtime", "protected_merge"}
+TRUSTED_WORKFLOW_PROMOTION_RESULTS = {"current", "promoted", "blocked"}
+ROUTE_ELIGIBILITY_REASONS = {
+    "trusted_workflow_match",
+    "workflow_blob_drift",
+    "future_request",
+    "stale_request",
+    "legacy_schema2_frozen",
+}
+PROTECTED_SOURCE_CHECK_WORKFLOWS = {
+    "repository-checks": "CI",
+    "images-gate": "images",
+    "cluster-smoke-gate": "cluster-smoke",
+    "staging-smoke-gate": "staging-smoke",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +607,9 @@ class RouteDecision:
     request_json: str
     response_json: str
     oldlab_eligible: bool
+    trust_generation_id: int | None
+    eligibility_reason: str | None
+    publisher_app_id: int | None
     state: RouteDecisionState
     created_at: str
     dispatch_attempted_at: str | None
@@ -619,6 +640,61 @@ class RouteDecision:
         ):
             raise LeaseBrokerError("stored route decision identity does not match response")
         return document
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedWorkflowGeneration:
+    generation_id: int
+    repository: str
+    candidate_sha: str
+    candidate_tree: str
+    predecessor_generation_id: int | None
+    predecessor_sha: str | None
+    workflow_blobs_json: str
+    evidence_json: str
+    generation_digest: str
+    accepted_at: str
+
+    def workflow_blobs(self) -> dict[str, str]:
+        try:
+            value = json.loads(self.workflow_blobs_json)
+        except json.JSONDecodeError as exc:
+            raise LeaseBrokerError("stored workflow blobs are invalid JSON") from exc
+        if not isinstance(value, dict) or _canonical_json(value) != self.workflow_blobs_json:
+            raise LeaseBrokerError("stored workflow blobs are not canonical")
+        expected = set(WORKFLOW_CLASS_CONTRACTS)
+        if set(value) != expected or any(
+            not isinstance(blob, str) or _SHA_RE.fullmatch(blob) is None
+            for blob in value.values()
+        ):
+            raise LeaseBrokerError("stored workflow blob contract is invalid")
+        return cast(dict[str, str], value)
+
+    def evidence(self) -> dict[str, object]:
+        try:
+            value = json.loads(self.evidence_json)
+        except json.JSONDecodeError as exc:
+            raise LeaseBrokerError("stored workflow-generation evidence is invalid JSON") from exc
+        if not isinstance(value, dict) or _canonical_json(value) != self.evidence_json:
+            raise LeaseBrokerError("stored workflow-generation evidence is not canonical")
+        _validate_trusted_workflow_evidence(
+            value,
+            candidate_sha=self.candidate_sha,
+            initial=self.predecessor_generation_id is None,
+        )
+        return value
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "generation_id": self.generation_id,
+            "candidate_sha": self.candidate_sha,
+            "candidate_tree": self.candidate_tree,
+            "predecessor_sha": self.predecessor_sha,
+            "workflow_blobs": self.workflow_blobs(),
+            "generation_digest": self.generation_digest,
+            "accepted_at": self.accepted_at,
+            "evidence_kind": self.evidence()["kind"],
+        }
 
 
 def _canonical_json(value: Mapping[str, object]) -> str:
@@ -658,6 +734,74 @@ def _bounded_int(value: object, field: str, *, minimum: int, maximum: int) -> in
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise LeaseBrokerError(f"{field} must be an integer in {minimum}..{maximum}")
     return value
+
+
+def _validate_trusted_workflow_evidence(
+    value: Mapping[str, object],
+    *,
+    candidate_sha: str,
+    initial: bool,
+) -> None:
+    if initial:
+        if set(value) != {"kind", "runtime_sha"} or value != {
+            "kind": "installed_runtime",
+            "runtime_sha": candidate_sha,
+        }:
+            raise LeaseBrokerError("installed workflow-generation evidence is invalid")
+        return
+    expected_keys = {
+        "kind",
+        "merge_commit_sha",
+        "pull_request_number",
+        "pull_request_head_sha",
+        "merged_at",
+        "observed_dev_head",
+        "checks",
+    }
+    pull_number = value.get("pull_request_number")
+    pull_head_sha = value.get("pull_request_head_sha")
+    observed_dev_head = value.get("observed_dev_head")
+    checks = value.get("checks")
+    if (
+        set(value) != expected_keys
+        or value.get("kind") != "protected_merge"
+        or value.get("merge_commit_sha") != candidate_sha
+        or isinstance(pull_number, bool)
+        or not isinstance(pull_number, int)
+        or pull_number < 1
+        or not isinstance(pull_head_sha, str)
+        or _SHA_RE.fullmatch(pull_head_sha) is None
+        or not isinstance(observed_dev_head, str)
+        or _SHA_RE.fullmatch(observed_dev_head) is None
+        or not isinstance(checks, dict)
+        or set(checks) != set(PROTECTED_SOURCE_CHECK_WORKFLOWS)
+    ):
+        raise LeaseBrokerError("protected workflow-generation evidence is invalid")
+    merged_at = value.get("merged_at")
+    if not isinstance(merged_at, str):
+        raise LeaseBrokerError("protected workflow-generation evidence is invalid")
+    _parse_timestamp(merged_at)
+    for check_name, workflow_name in PROTECTED_SOURCE_CHECK_WORKFLOWS.items():
+        check = checks.get(check_name)
+        if not isinstance(check, dict) or set(check) != {
+            "id",
+            "workflow",
+            "details_url",
+        }:
+            raise LeaseBrokerError("protected workflow-generation check evidence is invalid")
+        _bounded_int(check.get("id"), f"{check_name}.id", minimum=1, maximum=_MAX_RUN_ID)
+        if check.get("workflow") != workflow_name:
+            raise LeaseBrokerError("protected workflow-generation check evidence is invalid")
+        details_url = check.get("details_url")
+        if (
+            not isinstance(details_url, str)
+            or re.fullmatch(
+                r"https://github\.com/qianyi-sun/loom/actions/runs/[1-9][0-9]*/job/[1-9][0-9]*",
+                details_url,
+            )
+            is None
+        ):
+            raise LeaseBrokerError("protected workflow-generation check evidence is invalid")
 
 
 class CiRunnerLeaseBroker:
@@ -737,6 +881,11 @@ class CiRunnerLeaseBroker:
                     request_json TEXT NOT NULL,
                     response_json TEXT NOT NULL,
                     oldlab_eligible INTEGER NOT NULL CHECK (oldlab_eligible IN (0, 1)),
+                    trust_generation_id INTEGER,
+                    eligibility_reason TEXT,
+                    publisher_app_id INTEGER CHECK (
+                        publisher_app_id IS NULL OR publisher_app_id > 0
+                    ),
                     state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'abandoned')),
                     created_at TEXT NOT NULL,
                     dispatch_attempted_at TEXT,
@@ -753,8 +902,44 @@ class CiRunnerLeaseBroker:
                 );
                 CREATE INDEX IF NOT EXISTS route_decision_state
                     ON route_decisions(state, created_at);
+                CREATE TABLE IF NOT EXISTS trusted_workflow_generations (
+                    generation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository TEXT NOT NULL,
+                    candidate_sha TEXT NOT NULL UNIQUE,
+                    candidate_tree TEXT NOT NULL,
+                    predecessor_generation_id INTEGER,
+                    predecessor_sha TEXT,
+                    workflow_blobs_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    generation_digest TEXT NOT NULL UNIQUE,
+                    accepted_at TEXT NOT NULL,
+                    FOREIGN KEY (predecessor_generation_id)
+                        REFERENCES trusted_workflow_generations(generation_id),
+                    CHECK (
+                        (predecessor_generation_id IS NULL AND predecessor_sha IS NULL)
+                        OR
+                        (predecessor_generation_id IS NOT NULL AND predecessor_sha IS NOT NULL)
+                    )
+                );
+                CREATE TABLE IF NOT EXISTS trusted_workflow_observation (
+                    repository TEXT PRIMARY KEY,
+                    runtime_sha TEXT NOT NULL,
+                    publisher_app_id INTEGER NOT NULL CHECK (publisher_app_id > 0),
+                    trust_generation_id INTEGER NOT NULL,
+                    observed_dev_sha TEXT,
+                    generation_lag_commits INTEGER
+                        CHECK (generation_lag_commits IS NULL OR generation_lag_commits >= 0),
+                    workflow_blob_drift_json TEXT,
+                    promotion_result TEXT NOT NULL
+                        CHECK (promotion_result IN ('current', 'promoted', 'blocked')),
+                    promotion_blocker TEXT,
+                    observed_at TEXT NOT NULL,
+                    FOREIGN KEY (trust_generation_id)
+                        REFERENCES trusted_workflow_generations(generation_id)
+                );
                 """
             )
+            self._migrate_schema(connection)
             self._initialize_contract(connection)
             connection.commit()
         except BaseException:
@@ -763,6 +948,40 @@ class CiRunnerLeaseBroker:
             raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        route_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(route_decisions)")
+        }
+        if "trust_generation_id" not in route_columns:
+            connection.execute(
+                "ALTER TABLE route_decisions ADD COLUMN trust_generation_id INTEGER"
+            )
+        if "eligibility_reason" not in route_columns:
+            connection.execute(
+                "ALTER TABLE route_decisions ADD COLUMN eligibility_reason TEXT"
+            )
+        if "publisher_app_id" not in route_columns:
+            connection.execute(
+                "ALTER TABLE route_decisions ADD COLUMN publisher_app_id INTEGER"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS route_decision_generation "
+            "ON route_decisions(trust_generation_id, decision_id)"
+        )
+        observation_columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(trusted_workflow_observation)"
+            )
+        }
+        if "publisher_app_id" not in observation_columns:
+            connection.execute(
+                "ALTER TABLE trusted_workflow_observation "
+                "ADD COLUMN publisher_app_id INTEGER"
+            )
 
     def _initialize_contract(self, connection: sqlite3.Connection) -> None:
         expected_metadata = {
@@ -776,14 +995,14 @@ class CiRunnerLeaseBroker:
             for row in connection.execute("SELECT key, value FROM metadata")
         }
         if existing:
-            if existing.get("schema_version") not in {"1", SCHEMA_VERSION}:
+            if existing.get("schema_version") not in {"1", "2", SCHEMA_VERSION}:
                 raise LeaseBrokerError("stored broker schema_version does not match config")
             for key in ("repository", "oldlab_labels"):
                 if existing.get(key) != expected_metadata[key]:
                     raise LeaseBrokerError(f"stored broker {key} does not match config")
             if "next_lease_epoch" not in existing:
                 raise LeaseBrokerError("stored broker lease epoch is missing")
-            if existing["schema_version"] == "1":
+            if existing["schema_version"] in {"1", "2"}:
                 connection.execute(
                     "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
                     (SCHEMA_VERSION,),
@@ -824,6 +1043,262 @@ class CiRunnerLeaseBroker:
             (str(epoch + 1),),
         )
         return epoch
+
+    def current_trusted_workflow_generation(self) -> TrustedWorkflowGeneration | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM trusted_workflow_generations "
+                "ORDER BY generation_id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        return self._trusted_workflow_generation_from_row(row) if row is not None else None
+
+    def trusted_workflow_generations(self) -> tuple[TrustedWorkflowGeneration, ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM trusted_workflow_generations ORDER BY generation_id"
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(self._trusted_workflow_generation_from_row(row) for row in rows)
+
+    def record_trusted_workflow_generation(
+        self,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+        workflow_blobs: Mapping[str, str],
+        evidence: Mapping[str, object],
+        predecessor_generation_id: int | None,
+        now: datetime | None = None,
+    ) -> TrustedWorkflowGeneration:
+        if _SHA_RE.fullmatch(candidate_sha) is None:
+            raise LeaseBrokerError("trusted workflow candidate SHA is invalid")
+        if _SHA_RE.fullmatch(candidate_tree) is None:
+            raise LeaseBrokerError("trusted workflow candidate tree is invalid")
+        if set(workflow_blobs) != set(WORKFLOW_CLASS_CONTRACTS) or any(
+            _SHA_RE.fullmatch(blob) is None for blob in workflow_blobs.values()
+        ):
+            raise LeaseBrokerError("trusted workflow blob contract is invalid")
+        if evidence.get("kind") not in TRUSTED_WORKFLOW_EVIDENCE_KINDS:
+            raise LeaseBrokerError("trusted workflow evidence kind is invalid")
+        _validate_trusted_workflow_evidence(
+            evidence,
+            candidate_sha=candidate_sha,
+            initial=predecessor_generation_id is None,
+        )
+        workflow_blobs_json = _canonical_json(dict(workflow_blobs))
+        evidence_json = _canonical_json(dict(evidence))
+        observed_at = _utc(now or datetime.now(UTC))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                "SELECT * FROM trusted_workflow_generations "
+                "ORDER BY generation_id DESC LIMIT 1"
+            ).fetchone()
+            current = (
+                self._trusted_workflow_generation_from_row(current_row)
+                if current_row is not None
+                else None
+            )
+            if current is None:
+                if predecessor_generation_id is not None:
+                    raise LeaseBrokerError("initial workflow generation cannot have a predecessor")
+                predecessor_sha = None
+                if evidence.get("kind") != "installed_runtime":
+                    raise LeaseBrokerError("initial workflow generation must bind installed runtime")
+            else:
+                if predecessor_generation_id != current.generation_id:
+                    raise LeaseBrokerError("workflow generation predecessor is stale")
+                predecessor_sha = current.candidate_sha
+                if evidence.get("kind") != "protected_merge":
+                    raise LeaseBrokerError("advanced workflow generation needs protected merge evidence")
+                if candidate_sha == current.candidate_sha:
+                    if (
+                        candidate_tree != current.candidate_tree
+                        or workflow_blobs_json != current.workflow_blobs_json
+                        or evidence_json != current.evidence_json
+                    ):
+                        raise LeaseBrokerError("workflow generation replay changed immutable evidence")
+                    connection.commit()
+                    return current
+            generation_payload = {
+                "schema_version": 1,
+                "repository": self.config.repository,
+                "candidate_sha": candidate_sha,
+                "candidate_tree": candidate_tree,
+                "predecessor_sha": predecessor_sha,
+                "workflow_blobs": dict(workflow_blobs),
+                "evidence": dict(evidence),
+            }
+            generation_digest = hashlib.sha256(
+                _canonical_json(generation_payload).encode()
+            ).hexdigest()
+            cursor = connection.execute(
+                """
+                INSERT INTO trusted_workflow_generations(
+                    repository, candidate_sha, candidate_tree,
+                    predecessor_generation_id, predecessor_sha,
+                    workflow_blobs_json, evidence_json, generation_digest, accepted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.config.repository,
+                    candidate_sha,
+                    candidate_tree,
+                    predecessor_generation_id,
+                    predecessor_sha,
+                    workflow_blobs_json,
+                    evidence_json,
+                    generation_digest,
+                    _timestamp(observed_at),
+                ),
+            )
+            stored = connection.execute(
+                "SELECT * FROM trusted_workflow_generations WHERE generation_id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            if stored is None:
+                raise LeaseBrokerError("trusted workflow generation could not be read back")
+            generation = self._trusted_workflow_generation_from_row(stored)
+            if current is None:
+                connection.execute(
+                    """
+                    UPDATE route_decisions
+                    SET trust_generation_id = ?,
+                        eligibility_reason = COALESCE(
+                            eligibility_reason, 'legacy_schema2_frozen'
+                        ),
+                        publisher_app_id = COALESCE(publisher_app_id, ?)
+                    WHERE trust_generation_id IS NULL
+                    """,
+                    (generation.generation_id, LEGACY_GITHUB_ACTIONS_APP_ID),
+                )
+            connection.commit()
+            return generation
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def record_trusted_workflow_observation(
+        self,
+        *,
+        runtime_sha: str,
+        publisher_app_id: int,
+        trust_generation_id: int,
+        observed_dev_sha: str | None,
+        generation_lag_commits: int | None,
+        workflow_blob_drift: Mapping[str, bool] | None,
+        promotion_result: str,
+        promotion_blocker: str | None,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        if _SHA_RE.fullmatch(runtime_sha) is None:
+            raise LeaseBrokerError("trusted workflow runtime SHA is invalid")
+        _bounded_int(
+            publisher_app_id,
+            "publisher_app_id",
+            minimum=1,
+            maximum=_MAX_RUN_ID,
+        )
+        _bounded_int(
+            trust_generation_id,
+            "trust_generation_id",
+            minimum=1,
+            maximum=_MAX_RUN_ID,
+        )
+        if observed_dev_sha is not None and _SHA_RE.fullmatch(observed_dev_sha) is None:
+            raise LeaseBrokerError("observed trusted branch SHA is invalid")
+        if generation_lag_commits is not None:
+            _bounded_int(
+                generation_lag_commits,
+                "generation_lag_commits",
+                minimum=0,
+                maximum=_MAX_RUN_ID,
+            )
+        if observed_dev_sha is None and generation_lag_commits is not None:
+            raise LeaseBrokerError("trusted workflow lag observation is incomplete")
+        drift_json: str | None = None
+        if workflow_blob_drift is not None:
+            if (
+                set(workflow_blob_drift) != set(WORKFLOW_CLASS_CONTRACTS)
+                or any(type(value) is not bool for value in workflow_blob_drift.values())
+                or observed_dev_sha is None
+            ):
+                raise LeaseBrokerError("trusted workflow drift observation is invalid")
+            drift_json = _canonical_json(dict(workflow_blob_drift))
+        if promotion_result not in TRUSTED_WORKFLOW_PROMOTION_RESULTS:
+            raise LeaseBrokerError("trusted workflow promotion result is invalid")
+        if promotion_result == "blocked":
+            blocker = _exact_text(promotion_blocker, "promotion_blocker")
+            if len(blocker) > 1_000:
+                raise LeaseBrokerError("trusted workflow promotion blocker is too long")
+        elif promotion_blocker is not None:
+            raise LeaseBrokerError("successful workflow observation cannot have a blocker")
+        observed_at = _utc(now or datetime.now(UTC))
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT generation_id FROM trusted_workflow_generations "
+                "ORDER BY generation_id DESC LIMIT 1"
+            ).fetchone()
+            if current is None or int(current["generation_id"]) != trust_generation_id:
+                raise LeaseBrokerError("trusted workflow observation generation is stale")
+            connection.execute(
+                """
+                INSERT INTO trusted_workflow_observation(
+                    repository, runtime_sha, publisher_app_id, trust_generation_id,
+                    observed_dev_sha,
+                    generation_lag_commits, workflow_blob_drift_json,
+                    promotion_result, promotion_blocker, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repository) DO UPDATE SET
+                    runtime_sha = excluded.runtime_sha,
+                    publisher_app_id = excluded.publisher_app_id,
+                    trust_generation_id = excluded.trust_generation_id,
+                    observed_dev_sha = excluded.observed_dev_sha,
+                    generation_lag_commits = excluded.generation_lag_commits,
+                    workflow_blob_drift_json = excluded.workflow_blob_drift_json,
+                    promotion_result = excluded.promotion_result,
+                    promotion_blocker = excluded.promotion_blocker,
+                    observed_at = excluded.observed_at
+                """,
+                (
+                    self.config.repository,
+                    runtime_sha,
+                    publisher_app_id,
+                    trust_generation_id,
+                    observed_dev_sha,
+                    generation_lag_commits,
+                    drift_json,
+                    promotion_result,
+                    promotion_blocker,
+                    _timestamp(observed_at),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM trusted_workflow_observation WHERE repository = ?",
+                (self.config.repository,),
+            ).fetchone()
+            if row is None:
+                raise LeaseBrokerError("trusted workflow observation could not be read back")
+            result = self._trusted_workflow_observation_from_row(row)
+            connection.commit()
+            return result
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def allocate(
         self, request: AssignmentRequest, *, now: datetime | None = None
@@ -881,11 +1356,17 @@ class CiRunnerLeaseBroker:
         *,
         now: datetime | None = None,
         allow_oldlab: bool = True,
+        trust_generation_id: int | None = None,
+        eligibility_reason: str | None = None,
+        publisher_app_id: int = LEGACY_GITHUB_ACTIONS_APP_ID,
     ) -> RouteAssignmentDocument:
         return self.decide_route(
             request,
             now=now,
             allow_oldlab=allow_oldlab,
+            trust_generation_id=trust_generation_id,
+            eligibility_reason=eligibility_reason,
+            publisher_app_id=publisher_app_id,
         ).document()
 
     def decide_route(
@@ -894,17 +1375,45 @@ class CiRunnerLeaseBroker:
         *,
         now: datetime | None = None,
         allow_oldlab: bool = True,
+        trust_generation_id: int | None = None,
+        eligibility_reason: str | None = None,
+        publisher_app_id: int = LEGACY_GITHUB_ACTIONS_APP_ID,
     ) -> RouteDecision:
         """Atomically freeze one route response with its capacity assignments."""
         request.validate()
         if request.repository != self.config.repository:
             raise LeaseBrokerError("request repository does not match broker config")
+        selected_reason = eligibility_reason or (
+            "trusted_workflow_match" if allow_oldlab else "workflow_blob_drift"
+        )
+        if selected_reason not in ROUTE_ELIGIBILITY_REASONS:
+            raise LeaseBrokerError("route eligibility reason is invalid")
+        _bounded_int(
+            publisher_app_id,
+            "publisher_app_id",
+            minimum=1,
+            maximum=_MAX_RUN_ID,
+        )
         observed_at = _utc(now or datetime.now(UTC))
         request_json = _canonical_json(request.public_dict())
         request_sha256 = hashlib.sha256(request_json.encode()).hexdigest()
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            generation_row = connection.execute(
+                "SELECT * FROM trusted_workflow_generations "
+                "ORDER BY generation_id DESC LIMIT 1"
+            ).fetchone()
+            if generation_row is None:
+                raise LeaseBrokerError("trusted workflow generation is not initialized")
+            current_generation = self._trusted_workflow_generation_from_row(
+                generation_row
+            )
+            selected_generation_id = (
+                trust_generation_id or current_generation.generation_id
+            )
+            if selected_generation_id != current_generation.generation_id:
+                raise LeaseBrokerError("route decision trust generation is stale")
             existing = connection.execute(
                 """
                 SELECT * FROM route_decisions
@@ -946,8 +1455,9 @@ class CiRunnerLeaseBroker:
                 INSERT INTO route_decisions(
                     repository, workflow_name, workflow_id, workflow_run_id,
                     run_attempt, head_sha, request_sha256, request_json,
-                    response_json, oldlab_eligible, state, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    response_json, oldlab_eligible, trust_generation_id,
+                    eligibility_reason, publisher_app_id, state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     request.repository,
@@ -960,6 +1470,9 @@ class CiRunnerLeaseBroker:
                     request_json,
                     response_json,
                     int(allow_oldlab),
+                    selected_generation_id,
+                    selected_reason,
+                    publisher_app_id,
                     _timestamp(observed_at),
                 ),
             )
@@ -1121,6 +1634,19 @@ class CiRunnerLeaseBroker:
             rows = connection.execute(
                 "SELECT * FROM assignments WHERE state = 'assigned' ORDER BY assignment_id"
             ).fetchall()
+            generation_row = connection.execute(
+                "SELECT * FROM trusted_workflow_generations "
+                "ORDER BY generation_id DESC LIMIT 1"
+            ).fetchone()
+            observation_row = connection.execute(
+                "SELECT * FROM trusted_workflow_observation WHERE repository = ?",
+                (self.config.repository,),
+            ).fetchone()
+            reason_rows = connection.execute(
+                "SELECT eligibility_reason, COUNT(*) AS decision_count "
+                "FROM route_decisions WHERE eligibility_reason IS NOT NULL "
+                "GROUP BY eligibility_reason"
+            ).fetchall()
         finally:
             connection.close()
         assignments = [self._assignment_from_row(row) for row in rows]
@@ -1145,11 +1671,65 @@ class CiRunnerLeaseBroker:
                 "available": capacity - len(oldlab),
                 "overdue_oldlab_assignments": len(overdue),
             }
+        generation = (
+            self._trusted_workflow_generation_from_row(generation_row)
+            if generation_row is not None
+            else None
+        )
+        observation = (
+            self._trusted_workflow_observation_from_row(observation_row)
+            if observation_row is not None
+            else None
+        )
+        drift = (
+            cast(dict[str, bool], observation["workflow_blob_drift"])
+            if observation is not None
+            and observation["workflow_blob_drift"] is not None
+            else None
+        )
+        reason_counts = {reason: 0 for reason in sorted(ROUTE_ELIGIBILITY_REASONS)}
+        for row in reason_rows:
+            reason = str(row["eligibility_reason"])
+            if reason not in ROUTE_ELIGIBILITY_REASONS:
+                raise LeaseBrokerError("stored route eligibility reason is invalid")
+            reason_counts[reason] = int(row["decision_count"])
+        route_generation_healthy = bool(
+            generation is not None
+            and observation is not None
+            and observation["trust_generation_id"] == generation.generation_id
+            and observation["promotion_result"] != "blocked"
+            and observation["generation_lag_commits"] == 0
+            and drift is not None
+            and not any(drift.values())
+        )
         return {
             "schema_version": int(SCHEMA_VERSION),
             "repository": self.config.repository,
             "observed_at": _timestamp(observed_at),
             "classes": classes,
+            "trusted_workflow_generation": (
+                generation.public_dict() if generation is not None else None
+            ),
+            "trusted_workflow_observation": observation,
+            "metrics": {
+                "generation_lag_commits": (
+                    observation["generation_lag_commits"]
+                    if observation is not None
+                    else None
+                ),
+                "promotion_blocked": (
+                    int(observation["promotion_result"] == "blocked")
+                    if observation is not None
+                    else None
+                ),
+                "workflow_blob_drift": (
+                    {name: int(value) for name, value in drift.items()}
+                    if drift is not None
+                    else None
+                ),
+                "route_decisions_by_eligibility_reason": reason_counts,
+            },
+            "route_generation_healthy": route_generation_healthy,
             "healthy": all(
                 cast(int, item["oldlab_assigned"]) <= cast(int, item["capacity"])
                 for item in classes.values()
@@ -1304,6 +1884,131 @@ class CiRunnerLeaseBroker:
         finally:
             connection.close()
 
+    def _trusted_workflow_generation_from_row(
+        self, row: sqlite3.Row
+    ) -> TrustedWorkflowGeneration:
+        generation = TrustedWorkflowGeneration(
+            generation_id=int(row["generation_id"]),
+            repository=str(row["repository"]),
+            candidate_sha=str(row["candidate_sha"]),
+            candidate_tree=str(row["candidate_tree"]),
+            predecessor_generation_id=(
+                int(row["predecessor_generation_id"])
+                if row["predecessor_generation_id"] is not None
+                else None
+            ),
+            predecessor_sha=(
+                str(row["predecessor_sha"])
+                if row["predecessor_sha"] is not None
+                else None
+            ),
+            workflow_blobs_json=str(row["workflow_blobs_json"]),
+            evidence_json=str(row["evidence_json"]),
+            generation_digest=str(row["generation_digest"]),
+            accepted_at=str(row["accepted_at"]),
+        )
+        if generation.repository != self.config.repository:
+            raise LeaseBrokerError("stored workflow generation repository is invalid")
+        if (
+            generation.generation_id < 1
+            or _SHA_RE.fullmatch(generation.candidate_sha) is None
+            or _SHA_RE.fullmatch(generation.candidate_tree) is None
+            or _SHA256_RE.fullmatch(generation.generation_digest) is None
+        ):
+            raise LeaseBrokerError("stored workflow generation identity is invalid")
+        if (generation.predecessor_generation_id is None) != (
+            generation.predecessor_sha is None
+        ):
+            raise LeaseBrokerError("stored workflow generation predecessor is inconsistent")
+        if generation.predecessor_sha is not None and _SHA_RE.fullmatch(
+            generation.predecessor_sha
+        ) is None:
+            raise LeaseBrokerError("stored workflow generation predecessor SHA is invalid")
+        generation.workflow_blobs()
+        evidence = generation.evidence()
+        payload = {
+            "schema_version": 1,
+            "repository": generation.repository,
+            "candidate_sha": generation.candidate_sha,
+            "candidate_tree": generation.candidate_tree,
+            "predecessor_sha": generation.predecessor_sha,
+            "workflow_blobs": generation.workflow_blobs(),
+            "evidence": evidence,
+        }
+        expected_digest = hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+        if expected_digest != generation.generation_digest:
+            raise LeaseBrokerError("stored workflow generation digest is invalid")
+        _parse_timestamp(generation.accepted_at)
+        return generation
+
+    def _trusted_workflow_observation_from_row(
+        self, row: sqlite3.Row
+    ) -> dict[str, object]:
+        repository = str(row["repository"])
+        runtime_sha = str(row["runtime_sha"])
+        publisher_app_id = int(row["publisher_app_id"])
+        trust_generation_id = int(row["trust_generation_id"])
+        observed_dev_sha = (
+            str(row["observed_dev_sha"])
+            if row["observed_dev_sha"] is not None
+            else None
+        )
+        generation_lag_commits = (
+            int(row["generation_lag_commits"])
+            if row["generation_lag_commits"] is not None
+            else None
+        )
+        promotion_result = str(row["promotion_result"])
+        promotion_blocker = (
+            str(row["promotion_blocker"])
+            if row["promotion_blocker"] is not None
+            else None
+        )
+        workflow_blob_drift: dict[str, bool] | None = None
+        if row["workflow_blob_drift_json"] is not None:
+            try:
+                drift_value = json.loads(str(row["workflow_blob_drift_json"]))
+            except json.JSONDecodeError as exc:
+                raise LeaseBrokerError(
+                    "stored trusted workflow drift is invalid JSON"
+                ) from exc
+            if (
+                not isinstance(drift_value, dict)
+                or set(drift_value) != set(WORKFLOW_CLASS_CONTRACTS)
+                or any(type(value) is not bool for value in drift_value.values())
+                or _canonical_json(drift_value) != str(row["workflow_blob_drift_json"])
+            ):
+                raise LeaseBrokerError("stored trusted workflow drift is invalid")
+            workflow_blob_drift = cast(dict[str, bool], drift_value)
+        if (
+            repository != self.config.repository
+            or _SHA_RE.fullmatch(runtime_sha) is None
+            or publisher_app_id < 1
+            or trust_generation_id < 1
+            or (observed_dev_sha is not None and _SHA_RE.fullmatch(observed_dev_sha) is None)
+            or (observed_dev_sha is None and generation_lag_commits is not None)
+            or (generation_lag_commits is not None and generation_lag_commits < 0)
+            or (workflow_blob_drift is not None and observed_dev_sha is None)
+            or promotion_result not in TRUSTED_WORKFLOW_PROMOTION_RESULTS
+            or (promotion_result == "blocked") != (promotion_blocker is not None)
+        ):
+            raise LeaseBrokerError("stored trusted workflow observation is invalid")
+        if promotion_blocker is not None:
+            _exact_text(promotion_blocker, "promotion_blocker")
+        observed_at = str(row["observed_at"])
+        _parse_timestamp(observed_at)
+        return {
+            "runtime_sha": runtime_sha,
+            "publisher_app_id": publisher_app_id,
+            "trust_generation_id": trust_generation_id,
+            "observed_dev_sha": observed_dev_sha,
+            "generation_lag_commits": generation_lag_commits,
+            "workflow_blob_drift": workflow_blob_drift,
+            "promotion_result": promotion_result,
+            "promotion_blocker": promotion_blocker,
+            "observed_at": observed_at,
+        }
+
     def _route_decision_from_row(self, row: sqlite3.Row) -> RouteDecision:
         try:
             state = RouteDecisionState(str(row["state"]))
@@ -1321,6 +2026,21 @@ class CiRunnerLeaseBroker:
             request_json=str(row["request_json"]),
             response_json=str(row["response_json"]),
             oldlab_eligible=bool(row["oldlab_eligible"]),
+            trust_generation_id=(
+                int(row["trust_generation_id"])
+                if row["trust_generation_id"] is not None
+                else None
+            ),
+            eligibility_reason=(
+                str(row["eligibility_reason"])
+                if row["eligibility_reason"] is not None
+                else None
+            ),
+            publisher_app_id=(
+                int(row["publisher_app_id"])
+                if row["publisher_app_id"] is not None
+                else None
+            ),
             state=state,
             created_at=str(row["created_at"]),
             dispatch_attempted_at=(
@@ -1336,6 +2056,15 @@ class CiRunnerLeaseBroker:
                 str(row["abandoned_at"]) if row["abandoned_at"] is not None else None
             ),
         )
+        if decision.trust_generation_id is not None and decision.trust_generation_id < 1:
+            raise LeaseBrokerError("stored route decision trust generation is invalid")
+        if (
+            decision.eligibility_reason is not None
+            and decision.eligibility_reason not in ROUTE_ELIGIBILITY_REASONS
+        ):
+            raise LeaseBrokerError("stored route eligibility reason is invalid")
+        if decision.publisher_app_id is None or decision.publisher_app_id < 1:
+            raise LeaseBrokerError("stored route publisher app identity is invalid")
         try:
             request_value = json.loads(decision.request_json)
         except json.JSONDecodeError as exc:

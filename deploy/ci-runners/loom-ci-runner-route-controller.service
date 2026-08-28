@@ -1,0 +1,21 @@
+[Unit]
+Description=Publish durable oldlab-first CI routes independently of pool reconciliation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+LoadCredential=github-token:/etc/loom-ci-runner-pool/github-token
+LoadCredential=route-publisher-app-private-key:/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem
+EnvironmentFile=/etc/loom-ci-runner-pool/candidate.env
+Environment=PYTHONPATH=/usr/local/lib/loom-ci-runner-controller
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/loom-ci-runner-pool
+ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python -m loom_control_plane.ci_runner_route_controller --profile /etc/loom-ci-runner-pool/profile.toml --state-db /var/lib/loom-ci-runner-pool/leases.sqlite3 --repository qianyi-sun/loom --runtime-sha ${LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA} --token-file ${CREDENTIALS_DIRECTORY}/github-token --publisher-app-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_APP_ID} --publisher-installation-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_INSTALLATION_ID} --publisher-app-private-key-file ${CREDENTIALS_DIRECTORY}/route-publisher-app-private-key
+TimeoutStartSec=120

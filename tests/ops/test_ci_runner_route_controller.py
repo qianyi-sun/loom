@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import io
 import json
 import urllib.error
@@ -11,15 +8,27 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from loom_control_plane import ci_runner_lease_broker as leases
 from loom_control_plane import ci_runner_route_controller as routes
 
 HEAD_SHA = "a" * 40
-CANDIDATE_SHA = "c" * 40
+RUNTIME_SHA = "c" * 40
+RUNTIME_TREE = "b" * 40
 WORKFLOW_BLOB_SHA = "d" * 40
-PUBLISHER_KEY = b"route-publisher-test-key-with-32-bytes"
+MERGE_SHA = "e" * 40
+MERGE_TREE = "f" * 40
+PR_HEAD_SHA = "1" * 40
+CHANGED_WORKFLOW_BLOB_SHA = "2" * 40
+SECOND_MERGE_SHA = "3" * 40
+SECOND_MERGE_TREE = "4" * 40
+SECOND_PR_HEAD_SHA = "5" * 40
+SECOND_WORKFLOW_BLOB_SHA = "6" * 40
+PUBLISHER_APP_ID = 424_242
 NOW = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
 
 
@@ -65,6 +74,8 @@ def _zip_request(
 
 
 class FakeRouteAPI:
+    app_id = PUBLISHER_APP_ID
+
     def __init__(self, request: leases.RouteRequest) -> None:
         self.request = request
         self.artifacts: list[dict[str, object]] = [
@@ -98,15 +109,41 @@ class FakeRouteAPI:
         workflow_path = routes.WORKFLOW_PATHS[request.workflow_name]
         self.blobs = {
             (workflow_path, request.head_sha): WORKFLOW_BLOB_SHA,
-            (workflow_path, CANDIDATE_SHA): WORKFLOW_BLOB_SHA,
+            **{
+                (path, RUNTIME_SHA): WORKFLOW_BLOB_SHA
+                for path in routes.WORKFLOW_PATHS.values()
+            },
         }
+        self.dev_head = RUNTIME_SHA
+        self.commits: dict[str, dict[str, object]] = {
+            RUNTIME_SHA: {
+                "sha": RUNTIME_SHA,
+                "commit": {"tree": {"sha": RUNTIME_TREE}},
+                "parents": [],
+            }
+        }
+        self.compares: dict[tuple[str, str], dict[str, object]] = {}
+        self.pulls: dict[str, list[dict[str, object]]] = {}
         self.checks: dict[tuple[str, str], list[dict[str, object]]] = {}
         self.created_checks: list[dict[str, object]] = []
-        self.dispatches: list[dict[str, str]] = []
-        self.publish_dispatched_check = True
+        self.dispatches: list[dict[str, object]] = []
+        self.publisher_error = False
         self.jobs: dict[tuple[int, int], list[dict[str, object]]] = {
             (request.workflow_run_id, request.run_attempt): []
         }
+
+    def branch_head(self, branch: str) -> str:
+        assert branch == routes.TRUSTED_BRANCH
+        return self.dev_head
+
+    def commit(self, ref: str) -> dict[str, object]:
+        return self.commits[ref]
+
+    def compare_commits(self, base: str, head: str) -> dict[str, object]:
+        return self.compares[(base, head)]
+
+    def associated_pull_requests(self, commit_sha: str) -> list[dict[str, object]]:
+        return self.pulls.get(commit_sha, [])
 
     def active_workflow_runs(self, workflow_id: int) -> list[dict[str, object]]:
         return [
@@ -142,30 +179,78 @@ class FakeRouteAPI:
     def check_runs(self, head_sha: str, name: str) -> list[dict[str, object]]:
         return self.checks.get((head_sha, name), [])
 
-    def dispatch_route_publisher(
-        self, *, candidate_sha: str, payload_b64: str, signature: str
-    ) -> None:
-        raw = base64.b64decode(payload_b64, validate=True)
-        assert candidate_sha == CANDIDATE_SHA
-        assert hmac.compare_digest(
-            signature,
-            hmac.new(PUBLISHER_KEY, raw, hashlib.sha256).hexdigest(),
-        )
-        self.dispatches.append(
-            {
-                "candidate_sha": candidate_sha,
-                "payload_b64": payload_b64,
-                "signature": signature,
-            }
-        )
-        if self.publish_dispatched_check:
-            payload = json.loads(raw)
-            payload["app"] = {"id": routes.GITHUB_ACTIONS_APP_ID}
-            self.created_checks.append(payload)
-            self.checks.setdefault((payload["head_sha"], payload["name"]), []).append(payload)
+    def publish(self, payload: dict[str, object]) -> dict[str, object]:
+        self.dispatches.append(dict(payload))
+        if self.publisher_error:
+            raise routes.RouteControllerError("direct CheckRun publisher unavailable")
+        created = {**payload, "app": {"id": self.app_id}}
+        self.created_checks.append(created)
+        self.checks.setdefault((created["head_sha"], created["name"]), []).append(created)
+        return created
 
     def workflow_jobs(self, run_id: int, attempt: int) -> list[dict[str, object]]:
         return self.jobs[(run_id, attempt)]
+
+
+def _configure_protected_merge(
+    api: FakeRouteAPI,
+    *,
+    merge_sha: str = MERGE_SHA,
+    merge_tree: str = MERGE_TREE,
+    parent_sha: str = RUNTIME_SHA,
+    pull_head_sha: str = PR_HEAD_SHA,
+    changed_workflow: str = "images",
+    changed_blob_sha: str = CHANGED_WORKFLOW_BLOB_SHA,
+    dev_head: str | None = None,
+) -> None:
+    api.dev_head = dev_head or merge_sha
+    api.commits[merge_sha] = {
+        "sha": merge_sha,
+        "commit": {"tree": {"sha": merge_tree}},
+        "parents": [{"sha": parent_sha}],
+    }
+    api.compares[(parent_sha, api.dev_head)] = {
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
+        "total_commits": 1,
+        "commits": [{"sha": merge_sha, "parents": [{"sha": parent_sha}]}],
+    }
+    api.pulls[merge_sha] = [
+        {
+            "number": 1630,
+            "state": "closed",
+            "merged_at": NOW.isoformat().replace("+00:00", "Z"),
+            "merge_commit_sha": merge_sha,
+            "head": {
+                "sha": pull_head_sha,
+                "repo": {"full_name": "qianyi-sun/loom"},
+            },
+            "base": {
+                "ref": routes.TRUSTED_BRANCH,
+                "repo": {"full_name": "qianyi-sun/loom"},
+            },
+        }
+    ]
+    for index, check_name in enumerate(routes.REQUIRED_SOURCE_CHECKS, start=1):
+        api.checks[(pull_head_sha, check_name)] = [
+            {
+                "id": 10_000 + index,
+                "name": check_name,
+                "head_sha": pull_head_sha,
+                "status": "completed",
+                "conclusion": "success",
+                "app": {"id": routes.GITHUB_ACTIONS_APP_ID},
+                "details_url": (
+                    f"https://github.com/qianyi-sun/loom/actions/runs/{20_000 + index}"
+                    f"/job/{30_000 + index}"
+                ),
+            }
+        ]
+    for workflow_name, path in routes.WORKFLOW_PATHS.items():
+        api.blobs[(path, merge_sha)] = (
+            changed_blob_sha if workflow_name == changed_workflow else WORKFLOW_BLOB_SHA
+        )
 
 
 def _controller(
@@ -176,9 +261,8 @@ def _controller(
     controller = routes.CiRunnerRouteController(
         api=api,
         broker=broker,
-        candidate_sha=CANDIDATE_SHA,
-        publisher_key=PUBLISHER_KEY,
-        publisher_poll_seconds=0,
+        runtime_sha=RUNTIME_SHA,
+        publisher=api,
         now=lambda: NOW,
     )
     return controller, api, broker
@@ -198,6 +282,19 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
         "routes_abandoned": 0,
         "assignments_released": 0,
         "decisions_pruned": 0,
+        "runtime_sha": RUNTIME_SHA,
+        "trusted_workflow_sha": RUNTIME_SHA,
+        "trusted_workflow_digest": broker.current_trusted_workflow_generation().generation_digest,
+        "observed_dev_sha": RUNTIME_SHA,
+        "generation_lag_commits": 0,
+        "workflow_blob_drift": {
+            "CI": False,
+            "cluster-smoke": False,
+            "images": False,
+            "staging-smoke": False,
+        },
+        "generation_promoted": False,
+        "generation_blocker": None,
     }
     summary = json.loads(api.created_checks[0]["output"]["summary"])
     assert summary["request_sha256"] in api.created_checks[0]["external_id"]
@@ -205,6 +302,13 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     assert [item["target"] for item in summary["assignments"]].count("oldlab") == 5
     assert [item["target"] for item in summary["assignments"]].count("github_hosted") == 2
     assert broker.status()["classes"]["normal"]["oldlab_assigned"] == 5
+    assert broker.route_decisions()[0].publisher_app_id == PUBLISHER_APP_ID
+    status = broker.status(now=NOW)
+    assert status["route_generation_healthy"] is True
+    assert status["trusted_workflow_observation"]["publisher_app_id"] == PUBLISHER_APP_ID
+    assert status["metrics"]["route_decisions_by_eligibility_reason"][
+        "trusted_workflow_match"
+    ] == 1
     assert len(api.dispatches) == 1
 
 
@@ -231,6 +335,248 @@ def test_changed_workflow_blob_forces_every_job_to_hosted(tmp_path: Path) -> Non
     assert summary["oldlab_eligible"] is False
     assert {item["target"] for item in summary["assignments"]} == {"github_hosted"}
     assert broker.status()["classes"]["normal"]["available"] == 5
+
+
+def test_protected_merge_advances_workflow_generation_without_runtime_rollout(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=2)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
+        CHANGED_WORKFLOW_BLOB_SHA
+    )
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is True
+    assert result.runtime_sha == RUNTIME_SHA
+    assert result.trusted_workflow_sha == MERGE_SHA
+    assert api.app_id == PUBLISHER_APP_ID
+    summary = json.loads(api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is True
+    assert {item["target"] for item in summary["assignments"]} == {"oldlab"}
+    generations = broker.trusted_workflow_generations()
+    assert [item.candidate_sha for item in generations] == [RUNTIME_SHA, MERGE_SHA]
+    assert generations[1].predecessor_generation_id == generations[0].generation_id
+    assert generations[1].evidence()["kind"] == "protected_merge"
+    decision = broker.route_decisions()[0]
+    assert decision.trust_generation_id == generations[1].generation_id
+    assert decision.eligibility_reason == "trusted_workflow_match"
+
+
+def test_wrong_app_source_check_preserves_generation_and_forces_hosted(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    api.checks[(PR_HEAD_SHA, "images-gate")][0]["app"] = {"id": 999}
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
+        CHANGED_WORKFLOW_BLOB_SHA
+    )
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.trusted_workflow_sha == RUNTIME_SHA
+    assert result.observed_dev_sha == MERGE_SHA
+    assert result.generation_lag_commits == 1
+    assert result.workflow_blob_drift == {
+        "CI": False,
+        "cluster-smoke": False,
+        "images": True,
+        "staging-smoke": False,
+    }
+    assert result.generation_blocker == (
+        "protected source check images-gate is missing or ambiguous"
+    )
+    assert [item.candidate_sha for item in broker.trusted_workflow_generations()] == [
+        RUNTIME_SHA
+    ]
+    summary = json.loads(api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is False
+    assert summary["assignments"][0]["target"] == "github_hosted"
+    status = broker.status(now=NOW)
+    assert status["trusted_workflow_observation"]["promotion_result"] == "blocked"
+    assert status["metrics"] == {
+        "generation_lag_commits": 1,
+        "promotion_blocked": 1,
+        "workflow_blob_drift": {
+            "CI": 0,
+            "cluster-smoke": 0,
+            "images": 1,
+            "staging-smoke": 0,
+        },
+        "route_decisions_by_eligibility_reason": {
+            "future_request": 0,
+            "legacy_schema2_frozen": 0,
+            "stale_request": 0,
+            "trusted_workflow_match": 0,
+            "workflow_blob_drift": 1,
+        },
+    }
+    assert status["route_generation_healthy"] is False
+
+
+def test_unassociated_dev_commit_preserves_last_trusted_generation(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    api.pulls[MERGE_SHA] = []
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
+        CHANGED_WORKFLOW_BLOB_SHA
+    )
+
+    result = controller.reconcile()
+
+    assert result.generation_blocker == (
+        "trusted dev commit has ambiguous merge ownership"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+    decision = broker.route_decisions()[0]
+    assert decision.oldlab_eligible is False
+    assert decision.eligibility_reason == "workflow_blob_drift"
+
+
+def test_same_name_wrong_app_duplicate_cannot_hide_beside_authoritative_check(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    duplicate = dict(api.checks[(PR_HEAD_SHA, "images-gate")][0])
+    duplicate["id"] = 99_999
+    duplicate["app"] = {"id": 999}
+    api.checks[(PR_HEAD_SHA, "images-gate")].append(duplicate)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.generation_blocker == (
+        "protected source check images-gate is missing or ambiguous"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+
+
+def test_multiple_fast_protected_merges_converge_one_generation_per_reconcile(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    api.artifacts = []
+    api.runs = {}
+    _configure_protected_merge(api, dev_head=SECOND_MERGE_SHA)
+    api.compares[(RUNTIME_SHA, SECOND_MERGE_SHA)]["ahead_by"] = 2
+    api.compares[(RUNTIME_SHA, SECOND_MERGE_SHA)]["total_commits"] = 2
+    _configure_protected_merge(
+        api,
+        merge_sha=SECOND_MERGE_SHA,
+        merge_tree=SECOND_MERGE_TREE,
+        parent_sha=MERGE_SHA,
+        pull_head_sha=SECOND_PR_HEAD_SHA,
+        changed_blob_sha=SECOND_WORKFLOW_BLOB_SHA,
+    )
+
+    first = controller.reconcile()
+    second = controller.reconcile()
+
+    assert first.trusted_workflow_sha == MERGE_SHA
+    assert first.generation_lag_commits == 1
+    assert first.workflow_blob_drift["images"] is True
+    assert second.trusted_workflow_sha == SECOND_MERGE_SHA
+    assert second.generation_lag_commits == 0
+    assert second.workflow_blob_drift == {
+        "CI": False,
+        "cluster-smoke": False,
+        "images": False,
+        "staging-smoke": False,
+    }
+    assert [item.candidate_sha for item in broker.trusted_workflow_generations()] == [
+        RUNTIME_SHA,
+        MERGE_SHA,
+        SECOND_MERGE_SHA,
+    ]
+
+
+def test_promoted_generation_survives_restart_and_routes_with_pinned_runtime(
+    tmp_path: Path,
+) -> None:
+    initial_request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, initial_request)
+    api.artifacts = []
+    api.runs = {}
+    _configure_protected_merge(api)
+
+    promoted = controller.reconcile()
+
+    next_request = replace(initial_request, workflow_run_id=initial_request.workflow_run_id + 1)
+    restarted_api = FakeRouteAPI(next_request)
+    restarted_api.dev_head = MERGE_SHA
+    restarted_api.commits[MERGE_SHA] = api.commits[MERGE_SHA]
+    for path in routes.WORKFLOW_PATHS.values():
+        restarted_api.blobs[(path, MERGE_SHA)] = api.blobs[(path, MERGE_SHA)]
+    restarted_api.blobs[(routes.WORKFLOW_PATHS["images"], next_request.head_sha)] = (
+        CHANGED_WORKFLOW_BLOB_SHA
+    )
+    restarted = routes.CiRunnerRouteController(
+        api=restarted_api,
+        broker=leases.CiRunnerLeaseBroker(broker.state_db, _config()),
+        runtime_sha=RUNTIME_SHA,
+        publisher=restarted_api,
+        now=lambda: NOW + timedelta(seconds=10),
+    )
+
+    result = restarted.reconcile()
+
+    assert promoted.generation_promoted is True
+    assert result.generation_promoted is False
+    assert result.trusted_workflow_sha == MERGE_SHA
+    assert restarted_api.app_id == PUBLISHER_APP_ID
+    summary = json.loads(restarted_api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is True
+
+
+def test_github_interruption_preserves_generation_then_recovers_automatically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    artifacts = list(api.artifacts)
+    runs = dict(api.runs)
+    api.artifacts = []
+    api.runs = {}
+    _configure_protected_merge(api)
+    original_compare = api.compare_commits
+
+    def unavailable(_base: str, _head: str) -> dict[str, object]:
+        raise routes.RouteControllerError("GitHub compare temporarily unavailable")
+
+    monkeypatch.setattr(api, "compare_commits", unavailable)
+    interrupted = controller.reconcile()
+    monkeypatch.setattr(api, "compare_commits", original_compare)
+    api.artifacts = artifacts
+    api.runs = runs
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
+        CHANGED_WORKFLOW_BLOB_SHA
+    )
+
+    recovered = controller.reconcile()
+
+    assert interrupted.trusted_workflow_sha == RUNTIME_SHA
+    assert interrupted.observed_dev_sha == MERGE_SHA
+    assert interrupted.generation_lag_commits is None
+    assert interrupted.generation_blocker == "GitHub compare temporarily unavailable"
+    assert recovered.generation_promoted is True
+    assert recovered.generation_lag_commits == 0
+    assert broker.status(now=NOW)["trusted_workflow_observation"][
+        "promotion_result"
+    ] == "promoted"
+    summary = json.loads(api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is True
 
 
 def test_stale_request_forces_hosted_without_consuming_oldlab(tmp_path: Path) -> None:
@@ -286,9 +632,8 @@ def test_restart_replays_the_exact_persisted_route_decision(
     restarted = routes.CiRunnerRouteController(
         api=api,
         broker=leases.CiRunnerLeaseBroker(broker.state_db, _config()),
-        candidate_sha=CANDIDATE_SHA,
-        publisher_key=PUBLISHER_KEY,
-        publisher_poll_seconds=0,
+        runtime_sha=RUNTIME_SHA,
+        publisher=api,
         now=lambda: NOW + timedelta(minutes=1),
     )
     replay = restarted.reconcile()
@@ -299,31 +644,53 @@ def test_restart_replays_the_exact_persisted_route_decision(
     assert len(api.created_checks) == 1
 
 
-def test_late_publisher_replays_frozen_oldlab_decision_without_wedging(
+def test_legacy_actions_app_check_replays_after_direct_publisher_upgrade(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=1)
     controller, api, broker = _controller(tmp_path, request)
-    api.publish_dispatched_check = False
-    controller.publisher_poll_attempts = 1
+    artifacts = api.artifacts
+    runs = api.runs
+    api.artifacts = []
+    api.runs = {}
+    controller.reconcile()
+    api.artifacts = artifacts
+    api.runs = runs
+    decision = broker.decide_route(request, now=NOW)
+    payload = {
+        **controller._route_payload(decision),
+        "app": {"id": routes.GITHUB_ACTIONS_APP_ID},
+    }
+    api.checks[(request.head_sha, payload["name"])] = [payload]
 
-    first = controller.reconcile()
+    result = controller.reconcile()
+
+    assert decision.publisher_app_id == routes.GITHUB_ACTIONS_APP_ID
+    assert result.routes_replayed == 1
+    assert api.dispatches == []
+
+
+def test_direct_publisher_retry_replays_frozen_oldlab_decision_without_wedging(
+    tmp_path: Path,
+) -> None:
+    request = _request(job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    api.publisher_error = True
+
+    with pytest.raises(routes.RouteControllerError, match="publisher unavailable"):
+        controller.reconcile()
     frozen = broker.route_decisions(states=(leases.RouteDecisionState.PENDING,))[0]
-    payload = json.loads(
-        base64.b64decode(api.dispatches[0]["payload_b64"], validate=True)
-    )
-    payload["app"] = {"id": routes.GITHUB_ACTIONS_APP_ID}
-    api.checks[(payload["head_sha"], payload["name"])] = [payload]
-    controller.now = lambda: NOW + timedelta(seconds=141)
+    api.publisher_error = False
+    controller.now = lambda: NOW + timedelta(seconds=16)
 
     replay = controller.reconcile()
     published = broker.route_decisions(states=(leases.RouteDecisionState.PUBLISHED,))[0]
 
-    assert first.routes_pending == 1
     assert frozen.document().oldlab_eligible is True
-    assert replay.routes_replayed == 1
+    assert replay.routes_published == 1
     assert published.response_json == frozen.response_json
-    assert len(api.dispatches) == 1
+    assert len(api.dispatches) == 2
+    assert api.dispatches[0] == api.dispatches[1]
 
 
 def test_unrelated_repository_artifact_burst_cannot_block_fresh_route(
@@ -465,9 +832,9 @@ def test_terminal_hosted_fallback_abandons_outbox_and_releases_lease(
 ) -> None:
     request = _request(job_count=1)
     controller, api, broker = _controller(tmp_path, request)
-    api.publish_dispatched_check = False
-    controller.publisher_poll_attempts = 1
-    pending = controller.reconcile()
+    api.publisher_error = True
+    with pytest.raises(routes.RouteControllerError, match="publisher unavailable"):
+        controller.reconcile()
     api.jobs[(request.workflow_run_id, 1)] = [
         {
             "name": routes.ROUTE_JOB_NAMES[request.workflow_name],
@@ -478,7 +845,6 @@ def test_terminal_hosted_fallback_abandons_outbox_and_releases_lease(
 
     result = controller.reconcile()
 
-    assert pending.routes_pending == 1
     assert result.routes_abandoned == 1
     assert result.assignments_released == 1
     assert broker.active_assignments() == ()
@@ -561,6 +927,80 @@ def test_artifact_redirect_never_forwards_github_authorization(
     assert api.download_artifact(71) == payload
 
 
+def test_github_app_publisher_mints_least_privilege_token_and_creates_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    payload: dict[str, object] = {
+        "name": "loom-ci-route-v1/CI/30000/1",
+        "head_sha": HEAD_SHA,
+        "external_id": "route-external-id",
+        "status": "completed",
+        "conclusion": "success",
+        "output": {"title": "oldlab-first route assignment", "summary": "{}"},
+    }
+    calls: list[object] = []
+
+    class Response:
+        def __init__(self, value: dict[str, object]) -> None:
+            self.raw = json.dumps(value).encode()
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return self.raw
+
+    def urlopen(request: object, timeout: int) -> Response:
+        assert timeout == 20
+        calls.append(request)
+        body = json.loads(request.data)
+        authorization = request.get_header("Authorization")
+        if request.full_url.endswith("/app/installations/777/access_tokens"):
+            assert body == {
+                "repositories": ["loom"],
+                "permissions": {"checks": "write"},
+            }
+            assert authorization.startswith("Bearer ")
+            claims = jwt.decode(
+                authorization.removeprefix("Bearer "),
+                options={"verify_signature": False},
+            )
+            assert claims["iss"] == str(PUBLISHER_APP_ID)
+            return Response(
+                {
+                    "token": "ghs_test-installation-token",
+                    "expires_at": "2026-08-20T19:00:00Z",
+                    "permissions": {"checks": "write", "metadata": "read"},
+                }
+            )
+        assert request.full_url.endswith("/repos/qianyi-sun/loom/check-runs")
+        assert authorization == "Bearer ghs_test-installation-token"
+        assert body == payload
+        return Response({**payload, "app": {"id": PUBLISHER_APP_ID}})
+
+    monkeypatch.setattr(routes.urllib.request, "urlopen", urlopen)
+    publisher = routes.GitHubAppRouteCheckPublisher(
+        repository="qianyi-sun/loom",
+        app_id=PUBLISHER_APP_ID,
+        installation_id=777,
+        private_key_pem=private_key_pem,
+        now=lambda: NOW,
+    )
+
+    assert publisher.publish(payload)["app"] == {"id": PUBLISHER_APP_ID}
+    assert publisher.publish(payload)["app"] == {"id": PUBLISHER_APP_ID}
+    assert len(calls) == 3
+
+
 def test_root_owned_credential_files_fail_closed(tmp_path: Path) -> None:
     token = tmp_path / "github-token"
     token.write_text("opaque-token\n", encoding="utf-8")
@@ -571,32 +1011,54 @@ def test_root_owned_credential_files_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(routes.RouteControllerError, match="group or other"):
         routes._read_token(token)
 
-    publisher_key = tmp_path / "route-publisher-hmac"
-    publisher_key.write_text(PUBLISHER_KEY.decode() + "\n", encoding="utf-8")
+    publisher_key = tmp_path / "route-publisher-app-private-key.pem"
+    publisher_key.write_bytes(b"test-private-key")
     publisher_key.chmod(0o600)
-    assert routes._read_publisher_key(publisher_key) == PUBLISHER_KEY
+    assert routes._read_app_private_key(publisher_key) == b"test-private-key"
 
     publisher_key.chmod(0o640)
     with pytest.raises(routes.RouteControllerError, match="group or other"):
-        routes._read_publisher_key(publisher_key)
+        routes._read_app_private_key(publisher_key)
 
 
-def test_pool_timer_runs_the_route_controller_with_systemd_credential() -> None:
+def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    service = (repo_root / "deploy/ci-runners/loom-ci-runner-pool.service").read_text(
+    unit_root = repo_root / "deploy/ci-runners"
+    service = (unit_root / "loom-ci-runner-route-controller.service").read_text(
         encoding="utf-8"
     )
+    timer = (unit_root / "loom-ci-runner-route-controller.timer").read_text(
+        encoding="utf-8"
+    )
+    pool_service = (unit_root / "loom-ci-runner-pool.service").read_text(encoding="utf-8")
 
-    assert "ExecStart=/usr/local/libexec/loom-ci-runner-route-controller" in service
+    assert (
+        "ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python "
+        "-m loom_control_plane.ci_runner_route_controller"
+    ) in service
     assert "--token-file ${CREDENTIALS_DIRECTORY}/github-token" in service
-    assert "LoadCredential=route-publisher-hmac:" in service
-    assert "--publisher-secret-file ${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
+    assert "LoadCredential=route-publisher-app-private-key:" in service
+    assert "--publisher-app-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_APP_ID}" in service
+    assert (
+        "--publisher-installation-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_INSTALLATION_ID}"
+        in service
+    )
+    assert (
+        "--publisher-app-private-key-file "
+        "${CREDENTIALS_DIRECTORY}/route-publisher-app-private-key"
+    ) in service
     route_command = next(
         line
         for line in service.splitlines()
-        if line.startswith("ExecStart=/usr/local/libexec/loom-ci-runner-route-controller ")
+        if line.startswith(
+            "ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python "
+        )
     )
-    assert "--candidate-sha ${LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA}" in route_command
+    assert "--runtime-sha ${LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA}" in route_command
+    assert "LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA" not in service
     assert "LOOM_CI_RUNNER_POOL_CANDIDATE_SHA" not in route_command
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
+    assert "OnUnitActiveSec=15s" in timer
+    assert "Unit=loom-ci-runner-route-controller.service" in timer
+    assert "loom-ci-runner-route-controller" not in pool_service

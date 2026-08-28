@@ -11,6 +11,8 @@ import pytest
 from loom_control_plane import ci_runner_lease_broker as leases
 
 HEAD_SHA = "a" * 40
+RUNTIME_SHA = "b" * 40
+RUNTIME_TREE = "c" * 40
 NOW = datetime(2026, 8, 7, 20, 0, tzinfo=UTC)
 
 
@@ -50,7 +52,22 @@ def _request(
 
 
 def _broker(tmp_path: Path) -> leases.CiRunnerLeaseBroker:
-    return leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    if broker.current_trusted_workflow_generation() is None:
+        broker.record_trusted_workflow_generation(
+            candidate_sha=RUNTIME_SHA,
+            candidate_tree=RUNTIME_TREE,
+            workflow_blobs={
+                name: marker * 40
+                for name, marker in zip(
+                    leases.WORKFLOW_CLASS_CONTRACTS, ("d", "e", "f", "1"), strict=True
+                )
+            },
+            evidence={"kind": "installed_runtime", "runtime_sha": RUNTIME_SHA},
+            predecessor_generation_id=None,
+            now=NOW,
+        )
+    return broker
 
 
 def _route_request(
@@ -301,6 +318,19 @@ def test_schema_one_state_migrates_without_losing_assignments(tmp_path: Path) ->
         )
 
     migrated = leases.CiRunnerLeaseBroker(state_db, _config())
+    migrated.record_trusted_workflow_generation(
+        candidate_sha=RUNTIME_SHA,
+        candidate_tree=RUNTIME_TREE,
+        workflow_blobs={
+            name: marker * 40
+            for name, marker in zip(
+                leases.WORKFLOW_CLASS_CONTRACTS, ("d", "e", "f", "1"), strict=True
+            )
+        },
+        evidence={"kind": "installed_runtime", "runtime_sha": RUNTIME_SHA},
+        predecessor_generation_id=None,
+        now=NOW,
+    )
     decision = migrated.decide_route(
         _route_request(workflow_run_id=20_001, job_count=1),
         now=NOW,
@@ -310,9 +340,76 @@ def test_schema_one_state_migrates_without_losing_assignments(tmp_path: Path) ->
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()
 
-    assert schema_version == ("2",)
+    assert schema_version == ("3",)
     assert migrated.active_assignments()[0] == assignment
     assert decision.state is leases.RouteDecisionState.PENDING
+
+
+def test_schema_two_state_migrates_and_binds_frozen_outbox_to_initial_generation(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path)
+    decision = broker.decide_route(_route_request(job_count=2), now=NOW)
+    dispatched = broker.record_route_dispatch(decision.request_sha256, now=NOW)
+    original_assignments = broker.active_assignments()
+    original_response = dispatched.response_json
+    with sqlite3.connect(broker.state_db) as connection:
+        connection.execute(
+            "UPDATE route_decisions "
+            "SET trust_generation_id = NULL, eligibility_reason = NULL"
+        )
+        connection.execute("DELETE FROM trusted_workflow_generations")
+        connection.execute(
+            "UPDATE metadata SET value = '2' WHERE key = 'schema_version'"
+        )
+
+    migrated = leases.CiRunnerLeaseBroker(broker.state_db, _config())
+    assert migrated.current_trusted_workflow_generation() is None
+    generation = migrated.record_trusted_workflow_generation(
+        candidate_sha=RUNTIME_SHA,
+        candidate_tree=RUNTIME_TREE,
+        workflow_blobs={
+            name: marker * 40
+            for name, marker in zip(
+                leases.WORKFLOW_CLASS_CONTRACTS, ("d", "e", "f", "1"), strict=True
+            )
+        },
+        evidence={"kind": "installed_runtime", "runtime_sha": RUNTIME_SHA},
+        predecessor_generation_id=None,
+        now=NOW + timedelta(minutes=1),
+    )
+    recovered = migrated.route_decisions()[0]
+
+    assert migrated.active_assignments() == original_assignments
+    assert recovered.response_json == original_response
+    assert recovered.dispatch_attempts == 1
+    assert recovered.state is leases.RouteDecisionState.PENDING
+    assert recovered.trust_generation_id == generation.generation_id
+    assert recovered.eligibility_reason == "legacy_schema2_frozen"
+    assert recovered.publisher_app_id == leases.LEGACY_GITHUB_ACTIONS_APP_ID
+
+
+def test_generation_digest_tampering_is_detected_on_readback(tmp_path: Path) -> None:
+    broker = _broker(tmp_path)
+    with sqlite3.connect(broker.state_db) as connection:
+        connection.execute(
+            "UPDATE trusted_workflow_generations SET generation_digest = ?",
+            ("0" * 64,),
+        )
+
+    with pytest.raises(leases.LeaseBrokerError, match="generation digest is invalid"):
+        broker.current_trusted_workflow_generation()
+
+
+def test_route_eligibility_reason_is_a_bounded_enum(tmp_path: Path) -> None:
+    broker = _broker(tmp_path)
+
+    with pytest.raises(leases.LeaseBrokerError, match="eligibility reason is invalid"):
+        broker.decide_route(
+            _route_request(job_count=1),
+            eligibility_reason="pull-123-user-controlled",
+            now=NOW,
+        )
 
 
 def test_route_decision_retention_uses_terminal_time_and_active_lease_guard(
@@ -588,6 +685,20 @@ def test_cli_allocates_an_atomic_route_document(
     request_file.write_text(
         json.dumps(_route_request(job_count=7).public_dict()),
         encoding="utf-8",
+    )
+    broker = leases.CiRunnerLeaseBroker(state_db, _config())
+    broker.record_trusted_workflow_generation(
+        candidate_sha=RUNTIME_SHA,
+        candidate_tree=RUNTIME_TREE,
+        workflow_blobs={
+            name: marker * 40
+            for name, marker in zip(
+                leases.WORKFLOW_CLASS_CONTRACTS, ("d", "e", "f", "1"), strict=True
+            )
+        },
+        evidence={"kind": "installed_runtime", "runtime_sha": RUNTIME_SHA},
+        predecessor_generation_id=None,
+        now=NOW,
     )
 
     assert (
