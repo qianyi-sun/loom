@@ -148,6 +148,7 @@ def test_server_observed_readonly_authority_digest_ignores_rule_order() -> None:
     assert ordered_evidence.capability_source_digest == (
         reordered_evidence.capability_source_digest
     )
+    assert ordered_evidence.evidence_digest == reordered_evidence.evidence_digest
 
 
 def test_server_observed_authority_accepts_select_only_database_digest() -> None:
