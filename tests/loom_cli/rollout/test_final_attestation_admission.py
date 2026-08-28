@@ -129,8 +129,15 @@ def _checks(
     boot_id: str = "boot-1",
     baseline_digest: str = "6" * 64,
     credential_metadata: dict[str, str] | None = None,
+    predecessor_kind: str = "legacy-manifest",
+    predecessor_pointer_digest: str = EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
     predecessor_live_digest: str = "d" * 64,
+    predecessor_runtime_state: str = "ready",
+    predecessor_pending_transition_digest: str = "1" * 64,
+    predecessor_transition_clear: bool = True,
+    predecessor_runtime_ready: bool = True,
     oldlab_predecessor_live_digest: str = "7" * 64,
+    controller_binding_overrides: dict[str, str] | None = None,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
     baseline_ready: bool = True,
@@ -183,26 +190,26 @@ def _checks(
         _check(
             "external-supervisor.predecessor",
             {
-                "authority-kind": "legacy-manifest",
+                "authority-kind": predecessor_kind,
                 "authority-digest": "c" * 64,
-                "pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                "pointer-digest": predecessor_pointer_digest,
                 "unit-digests": predecessor_units,
                 "unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
                 "live-evidence-digest": predecessor_live_digest,
-                "pending-transition-digest": "1" * 64,
-                "transition-clear": True,
-                "runtime-ready": True,
+                "pending-transition-digest": predecessor_pending_transition_digest,
+                "transition-clear": predecessor_transition_clear,
+                "runtime-ready": predecessor_runtime_ready,
                 "pool-identity-digest": predecessor_pool_digest,
                 "controller-bindings": {
-                    "gx10-01c7/authority-kind": "legacy-manifest",
+                    "gx10-01c7/authority-kind": predecessor_kind,
                     "gx10-01c7/authority-digest": "c" * 64,
-                    "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                    "gx10-01c7/pointer-digest": predecessor_pointer_digest,
                     "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
                         predecessor_units
                     ),
                     "gx10-01c7/live-evidence-digest": predecessor_live_digest,
-                    "gx10-01c7/pending-transition-digest": "1" * 64,
-                    "gx10-01c7/runtime-state": "ready",
+                    "gx10-01c7/pending-transition-digest": (predecessor_pending_transition_digest),
+                    "gx10-01c7/runtime-state": predecessor_runtime_state,
                     "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
                     **{
                         f"gx10-01c7/unit/{name}": digest
@@ -224,6 +231,9 @@ def _checks(
                         f"TRT-EAI-OLDLAB-1/unit/{name}": digest
                         for name, digest in oldlab_predecessor_units.items()
                     },
+                    **(
+                        {} if controller_binding_overrides is None else controller_binding_overrides
+                    ),
                 },
             },
             (
@@ -455,15 +465,118 @@ def test_final_admission_tolerates_pool_identity_drift() -> None:
     assert all(execution.passed for execution in admission.tier0_executions)
 
 
-def test_final_admission_rejects_oldlab_controller_predecessor_drift() -> None:
+def test_final_admission_tolerates_supervisor_runtime_convergence() -> None:
+    canonical_pointer_digest = "9" * 64
+    attested_plan = _plan(
+        _checks(
+            predecessor_kind="canonical",
+            predecessor_pointer_digest=canonical_pointer_digest,
+            predecessor_live_digest="d" * 64,
+            predecessor_runtime_state="repairable",
+        )
+    )
+    attestation = _attestation(attested_plan)
+    attested_controller_bindings = dict(attestation.bindings.supervisor_controller_bindings)
+    attested_controller_bindings["gx10-01c7/authority-kind"] = "canonical"
+    attested_controller_bindings["gx10-01c7/pointer-digest"] = canonical_pointer_digest
+    attested_controller_bindings["gx10-01c7/runtime-state"] = "repairable"
+    attestation = replace(
+        attestation,
+        bindings=replace(
+            attestation.bindings,
+            supervisor_predecessor_kind="canonical",
+            supervisor_predecessor_pointer_digest=canonical_pointer_digest,
+            supervisor_controller_bindings=attested_controller_bindings,
+        ),
+    )
+    converged_plan = _plan(
+        _checks(
+            predecessor_kind="canonical",
+            predecessor_pointer_digest=canonical_pointer_digest,
+            predecessor_live_digest="0" * 64,
+            predecessor_runtime_state="ready",
+        )
+    )
+
+    admission = validate_final_attestation(
+        attestation=attestation,
+        candidate=_candidate(),
+        plan=converged_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_admission_tolerates_other_controller_live_evidence_drift() -> None:
     attested_plan = _plan(_checks())
     drifted_plan = _plan(_checks(oldlab_predecessor_live_digest="9" * 64))
+
+    admission = validate_final_attestation(
+        attestation=_attestation(attested_plan),
+        candidate=_candidate(),
+        plan=drifted_plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+
+    assert all(execution.passed for execution in admission.tier0_executions)
+
+
+@pytest.mark.parametrize(
+    ("field", "drifted_value"),
+    (
+        ("authority-kind", "absent"),
+        ("authority-digest", "0" * 64),
+        ("pointer-digest", "0" * 64),
+        ("unit/loom-autoscaler-gb10-staging.service", "0" * 64),
+        ("unit-set-digest", "0" * 64),
+        ("pending-transition-digest", "0" * 64),
+        ("unit-directory", "/var/lib/loom-staging-rollout/.config/systemd/user"),
+    ),
+)
+def test_final_admission_rejects_stable_controller_binding_drift(
+    field: str,
+    drifted_value: str,
+) -> None:
+    attested_plan = _plan(_checks())
+    drifted_plan = _plan(
+        _checks(
+            controller_binding_overrides={f"gx10-01c7/{field}": drifted_value},
+        )
+    )
 
     with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
         validate_final_attestation(
             attestation=_attestation(attested_plan),
             candidate=_candidate(),
             plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("transition_clear", "runtime_ready"),
+    ((False, True), (True, False)),
+)
+def test_final_admission_rejects_unclear_transition_or_failed_runtime(
+    transition_clear: bool,
+    runtime_ready: bool,
+) -> None:
+    plan = _plan(
+        _checks(
+            predecessor_transition_clear=transition_clear,
+            predecessor_runtime_ready=runtime_ready,
+        )
+    )
+
+    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(plan),
+            candidate=_candidate(),
+            plan=plan,
             current_mutation_epoch=7,
             now=NOW,
         )
@@ -642,7 +755,7 @@ def test_final_admission_rejects_unhealthy_tier2_baseline() -> None:
 
 def test_final_admission_rejects_predecessor_drift_before_apply() -> None:
     attested_plan = _plan(_checks())
-    drifted_plan = _plan(_checks(predecessor_live_digest="0" * 64))
+    drifted_plan = _plan(_checks(predecessor_pending_transition_digest="0" * 64))
 
     with pytest.raises(ValueError, match="evidence changed"):
         validate_final_attestation(
