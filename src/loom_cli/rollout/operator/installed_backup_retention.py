@@ -494,12 +494,7 @@ class InstalledBackupRetentionService:
     activate_payload: Callable[[BackupPayloadRecord], None]
 
     def __post_init__(self) -> None:
-        if (
-            self.service_uid < 1
-            or self.config.source_mode != "sealed-cumulative"
-            or self.config.environment != "staging"
-            or self.config.namespace != "loom-staging"
-        ):
+        if self.service_uid < 1 or not self.config.backup_rotation_maintenance_permitted():
             raise ValueError("installed backup retention authority is invalid")
 
     @property
@@ -1064,12 +1059,7 @@ class InstalledBackupRecoveryService:
     activate_payload: Callable[[BackupPayloadRecord], None]
 
     def __post_init__(self) -> None:
-        if (
-            self.service_uid < 1
-            or self.config.source_mode != "sealed-cumulative"
-            or self.config.environment != "staging"
-            or self.config.namespace != "loom-staging"
-        ):
+        if self.service_uid < 1 or not self.config.backup_rotation_maintenance_permitted():
             raise ValueError("installed backup recovery authority is invalid")
 
     @property
@@ -1179,9 +1169,7 @@ class InstalledBackupRecoveryService:
             "final_rotation_generation": final.generation,
             "final_rotation_sha256": final.evidence_digest,
             "namespace": self.config.namespace,
-            "queued_retirement_payload_ids": [
-                record.payload_id for record in final.retirements
-            ],
+            "queued_retirement_payload_ids": [record.payload_id for record in final.retirements],
             "recovered_payload_id": plan.recovered_active.payload_id,
             "schema_version": 1,
         }
@@ -1223,9 +1211,7 @@ class InstalledBackupRecoveryService:
             or job_state.lease_digest is None
             or job_state.preflight_attestation_sha256 is None
         ):
-            raise InstalledBackupRecoveryError(
-                "verified candidate backup job authority drifted"
-            )
+            raise InstalledBackupRecoveryError("verified candidate backup job authority drifted")
         try:
             lease = self.store.read_backup_lease(job_state.lease_digest)
         except RequestStoreError as exc:
@@ -1256,12 +1242,9 @@ class InstalledBackupRecoveryService:
                 or attempt.attempt_number != 1
                 or attempt.resolved_sha != job.candidate_sha
                 or attempt.backup_manifest_sha256 != candidate.manifest_sha256
-                or attempt.preflight_attestation_sha256
-                != job_state.preflight_attestation_sha256
+                or attempt.preflight_attestation_sha256 != job_state.preflight_attestation_sha256
             ):
-                raise InstalledBackupRecoveryError(
-                    "launched candidate attempt authority drifted"
-                )
+                raise InstalledBackupRecoveryError("launched candidate attempt authority drifted")
             request_sha256 = hashlib.sha256(_json_bytes(request.to_dict())).hexdigest()
             attempt_sha256 = hashlib.sha256(_json_bytes(attempt.to_dict())).hexdigest()
         return VerifiedBackupCandidateRecoveryPlan(
@@ -1320,11 +1303,7 @@ class InstalledBackupRecoveryService:
                 and current.active == plan.recovered_active
                 and all(
                     record.payload_id
-                    != (
-                        None
-                        if plan.previous_active is None
-                        else plan.previous_active.payload_id
-                    )
+                    != (None if plan.previous_active is None else plan.previous_active.payload_id)
                     or self.store.has_backup_retirement_receipt(record.payload_id)
                     for record in promoted.retirements
                     if record not in current.retirements
@@ -1358,8 +1337,7 @@ class InstalledBackupRecoveryService:
             or state.preflight_attestation_sha256 != plan.preflight_attestation_sha256
             or lease != plan.recovered_active.lease
             or job.evidence_digest != plan.job_sha256
-            or hashlib.sha256(_json_bytes(state.to_dict())).hexdigest()
-            != plan.job_state_sha256
+            or hashlib.sha256(_json_bytes(state.to_dict())).hexdigest() != plan.job_state_sha256
             or request_sha256 != plan.request_sha256
             or attempt_sha256 != plan.attempt_sha256
         ):
@@ -1403,12 +1381,7 @@ class InstalledBackupRecoveryService:
     def _execution_guard(self) -> Iterator[None]:
         _ensure_private_directory(self.evidence_root, self.service_uid)
         path = self.evidence_root / ".apply.lock"
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(path, flags, _PRIVATE_FILE_MODE)
         locked = False
         try:
@@ -1433,6 +1406,7 @@ class InstalledBackupRecoveryService:
             if locked:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
 
 def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"

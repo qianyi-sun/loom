@@ -371,6 +371,21 @@ class OperatorConfig:
     short_name: EnvironmentShortName = "staging"
     ownership_maintenance_allowed: bool = False
 
+    def backup_rotation_maintenance_permitted(self) -> bool:
+        """Whether this runner may converge its exact persisted backup ledger.
+
+        Recovery and retention operate only on the installed rotation, job,
+        lease, and receipt records; unlike manifest ownership, they do not
+        derive mutation targets from candidate source. Both validated source
+        modes therefore share the same staging-only maintenance capability.
+        """
+        return (
+            self.source_mode in {"merged-dev", "sealed-cumulative"}
+            and self.short_name == "staging"
+            and self.environment == "staging"
+            and self.namespace == "loom-staging"
+        )
+
     def ownership_maintenance_permitted(self) -> bool:
         """Whether this runner may run manifest-ownership maintenance.
 

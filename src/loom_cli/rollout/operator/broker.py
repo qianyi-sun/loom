@@ -608,7 +608,7 @@ def _backup_retention(
             "backup retention maintenance requires coordinator authority",
         )
     if (
-        dependencies.config.source_mode != "sealed-cumulative"
+        not dependencies.config.backup_rotation_maintenance_permitted()
         or dependencies.backup_retention is None
     ):
         return _safe_error(dependencies, "backup retention maintenance is not configured")
@@ -683,7 +683,7 @@ def _backup_recovery(
             "backup recovery maintenance requires coordinator authority",
         )
     if (
-        dependencies.config.source_mode != "sealed-cumulative"
+        not dependencies.config.backup_rotation_maintenance_permitted()
         or dependencies.backup_recovery is None
     ):
         return _safe_error(dependencies, "backup recovery maintenance is not configured")
@@ -2157,7 +2157,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
                 enforce_freshness=False,
             ),
         )
-        if config.source_mode == "sealed-cumulative"
+        if config.backup_rotation_maintenance_permitted()
         else None
     )
     backup_recovery = (
@@ -2170,7 +2170,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
                 enforce_freshness=False,
             ),
         )
-        if config.source_mode == "sealed-cumulative"
+        if config.backup_rotation_maintenance_permitted()
         else None
     )
     preflight_artifact_retention = None
