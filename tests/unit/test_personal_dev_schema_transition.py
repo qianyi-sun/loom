@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_control_plane_profile,
@@ -304,6 +305,17 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
     assert plan["target"]["schema_head"] == "0120"
+    predecessor_documents = list(
+        yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
+    )
+    predecessor_migration_name = next(
+        item["metadata"]["name"]
+        for item in predecessor_documents
+        if item.get("kind") == "Job"
+        and item.get("metadata", {}).get("labels", {}).get("app") == "loom-personal-dev-migration"
+    )
+    assert plan["predecessor"]["migration_job_name"] == predecessor_migration_name
+    assert plan["migration"]["job_name"] != predecessor_migration_name
     assert plan["rollback"]["delete_after_predecessor_apply"] == [
         "deployment.apps/loom-personal-dev-web",
         "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",

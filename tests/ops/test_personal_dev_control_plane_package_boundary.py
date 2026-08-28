@@ -4239,10 +4239,13 @@ def test_schema_transition_failure_restores_before_predecessor_restart(
     )
 
     assert result.returncode == 1
-    assert calls[-14:] == [
+    assert calls[-17:] == [
+        "assert_predecessor_recovery_interlocks",
         "scale_management_to_zero",
         "wait_for_no_management_pods",
+        "assert_predecessor_recovery_interlocks",
         "stop_target_migration",
+        "assert_predecessor_recovery_interlocks",
         "assert_predecessor_restore_artifacts",
         "assert_only_restore_connection",
         "restore_predecessor_database",
@@ -4259,6 +4262,34 @@ def test_schema_transition_failure_restores_before_predecessor_restart(
     verify = calls.index("assert_live_predecessor_state", restore)
     restart = calls.index("apply_reviewed_predecessor_shadow")
     assert restore < verify < restart
+
+
+def test_schema_transition_recovery_validates_boundary_before_every_mutation_phase(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run_schema_transition_orchestration(
+        tmp_path,
+        fail_at="wait_for_reviewed_migration_job",
+    )
+
+    assert result.returncode == 1
+    failure = calls.index("wait_for_reviewed_migration_job")
+    recovery = calls[failure + 1 :]
+    assert recovery[:6] == [
+        "assert_predecessor_recovery_interlocks",
+        "scale_management_to_zero",
+        "wait_for_no_management_pods",
+        "assert_predecessor_recovery_interlocks",
+        "stop_target_migration",
+        "assert_predecessor_recovery_interlocks",
+    ]
+    assert recovery.index("assert_predecessor_recovery_interlocks") < recovery.index(
+        "scale_management_to_zero"
+    )
+    assert recovery.index("stop_target_migration") < recovery.index("restore_predecessor_database")
+    assert recovery[recovery.index("stop_target_migration") + 1] == (
+        "assert_predecessor_recovery_interlocks"
+    )
 
 
 def test_schema_transition_rollback_removes_exact_forward_only_web_resources(
@@ -4299,26 +4330,104 @@ def test_schema_transition_rollback_removes_exact_forward_only_web_resources(
     }.issubset(command)
 
 
-def test_schema_transition_recovery_stops_migrations_without_target_job_name(
+def test_schema_transition_recovery_preserves_succeeded_predecessor_migration(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
     function = _fenced_shell_function(runbook, "stop_target_migration")
+    predecessor_name = "predecessor-migration"
+    target_name = "target-migration"
+    predecessor_job = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "labels": {"app": "loom-personal-dev-migration"},
+            "name": predecessor_name,
+        },
+        "status": {"active": 0, "failed": 0, "succeeded": 1},
+    }
+    predecessor_pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "labels": {
+                "app": "loom-personal-dev-migration",
+                "batch.kubernetes.io/job-name": predecessor_name,
+            },
+            "name": "predecessor-migration-pod",
+        },
+        "status": {"phase": "Succeeded"},
+    }
+    target_job = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "labels": {"app": "loom-personal-dev-migration"},
+            "name": target_name,
+        },
+        "status": {"active": 1, "failed": 0, "succeeded": 0},
+    }
+    target_pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "labels": {
+                "app": "loom-personal-dev-migration",
+                "batch.kubernetes.io/job-name": target_name,
+            },
+            "name": "target-migration-pod",
+        },
+        "status": {"phase": "Running"},
+    }
+    inventory_before = json.dumps(
+        {"items": [predecessor_job, predecessor_pod, target_job, target_pod]},
+        separators=(",", ":"),
+    )
+    inventory_after = json.dumps(
+        {"items": [predecessor_job, predecessor_pod]},
+        separators=(",", ":"),
+    )
+    empty_inventory = '{"items":[]}'
     call_log = tmp_path / "calls.txt"
     program = (
         "set -euo pipefail\n"
         f"call_log={shlex.quote(str(call_log))}\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
         "kubeconfig=/unused/kubeconfig\n"
+        f"predecessor_migration_job_name={predecessor_name}\n"
+        f"migration_job_name={target_name}\n"
+        "predecessor_present=1\n"
+        "target_present=1\n"
+        "target_pod_present=1\n"
         "kubectl() {\n"
         '  printf "%s\\n" "$*" >> "$call_log"\n'
-        '  case "$*" in\n'
-        '    *"get jobs,pods"*"-o json"*) printf \'{"items":[]}\\n\' ;;\n'
-        '    *"get jobs,pods"*"-o name"*) : ;;\n'
+        '  case " $* " in\n'
+        '    *" get jobs,pods "*" -o json "*)\n'
+        '      if test "$predecessor_present" -eq 0; then\n'
+        f"        printf '%s\\n' {shlex.quote(empty_inventory)}\n"
+        '      elif test "$target_present" -eq 0 &&\n'
+        '           test "$target_pod_present" -eq 0; then\n'
+        f"        printf '%s\\n' {shlex.quote(inventory_after)}\n"
+        "      else\n"
+        f"        printf '%s\\n' {shlex.quote(inventory_before)}\n"
+        "      fi\n"
+        "      ;;\n"
+        f'    *" delete job {target_name} "*) target_present=0 ;;\n'
+        f'    *" delete pods "*"batch.kubernetes.io/job-name={target_name}"*)\n'
+        "      target_pod_present=0\n"
+        "      ;;\n"
+        '    *" delete jobs "*" app=loom-personal-dev-migration "*)\n'
+        "      predecessor_present=0\n"
+        "      target_present=0\n"
+        "      target_pod_present=0\n"
+        "      ;;\n"
+        "    *) return 91 ;;\n"
         "  esac\n"
         "}\n"
         f"{function}\n"
         "stop_target_migration\n"
+        'printf "%s:%s:%s\\n" "$predecessor_present" '
+        '"$target_present" "$target_pod_present"\n'
     )
 
     result = subprocess.run(
@@ -4330,10 +4439,7 @@ def test_schema_transition_recovery_stops_migrations_without_target_job_name(
     )
 
     assert result.returncode == 0, result.stderr
-    calls = call_log.read_text(encoding="ascii").splitlines()
-    assert len(calls) == 3
-    assert all("app=loom-personal-dev-migration" in call for call in calls)
-    assert "delete jobs" in calls[1]
+    assert result.stdout == "1:0:0\n"
 
 
 def test_schema_transition_recovery_rejects_orphan_migration_pod(
@@ -4341,15 +4447,44 @@ def test_schema_transition_recovery_rejects_orphan_migration_pod(
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
     function = _fenced_shell_function(runbook, "stop_target_migration")
+    inventory = json.dumps(
+        {
+            "items": [
+                {
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "labels": {"app": "loom-personal-dev-migration"},
+                        "name": "predecessor-migration",
+                    },
+                    "status": {"succeeded": 1},
+                },
+                {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "labels": {
+                            "app": "loom-personal-dev-migration",
+                            "batch.kubernetes.io/job-name": "unknown-migration",
+                        },
+                        "name": "orphan-migration",
+                    },
+                    "status": {"phase": "Running"},
+                },
+            ]
+        },
+        separators=(",", ":"),
+    )
     program = (
         "set -euo pipefail\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
         "kubeconfig=/unused/kubeconfig\n"
+        "predecessor_migration_job_name=predecessor-migration\n"
+        "migration_job_name=target-migration\n"
         "kubectl() {\n"
         '  case "$*" in\n'
-        '    *"get jobs,pods"*"-o json"*) printf \'{"items":[]}\\n\' ;;\n'
-        '    *"get jobs,pods"*"-o name"*) printf \'pod/orphan-migration\\n\' ;;\n'
-        '    *"get jobs"*"-o name"*) : ;;\n'
+        f'    *"get jobs,pods"*"-o json"*) printf \'%s\\n\' {shlex.quote(inventory)} ;;\n'
+        "    *) return 91 ;;\n"
         "  esac\n"
         "}\n"
         f"{function}\n"
@@ -4388,10 +4523,13 @@ def test_schema_transition_every_post_quiesce_failure_runs_full_restore(
     result, calls = _run_schema_transition_orchestration(tmp_path, fail_at=fail_at)
 
     assert result.returncode == 1
-    assert calls[-14:] == [
+    assert calls[-17:] == [
+        "assert_predecessor_recovery_interlocks",
         "scale_management_to_zero",
         "wait_for_no_management_pods",
+        "assert_predecessor_recovery_interlocks",
         "stop_target_migration",
+        "assert_predecessor_recovery_interlocks",
         "assert_predecessor_restore_artifacts",
         "assert_only_restore_connection",
         "restore_predecessor_database",

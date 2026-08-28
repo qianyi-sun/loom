@@ -187,6 +187,7 @@ jq -e --arg predecessor_head "$expected_predecessor_schema_head" \
   .namespace == "loom-dev" and
   .predecessor.schema_head == $predecessor_head and
   .target.schema_head == $target_head and
+  .predecessor.migration_job_name != .migration.job_name and
   .capacity.executable_new_capacity_ceiling == 0 and
   .rollback.method == "full-predecessor-database-restore" and
   .rollback.requires_exact_state_match == true and
@@ -203,6 +204,8 @@ plan_sha256="$(sha256sum "$transition_plan" | awk '{print $1}')"
 predecessor_head="$(jq -r .predecessor.schema_head "$transition_plan")"
 target_head="$(jq -r .target.schema_head "$transition_plan")"
 migration_job_name="$(jq -r .migration.job_name "$transition_plan")"
+predecessor_migration_job_name="$(jq -er \
+  .predecessor.migration_job_name "$transition_plan")"
 migration_image="$(jq -r .migration.service_image "$transition_plan")"
 target_source_commit="$(jq -er .target.source_commit "$transition_plan")"
 target_source_tree="$(jq -er .target.source_tree "$transition_plan")"
@@ -214,6 +217,8 @@ postgres_dump_sha256="$(jq -er .backup.postgres_dump_sha256 "$transition_plan")"
 postgres_state_sha256="$(jq -er .backup.postgres_state_sha256 "$transition_plan")"
 test "$predecessor_head" = "$expected_predecessor_schema_head"
 test "$target_head" = "$expected_target_schema_head"
+test -n "$predecessor_migration_job_name"
+test "$predecessor_migration_job_name" != "$migration_job_name"
 
 trusted_release_source="$trusted_release"
 predecessor_release_source="$predecessor_release"
@@ -865,21 +870,65 @@ Do not run this on the successful path. It replaces the live database with the
 reviewed predecessor dump and is authorized only after section 3 has quiesced
 the old management Deployment.
 
+The exact succeeded predecessor migration Job must still exist. Recovery
+preserves that Job and deletes only the target migration Job and its Pods, so
+reapplying the predecessor shadow updates an already-complete Job rather than
+starting a schema writer concurrently with predecessor management.
+
 ```bash
 stop_target_migration() {
-  local observed
+  local inventory="$evidence_dir/rollback-migration-inventory.json"
+  local remaining="$evidence_dir/rollback-migration-remaining.json"
   kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
     jobs,pods -l app=loom-personal-dev-migration -o json \
-    > "$evidence_dir/rollback-migration-inventory.json" || return
-  chmod 0600 "$evidence_dir/rollback-migration-inventory.json" || return
-  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete jobs \
-    -l app=loom-personal-dev-migration --ignore-not-found \
+    > "$inventory" || return
+  chmod 0600 "$inventory" || return
+  jq -e --arg predecessor "$predecessor_migration_job_name" \
+    --arg target "$migration_job_name" '
+      (.items | type == "array") and
+      ([.items[] | select(
+        .kind == "Job" and .metadata.name == $predecessor and
+        (.status.succeeded // 0) == 1 and
+        (.status.active // 0) == 0 and (.status.failed // 0) == 0
+      )] | length == 1) and
+      all(.items[];
+        if .kind == "Job" then
+          (.metadata.name == $predecessor or .metadata.name == $target)
+        elif .kind == "Pod" then
+          ((.metadata.labels["batch.kubernetes.io/job-name"] //
+            .metadata.labels["job-name"] // "") as $owner |
+            ($owner == $predecessor or $owner == $target) and
+            ($owner != $predecessor or .status.phase == "Succeeded"))
+        else false end
+      )' "$inventory" >/dev/null || return
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete job \
+    "$migration_job_name" --ignore-not-found \
     --cascade=foreground --wait=true --timeout=300s \
     > "$evidence_dir/rollback-delete-target-migration.txt" || return
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete pods \
+    -l "batch.kubernetes.io/job-name=$migration_job_name" --ignore-not-found \
+    --wait=true --timeout=300s \
+    >> "$evidence_dir/rollback-delete-target-migration.txt" || return
   chmod 0600 "$evidence_dir/rollback-delete-target-migration.txt" || return
-  observed="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
-    jobs,pods -l app=loom-personal-dev-migration -o name)" || return
-  test -z "$observed"
+  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get \
+    jobs,pods -l app=loom-personal-dev-migration -o json \
+    > "$remaining" || return
+  chmod 0600 "$remaining" || return
+  jq -e --arg predecessor "$predecessor_migration_job_name" '
+      (.items | type == "array") and
+      ([.items[] | select(
+        .kind == "Job" and .metadata.name == $predecessor and
+        (.status.succeeded // 0) == 1 and
+        (.status.active // 0) == 0 and (.status.failed // 0) == 0
+      )] | length == 1) and
+      all(.items[];
+        if .kind == "Job" then .metadata.name == $predecessor
+        elif .kind == "Pod" then
+          ((.metadata.labels["batch.kubernetes.io/job-name"] //
+            .metadata.labels["job-name"] // "") == $predecessor and
+            .status.phase == "Succeeded")
+        else false end
+      )' "$remaining" >/dev/null || return
 }
 assert_only_restore_connection() {
   local connections
@@ -937,9 +986,12 @@ assert_predecessor_shadow_ready() {
     "$evidence_dir/rollback-predecessor.status.json" >/dev/null || return
 }
 restore_predecessor() {
+  assert_predecessor_recovery_interlocks || return
   scale_management_to_zero rollback-quiesce || return
   wait_for_no_management_pods || return
+  assert_predecessor_recovery_interlocks || return
   stop_target_migration || return
+  assert_predecessor_recovery_interlocks || return
   assert_predecessor_restore_artifacts || return
   assert_only_restore_connection || return
   restore_predecessor_database || return

@@ -647,6 +647,7 @@ def prepare_personal_dev_schema_transition(
             },
             "namespace": "loom-dev",
             "predecessor": {
+                "migration_job_name": predecessor_migration_identity[3],
                 "release_sha256": predecessor_release_sha256,
                 "schema_head": predecessor_head,
                 "shadow_manifest_sha256": predecessor_shadow_sha256,
