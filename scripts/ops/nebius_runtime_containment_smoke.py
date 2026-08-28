@@ -318,7 +318,8 @@ def forbidden_pods(candidate_sha: str, image: str) -> dict[str, dict[str, Any]]:
     base = pod(candidate_sha, image)
     privileged = json.loads(json.dumps(base))
     privileged["metadata"]["name"] = "forbidden-privileged"
-    privileged["spec"]["containers"][0]["securityContext"]["privileged"] = True
+    privileged["spec"]["securityContext"] = {"runAsUser": 0}
+    privileged["spec"]["containers"][0]["securityContext"] = {"privileged": True}
 
     host_namespaces = json.loads(json.dumps(base))
     host_namespaces["metadata"]["name"] = "forbidden-host-namespaces"

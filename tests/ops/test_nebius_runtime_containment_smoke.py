@@ -77,7 +77,9 @@ def test_forbidden_variants_cover_privilege_namespaces_and_host_path() -> None:
     variants = _MODULE.forbidden_pods("b" * 40, "ghcr.io/qianyi-sun/probe@sha256:" + "a" * 64)
 
     assert sorted(variants) == ["host_namespaces", "host_path", "privileged"]
-    assert variants["privileged"]["spec"]["containers"][0]["securityContext"]["privileged"]
+    privileged = variants["privileged"]["spec"]
+    assert privileged["securityContext"] == {"runAsUser": 0}
+    assert privileged["containers"][0]["securityContext"] == {"privileged": True}
     assert variants["host_namespaces"]["spec"]["hostNetwork"] is True
     assert variants["host_namespaces"]["spec"]["hostPID"] is True
     assert variants["host_namespaces"]["spec"]["hostIPC"] is True
