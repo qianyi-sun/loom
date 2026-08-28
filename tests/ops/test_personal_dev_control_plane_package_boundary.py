@@ -715,6 +715,8 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     ("live_variant", "expected_returncode"),
     [
         ("exact", 0),
+        ("acceptance-binding", 0),
+        ("operational-binding", 0),
         ("all-reviewed-missing", 0),
         ("one-reviewed-missing", 0),
         ("unreviewed-missing", 1),
@@ -1868,7 +1870,7 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
 def test_approved_solo_owner_durable_launch_is_byte_preserved() -> None:
     assert (
         _document_sha256("docs/runbooks/personal-dev-durable-launch.md")
-        == "675d661283b1d69850e1c7cb404a6d43cd0f8b1a0b202446e322cc89c73d099a"
+        == "f31575e320499624438250b9fec20cef22cc56628e56f107251c7457ae9875ef"
     )
 
 
@@ -2062,6 +2064,8 @@ def test_multi_owner_durable_launch_requires_verified_v2_result() -> None:
     ("mutation", "expected_returncode"),
     [
         ("exact", 0),
+        ("acceptance-binding", 0),
+        ("operational-binding", 0),
         ("web-port", 1),
         ("web-selector", 1),
         ("ingress-backend", 1),
@@ -2166,6 +2170,14 @@ def test_multi_owner_runbooks_execute_exact_web_and_api_route_contract(
         ingress["spec"]["defaultBackend"] = {"service": {"name": "wrong"}}
     if mutation == "ingress-snippet":
         ingress["metadata"]["annotations"]["nginx.ingress.kubernetes.io/server-snippet"] = "deny all;"
+    if mutation == "acceptance-binding":
+        ingress["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "c" * 64
+    if mutation == "operational-binding":
+        ingress["metadata"]["annotations"]["loom.dev/operational-plan-sha256"] = "c" * 64
+    if mutation in {"acceptance-binding", "operational-binding"}:
+        expected_returncode = int(
+            (mutation == "acceptance-binding") != ("concurrent-owner" in relative)
+        )
     frontend = {
         "apiBase": "",
         "apiRouteBase": frontend_api,

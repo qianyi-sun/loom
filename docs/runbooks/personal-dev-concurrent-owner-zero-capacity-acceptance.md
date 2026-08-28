@@ -481,7 +481,7 @@ expected, while regression is a stop condition.
       if ! jq -e --arg host "$management_host" '
         (.spec | keys | sort == ["ingressClassName","rules","tls"]) and
         (.metadata.annotations | keys | sort) as $keys |
-        ($keys == ["cert-manager.io/cluster-issuer","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"] or $keys == ["cert-manager.io/cluster-issuer","loom.dev/acceptance-plan-sha256","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"] or $keys == ["cert-manager.io/cluster-issuer","loom.dev/operational-plan-sha256","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"]) and
+        ($keys == ["cert-manager.io/cluster-issuer","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"] or $keys == ["cert-manager.io/cluster-issuer","loom.dev/acceptance-plan-sha256","loom.dev/render-input-sha256","loom.dev/trusted-release-sha256","nginx.ingress.kubernetes.io/proxy-body-size","nginx.ingress.kubernetes.io/proxy-read-timeout"]) and
         .metadata.annotations["cert-manager.io/cluster-issuer"] == "letsencrypt-prod" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-body-size"] == "512m" and .metadata.annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] == "300" and
         .spec.ingressClassName == "nginx" and
         .spec.rules == [{host:$host,http:{paths:[
