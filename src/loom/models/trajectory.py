@@ -254,12 +254,15 @@ class ToolUseEvent(_EventBase):
     result: dict[str, Any] | None = None
     error: str | None = None
     duration_sec: float = Field(ge=0)
+    reasoning_content: str | None = None
+    thought: str | None = None
 
 
 class AgentThoughtEvent(_EventBase):
     kind: Literal[EventKind.AGENT_THOUGHT] = EventKind.AGENT_THOUGHT
     content: str
     tokens: int | None = None
+    reasoning_content: str | None = None
 
 
 class AgentRetryEvent(_EventBase):

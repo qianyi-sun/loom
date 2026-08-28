@@ -32,7 +32,7 @@ from loom.models.trajectory import (
 # of the same events would no longer be byte-identical. Mixed into the
 # deterministic trajectory_id hash so re-runs after a logic change are
 # distinguishable from prior runs.
-PROJECTION_VERSION = "1"
+PROJECTION_VERSION = "2"
 
 
 class AtifMetadata(BaseModel):
@@ -227,7 +227,7 @@ def _project_step(
     chat_messages.append(last_call.response)
     messages = [m.model_dump() for m in chat_messages]
 
-    reasoning = "\n---\n".join(t.content for t in thoughts) if thoughts else None
+    reasoning = _assemble_reasoning_content(tools, thoughts)
 
     return AtifStep(
         step_id=step_id,
@@ -238,3 +238,24 @@ def _project_step(
         tool_calls=tool_calls,
         metrics=metrics,
     )
+
+
+def _assemble_reasoning_content(
+    tools: list[ToolUseEvent],
+    thoughts: list[AgentThoughtEvent],
+) -> str | None:
+    reasoning_parts: list[str] = []
+    for tool in tools:
+        if tool.tool_name == "think" and (thought := tool.args.get("thought")):
+            reasoning_parts.append(str(thought))
+        if tool.reasoning_content:
+            reasoning_parts.append(tool.reasoning_content)
+    for thought_event in thoughts:
+        if thought_event.reasoning_content:
+            reasoning_parts.append(thought_event.reasoning_content)
+        elif thought_event.content and not (
+            thought_event.content.startswith("status:")
+            or thought_event.content.startswith("result:")
+        ):
+            reasoning_parts.append(thought_event.content)
+    return "\n---\n".join(reasoning_parts) if reasoning_parts else None
