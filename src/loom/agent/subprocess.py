@@ -43,7 +43,10 @@ from loom_worker.control_plane_client import StepTokenClient
 logger = logging.getLogger(__name__)
 _LOOM_EVENT_REQUIRED_KEYS = frozenset({"kind", "emitted_at", "trial_id", "step_id", "seq"})
 _LOOM_EVENT_KINDS = frozenset(kind.value for kind in EventKind)
-_SUBPROCESS_AGENT_ENV_PASSTHROUGH = ("LOOM_CODEX_SETTINGS_JSON",)
+_SUBPROCESS_AGENT_ENV_PASSTHROUGH = (
+    "LOOM_CODEX_SETTINGS_JSON",
+    "LOOM_OPENHANDS_TERMINUS_STYLE",
+)
 
 
 def _bridge_driver(driver: Driver, *, cwd: PurePosixPath) -> SandboxAccess:

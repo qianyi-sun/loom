@@ -56,3 +56,26 @@ def test_mapper_preserves_action_reasoning_and_think_tool() -> None:
     assert events[2]["reasoning_content"] == "model-native reasoning"
     assert events[2]["thought"] == "sdk prose thought"
     assert events[3]["reasoning_content"] == "hidden reasoning"
+
+
+def test_mapper_parses_analysis_and_plan_from_thought() -> None:
+    native = [
+        {
+            "event_type": "ActionEvent",
+            "tool_call_id": "call-1",
+            "tool_name": "terminal",
+            "thought": [{"text": "Analysis: saw broken renderer\nPlan: rewrite render()"}],
+            "tool_call": {
+                "function": {
+                    "arguments": '{"command": "pwd"}',
+                }
+            },
+        },
+    ]
+    trajectory = OpenHandsSdkTrajectoryMapper.project_trajectory(
+        json.dumps(native).encode(),
+    )
+    event = trajectory["events"][0]
+    assert event["analysis"] == "saw broken renderer"
+    assert event["plan"] == "rewrite render()"
+    assert event["thought"] == "Analysis: saw broken renderer\nPlan: rewrite render()"

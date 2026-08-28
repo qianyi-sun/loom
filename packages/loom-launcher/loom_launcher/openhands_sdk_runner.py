@@ -23,6 +23,7 @@ from loom_launcher.openhands_sdk_capture import (
     resolve_package_version,
     write_native_events_file,
 )
+from loom_launcher.openhands_sdk_prompt import build_terminus_style_agent_kwargs
 from loom_launcher.openhands_sdk_events import OpenHandsEventMapper
 
 
@@ -76,6 +77,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--max-iterations", type=int, default=500)
+    parser.add_argument(
+        "--terminus-style",
+        action="store_true",
+        help="Enable Terminus-style Analysis/Plan preamble and disable ThinkTool",
+    )
     return parser
 
 
@@ -106,9 +112,14 @@ def main(argv: list[str] | None = None) -> int:
             _emit(payload)
 
     _emit(mapper.map_status("openhands-sdk runner started"))
+    if args.terminus_style:
+        _emit(mapper.map_status("terminus-style enabled"))
 
     llm = llm_type(model=args.model, api_key=api_key, base_url=base_url)
-    agent = agent_type(llm=llm, tools=tools)
+    agent_kwargs: dict[str, Any] = {}
+    if args.terminus_style:
+        agent_kwargs = build_terminus_style_agent_kwargs()
+    agent = agent_type(llm=llm, tools=tools, **agent_kwargs)
     conversation = conversation_type(
         agent=agent,
         callbacks=[_on_event],
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             sdk_version=sdk_version,
             openhands_tools_version=tools_version,
             loom_bridge_revision=LOOM_BRIDGE_REVISION,
+            terminus_style=args.terminus_style,
         )
     )
     native_events = getattr(getattr(conversation, "state", None), "events", None) or []

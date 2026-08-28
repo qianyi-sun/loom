@@ -14,6 +14,7 @@ from loom_launcher.adapters._openhands_runtime import (
     OPENHANDS_SDK_INSTALL_SCRIPT,
     OPENHANDS_SDK_PYTHON,
 )
+from loom_launcher.openhands_sdk_prompt import terminus_style_argv_suffix
 from loom_launcher.capture import stream_stdout_jsonl
 from loom_launcher.registry import register_adapter
 
@@ -53,6 +54,7 @@ class OpenHandsSdkAdapter:
             "jsonl",
             "--task",
             instruction,
+            *terminus_style_argv_suffix(env),
         ]
 
     async def capture_events(
