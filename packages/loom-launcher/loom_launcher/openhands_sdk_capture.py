@@ -62,12 +62,14 @@ def build_runtime_provenance_payload(
     sdk_version: str,
     openhands_tools_version: str,
     loom_bridge_revision: str = LOOM_BRIDGE_REVISION,
+    terminus_style: bool = False,
 ) -> dict[str, object]:
     return envelope(
         "openhands_sdk_runtime_provenance",
         sdk_version=sdk_version,
         openhands_tools_version=openhands_tools_version,
         loom_bridge_revision=loom_bridge_revision,
+        terminus_style=terminus_style,
     )
 
 
