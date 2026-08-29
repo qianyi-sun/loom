@@ -1017,6 +1017,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             subject_incarnation = environment.subject_incarnation
             if environment.status == "deleted":
                 await self._assert_limits(requested, replacing_name=None)
+                identity = derive_identity(requested.name)
                 subject_incarnation = uuid4()
                 operation_epoch = environment.operation_epoch + 1
                 generation = 1
@@ -1029,6 +1030,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.deployment_generation = generation
                 environment.candidate_id = requested.candidate_id
                 environment.candidate_sha = requested.candidate_sha
+                environment.capacity_namespace = identity.namespace
+                environment.capacity_database = identity.database
                 environment.operation_epoch = operation_epoch
                 environment.operation_id = operation_id
                 environment.operation_step = "candidate_build"

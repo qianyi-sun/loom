@@ -1,4 +1,4 @@
-"""Allow truthful terminal abandonment before personal-dev activation.
+"""Allow pre-activation abandonment and require exact capacity identities.
 
 Revision ID: 0122
 Revises: 0121
@@ -12,6 +12,7 @@ branch_labels = None
 depends_on = None
 
 _CONSTRAINT = "dev_lifecycle_operations_capacity_completion_check"
+_IDENTITY_CONSTRAINT = "dev_instances_personal_capacity_identity_check"
 _OLD_RULE = "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL"
 _NEW_RULE = (
     "(checkpoint <> 'pre_activation_abandoned' OR ("
@@ -33,11 +34,36 @@ _NEW_RULE = (
     "OR checkpoint = 'pre_activation_abandoned' "
     "OR capacity_configuration_epoch IS NOT NULL)"
 )
+_OLD_IDENTITY_RULE = (
+    "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
+    "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+    "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
+)
+_NEW_IDENTITY_RULE = (
+    "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
+    "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
+    "AND capacity_database IS NOT NULL "
+    "AND capacity_namespace = 'loom-dev-' || name "
+    "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
+)
 
 
 def upgrade() -> None:
     op.drop_constraint(_CONSTRAINT, "dev_lifecycle_operations", type_="check")
     op.create_check_constraint(_CONSTRAINT, "dev_lifecycle_operations", _NEW_RULE)
+    op.execute(
+        "UPDATE dev_instances SET capacity_namespace = 'loom-dev-' || name, "
+        "capacity_database = 'loom_dev_' || replace(name, '-', '_') "
+        "WHERE candidate_id IS NOT NULL AND ("
+        "capacity_namespace IS DISTINCT FROM 'loom-dev-' || name OR "
+        "capacity_database IS DISTINCT FROM 'loom_dev_' || replace(name, '-', '_'))"
+    )
+    op.drop_constraint(_IDENTITY_CONSTRAINT, "dev_instances", type_="check")
+    op.create_check_constraint(
+        _IDENTITY_CONSTRAINT,
+        "dev_instances",
+        _NEW_IDENTITY_RULE,
+    )
 
 
 def downgrade() -> None:
@@ -56,3 +82,9 @@ def downgrade() -> None:
     )
     op.drop_constraint(_CONSTRAINT, "dev_lifecycle_operations", type_="check")
     op.create_check_constraint(_CONSTRAINT, "dev_lifecycle_operations", _OLD_RULE)
+    op.drop_constraint(_IDENTITY_CONSTRAINT, "dev_instances", type_="check")
+    op.create_check_constraint(
+        _IDENTITY_CONSTRAINT,
+        "dev_instances",
+        _OLD_IDENTITY_RULE,
+    )

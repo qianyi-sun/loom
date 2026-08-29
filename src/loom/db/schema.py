@@ -587,7 +587,9 @@ class DevInstance(Base):
         ),
         CheckConstraint(
             "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
-            "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+            "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
+            "AND capacity_database IS NOT NULL "
+            "AND capacity_namespace = 'loom-dev-' || name "
             "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))",
             name="dev_instances_personal_capacity_identity_check",
         ),

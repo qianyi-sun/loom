@@ -95,7 +95,7 @@ def postgres_url():
 
 
 async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
-    """Downgrading restores revision 0120 without abandonment rows."""
+    """Re-upgrade repairs nullable coordinates and preserves the registry constraint."""
     repo_root = Path(__file__).resolve().parents[2]
     try:
         subprocess.run(
@@ -119,6 +119,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
         owner_id = uuid4()
         team_id = uuid4()
         candidate_id = uuid4()
+        coordinate_name = "coordinate-repair"
         now = datetime.now(UTC)
         candidate = PersonalDevCandidateRecord(
             id=candidate_id,
@@ -179,6 +180,26 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     )
                 assert exc_info.value.orig.sqlstate == "23514"
                 await session.rollback()
+
+            async with sessions() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_instances "
+                        "(name, owner_user_id, owner_team_id, max_slots, "
+                        "deployment_generation, candidate_id, candidate_sha, operation_id) "
+                        "VALUES (:name, :owner_id, :team_id, 1, 1, :candidate_id, "
+                        ":candidate_sha, :operation_id)"
+                    ),
+                    {
+                        "name": coordinate_name,
+                        "owner_id": owner_id,
+                        "team_id": team_id,
+                        "candidate_id": candidate_id,
+                        "candidate_sha": candidate.candidate_sha,
+                        "operation_id": uuid4(),
+                    },
+                )
+                await session.commit()
         finally:
             await engine.dispose()
 
@@ -193,7 +214,18 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
+                coordinates = connection.execute(
+                    text(
+                        "SELECT capacity_namespace, capacity_database "
+                        "FROM dev_instances WHERE name = :name"
+                    ),
+                    {"name": coordinate_name},
+                ).one()
             assert revision == "0122"
+            assert tuple(coordinates) == (
+                f"loom-dev-{coordinate_name}",
+                "loom_dev_coordinate_repair",
+            )
         finally:
             engine.dispose()
     finally:
@@ -1932,6 +1964,8 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
                     deployment_generation=1,
                     candidate_id=candidate_id,
                     candidate_sha="a" * 64,
+                    capacity_namespace=f"loom-dev-{name}",
+                    capacity_database=f"loom_dev_{name}",
                     operation_epoch=4,
                     operation_id=uuid4(),
                     operation_step="complete",
@@ -2369,6 +2403,7 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                 owner_team_id=team_id,
                 expected_operation_epoch=1,
                 idempotency_key=uuid4(),
+                keep_data=True,
             )
             for field, value in (
                 ("failure_reason", "provisioning_failed"),
@@ -2480,6 +2515,29 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                 )
             ).scalar_one_or_none()
             assert eligible == candidate_id
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            redeployed = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name=name,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=candidate_id,
+                    candidate_sha=candidate.candidate_sha,
+                    min_slots=0,
+                    max_slots=1,
+                    expected_operation_epoch=2,
+                    idempotency_key=uuid4(),
+                ),
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            assert redeployed.environment.status == "provisioning"
+            assert redeployed.environment.keep_data is False
+            redeployed_row = await session.get(DevInstance, name)
+            assert redeployed_row is not None
+            assert redeployed_row.capacity_namespace == f"loom-dev-{name}"
+            assert redeployed_row.capacity_database == f"loom_dev_{name}"
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0121"],
             cwd=Path(__file__).resolve().parents[2],
@@ -2563,10 +2621,19 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
     assert in_flight() == 1
 
 
+@pytest.mark.parametrize(
+    ("capacity_namespace", "capacity_database"),
+    (
+        pytest.param(None, None, id="missing"),
+        pytest.param("loom-dev-other", "loom_dev_other", id="mismatched"),
+    ),
+)
 def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
     postgres_url: str,
+    capacity_namespace: str | None,
+    capacity_database: str | None,
 ) -> None:
-    """Direct SQL cannot bind syntactically valid coordinates to the wrong owner name."""
+    """Direct SQL cannot omit or misbind coordinates for a personal environment."""
 
     engine = create_engine(postgres_url)
     user_id = uuid4()
@@ -2615,12 +2682,15 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
                         "deployment_generation, candidate_id, candidate_sha, "
                         "capacity_namespace, capacity_database, operation_id) "
                         "VALUES ('alice', :user_id, :team_id, 1, 1, :candidate_id, "
-                        "repeat('a', 64), 'loom-dev-other', 'loom_dev_other', :operation_id)"
+                        "repeat('a', 64), :capacity_namespace, :capacity_database, "
+                        ":operation_id)"
                     ),
                     {
                         "user_id": user_id,
                         "team_id": team_id,
                         "candidate_id": candidate_id,
+                        "capacity_namespace": capacity_namespace,
+                        "capacity_database": capacity_database,
                         "operation_id": uuid4(),
                     },
                 )
@@ -2631,11 +2701,13 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
 def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
     postgres_url: str,
 ) -> None:
-    """The 0097 derived-coordinate constraint must be present in ORM and database."""
+    """The current fail-closed coordinate rule must match ORM and database."""
 
     expected_model_sql = (
         "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
-        "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+        "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
+        "AND capacity_database IS NOT NULL "
+        "AND capacity_namespace = 'loom-dev-' || name "
         "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
     )
     model_checks = {
@@ -2665,6 +2737,8 @@ def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration
     assert "capacity_namespace is null" in normalized_database_sql
     assert "capacity_database is null" in normalized_database_sql
     assert "candidate_id is not null" in normalized_database_sql
+    assert "capacity_namespace is not null" in normalized_database_sql
+    assert "capacity_database is not null" in normalized_database_sql
     assert "capacity_namespace = ('loom-dev-'::text || name)" in normalized_database_sql
     assert (
         "capacity_database = ('loom_dev_'::text || replace(name, '-'::text, '_'::text))"
