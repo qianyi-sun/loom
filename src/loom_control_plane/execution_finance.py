@@ -553,11 +553,9 @@ async def reserve_execution_cost(
         .scalars()
         .all()
     )
-    kinds = {policy.scope_kind for policy in policies}
-    if "pool" not in kinds:
-        raise ExecutionFinanceBlockedError("execution_budget_pool_policy_unavailable")
-    if "target" not in kinds:
-        raise ExecutionFinanceBlockedError("execution_budget_target_policy_unavailable")
+    # Budget enforcement is opt-in. Price attribution remains mandatory for
+    # Nebius, but an absent pool/target policy is not an implicit spend cap.
+    # Every enabled policy that does exist is still enforced below.
     day, month = _periods(current_time)
     monthly_estimates: dict[date, int] = {}
     for budget_day, amount in estimate.daily_costs:

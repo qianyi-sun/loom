@@ -110,17 +110,21 @@ The accepted service pool identities and adapter boundaries are:
 | `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
 | `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
 
-Normal scheduling evaluates all compatible candidates without exposing a
-physical-pool selector to users. It records candidate health, draining state,
-configured/active/occupied/pending/assigned slots, capacity observation time,
-adapter identity, environment/region/residency, budget eligibility, estimated
-per-slot cost, operator weight, selected reason, and a canonical digest in
-`ExecutionRoutingDecisionV1`. Fresh executable capacity is preferred over
-configured scale headroom; within the same operator weight, lower known cost is
-preferred. A budget-ineligible candidate is blocked. An operator-only weight
-may order otherwise eligible candidates; it cannot override capability,
-security, health, residency, budget, drain, or capacity blockers. An explicit
-admin target binding is audited and is not a normal user workflow.
+Converted tasks opt into normal Kubernetes scheduling with an immutable
+`service_execution` binding in `TaskConfig`. The binding selects the logical
+pool and carries a validated runtime template. It deliberately omits the task
+revision digest because that digest covers the complete task directory; after
+materialization the scheduler binds the published `Task.checksum` into the
+final runtime plan. Trial submission derives the required pool from that task
+binding, so ordinary users do not select a physical target.
+
+When the environment scheduler is enabled, it fairly selects one queued,
+converted Trial, requires a fresh healthy target in the bound environment,
+and records a `preexisting_assignment` routing decision before creating the
+lease. The later provisioning boundary still requires fresh executable target
+capacity before a Kubernetes create. Tasks without the explicit binding retain
+the legacy worker path. An explicit admin target binding remains audited and is
+not the normal workflow.
 
 `Trial.execution_route_generation` advances while the Trial is queued. The
 selected pool, adapter, target/class when applicable, reason, candidate
@@ -176,17 +180,18 @@ effective; other pools are not changed by this provider-specific requirement.
 The preflight estimate prices the complete requested Pod envelope for its full
 deadline: execution container, native sidecars, runtime materializer,
 workspace/runtime/output volumes, CPU, memory, and ephemeral storage. It is a
-conservative reservation, not a provider bill. Both an enabled pool policy and
-an enabled target policy must admit the estimate. Each policy independently
-enforces per-attempt, daily, monthly, and maximum-duration limits plus an
-emergency stop. Matching policy rows are locked before their current-period
-counters and debit ledger are updated, so concurrent control-plane replicas
-cannot overspend the same remaining budget. Policy mutation takes an exclusive
-transaction lock while reservations, terminal release, and billing ingestion
-take the shared form; routine paid reservations remain concurrent after that
-brief shared acquisition. Reservations that cross midnight are split into UTC
-daily debit rows, and status reads reconcile the current UTC day/month directly
-from the debit and provider-bill ledgers instead of trusting cached counters.
+conservative cost-attribution reservation, not a provider bill. Budget policies
+are opt-in: absence of a pool or target policy does not create an implicit
+spend cap. Every enabled matching policy independently enforces per-attempt,
+daily, monthly, and maximum-duration limits plus an emergency stop. Matching
+policy rows are locked before their current-period counters and debit ledger
+are updated, so concurrent control-plane replicas cannot overspend the same
+remaining budget. Policy mutation takes an exclusive transaction lock while
+reservations, terminal release, and billing ingestion take the shared form;
+routine paid reservations remain concurrent after that brief shared
+acquisition. Reservations that cross midnight are split into UTC daily debit
+rows, and status reads reconcile the current UTC day/month directly from the
+debit and provider-bill ledgers instead of trusting cached counters.
 
 Terminal leases that never started a Pod release the estimate immediately.
 Started leases retain it as `awaiting_settlement` until provider billing covers
@@ -380,6 +385,9 @@ The reservation transaction locks a queued Trial, creates or verifies its
 Kubernetes route, increments its attempt, creates the lease, and appends the
 `create` command. A crash before commit leaves every effect absent. A Trial
 already routed to a legacy worker pool cannot also reserve a Kubernetes lease.
+The opt-in service-execution scheduler performs this transaction for ordinary
+queued Trials; the admin reservation endpoint remains available for audited
+operator recovery and diagnostics.
 Command consumers use bounded delivery leases;
 an expired claim redelivers the same command and idempotency key. Exact event
 and acknowledgement replay is accepted, while changed replay is rejected.

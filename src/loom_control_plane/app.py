@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from loom.admin_secret import AdminSecretVerifier, load_optional_admin_secret_verifier
 from loom.db.schema_startup import assert_schema_at_head
+from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.storage_credentials import build_s3_client
 from loom.trajectory.storage import MinioObjectStore
@@ -57,6 +58,9 @@ from loom_control_plane.routes import (
     workers,
 )
 from loom_control_plane.scheduler.crash_detector import run_crash_detector_loop
+from loom_control_plane.service_execution_scheduler import (
+    run_service_execution_scheduler_loop,
+)
 from loom_control_plane.worker_pool_autoscaler import (
     run_worker_pool_autoscaler_loop,
 )
@@ -233,6 +237,23 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 ),
                 name="loom-cp-elastic-slurm-worker-controller",
             )
+        service_execution_scheduler_task: asyncio.Task[None] | None = None
+        if settings.service_execution_scheduler_enabled:
+            service_execution_scheduler_task = asyncio.create_task(
+                run_service_execution_scheduler_loop(
+                    session_factory=session_factory,
+                    environment=settings.service_execution_scheduler_environment,
+                    pool_id=settings.service_execution_scheduler_pool_id,
+                    image_admission_keyring=ImageAdmissionKeyring.from_json(
+                        settings.execution_image_admission_public_keys_json
+                    ),
+                    interval_seconds=settings.service_execution_scheduler_interval_sec,
+                    maximum_deadline_seconds=(
+                        settings.service_execution_scheduler_max_deadline_sec
+                    ),
+                ),
+                name="loom-cp-service-execution-scheduler",
+            )
         try:
             yield
         finally:
@@ -243,6 +264,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             live_preview_reconciler_task.cancel()
             if slurm_controller_task is not None:
                 slurm_controller_task.cancel()
+            if service_execution_scheduler_task is not None:
+                service_execution_scheduler_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
             # cancellation arrives, asyncpg connection takes a moment
             # to release) doesn't block the entire lifespan shutdown —
@@ -256,6 +279,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 worker_pool_autoscaler_task,
                 live_preview_reconciler_task,
                 slurm_controller_task,
+                service_execution_scheduler_task,
             ):
                 if t is None:
                     continue

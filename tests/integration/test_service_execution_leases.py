@@ -38,6 +38,7 @@ from loom.db.schema import (
     ServiceExecutionTarget,
     Task,
     Team,
+    TeamQuota,
     Trial,
 )
 from loom.execution_contract import (
@@ -98,7 +99,9 @@ from loom_control_plane.service_execution_output import (
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
 )
+from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
 from loom_execution_actuator.contracts import (
+    ExecutionTerminationSummaryV1,
     KubernetesApiError,
     KubernetesJobInventory,
     KubernetesJobObservation,
@@ -204,6 +207,13 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
             await session.execute(
                 delete(ExecutionPriceSnapshot).where(
                     ExecutionPriceSnapshot.source == "service-execution-test"
+                )
+            )
+            await session.execute(
+                delete(TeamQuota).where(
+                    TeamQuota.team_id.in_(
+                        select(Team.id).where(Team.name.like("service-execution-%"))
+                    )
                 )
             )
             await session.execute(delete(Team).where(Team.name.like("service-execution-%")))
@@ -714,6 +724,106 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
                 )
                 await session.commit()
             await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            session.add(TeamQuota(team_id=trial.team_id))
+            task = await session.get(Task, trial.task_id)
+            assert task is not None
+            plan = _runtime_contract(now=now)
+            task.checksum = plan.task_revision_sha256.removeprefix("sha256:")
+            task.config = {
+                "schema_version": "1",
+                "task": {"id": task.id, "name": "Service execution scheduler"},
+                "environment": {
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "docker_image": plan.task_image_ref,
+                    "cpus": 1,
+                    "memory_mb": 1024,
+                    "storage_mb": 2048,
+                    "tmpfs": ["/tmp"],
+                    "baseline_network_policy": {"kind": "gateway-only"},
+                    "network_policies_supported": ["gateway-only"],
+                },
+                "agent": {"name": "service-smoke"},
+                "verifier": {"name": "script"},
+                "service_execution": {
+                    "schema_version": "loom.task-service-execution.v1",
+                    "logical_pool_id": "nebius-cpu",
+                    "runtime_template": plan.model_dump(
+                        mode="json", exclude={"task_revision_sha256"}
+                    ),
+                },
+            }
+            trial.requires_caps = {
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "gpu_vendor": "none",
+                "network_policies": ["gateway-only"],
+                "backend": "docker",
+                "worker_pool": "nebius-cpu",
+            }
+            await session.execute(
+                delete(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_key.in_((target.logical_pool_id, target.target_id))
+                )
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session,
+                environment="staging",
+                pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=now,
+            )
+            await session.commit()
+            assert lease is not None
+            assert lease.trial_id == trial_id
+            assert lease.target_id == target.target_id
+            assert lease.selected_pool_id == "nebius-cpu"
+            assert lease.routing_reason == ExecutionRoutingReason.PREEXISTING_ASSIGNMENT
+            assert lease.desired_state == "create"
+
+        async with sessions() as session:
+            persisted_trial = await session.get(Trial, trial_id)
+            assert persisted_trial is not None
+            assert persisted_trial.state == "claimed"
+            assert persisted_trial.worker_id is None
+            assert (
+                await session.scalar(
+                    select(func.count(ExecutionCostReservation.id)).where(
+                        ExecutionCostReservation.lease_id == lease.id
+                    )
+                )
+                == 1
+            )
+            assert (
+                await session.scalar(
+                    select(func.count(ExecutionCostReservationDebit.reservation_id)).where(
+                        ExecutionCostReservationDebit.reservation_id
+                        == select(ExecutionCostReservation.id)
+                        .where(ExecutionCostReservation.lease_id == lease.id)
+                        .scalar_subquery()
+                    )
+                )
+                == 0
+            )
     finally:
         await engine.dispose()
 
@@ -2265,6 +2375,14 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
         )
         assert committed["state"] == "committed"
         assert committed["manifest_sha256"].startswith("sha256:")
+        assert (
+            await route.commit(
+                lease=authorized,
+                session_id=upload_session_id,
+                upload_token=upload_token,
+            )
+            == committed
+        )
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
@@ -2279,7 +2397,87 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert persisted is not None
             assert persisted.output_commit_state == "committed"
             assert persisted.output_upload_session_id == upload_session_id
+            assert persisted.desired_state == "finalize"
             assert artifact.content_hash == digest_bytes(result_payload)
+            assert (
+                await session.scalar(
+                    select(func.count(ServiceExecutionEvent.id)).where(
+                        ServiceExecutionEvent.lease_id == lease.id,
+                        ServiceExecutionEvent.event_kind == "result_reported",
+                    )
+                )
+                == 1
+            )
+
+        terminal_observation = KubernetesJobObservation(
+            namespace=target.namespace_name,
+            job_name=lease.job_name,
+            lease_id=str(lease.id),
+            resource_generation=lease.resource_generation,
+            target_id=target.target_id,
+            execution_unit_key=str(lease.execution_unit_key),
+            normalized_state=NormalizedJobState.SUCCEEDED,
+            job_uid="job-uid-1",
+            pod_uid="pod-uid-1",
+            pod_ip=pod_ip,
+            resource_version="8",
+            terminated_at=now + timedelta(seconds=3),
+            termination_summary=ExecutionTerminationSummaryV1(
+                schema_version="loom.execution-termination-summary.v1",
+                runtime_contract_sha256=authorized.runtime_contract_sha256,
+                command_identity_sha256=result_document["command_identity_sha256"],
+                execution_role="attempt",
+                status="runtime_error",
+                partial_evidence=True,
+                phase_count=0,
+                finished_at=now + timedelta(seconds=3),
+                result_path="result.json",
+                output_committed=True,
+                output_upload_session_id=upload_session_id,
+                output_manifest_sha256=committed["manifest_sha256"],
+                output_marker_sha256=committed["committed_marker_sha256"],
+            ),
+        )
+        kubernetes = _FakeKubernetesJobApi()
+        kubernetes.jobs[lease.job_name] = terminal_observation
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=kubernetes,
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+            ),
+            controller_id="output-finalization-test",
+        )
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=4)) == 3
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            assert persisted is not None
+            assert trial is not None
+            assert persisted.desired_state == "delete_pending"
+            assert persisted.observed_state == "finalized"
+            assert trial.state == "failed"
+            assert trial.failure_reason == "runtime_error"
+            assert (
+                await session.scalar(
+                    select(func.count(ServiceExecutionCommand.id)).where(
+                        ServiceExecutionCommand.lease_id == lease.id,
+                        ServiceExecutionCommand.command_type == "delete",
+                    )
+                )
+                == 1
+            )
+        assert await actuator.run_commands_once(now=now + timedelta(seconds=5)) == 1
+        assert kubernetes.delete_count == 1
+        assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 1
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.desired_state == "deleted"
+            assert persisted.cleanup_state == "complete"
 
         async with sessions() as session:
             with pytest.raises(ServiceExecutionBrokerError, match="not_observed"):

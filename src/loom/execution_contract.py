@@ -458,6 +458,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
     policy_kind = env.baseline_network_policy.kind
     network_access = {
         "no-network": NetworkAccess.NONE,
+        "gateway-only": NetworkAccess.GATEWAY_ONLY,
         "allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
