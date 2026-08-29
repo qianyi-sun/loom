@@ -93,22 +93,99 @@ def postgres_url():
         yield url
 
 
-def test_0121_downgrade_fails_closed_and_preserves_revision(postgres_url: str) -> None:
-    """The repaired constraint cannot safely be reverted to its invalid predecessor."""
+async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
+    """Downgrading retains the safe constraint while restoring revision 0120."""
     repo_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0120"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
     try:
-        assert result.returncode != 0
-        assert "cannot downgrade 0121: registry-prefix constraint repair is irreversible" in (
-            result.stdout + result.stderr
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0120"],
+            cwd=repo_root,
+            check=True,
         )
 
+        engine = create_engine(postgres_url)
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            assert revision == "0120"
+        finally:
+            engine.dispose()
+
+        engine = create_async_engine(postgres_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        owner_id = uuid4()
+        team_id = uuid4()
+        candidate_id = uuid4()
+        now = datetime.now(UTC)
+        candidate = PersonalDevCandidateRecord(
+            id=candidate_id,
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_sha="1" * 64,
+            source_sha256="2" * 64,
+            archive_sha256="3" * 64,
+            build_contract_sha256="4" * 64,
+            source_commit="5" * 40,
+            dirty=True,
+            manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+            object_bucket="artifacts",
+            object_key=(
+                f"personal-dev/sources/{team_id}/{owner_id}/{'1' * 64}/{candidate_id}/{'3' * 64}.tar"
+            ),
+            source_generation_id=candidate_id,
+            archive_size_bytes=10240,
+            status="uploaded",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            async with sessions() as session:
+                session.add(Team(id=team_id, name=f"downgrade-registry-{team_id}"))
+                session.add(
+                    User(
+                        id=owner_id,
+                        email=f"{owner_id}@example.test",
+                        username=f"downgrade-registry-{owner_id}",
+                        username_normalized=f"downgrade-registry-{owner_id}",
+                        status="active",
+                    )
+                )
+                await session.commit()
+
+            async with sessions() as session:
+                await SqlAlchemyPersonalDevCandidateStore(session).register(candidate)
+
+            async with sessions() as session:
+                await session.execute(
+                    text(
+                        "UPDATE personal_dev_candidates "
+                        "SET registry_prefix = :registry_prefix WHERE id = :candidate_id"
+                    ),
+                    {"registry_prefix": "r" * 309, "candidate_id": candidate_id},
+                )
+                await session.commit()
+
+            async with sessions() as session:
+                with pytest.raises(DBAPIError) as exc_info:
+                    await session.execute(
+                        text(
+                            "UPDATE personal_dev_candidates "
+                            "SET registry_prefix = :registry_prefix WHERE id = :candidate_id"
+                        ),
+                        {"registry_prefix": "r" * 310, "candidate_id": candidate_id},
+                    )
+                assert exc_info.value.orig.sqlstate == "23514"
+                await session.rollback()
+        finally:
+            await engine.dispose()
+
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
+        )
         engine = create_engine(postgres_url)
         try:
             with engine.connect() as connection:

@@ -31,4 +31,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise RuntimeError("cannot downgrade 0121: registry-prefix constraint repair is irreversible")
+    # Retain the repaired constraint: the 0120 validator is PostgreSQL-invalid,
+    # while the corrected constraint is compatible with 0120 application behavior.
+    pass
