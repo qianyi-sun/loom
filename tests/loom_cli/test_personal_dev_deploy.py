@@ -258,13 +258,25 @@ def test_wait_rejects_a_ready_projection_that_drifted_from_the_apply() -> None:
             )
 
 
-def test_existing_nonready_environment_blocks_a_new_apply() -> None:
+def test_failed_environment_reuses_its_current_operation_epoch() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_environment(status="activating", epoch=3))
+        return httpx.Response(200, json=_environment(status="failed", epoch=3))
 
     with httpx.Client(
         base_url="https://loom.example",
         transport=httpx.MockTransport(handler),
     ) as http_client:
-        with pytest.raises(PersonalDevDeployError, match="activating"):
+        assert PersonalDevDeployClient(http_client).expected_operation_epoch("alice") == 3
+
+
+@pytest.mark.parametrize("status", ["provisioning", "activating", "updating", "deleting"])
+def test_existing_lifecycle_environment_blocks_a_new_apply(status: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_environment(status=status, epoch=3))
+
+    with httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        with pytest.raises(PersonalDevDeployError, match=status):
             PersonalDevDeployClient(http_client).expected_operation_epoch("alice")

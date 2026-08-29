@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
@@ -185,6 +187,36 @@ class _Executor:
         self.cleaned = True
 
 
+class _FailingExecutor(_Executor):
+    def __init__(self, publication: Mapping[str, object], *, failure_phase: str) -> None:
+        super().__init__(dict(publication))
+        self.failure_phase = failure_phase
+
+    async def build(self, registration, *, source_archive):
+        if self.failure_phase == "executor_build":
+            raise RuntimeError(_DIAGNOSTIC_MARKER)
+        return await super().build(registration, source_archive=source_archive)
+
+    async def cleanup(self, registration):
+        if self.failure_phase == "cleanup":
+            raise RuntimeError(_DIAGNOSTIC_MARKER)
+        await super().cleanup(registration)
+
+
+class _InvalidPublication(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise ValueError(_DIAGNOSTIC_MARKER)
+
+    def __iter__(self):
+        raise ValueError(_DIAGNOSTIC_MARKER)
+
+    def __len__(self) -> int:
+        return 0
+
+
+_DIAGNOSTIC_MARKER = "never-log-personal-dev-build-exception-text"
+
+
 @asynccontextmanager
 async def _source(_candidate):
     path = Path("/tmp/loom-personal-dev-builder-test-source")
@@ -193,6 +225,12 @@ async def _source(_candidate):
         yield path
     finally:
         path.unlink(missing_ok=True)
+
+
+@asynccontextmanager
+async def _failing_source(_candidate):
+    raise PersonalDevSourceError(_DIAGNOSTIC_MARKER)
+    yield Path("unused")  # pragma: no cover
 
 
 async def test_builder_coordinator_heartbeats_cleans_then_publishes() -> None:
@@ -236,6 +274,74 @@ async def test_builder_coordinator_rejects_untrusted_publication_before_success(
     assert executor.cleaned is True
     assert authority.publication is None
     assert authority.failure_reason == "builder_output_invalid"
+
+
+@pytest.mark.parametrize(
+    ("phase", "source", "executor", "failure_reason", "error_type"),
+    [
+        (
+            "source_acquisition",
+            _failing_source,
+            _Executor({}),
+            "source_verification_failed",
+            "PersonalDevSourceError",
+        ),
+        (
+            "executor_build",
+            _source,
+            _FailingExecutor({}, failure_phase="executor_build"),
+            "builder_failed",
+            "RuntimeError",
+        ),
+        (
+            "output_validation",
+            _source,
+            _Executor(_InvalidPublication()),
+            "builder_output_invalid",
+            "ValueError",
+        ),
+        (
+            "cleanup",
+            _source,
+            _FailingExecutor(_publication(_candidate()), failure_phase="cleanup"),
+            "builder_failed",
+            "RuntimeError",
+        ),
+    ],
+)
+async def test_builder_failure_logs_only_a_bounded_phase_and_error_type(
+    phase: str,
+    source,
+    executor,
+    failure_reason: str,
+    error_type: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Catches logging an exception's potentially sensitive text on failure."""
+    registration = _registration()
+    authority = _Authority(registration)
+    caplog.set_level(logging.ERROR, logger="loom.personal_dev_builder")
+
+    await PersonalDevBuildCoordinator(
+        authority=authority,  # type: ignore[arg-type]
+        source=source,
+        executor=executor,  # type: ignore[arg-type]
+        builder_id="builder-a",
+        lease_seconds=60,
+    ).build_once(now=_NOW)
+
+    events = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "personal_dev_builder_execution_failed"
+    ]
+    assert len(events) == 1
+    assert events[0].phase == phase
+    assert events[0].error_type == error_type
+    assert _DIAGNOSTIC_MARKER not in caplog.text
+    assert all(_DIAGNOSTIC_MARKER not in str(record.__dict__) for record in caplog.records)
+    assert _DIAGNOSTIC_MARKER not in (authority.failure_reason or "")
+    assert authority.failure_reason == failure_reason
 
 
 class _ObjectBody:

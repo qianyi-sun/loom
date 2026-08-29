@@ -200,7 +200,7 @@ class PersonalDevDeployClient:
             return 0
         body = assert_2xx(response, action=f"resolve development environment {name!r}")
         environment = _environment(body, expected_name=name)
-        if environment["status"] != "ready":
+        if environment["status"] not in {"ready", "failed"}:
             raise PersonalDevDeployError(
                 f"development environment {name!r} is {environment['status']}; "
                 "wait for or resolve its current lifecycle operation before applying another"

@@ -259,6 +259,108 @@ def test_personal_service_up_routes_to_authenticated_lifecycle_without_docker(
     ]
 
 
+def test_personal_service_up_retries_a_failed_environment_at_its_current_epoch(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate_sha = "c" * 64
+    candidate_id = "00000000-0000-0000-0000-000000000001"
+    operation_id = "00000000-0000-0000-0000-000000000002"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/api/v1/dev-instances/alice":
+            return httpx.Response(
+                200,
+                json={
+                    "name": "alice",
+                    "status": "failed",
+                    "operation_epoch": 3,
+                    "candidate_sha": candidate_sha,
+                    "min_slots": 0,
+                    "max_slots": 2,
+                    "identity": {},
+                },
+            )
+        if request.url.path == "/api/v1/personal-dev-candidates":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": candidate_id,
+                            "candidate_sha": candidate_sha,
+                            "attestation_scope": "personal-dev-only",
+                            "promotable": False,
+                            "status": "ready",
+                        }
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/api/v1/dev-instances/alice":
+            payload = json.loads(request.content)
+            assert payload["expected_operation_epoch"] == 3
+            return httpx.Response(
+                202,
+                json={
+                    "environment": {
+                        "name": "alice",
+                        "status": "provisioning",
+                        "operation_epoch": 3,
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "identity": {},
+                    },
+                    "operation": {
+                        "id": operation_id,
+                        "environment_name": "alice",
+                        "candidate_sha": candidate_sha,
+                        "min_slots": 0,
+                        "max_slots": 2,
+                        "expected_operation_epoch": 3,
+                        "operation_epoch": 3,
+                        "state": "running",
+                    },
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http_client = httpx.Client(
+        base_url="https://loom.example",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with (
+            patch(
+                "loom_cli.server_client.require_logged_in",
+                return_value=SimpleNamespace(server_url="https://loom.example"),
+            ),
+            patch("loom_cli.server_client.authed_client", return_value=http_client),
+        ):
+            rc = main(
+                [
+                    "service",
+                    "up",
+                    "--environment",
+                    "dev-alice",
+                    "--candidate",
+                    candidate_sha,
+                    "--no-wait",
+                ]
+            )
+    finally:
+        http_client.close()
+
+    assert rc == 0
+    assert "expected operation epoch 3" in capsys.readouterr().out
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/dev-instances/alice"),
+        ("GET", "/api/v1/personal-dev-candidates"),
+        ("PUT", "/api/v1/dev-instances/alice"),
+    ]
+
+
 def test_personal_service_up_redeploys_a_deleted_retained_name_with_explicit_epoch(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

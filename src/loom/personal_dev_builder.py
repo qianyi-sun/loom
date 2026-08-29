@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -36,6 +37,7 @@ from loom.personal_dev_source import (
 )
 
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class PersonalDevBuildAuthority(Protocol):
@@ -67,8 +69,18 @@ PersonalDevBuildSource = Callable[
 ]
 
 
-class _BuilderOutputInvalidError(RuntimeError):
-    pass
+class _BuilderExecutionError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        phase: str,
+        error: Exception,
+        failure_reason: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.phase = phase
+        self.error = error
+        self.failure_reason = failure_reason
 
 
 def _claimed_attempt(
@@ -154,26 +166,44 @@ class PersonalDevBuildCoordinator:
 
         async def execute() -> dict[str, object]:
             entered_executor = False
+            phase = "source_acquisition"
             try:
                 async with self.source(running.candidate) as archive:
                     entered_executor = True
-                    publication = await self.executor.build(
-                        running,
-                        source_archive=archive,
-                    )
                     try:
-                        normalized, _publication_sha256, _image_manifest = (
-                            validate_personal_dev_candidate_publication(
-                                running.candidate,
-                                publication,
-                            )
+                        phase = "executor_build"
+                        publication = await self.executor.build(
+                            running,
+                            source_archive=archive,
                         )
-                    except ValueError as exc:
-                        raise _BuilderOutputInvalidError from exc
-                    return normalized
-            finally:
-                if entered_executor:
-                    await self.executor.cleanup(running)
+                        phase = "output_validation"
+                        try:
+                            normalized, _publication_sha256, _image_manifest = (
+                                validate_personal_dev_candidate_publication(
+                                    running.candidate,
+                                    publication,
+                                )
+                            )
+                        except ValueError as exc:
+                            raise _BuilderExecutionError(
+                                phase=phase,
+                                error=exc,
+                                failure_reason="builder_output_invalid",
+                            ) from exc
+                        return normalized
+                    finally:
+                        if entered_executor:
+                            try:
+                                await self.executor.cleanup(running)
+                            except Exception as exc:
+                                raise _BuilderExecutionError(
+                                    phase="cleanup",
+                                    error=exc,
+                                ) from exc
+            except _BuilderExecutionError:
+                raise
+            except Exception as exc:
+                raise _BuilderExecutionError(phase=phase, error=exc) from exc
 
         task = asyncio.create_task(
             execute(),
@@ -202,10 +232,20 @@ class PersonalDevBuildCoordinator:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             raise
-        except _BuilderOutputInvalidError:
-            failure_reason = "builder_output_invalid"
-        except PersonalDevSourceError:
-            failure_reason = "source_verification_failed"
+        except _BuilderExecutionError as exc:
+            logger.error(
+                "personal_dev_builder_execution_failed",
+                extra={
+                    "phase": exc.phase,
+                    "error_type": type(exc.error).__name__,
+                },
+            )
+            if exc.failure_reason is not None:
+                failure_reason = exc.failure_reason
+            elif isinstance(exc.error, PersonalDevSourceError):
+                failure_reason = "source_verification_failed"
+            else:
+                failure_reason = "builder_failed"
         except Exception:
             failure_reason = "builder_failed"
         if not task.done():
