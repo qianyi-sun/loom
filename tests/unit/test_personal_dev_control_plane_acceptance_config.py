@@ -131,7 +131,7 @@ def _plan_value(
             "images": release.canonical_value()["images"],
         },
         "storage": {
-            "schema_head": "0121",
+            "schema_head": "0122",
             "backup_restore_evidence_sha256": "b" * 64,
         },
         "activation": {
@@ -243,9 +243,7 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
         release.scanner.java_database_metadata_sha256
     )
     assert plan.quotas.per_owner_aggregate_min_slots == 8
-    assert str(plan.acceptance_owner.user_id) == (
-        "00000000-0000-0000-0000-000000000301"
-    )
+    assert str(plan.acceptance_owner.user_id) == ("00000000-0000-0000-0000-000000000301")
     assert plan.acceptance_owners == (plan.acceptance_owner,)
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
