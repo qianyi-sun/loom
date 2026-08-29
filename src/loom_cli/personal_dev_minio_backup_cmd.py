@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
-from urllib.parse import unquote_to_bytes, urlsplit
+from urllib.parse import SplitResult, unquote_to_bytes, urlsplit
 
 from loom.personal_dev_minio_backup import (
     PersonalDevMinioBackupError,
@@ -41,6 +42,7 @@ _COMMAND_TIMEOUT_SECONDS = 60
 _STREAM_TIMEOUT_SECONDS = 3600
 _REQUEST_ID_RE = re.compile(r"[0-9A-F]+")
 _HOST_ID_RE = re.compile(r"[0-9a-f]+")
+_INVALID_URL_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +166,34 @@ def _bounded_observation(value: object, *, maximum_bytes: int = 4096) -> str:
     return value
 
 
+def _credential_free_url(value: object) -> SplitResult:
+    observed = _bounded_observation(value)
+    try:
+        target = urlsplit(observed)
+        hostname = target.hostname
+        _ = target.port
+    except ValueError:
+        raise _invalid() from None
+    if (
+        target.scheme not in {"http", "https"}
+        or not hostname
+        or target.username is not None
+        or target.password is not None
+        or target.query
+        or target.fragment
+        or _INVALID_URL_ESCAPE_RE.search(target.path) is not None
+    ):
+        raise _invalid()
+    return target
+
+
+def _check_object_url(value: object, *, listed: PersonalDevMinioListedObject) -> None:
+    target = _credential_free_url(value)
+    expected_path = f"/{listed.bucket}/{listed.key}".encode()
+    if unquote_to_bytes(target.path) != expected_path:
+        raise _invalid()
+
+
 def _check_bucket_inventory(transport: PersonalDevMinioTransport, *, alias: str) -> None:
     payload = _run_success(
         transport,
@@ -205,7 +235,7 @@ def _check_bucket_inventory(transport: PersonalDevMinioTransport, *, alias: str)
         ):
             raise _invalid()
         _bounded_observation(record["lastModified"])
-        _bounded_observation(record["url"])
+        _credential_free_url(record["url"])
         key = record["key"]
         if not isinstance(key, str) or not key.endswith("/"):
             raise _invalid()
@@ -319,10 +349,27 @@ def _check_tags(
     alias: str,
     listed: PersonalDevMinioListedObject,
 ) -> None:
-    value = _run_absent(
-        transport,
+    result = transport.run(
         ("tag", "list", "--json", f"{alias}/{listed.bucket}/{listed.key}"),
+        maximum_stdout_bytes=_MAX_FEATURE_BYTES,
+        timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
     )
+    _validate_result(result, maximum_stdout_bytes=_MAX_FEATURE_BYTES)
+    if result.returncode == 0:
+        if result.stderr or not result.stdout:
+            raise _invalid()
+        value = _one_json(result.stdout, maximum_bytes=_MAX_FEATURE_BYTES)
+        if (
+            set(value) != {"status", "url", "versionID"}
+            or value["status"] != "success"
+            or value["versionID"] != ""
+        ):
+            raise _invalid()
+        _check_object_url(value["url"], listed=listed)
+        return
+    if bool(result.stdout) == bool(result.stderr):
+        raise _invalid()
+    value = _one_json(result.stdout or result.stderr, maximum_bytes=_MAX_FEATURE_BYTES)
     try:
         error = value["error"]
         cause = error["cause"]  # type: ignore[index]
@@ -331,11 +378,6 @@ def _check_tags(
         raise _invalid() from None
     message_prefix = "No tags found  for "
     observed_message = _bounded_observation(message) if isinstance(message, str) else ""
-    try:
-        target = urlsplit(observed_message.removeprefix(message_prefix))
-    except ValueError:
-        raise _invalid() from None
-    expected_path = f"/{listed.bucket}/{listed.key}".encode()
     if (
         set(value) != {"status", "error"}
         or value["status"] != "error"
@@ -351,13 +393,9 @@ def _check_tags(
         or not isinstance(message, str)
         or not observed_message.startswith(message_prefix)
         or len(message) == len(message_prefix)
-        or target.scheme not in {"http", "https"}
-        or not target.netloc
-        or target.query
-        or target.fragment
-        or unquote_to_bytes(target.path) != expected_path
     ):
         raise _invalid()
+    _check_object_url(observed_message.removeprefix(message_prefix), listed=listed)
 
 
 def _check_features(transport: PersonalDevMinioTransport, *, alias: str) -> None:
@@ -471,6 +509,7 @@ def _capture_impl(
     first_listing = _list_objects(transport, alias=_CAPTURE_ALIAS)
     captured: list[PersonalDevMinioObject] = []
     retained_paths: dict[tuple[str, str], Path] = {}
+    stat_sha256s: dict[tuple[str, str], bytes] = {}
     for index, listed in enumerate(first_listing):
         _check_tags(transport, alias=_CAPTURE_ALIAS, listed=listed)
         stat_payload = _stat_object(transport, alias=_CAPTURE_ALIAS, listed=listed)
@@ -495,19 +534,33 @@ def _capture_impl(
             object=normalized,
         )
         captured.append(normalized)
-        retained_paths[(listed.bucket, listed.key)] = retained_path
+        identity = (listed.bucket, listed.key)
+        retained_paths[identity] = retained_path
+        stat_sha256s[identity] = hashlib.sha256(stat_payload).digest()
     first_manifest = build_personal_dev_minio_manifest(captured)
+    _check_bucket_inventory(transport, alias=_CAPTURE_ALIAS)
+    _check_features(transport, alias=_CAPTURE_ALIAS)
     second_listing = _list_objects(transport, alias=_CAPTURE_ALIAS)
     if second_listing != first_listing:
         raise _invalid()
-    second_objects = tuple(
-        normalize_personal_dev_minio_object(
+    second_objects: list[PersonalDevMinioObject] = []
+    for listed in second_listing:
+        _check_tags(transport, alias=_CAPTURE_ALIAS, listed=listed)
+        identity = (listed.bucket, listed.key)
+        second_stat_payload = _stat_object(
+            transport,
+            alias=_CAPTURE_ALIAS,
             listed=listed,
-            stat_payload=_stat_object(transport, alias=_CAPTURE_ALIAS, listed=listed),
-            payload_path=retained_paths[(listed.bucket, listed.key)],
         )
-        for listed in second_listing
-    )
+        if hashlib.sha256(second_stat_payload).digest() != stat_sha256s[identity]:
+            raise _invalid()
+        second_objects.append(
+            normalize_personal_dev_minio_object(
+                listed=listed,
+                stat_payload=second_stat_payload,
+                payload_path=retained_paths[identity],
+            )
+        )
     second_manifest = build_personal_dev_minio_manifest(second_objects)
     if second_manifest.canonical_bytes != first_manifest.canonical_bytes:
         raise _invalid()
@@ -545,6 +598,7 @@ def _restore_impl(
         not isinstance(source_manifest_path, Path)
         or not isinstance(payload_root, Path)
         or not isinstance(restored_manifest_path, Path)
+        or _has_symlinked_ancestor(source_manifest_path)
         or _has_symlinked_ancestor(restored_manifest_path)
         or _has_symlinked_ancestor(payload_root)
         or _would_pollute_payload_root(restored_manifest_path, payload_root)

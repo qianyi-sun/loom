@@ -3610,3 +3610,65 @@ def test_docker_minio_client_rejects_noncanonical_cid_file(tmp_path: Path) -> No
 
     with pytest.raises(OSError, match="CID is invalid"):
         command._DockerMinioTransport._read_client_cid(cid_path)
+
+
+def test_docker_minio_client_closes_the_verified_env_fd_if_cid_setup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    tmp_path.chmod(0o700)
+    minio_name = "loom-personal-dev-minio-restore-123456789abc"
+    network_name = "loom-personal-dev-restore-123456789abc"
+    minio_image = "quay.io/minio/minio@sha256:" + "b" * 64
+    container, network = _isolated_docker_documents(
+        minio_image=minio_image,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+    )
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    transport = command._DockerMinioTransport(
+        client_image="quay.io/minio/mc@sha256:" + "a" * 64,
+        minio_image=minio_image,
+        restore_env_file=env_file,
+        payload_root=payload_root,
+        isolated_minio_name=minio_name,
+        isolated_network_name=network_name,
+    )
+    real_open = command._open_owner_only_file
+    observed: dict[str, int] = {}
+
+    def _record_open(*args: object, **kwargs: object) -> int:
+        descriptor = real_open(*args, **kwargs)
+        observed["descriptor"] = descriptor
+        return descriptor
+
+    def _fail_mkdtemp(*_args: object, **_kwargs: object) -> str:
+        raise OSError("CID setup failed")
+
+    monkeypatch.setattr(command, "_open_owner_only_file", _record_open)
+    monkeypatch.setattr(command.tempfile, "mkdtemp", _fail_mkdtemp)
+
+    with pytest.raises(OSError, match="CID setup failed"):
+        transport.run(("ls", "--json", "restore"), maximum_stdout_bytes=4096, timeout_seconds=1)
+
+    descriptor = observed["descriptor"]
+    descriptor_closed = False
+    try:
+        os.fstat(descriptor)
+    except OSError:
+        descriptor_closed = True
+    finally:
+        if not descriptor_closed:
+            os.close(descriptor)
+    assert descriptor_closed

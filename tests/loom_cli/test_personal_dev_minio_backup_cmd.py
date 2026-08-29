@@ -49,6 +49,9 @@ def _list_record(
         "size": size,
         "etag": "source-etag",
         "lastModified": "2026-08-29T12:00:00Z",
+        "storageClass": "STANDARD",
+        "url": "http://minio.internal/",
+        "versionOrdinal": 1,
     }
 
 
@@ -58,10 +61,11 @@ def _stat_record(
     return {
         "status": "success",
         "type": "file",
-        "name": key,
+        "name": key.rsplit("/", 1)[-1],
         "size": size,
         "etag": "source-etag",
         "lastModified": "2026-08-29T12:00:00Z",
+        "checksum": {"CRC32C": "AAAAAA=="},
         "metadata": {
             "Content-Type": "application/x-tar",
             "Cache-Control": "no-cache",
@@ -133,6 +137,16 @@ def _tags_absent(target: str) -> bytes:
                 },
                 "type": "fatal",
             },
+        }
+    )
+
+
+def _tags_absent_success(target: str) -> bytes:
+    return _json_line(
+        {
+            "status": "success",
+            "url": f"http://minio.internal/{target}",
+            "versionID": "",
         }
     )
 
@@ -260,6 +274,32 @@ def _capture_actions(
             ),
             _Run(("stat", "--json", f"local/artifacts/{key}"), _result(stat)),
             _Stream(("cat", f"local/artifacts/{key}"), payload),
+            _Run(("ls", "--json", "local"), _result(bucket_output)),
+        ]
+    )
+    for bucket in ("artifacts", "trajectories"):
+        actions.append(
+            _Run(
+                ("version", "info", "--json", f"local/{bucket}"),
+                _result(_version_disabled("local", bucket)),
+            )
+        )
+    for bucket in ("artifacts", "trajectories"):
+        actions.append(
+            _Run(
+                ("retention", "info", "--json", f"local/{bucket}"),
+                _result(stderr=_retention_absent(), returncode=1),
+            )
+        )
+    for bucket in ("artifacts", "trajectories"):
+        actions.append(
+            _Run(
+                ("encrypt", "info", "--json", f"local/{bucket}"),
+                _result(stderr=_encryption_absent(bucket), returncode=1),
+            )
+        )
+    actions.extend(
+        [
             _Run(
                 ("ls", "--recursive", "--json", "local/artifacts"),
                 _result(listing),
@@ -267,6 +307,10 @@ def _capture_actions(
             _Run(
                 ("ls", "--recursive", "--json", "local/trajectories"),
                 _result(empty_listing),
+            ),
+            _Run(
+                ("tag", "list", "--json", f"local/artifacts/{key}"),
+                tags or _result(stderr=_tags_absent(f"artifacts/{key}"), returncode=1),
             ),
             _Run(("stat", "--json", f"local/artifacts/{key}"), _result(stat)),
         ]
@@ -419,7 +463,10 @@ def test_capture_rejects_every_preexisting_output_path_before_transport(
     assert payload_root.exists() is (preexisting == "payload-root")
 
 
-@pytest.mark.parametrize("drift", ("addition", "removal", "size", "metadata"))
+@pytest.mark.parametrize(
+    "drift",
+    ("addition", "removal", "size", "metadata", "etag", "last-modified"),
+)
 def test_capture_does_not_publish_when_live_authority_drifts(
     tmp_path: Path,
     drift: str,
@@ -446,7 +493,7 @@ def test_capture_does_not_publish_when_live_authority_drifts(
             _result(_json_line(_list_record(size=8))),
             occurrence=1,
         )
-    else:
+    elif drift == "metadata":
         stat = _stat_record()
         stat["metadata"] = {"Content-Type": "application/octet-stream"}
         _replace_run(
@@ -455,6 +502,104 @@ def test_capture_does_not_publish_when_live_authority_drifts(
             _result(_json_line(stat)),
             occurrence=1,
         )
+    else:
+        stat = _stat_record()
+        stat["etag" if drift == "etag" else "lastModified"] = "changed-observation"
+        _replace_run(
+            actions,
+            ("stat", "--json", "local/artifacts/personal-dev/source/candidate.tar"),
+            _result(_json_line(stat)),
+            occurrence=1,
+        )
+    transport = _RecordingTransport(actions)
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert not source_manifest_path.exists()
+
+
+@pytest.mark.parametrize("drift", ("bucket-inventory", "versioning", "tags"))
+def test_capture_rechecks_unsupported_state_before_publication(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    actions = _capture_actions()
+    if drift == "bucket-inventory":
+        bucket_output = (
+            _json_line(_bucket_record("artifacts"))
+            + _json_line(_bucket_record("trajectories"))
+            + _json_line(_bucket_record("unexpected"))
+        )
+        _replace_run(
+            actions,
+            ("ls", "--json", "local"),
+            _result(bucket_output),
+            occurrence=1,
+        )
+    elif drift == "versioning":
+        version = json.loads(_version_disabled("local", "artifacts"))
+        version["versioning"]["status"] = "Enabled"
+        _replace_run(
+            actions,
+            ("version", "info", "--json", "local/artifacts"),
+            _result(_json_line(version)),
+            occurrence=1,
+        )
+    else:
+        _replace_run(
+            actions,
+            (
+                "tag",
+                "list",
+                "--json",
+                "local/artifacts/personal-dev/source/candidate.tar",
+            ),
+            _result(_json_line({"status": "success"})),
+            occurrence=1,
+        )
+    transport = _RecordingTransport(actions)
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert not source_manifest_path.exists()
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://user@minio.internal/",
+        "http://minio.internal/?capability=value",
+        "http://minio.internal/#fragment",
+        "http://:9000/",
+        "http://minio.internal:not-a-port/",
+    ),
+    ids=("userinfo", "query", "fragment", "empty-host", "invalid-port"),
+)
+def test_capture_rejects_unsafe_bucket_inventory_urls(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    actions = _capture_actions()
+    artifacts = _bucket_record("artifacts")
+    artifacts["url"] = url
+    bucket_output = _json_line(artifacts) + _json_line(_bucket_record("trajectories"))
+    _replace_run(
+        actions,
+        ("ls", "--json", "local"),
+        _result(bucket_output),
+    )
     transport = _RecordingTransport(actions)
     source_manifest_path, payload_root = _capture_paths(tmp_path)
 
@@ -741,6 +886,91 @@ def test_capture_binds_the_no_tags_response_to_the_requested_object(
     assert not source_manifest_path.exists()
 
 
+def test_capture_accepts_the_exact_success_response_for_an_untagged_object(
+    tmp_path: Path,
+) -> None:
+    key = "personal-dev/source/candidate.tar"
+    tags = _result(_tags_absent_success(f"artifacts/{key}"))
+    transport = _RecordingTransport(_capture_actions(tags=tags))
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    manifest = capture_personal_dev_minio_backup(
+        transport=transport,
+        source_manifest_path=source_manifest_path,
+        payload_root=payload_root,
+    )
+
+    assert manifest.object_count == 1
+    assert source_manifest_path.read_bytes() == manifest.canonical_bytes
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {
+            "status": "success",
+            "url": ("http://minio.internal/artifacts/personal-dev/source/candidate.tar"),
+            "versionID": "unexpected-version",
+        },
+        {
+            "status": "error",
+            "url": ("http://minio.internal/artifacts/personal-dev/source/candidate.tar"),
+            "versionID": "",
+        },
+        {
+            "status": "success",
+            "url": ("http://minio.internal/artifacts/personal-dev/source/candidate.tar"),
+            "versionID": "",
+            "extra": "unexpected",
+        },
+        {
+            "status": "success",
+            "url": ("http://user@minio.internal/artifacts/personal-dev/source/candidate.tar"),
+            "versionID": "",
+        },
+        {
+            "status": "success",
+            "url": ("http://minio.internal/artifacts/personal-dev/source/candidate.tar?tag=one"),
+            "versionID": "",
+        },
+        {
+            "status": "success",
+            "url": ("http://minio.internal/artifacts/personal-dev/source/candidate.tar#tag"),
+            "versionID": "",
+        },
+        {
+            "status": "success",
+            "url": "http://minio.internal/artifacts/personal-dev/source/another.tar",
+            "versionID": "",
+        },
+    ],
+    ids=(
+        "version-id",
+        "wrong-status",
+        "extra-field",
+        "userinfo",
+        "query",
+        "fragment",
+        "stale-object-url",
+    ),
+)
+def test_capture_rejects_unsafe_success_responses_for_an_untagged_object(
+    tmp_path: Path,
+    value: dict[str, object],
+) -> None:
+    transport = _RecordingTransport(_capture_actions(tags=_result(_json_line(value))))
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert not source_manifest_path.exists()
+
+
 def _source_authority(
     tmp_path: Path,
 ) -> tuple[Path, Path, Path, PersonalDevMinioObject]:
@@ -981,6 +1211,27 @@ def test_restore_rejects_a_manifest_symlink_ancestor_into_the_payload_root(
     alias = tmp_path / "backup-authority-alias"
     alias.symlink_to(payload_root.parent, target_is_directory=True)
     restored_manifest_path = alias / "payloads" / "restored.json"
+    transport = _RecordingTransport(_restore_actions(payload_root=payload_root, object=object))
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        restore_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+            restored_manifest_path=restored_manifest_path,
+        )
+
+    assert transport.calls == []
+    assert not restored_manifest_path.exists()
+
+
+def test_restore_rejects_a_source_manifest_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    real_source_manifest, payload_root, restored_manifest_path, object = _source_authority(tmp_path)
+    alias = tmp_path / "source-parent-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    source_manifest_path = alias / real_source_manifest.relative_to(tmp_path)
     transport = _RecordingTransport(_restore_actions(payload_root=payload_root, object=object))
 
     with pytest.raises(PersonalDevMinioBackupError):

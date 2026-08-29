@@ -1252,13 +1252,15 @@ class _DockerMinioTransport:
             self._restore_env_file,
             expected_identity=self._restore_env_identity,
         )
-        cid_directory = Path(
-            tempfile.mkdtemp(
-                prefix=".loom-minio-client-",
-            )
-        )
-        cid_path = cid_directory / "cid"
+        cid_directory: Path | None = None
+        cid_path: Path | None = None
         try:
+            cid_directory = Path(
+                tempfile.mkdtemp(
+                    prefix=".loom-minio-client-",
+                )
+            )
+            cid_path = cid_directory / "cid"
             try:
                 result = _stream_docker_command(
                     self._command(
@@ -1281,11 +1283,12 @@ class _DockerMinioTransport:
             return result
         finally:
             os.close(env_descriptor)
-            try:
-                cid_path.unlink(missing_ok=True)
-                cid_directory.rmdir()
-            except OSError:
-                raise OSError("Docker client authority cleanup failed") from None
+            if cid_path is not None and cid_directory is not None:
+                try:
+                    cid_path.unlink(missing_ok=True)
+                    cid_directory.rmdir()
+                except OSError:
+                    raise OSError("Docker client authority cleanup failed") from None
 
     def run(
         self,

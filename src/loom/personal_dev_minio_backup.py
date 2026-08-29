@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -11,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from urllib.parse import urlsplit
 
 _ERROR_MESSAGE = "personal-dev MinIO backup is invalid"
 _BUCKETS = ("artifacts", "trajectories")
@@ -25,6 +28,7 @@ _MAX_METADATA_KEY_BYTES = 128
 _MAX_METADATA_VALUE_BYTES = 2_048
 _MAX_METADATA_BYTES = 16 * 1024
 _MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+_MAX_OBSERVATION_BYTES = 4_096
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _METADATA_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,127}")
 _CONTENT_TYPE_RE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")
@@ -353,6 +357,36 @@ def _validate_observation(value: object) -> str:
     return value
 
 
+def _validate_listing_observations(record: Mapping[str, object]) -> bool:
+    if "url" not in record:
+        return True
+    _validate_key(record.get("key"))
+    url = _validate_observation(record.get("url"))
+    try:
+        encoded_url = url.encode("utf-8")
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        _ = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except (UnicodeEncodeError, ValueError):
+        raise _invalid() from None
+    if (
+        record.get("storageClass") != "STANDARD"
+        or not _is_plain_int(record.get("versionOrdinal"))
+        or record["versionOrdinal"] < 1  # type: ignore[operator]
+        or parsed.scheme not in {"http", "https"}
+        or not hostname
+        or username is not None
+        or password is not None
+        or parsed.query
+        or parsed.fragment
+        or len(encoded_url) > _MAX_OBSERVATION_BYTES
+    ):
+        raise _invalid()
+    return True
+
+
 def parse_personal_dev_minio_listing(
     payload: bytes,
     *,
@@ -374,14 +408,23 @@ def parse_personal_dev_minio_listing(
             for record in records
             if set(record)
             in (
-                {"status", "type", "key", "size", "etag", "lastModified"},
-                {"status", "type", "key", "size", "etag", "lastModified", "checksum"},
+                {
+                    "status",
+                    "type",
+                    "key",
+                    "size",
+                    "etag",
+                    "lastModified",
+                    "storageClass",
+                    "url",
+                    "versionOrdinal",
+                },
             )
             and record["status"] == "success"
             and record["type"] == "file"
+            and _validate_listing_observations(record)
             and _validate_observation(record["etag"])
             and _validate_observation(record["lastModified"])
-            and ("checksum" not in record or _validate_observation(record["checksum"]))
         )
     except (KeyError, TypeError, ValueError):
         raise _invalid() from None
@@ -411,6 +454,23 @@ def _normalized_stat_metadata(value: object) -> tuple[str, str | None, Mapping[s
     if content_type is None:
         raise _invalid()
     return content_type, cache_control, custom
+
+
+def _validate_stat_checksum(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {"CRC32C"}:
+        raise _invalid()
+    checksum = value["CRC32C"]
+    if not isinstance(checksum, str):
+        raise _invalid()
+    encoded, separator, part_count = checksum.partition("-")
+    if separator and (not re.fullmatch(r"[1-9][0-9]{0,4}", part_count) or int(part_count) > 10_000):
+        raise _invalid()
+    try:
+        decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError):
+        raise _invalid() from None
+    if len(decoded) != 4:
+        raise _invalid()
 
 
 def _hash_payload_path(path: Path) -> tuple[str, int]:
@@ -450,7 +510,7 @@ def normalize_personal_dev_minio_object(
         if (
             record["status"] != "success"
             or record["type"] != "file"
-            or record["name"] != listed.key
+            or record["name"] != listed.key.rsplit("/", 1)[-1]
             or type(record["size"]) is not int
             or record["size"] != listed.size_bytes
         ):
@@ -458,7 +518,7 @@ def normalize_personal_dev_minio_object(
         _validate_observation(record["etag"])
         _validate_observation(record["lastModified"])
         if "checksum" in record:
-            _validate_observation(record["checksum"])
+            _validate_stat_checksum(record["checksum"])
         content_type, cache_control, metadata = _normalized_stat_metadata(record["metadata"])
         payload_sha256, payload_size = _hash_payload_path(payload_path)
         if payload_size != listed.size_bytes:

@@ -133,12 +133,15 @@ def _list_record(
         "size": size,
         "etag": "opaque-observation",
         "lastModified": "2026-08-29T00:00:00Z",
+        "storageClass": "STANDARD",
+        "url": "http://minio.internal/",
+        "versionOrdinal": 1,
     }
 
 
 def _stat_record(
     *,
-    name: object = "personal-dev/source/candidate.tar",
+    name: object = "candidate.tar",
     size: object = 1,
     metadata: object | None = None,
 ) -> dict[str, object]:
@@ -149,6 +152,7 @@ def _stat_record(
         "size": size,
         "etag": "opaque-observation",
         "lastModified": "2026-08-29T00:00:00Z",
+        "checksum": {"CRC32C": "AAAAAA=="},
         "metadata": (
             {
                 "Content-Type": "text/plain",
@@ -196,6 +200,182 @@ def test_listing_and_stat_normalization_preserve_only_restorable_authority(tmp_p
     assert personal_dev_minio_restore_attributes(normalized) == (
         "Content-Type=text/plain;X-Amz-Meta-archive-sha256=" + "a" * 64
     )
+
+
+def test_listing_accepts_the_exact_trusted_client_observation_surface() -> None:
+    # Rejecting these non-authoritative fields makes the exact pinned mc image unusable.
+    record = {
+        **_list_record(),
+        "storageClass": "STANDARD",
+        "url": "http://minio.internal/artifacts/personal-dev/source/candidate.tar",
+        "versionOrdinal": 1,
+    }
+
+    assert parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts") == (
+        PersonalDevMinioListedObject(
+            bucket="artifacts",
+            key="personal-dev/source/candidate.tar",
+            size_bytes=1,
+        ),
+    )
+
+
+def test_listing_accepts_a_credential_free_client_url_as_discarded_observation() -> None:
+    # The pinned client URL is endpoint context; bucket/key remain separate authorities.
+    record = {
+        **_list_record(),
+        "storageClass": "STANDARD",
+        "url": "http://minio.internal/",
+        "versionOrdinal": 1,
+    }
+
+    assert parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts") == (
+        PersonalDevMinioListedObject(
+            bucket="artifacts",
+            key="personal-dev/source/candidate.tar",
+            size_bytes=1,
+        ),
+    )
+
+
+def test_listing_rejects_the_obsolete_narrow_fixture_surface() -> None:
+    record = _list_record()
+    for field in ("storageClass", "url", "versionOrdinal"):
+        record.pop(field)
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts")
+
+
+@pytest.mark.parametrize(
+    "url",
+    ("http://:9000/", "http://minio.internal:not-a-port/"),
+    ids=("empty-host", "invalid-port"),
+)
+def test_listing_rejects_malformed_client_urls(url: str) -> None:
+    record = {
+        **_list_record(),
+        "storageClass": "STANDARD",
+        "url": url,
+        "versionOrdinal": 1,
+    }
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts")
+
+
+def test_stat_accepts_the_exact_trusted_client_observation_surface(tmp_path: Path) -> None:
+    payload_path = tmp_path / "temporary"
+    payload_path.write_bytes(b"x")
+    payload_path.chmod(0o600)
+    listed = PersonalDevMinioListedObject(
+        "artifacts",
+        "personal-dev/source/candidate.tar",
+        1,
+    )
+    record = {
+        **_stat_record(name="candidate.tar"),
+        "checksum": {"CRC32C": "AAAAAA==-3"},
+    }
+
+    normalized = normalize_personal_dev_minio_object(
+        listed=listed,
+        stat_payload=_json_line(record),
+        payload_path=payload_path,
+    )
+
+    assert normalized.key == listed.key
+    assert normalized.payload_sha256 == hashlib.sha256(b"x").hexdigest()
+
+
+def test_stat_rejects_the_obsolete_full_key_fixture_surface(tmp_path: Path) -> None:
+    payload_path = tmp_path / "temporary"
+    payload_path.write_bytes(b"x")
+    payload_path.chmod(0o600)
+    listed = PersonalDevMinioListedObject(
+        "artifacts",
+        "personal-dev/source/candidate.tar",
+        1,
+    )
+
+    record = _stat_record(name="personal-dev/source/candidate.tar")
+    record.pop("checksum")
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        normalize_personal_dev_minio_object(
+            listed=listed,
+            stat_payload=_json_line(record),
+            payload_path=payload_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "checksum"),
+    [
+        ("another.tar", {"CRC32C": "AAAAAA==-3"}),
+        ("candidate.tar", {"CRC32": "AAAAAA==-3"}),
+        ("candidate.tar", {"CRC32C": "AAAAAA==-0"}),
+        ("candidate.tar", {"CRC32C": "not-base64"}),
+        ("candidate.tar", {"CRC32C": "AAAAAA==-3", "extra": "AAAAAA=="}),
+        ("candidate.tar", "AAAAAA==-3"),
+    ],
+    ids=(
+        "wrong-basename",
+        "wrong-algorithm",
+        "zero-parts",
+        "malformed-value",
+        "extra-algorithm",
+        "non-object-checksum",
+    ),
+)
+def test_stat_rejects_unsafe_trusted_client_observations(
+    tmp_path: Path,
+    name: str,
+    checksum: object,
+) -> None:
+    payload_path = tmp_path / "temporary"
+    payload_path.write_bytes(b"x")
+    payload_path.chmod(0o600)
+    listed = PersonalDevMinioListedObject(
+        "artifacts",
+        "personal-dev/source/candidate.tar",
+        1,
+    )
+    record = {**_stat_record(name=name), "checksum": checksum}
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        normalize_personal_dev_minio_object(
+            listed=listed,
+            stat_payload=_json_line(record),
+            payload_path=payload_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("storageClass", "GLACIER"),
+        ("url", "http://user:password@minio.internal/artifacts/personal-dev/source/candidate.tar"),
+        ("url", "file:///artifacts/personal-dev/source/candidate.tar"),
+        ("url", "http://minio.internal/artifacts/personal-dev/source/candidate.tar?version=1"),
+        ("url", "http://minio.internal/" + "a" * 4097),
+        ("versionOrdinal", True),
+        ("versionOrdinal", 0),
+    ],
+)
+def test_listing_rejects_unsupported_trusted_client_observations(
+    field: str,
+    value: object,
+) -> None:
+    # Discarded observations still need validation or unsupported S3 state can pass silently.
+    record = {
+        **_list_record(),
+        "storageClass": "STANDARD",
+        "url": "http://minio.internal/artifacts/personal-dev/source/candidate.tar",
+        "versionOrdinal": 1,
+        field: value,
+    }
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts")
 
 
 @pytest.mark.parametrize(

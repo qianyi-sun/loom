@@ -3353,6 +3353,11 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback(
     assert '--trusted-release-sha256 "$trusted_release_sha256"' in runbook
     assert "capture-minio-backup" in runbook
     assert "restore-minio-backup" in runbook
+    assert "ready restore" in runbook
+    assert runbook.index("ready restore") < runbook.index(
+        '"$loom_cli" admin personal-dev-control-plane restore-minio-backup'
+    )
+    assert '"$minio_client_image" -euc' in runbook
     assert '--payload-root "$minio_payload_root"' in runbook
     assert '--source-manifest-file "$minio_source_manifest"' in runbook
     assert '--restored-manifest-file "$minio_restored_manifest"' in runbook

@@ -341,6 +341,17 @@ docker run --detach --network "$restore_network" --network-alias minio-restore \
   --name "$minio_restore" \
   --env-file "$restore_env" "$minio_image" server /data >/dev/null
 
+for attempt in $(seq 1 60); do
+  if docker run --rm --network "$restore_network" --env-file "$restore_env" \
+    --entrypoint /bin/sh "$minio_client_image" -euc \
+    'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio-restore:9000"; exec mc "$@"' \
+    sh ready restore >/dev/null 2>&1; then
+    break
+  fi
+  test "$attempt" -lt 60
+  sleep 1
+done
+
 "$loom_cli" admin personal-dev-control-plane restore-minio-backup \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
