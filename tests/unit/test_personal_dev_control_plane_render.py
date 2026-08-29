@@ -327,7 +327,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "e99c7a9c9a6f3a6083c88df8e75b96221a9e333da1617f2a0d4591cd02102dbd"
+        "f652f06b82f64590f6d9fef9299dee052cbb1a1de66d1739e6493467193a53a6"
     )
 
     identities = {_identity(document) for document in documents}
@@ -611,9 +611,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
 
 
 def test_acceptance_render_v2_two_owners_preserves_resource_shape(tmp_path: Path) -> None:
-    profile, release, v1_plan, _shadow, v1_rendered, v1_documents = _acceptance_render(
-        tmp_path
-    )
+    profile, release, v1_plan, _shadow, v1_rendered, v1_documents = _acceptance_render(tmp_path)
     profile = replace(
         profile,
         limits=replace(
@@ -1244,11 +1242,21 @@ def test_pods_are_restricted_finite_and_receive_only_explicit_api_tokens(
     assert "0.0.0.0/0" not in yaml.safe_dump_all(policies)
     assert profile.network.kubernetes_api_cidr in yaml.safe_dump_all(policies)
 
-    migration_policy = next(
-        item
-        for item in policies
-        if item["metadata"]["name"] == "loom-personal-dev-migration-egress"
-    )
+    api_service_rule = {
+        "to": [{"ipBlock": {"cidr": "10.43.0.1/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    }
+    api_endpoint_rule = {
+        "to": [{"ipBlock": {"cidr": "192.168.50.103/32"}}],
+        "ports": [{"protocol": "TCP", "port": 6443}],
+    }
+    policies_by_name = {item["metadata"]["name"]: item for item in policies}
+    for name in ("loom-personal-dev-management", "loom-personal-dev-activation"):
+        egress = policies_by_name[name]["spec"]["egress"]
+        assert api_service_rule in egress
+        assert api_endpoint_rule in egress
+
+    migration_policy = policies_by_name["loom-personal-dev-migration-egress"]
     assert migration_policy["spec"]["podSelector"] == {
         "matchLabels": {"app": "loom-personal-dev-migration"}
     }
@@ -1259,6 +1267,10 @@ def test_pods_are_restricted_finite_and_receive_only_explicit_api_tokens(
     assert "loom-dev-minio" not in migration_egress
     assert profile.network.capacity_manager_pod_label_value not in migration_egress
     assert profile.network.kubernetes_api_cidr not in migration_egress
+    assert profile.network.kubernetes_api_endpoint_cidrs[0] not in migration_egress
+    rendered_policies = yaml.safe_dump_all(policies)
+    assert "192.168.50.0/24" not in rendered_policies
+    assert "0.0.0.0/0" not in rendered_policies
 
 
 def test_storage_ingress_separates_postgres_and_minio_callers(tmp_path: Path) -> None:

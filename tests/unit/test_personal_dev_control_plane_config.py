@@ -109,6 +109,20 @@ def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
     return "\n".join(lines).replace("[network]\n", "[network]\n" + entry, 1) + "\n"
 
 
+def _with_kubernetes_api_endpoints(text: str, cidrs: object, port: object = 6443) -> str:
+    entries = (
+        "kubernetes_api_endpoint_cidrs = " + json.dumps(cidrs) + "\n"
+        "kubernetes_api_endpoint_port = " + json.dumps(port) + "\n"
+    )
+    lines = [
+        line
+        for line in text.splitlines()
+        if not line.startswith("kubernetes_api_endpoint_cidrs = ")
+        and not line.startswith("kubernetes_api_endpoint_port = ")
+    ]
+    return "\n".join(lines).replace("[network]\n", "[network]\n" + entries, 1) + "\n"
+
+
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
@@ -142,6 +156,9 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
     assert profile.network.kubernetes_api_cidr != "0.0.0.0/0"
     assert profile.network.kubernetes_api_port == 443
+    assert profile.network.kubernetes_api_endpoint_cidrs == ("192.168.50.103/32",)
+    assert profile.network.kubernetes_api_endpoint_port == 6443
+    assert isinstance(profile.network.kubernetes_api_endpoint_cidrs, tuple)
     assert profile.network.ingress_controller_source_cidrs == ()
     assert isinstance(profile.network.ingress_controller_source_cidrs, tuple)
     assert profile.network.acme_http01_solver_port == 8089
@@ -504,6 +521,38 @@ def test_profile_accepts_ipv6_ula_ingress_controller_source(tmp_path: Path) -> N
     profile = load_personal_dev_control_plane_profile(path)
 
     assert profile.network.ingress_controller_source_cidrs == ("fd00::1/128",)
+
+
+@pytest.mark.parametrize(
+    ("cidrs", "port"),
+    [
+        ([], 6443),
+        (["192.168.50.103/32", "192.168.50.103/32"], 6443),
+        (["192.168.50.104/32", "192.168.50.103/32"], 6443),
+        (["192.168.50.0/24"], 6443),
+        (["8.8.8.8/32"], 6443),
+        (["0.0.0.0/32"], 6443),
+        (["127.0.0.1/32"], 6443),
+        (["169.254.1.1/32"], 6443),
+        (["224.0.0.1/32"], 6443),
+        (["240.0.0.1/32"], 6443),
+        ([f"10.0.0.{number}/32" for number in range(1, 34)], 6443),
+        (["192.168.50.103/32"], 0),
+        (["192.168.50.103/32"], 65536),
+    ],
+)
+def test_profile_rejects_unsafe_kubernetes_api_endpoints(
+    tmp_path: Path,
+    cidrs: list[str],
+    port: int,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _with_kubernetes_api_endpoints(text, cidrs, port),
+    )
+
+    with pytest.raises(ValidationError):
+        load_personal_dev_control_plane_profile(path)
 
 
 @pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "empty", "oversized"])

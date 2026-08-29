@@ -235,6 +235,8 @@ class _NetworkInput(_StrictModel):
     acme_http01_solver_port: int = Field(default=8089, ge=1, le=65535)
     kubernetes_api_cidr: str
     kubernetes_api_port: int = Field(ge=1, le=65535)
+    kubernetes_api_endpoint_cidrs: list[str] = Field(min_length=1, max_length=32)
+    kubernetes_api_endpoint_port: int = Field(ge=1, le=65535)
     dns_namespace: str
     dns_pod_label_key: str
     dns_pod_label_value: str
@@ -338,6 +340,36 @@ class _NetworkInput(_StrictModel):
             raise ValueError("Kubernetes API CIDR is invalid") from None
         if network.num_addresses != 1 or network.is_unspecified:
             raise ValueError("Kubernetes API CIDR must name one exact host")
+        return value
+
+    @field_validator("kubernetes_api_endpoint_cidrs")
+    @classmethod
+    def _api_endpoint_cidrs_are_exact_private_hosts(cls, value: list[str]) -> list[str]:
+        networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for cidr in value:
+            try:
+                network = ipaddress.ip_network(cidr, strict=True)
+            except ValueError:
+                raise ValueError("Kubernetes API endpoint CIDR is invalid") from None
+            address = network.network_address
+            if (
+                cidr != str(network)
+                or network.prefixlen != network.max_prefixlen
+                or not _is_private_use_address(address)
+                or address.is_loopback
+                or address.is_link_local
+                or address.is_multicast
+                or address.is_unspecified
+                or address.is_reserved
+            ):
+                raise ValueError("Kubernetes API endpoint must be one private host")
+            networks.append(network)
+        if len({str(network) for network in networks}) != len(networks):
+            raise ValueError("Kubernetes API endpoint CIDRs must be unique")
+        if value != [
+            str(network) for network in sorted(networks, key=lambda item: int(item.network_address))
+        ]:
+            raise ValueError("Kubernetes API endpoint CIDRs must be in canonical order")
         return value
 
 
@@ -954,6 +986,8 @@ class PersonalDevControlPlaneNetwork:
     acme_http01_solver_port: int
     kubernetes_api_cidr: str
     kubernetes_api_port: int
+    kubernetes_api_endpoint_cidrs: tuple[str, ...]
+    kubernetes_api_endpoint_port: int
     dns_namespace: str
     dns_pod_label_key: str
     dns_pod_label_value: str
@@ -1472,6 +1506,9 @@ def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPla
                 **parsed.network.model_dump(),
                 "ingress_controller_source_cidrs": tuple(
                     parsed.network.ingress_controller_source_cidrs
+                ),
+                "kubernetes_api_endpoint_cidrs": tuple(
+                    parsed.network.kubernetes_api_endpoint_cidrs
                 ),
             }
         ),
