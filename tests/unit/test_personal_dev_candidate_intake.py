@@ -276,6 +276,56 @@ async def test_collection_race_deletes_only_its_unique_unversioned_generation(
     assert "VersionId" not in object_store.deleted[0]
 
 
+async def test_unexpected_registration_failure_removes_only_its_published_generation(
+    tmp_path: Path,
+) -> None:
+    class _UnexpectedRegistry(_Registry):
+        requested: PersonalDevCandidateRecord | None = None
+
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            self.requested = requested
+            raise RuntimeError("registry failure must not reach the client")
+
+    registry = _UnexpectedRegistry()
+    object_store = _ObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=registry, object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev candidate registration failed"
+    assert object_store.objects == {}
+    assert registry.requested is not None
+    assert object_store.deleted == [
+        {
+            "Bucket": "artifacts",
+            "Key": registry.requested.object_key,
+            "VersionId": "v1",
+        }
+    ]
+
+
+async def test_unexpected_registration_cleanup_failure_is_generic(tmp_path: Path) -> None:
+    class _UnexpectedRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            del requested
+            raise RuntimeError("registry failure must not reach the client")
+
+    class _FailingCleanupObjectStore(_ObjectStore):
+        def delete_object(self, **kwargs: object) -> None:
+            self.deleted.append(dict(kwargs))
+            raise RuntimeError("cleanup failure must not reach the client")
+
+    object_store = _FailingCleanupObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=_UnexpectedRegistry(), object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev rejected source cleanup failed"
+    assert "registry failure" not in exc.value.detail
+    assert "cleanup failure" not in exc.value.detail
+    assert object_store.deleted[0]["VersionId"] == "v1"
+
+
 async def test_digest_mismatch_and_oversize_fail_before_publication(tmp_path: Path) -> None:
     registry = _Registry()
     object_store = _ObjectStore()

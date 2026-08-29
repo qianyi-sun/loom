@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -158,9 +159,19 @@ def _same_registration(
         and existing.build_contract_sha256 == requested.build_contract_sha256
         and existing.source_commit == requested.source_commit
         and existing.dirty is requested.dirty
-        and dict(existing.manifest_json) == dict(requested.manifest_json)
+        and _canonical_json(existing.manifest_json) == _canonical_json(requested.manifest_json)
         and existing.object_bucket == requested.object_bucket
         and existing.archive_size_bytes == requested.archive_size_bytes
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     )
 
 

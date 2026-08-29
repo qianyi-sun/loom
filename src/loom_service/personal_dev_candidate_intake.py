@@ -137,6 +137,25 @@ def _publish_archive(
         os.close(descriptor)
 
 
+async def _cleanup_published_generation(
+    object_store: SyncObjectStore,
+    *,
+    bucket: str,
+    key: str,
+    version_id: str | None,
+) -> None:
+    delete = {"Bucket": bucket, "Key": key}
+    if version_id is not None:
+        delete["VersionId"] = version_id
+    try:
+        await asyncio.to_thread(object_store.delete_object, **delete)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev rejected source cleanup failed",
+        ) from exc
+
+
 async def intake_personal_dev_candidate(
     *,
     registry: CandidateRegistry,
@@ -228,49 +247,46 @@ async def intake_personal_dev_candidate(
         )
         try:
             registration = await registry.register(requested)
-            if registration.candidate.object_key != object_key:
-                delete = {"Bucket": bucket, "Key": object_key}
-                if published_version_id is not None:
-                    delete["VersionId"] = published_version_id
-                await asyncio.to_thread(object_store.delete_object, **delete)
-            return registration
         except PersonalDevCandidateQuotaError:
-            try:
-                delete = {"Bucket": bucket, "Key": object_key}
-                if published_version_id is not None:
-                    delete["VersionId"] = published_version_id
-                await asyncio.to_thread(
-                    object_store.delete_object,
-                    **delete,
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="personal-dev rejected source cleanup failed",
-                ) from exc
+            await _cleanup_published_generation(
+                object_store,
+                bucket=bucket,
+                key=object_key,
+                version_id=published_version_id,
+            )
             raise
         except PersonalDevArtifactCollectionInProgressError as exc:
             # Every upload has a unique generation key, so this cleanup cannot
             # erase either the collecting generation or a later successful one.
-            try:
-                delete = {"Bucket": bucket, "Key": object_key}
-                if published_version_id is not None:
-                    delete["VersionId"] = published_version_id
-                await asyncio.to_thread(object_store.delete_object, **delete)
-            except Exception as cleanup_exc:
-                raise HTTPException(
-                    status_code=503,
-                    detail="personal-dev rejected source cleanup failed",
-                ) from cleanup_exc
+            await _cleanup_published_generation(
+                object_store,
+                bucket=bucket,
+                key=object_key,
+                version_id=published_version_id,
+            )
             raise HTTPException(
                 status_code=409,
                 detail="personal-dev candidate artifacts are being collected; retry",
             ) from exc
         except Exception as exc:
+            await _cleanup_published_generation(
+                object_store,
+                bucket=bucket,
+                key=object_key,
+                version_id=published_version_id,
+            )
             raise HTTPException(
                 status_code=503,
                 detail="personal-dev candidate registration failed",
             ) from exc
+        if registration.candidate.object_key != object_key:
+            await _cleanup_published_generation(
+                object_store,
+                bucket=bucket,
+                key=object_key,
+                version_id=published_version_id,
+            )
+        return registration
 
 
 __all__ = [
