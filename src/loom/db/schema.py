@@ -587,7 +587,9 @@ class DevInstance(Base):
         ),
         CheckConstraint(
             "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
-            "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+            "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
+            "AND capacity_database IS NOT NULL "
+            "AND capacity_namespace = 'loom-dev-' || name "
             "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))",
             name="dev_instances_personal_capacity_identity_check",
         ),
@@ -1132,7 +1134,24 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_capacity_projection_check",
         ),
         CheckConstraint(
-            "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL",
+            "(checkpoint <> 'pre_activation_abandoned' OR ("
+            "kind = 'destroy' AND state = 'succeeded' "
+            "AND readiness_evidence_sha256 IS NULL "
+            "AND activation_acknowledgement_sha256 IS NULL "
+            "AND local_activation_sha256 IS NULL "
+            "AND capacity_expected_configuration_epoch IS NULL "
+            "AND capacity_projection_request_sha256 IS NULL "
+            "AND capacity_configuration_epoch IS NULL "
+            "AND capacity_configuration_sha256 IS NULL "
+            "AND capacity_reporter_incarnation IS NULL "
+            "AND capacity_reporter_token_sha256 IS NULL "
+            "AND protected_admission_sha256 IS NULL "
+            "AND capacity_agent_installation_sha256 IS NULL "
+            "AND capacity_supported_pool_ids IS NULL "
+            "AND capacity_supported_architectures IS NULL)) AND ("
+            "state <> 'succeeded' OR kind = 'noop' "
+            "OR checkpoint = 'pre_activation_abandoned' "
+            "OR capacity_configuration_epoch IS NOT NULL)",
             name="dev_lifecycle_operations_capacity_completion_check",
         ),
         CheckConstraint(

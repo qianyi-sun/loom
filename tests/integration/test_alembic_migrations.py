@@ -19,6 +19,7 @@ from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import (
     DevInstance,
+    DevLifecycleOperation,
     PersonalDevCandidate,
     PersonalDevCandidateArtifactCollection,
     Team,
@@ -93,8 +94,8 @@ def postgres_url():
         yield url
 
 
-async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
-    """Downgrading retains the safe constraint while restoring revision 0120."""
+async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
+    """Re-upgrade repairs nullable coordinates and preserves the registry constraint."""
     repo_root = Path(__file__).resolve().parents[2]
     try:
         subprocess.run(
@@ -118,6 +119,7 @@ async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> 
         owner_id = uuid4()
         team_id = uuid4()
         candidate_id = uuid4()
+        coordinate_name = "coordinate-repair"
         now = datetime.now(UTC)
         candidate = PersonalDevCandidateRecord(
             id=candidate_id,
@@ -178,6 +180,26 @@ async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     )
                 assert exc_info.value.orig.sqlstate == "23514"
                 await session.rollback()
+
+            async with sessions() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_instances "
+                        "(name, owner_user_id, owner_team_id, max_slots, "
+                        "deployment_generation, candidate_id, candidate_sha, operation_id) "
+                        "VALUES (:name, :owner_id, :team_id, 1, 1, :candidate_id, "
+                        ":candidate_sha, :operation_id)"
+                    ),
+                    {
+                        "name": coordinate_name,
+                        "owner_id": owner_id,
+                        "team_id": team_id,
+                        "candidate_id": candidate_id,
+                        "candidate_sha": candidate.candidate_sha,
+                        "operation_id": uuid4(),
+                    },
+                )
+                await session.commit()
         finally:
             await engine.dispose()
 
@@ -192,7 +214,18 @@ async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-            assert revision == "0121"
+                coordinates = connection.execute(
+                    text(
+                        "SELECT capacity_namespace, capacity_database "
+                        "FROM dev_instances WHERE name = :name"
+                    ),
+                    {"name": coordinate_name},
+                ).one()
+            assert revision == "0122"
+            assert tuple(coordinates) == (
+                f"loom-dev-{coordinate_name}",
+                "loom_dev_coordinate_repair",
+            )
         finally:
             engine.dispose()
     finally:
@@ -1931,6 +1964,8 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
                     deployment_generation=1,
                     candidate_id=candidate_id,
                     candidate_sha="a" * 64,
+                    capacity_namespace=f"loom-dev-{name}",
+                    capacity_database=f"loom_dev_{name}",
                     operation_epoch=4,
                     operation_id=uuid4(),
                     operation_step="complete",
@@ -2081,6 +2116,442 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
         await engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("unsafe_model", "unsafe_evidence"),
+    (
+        pytest.param(
+            DevLifecycleOperation,
+            (
+                ("readiness_evidence_sha256", "1" * 64),
+                ("activation_acknowledgement_sha256", "2" * 64),
+                ("local_activation_sha256", "3" * 64),
+                ("capacity_expected_configuration_epoch", 1),
+                ("capacity_projection_request_sha256", "4" * 64),
+                ("capacity_configuration_epoch", 1),
+                ("capacity_configuration_sha256", "5" * 64),
+                ("capacity_reporter_incarnation", uuid4()),
+                ("capacity_reporter_token_sha256", "6" * 64),
+                ("protected_admission_sha256", "7" * 64),
+                ("capacity_agent_installation_sha256", "8" * 64),
+                ("capacity_supported_pool_ids", ["gb10"]),
+                ("capacity_supported_architectures", ["x86_64"]),
+            ),
+            id="operation-evidence",
+        ),
+        pytest.param(
+            DevInstance,
+            (
+                ("capacity_configuration_epoch", 1),
+                ("capacity_configuration_sha256", "1" * 64),
+                ("capacity_reporter_incarnation", uuid4()),
+                ("capacity_reporter_token_sha256", "2" * 64),
+                ("local_activation_sha256", "3" * 64),
+                ("protected_admission_sha256", "4" * 64),
+                ("capacity_agent_installation_sha256", "5" * 64),
+                ("capacity_supported_pool_ids", ["gb10"]),
+                ("capacity_supported_architectures", ["x86_64"]),
+            ),
+            id="environment-evidence",
+        ),
+    ),
+)
+async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
+    postgres_url: str,
+    unsafe_model: type[DevLifecycleOperation] | type[DevInstance],
+    unsafe_evidence: tuple[tuple[str, object], ...],
+) -> None:
+    """A failed initial build can retire without invented teardown evidence."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    other_team_id = uuid4()
+    candidate_id = uuid4()
+    now = datetime.now(UTC)
+    name = f"a{uuid4().hex[:10]}"
+    candidate = PersonalDevCandidateRecord(
+        id=candidate_id,
+        owner_user_id=owner_id,
+        owner_team_id=team_id,
+        candidate_sha="a" * 64,
+        source_sha256="b" * 64,
+        archive_sha256="c" * 64,
+        build_contract_sha256="d" * 64,
+        source_commit="e" * 40,
+        dirty=False,
+        manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+        object_bucket="artifacts",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{candidate_id}/{'c' * 64}.tar"
+        ),
+        source_generation_id=candidate_id,
+        archive_size_bytes=10240,
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"abandon-{team_id}"))
+            session.add(Team(id=other_team_id, name=f"abandon-other-{other_team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.commit()
+            await SqlAlchemyPersonalDevCandidateStore(session).register(candidate)
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            created = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name=name,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=candidate_id,
+                    candidate_sha=candidate.candidate_sha,
+                    min_slots=0,
+                    max_slots=1,
+                    expected_operation_epoch=0,
+                    idempotency_key=uuid4(),
+                ),
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+
+        async with sessions() as session:
+            candidates = SqlAlchemyPersonalDevCandidateStore(session)
+            claim = await _claim_candidate_build(
+                candidates,
+                candidate_id=candidate_id,
+                builder_id="abandon-test-builder",
+                now=now,
+            )
+            assert claim.build_attempt is not None
+            running = await candidates.start_build(
+                attempt_id=claim.build_attempt.id,
+                builder_id="abandon-test-builder",
+                lease_epoch=claim.build_attempt.lease_epoch,
+                now=now,
+            )
+            await candidates.finish_build(
+                attempt_id=running.id,
+                builder_id="abandon-test-builder",
+                lease_epoch=running.lease_epoch,
+                now=now,
+                failure_reason="build failed",
+            )
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            claim = await authority.claim_next_reconciliation(
+                reconciler_id="abandon-test-reconciler",
+                now=now,
+                lease_seconds=60,
+            )
+            assert claim is not None
+            if claim.operation.id != created.operation.id:
+                assert claim.candidate.status == "failed"
+                await authority.fail_pre_activation(
+                    operation_id=claim.operation.id,
+                    operation_epoch=claim.operation.operation_epoch,
+                    attempt_id=claim.attempt.id,
+                    reconciler_id="abandon-test-reconciler",
+                    lease_epoch=claim.attempt.lease_epoch,
+                    failure_reason="candidate_build_failed",
+                    now=now,
+                )
+                claim = await authority.claim_next_reconciliation(
+                    reconciler_id="abandon-test-reconciler",
+                    now=now,
+                    lease_seconds=60,
+                )
+                assert claim is not None
+            assert claim.operation.id == created.operation.id
+            failed = await authority.fail_pre_activation(
+                operation_id=created.operation.id,
+                operation_epoch=created.operation.operation_epoch,
+                attempt_id=claim.attempt.id,
+                reconciler_id="abandon-test-reconciler",
+                lease_epoch=claim.attempt.lease_epoch,
+                failure_reason="candidate_build_failed",
+                now=now,
+            )
+            assert failed.environment.status == "failed"
+            assert failed.operation.failure_reason == "candidate_build_failed"
+
+            base_columns = (
+                "id, idempotency_key, environment_name, subject_id, subject_incarnation, "
+                "owner_user_id, owner_team_id, operation_epoch, expected_operation_epoch, "
+                "kind, state, attempt_id, attempt_sequence, request_sha256, candidate_id, "
+                "candidate_sha, min_slots, max_slots, deployment_generation, keep_data, "
+                "checkpoint, created_at, updated_at, started_at, finished_at"
+            )
+            base_values = (
+                ":id, :key, :name, :subject_id, :subject_incarnation, :owner_id, :team_id, "
+                "2, 1, 'destroy', 'succeeded', :attempt_id, 0, :request_sha256, "
+                ":candidate_id, :candidate_sha, 0, 1, 1, false, :checkpoint, "
+                ":now, :now, :now, :now"
+            )
+            failed_base_values = base_values.replace("'succeeded'", "'failed'")
+            bindings = {
+                "id": uuid4(),
+                "key": uuid4(),
+                "name": name,
+                "subject_id": created.environment.subject_id,
+                "subject_incarnation": created.environment.subject_incarnation,
+                "owner_id": owner_id,
+                "team_id": team_id,
+                "attempt_id": uuid4(),
+                "request_sha256": "f" * 64,
+                "candidate_id": candidate_id,
+                "candidate_sha": candidate.candidate_sha,
+                "now": now,
+            }
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}) VALUES ({base_values})"
+                    ),
+                    {**bindings, "checkpoint": "complete"},
+                )
+            await session.rollback()
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}) VALUES ({failed_base_values})"
+                    ),
+                    {**bindings, "checkpoint": "pre_activation_abandoned"},
+                )
+            await session.rollback()
+            schema_unsafe_evidence = {
+                "readiness_evidence_sha256": "1" * 64,
+                "activation_acknowledgement_sha256": "2" * 64,
+                "local_activation_sha256": "3" * 64,
+                "capacity_expected_configuration_epoch": 1,
+                "capacity_projection_request_sha256": "4" * 64,
+                "capacity_configuration_epoch": 1,
+                "capacity_configuration_sha256": "5" * 64,
+                "capacity_reporter_incarnation": uuid4(),
+                "capacity_reporter_token_sha256": "6" * 64,
+                "protected_admission_sha256": "7" * 64,
+                "capacity_agent_installation_sha256": "8" * 64,
+                "capacity_supported_pool_ids": '["gb10"]',
+                "capacity_supported_architectures": '["x86_64"]',
+            }
+            for field, value in schema_unsafe_evidence.items():
+                with pytest.raises(DBAPIError):
+                    await session.execute(
+                        text(
+                            "INSERT INTO dev_lifecycle_operations ("
+                            f"{base_columns}, {field}) VALUES ({base_values}, :unsafe)"
+                        ),
+                        {
+                            **bindings,
+                            "id": uuid4(),
+                            "key": uuid4(),
+                            "attempt_id": uuid4(),
+                            "checkpoint": "pre_activation_abandoned",
+                            "unsafe": value,
+                        },
+                    )
+                await session.rollback()
+            coherent_capacity_evidence = {
+                "local_activation_sha256": "1" * 64,
+                "capacity_expected_configuration_epoch": 7,
+                "capacity_projection_request_sha256": "2" * 64,
+                "capacity_configuration_epoch": 8,
+                "capacity_configuration_sha256": "3" * 64,
+                "capacity_reporter_incarnation": uuid4(),
+                "capacity_reporter_token_sha256": "4" * 64,
+                "protected_admission_sha256": "5" * 64,
+                "capacity_agent_installation_sha256": "6" * 64,
+                "capacity_supported_pool_ids": '["gb10"]',
+                "capacity_supported_architectures": '["x86_64"]',
+            }
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}, {', '.join(coherent_capacity_evidence)}) "
+                        f"VALUES ({base_values}, "
+                        f"{', '.join(f':{field}' for field in coherent_capacity_evidence)})"
+                    ),
+                    {
+                        **bindings,
+                        "id": uuid4(),
+                        "key": uuid4(),
+                        "attempt_id": uuid4(),
+                        "checkpoint": "pre_activation_abandoned",
+                        **coherent_capacity_evidence,
+                    },
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            request = PersonalDevEnvironmentDestroyRequest(
+                name=name,
+                owner_user_id=owner_id,
+                owner_team_id=team_id,
+                expected_operation_epoch=1,
+                idempotency_key=uuid4(),
+                keep_data=True,
+            )
+            for field, value in (
+                ("failure_reason", "provisioning_failed"),
+                ("checkpoint", "candidate_build"),
+            ):
+                await session.execute(
+                    text(
+                        "UPDATE dev_lifecycle_operations SET "
+                        f"{field} = :value WHERE id = :operation_id"
+                    ),
+                    {"value": value, "operation_id": created.operation.id},
+                )
+                with pytest.raises(PersonalDevEnvironmentConflictError):
+                    await authority.destroy(
+                        replace(request, idempotency_key=uuid4()),
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            for field, value in unsafe_evidence:
+                row = await session.get(
+                    unsafe_model,
+                    created.operation.id if unsafe_model is DevLifecycleOperation else name,
+                )
+                assert row is not None
+                setattr(row, field, value)
+                with session.no_autoflush, pytest.raises(PersonalDevEnvironmentConflictError):
+                    await authority.destroy(
+                        replace(request, idempotency_key=uuid4()),
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            with pytest.raises(PersonalDevEnvironmentEpochFencedError):
+                await authority.destroy(
+                    replace(request, expected_operation_epoch=2, idempotency_key=uuid4()),
+                    access_binding=_PERSONAL_DEV_ACCESS,
+                    now=now,
+                )
+            abandoned = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            replay = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            assert abandoned.acquired is True
+            assert replay.acquired is False
+            assert abandoned.operation.kind == "destroy"
+            assert abandoned.operation.state == "succeeded"
+            assert abandoned.operation.checkpoint == "pre_activation_abandoned"
+            assert abandoned.operation.operation_epoch == 2
+            assert abandoned.operation.subject_id == created.operation.subject_id
+            assert abandoned.operation.subject_incarnation == created.operation.subject_incarnation
+            assert abandoned.environment.status == "deleted"
+            assert abandoned.environment.candidate_id is None
+            assert abandoned.environment.deleted_at == now
+            assert (await authority.get_operation(created.operation.id)).state == "failed"  # type: ignore[union-attr]
+            assert (
+                await authority.claim_next_reconciliation(
+                    reconciler_id="abandon-test-no-reconciliation",
+                    now=now,
+                    lease_seconds=60,
+                )
+                is None
+            )
+            terminal_attempt = (
+                await session.execute(
+                    text(
+                        "SELECT state, checkpoint FROM dev_lifecycle_operation_attempts "
+                        "WHERE operation_id = :operation_id"
+                    ),
+                    {"operation_id": abandoned.operation.id},
+                )
+            ).one()
+            assert tuple(terminal_attempt) == ("succeeded", "pre_activation_abandoned")
+            await session.execute(
+                text("UPDATE dev_instances SET owner_team_id = :team_id WHERE name = :name"),
+                {"team_id": other_team_id, "name": name},
+            )
+            await session.commit()
+            try:
+                with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+                    await authority.destroy(
+                        request,
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            finally:
+                await session.execute(
+                    text("UPDATE dev_instances SET owner_team_id = :team_id WHERE name = :name"),
+                    {"team_id": team_id, "name": name},
+                )
+                await session.commit()
+
+        async with sessions() as session:
+            candidates = SqlAlchemyPersonalDevCandidateStore(session)
+            eligible = (
+                await session.execute(
+                    select(PersonalDevCandidate.id).where(
+                        PersonalDevCandidate.id == candidate_id,
+                        PersonalDevCandidate.artifact_state == "retained",
+                        PersonalDevCandidate.artifact_gc_unreferenced_at.is_(None),
+                        PersonalDevCandidate.artifact_gc_blocked_reason.is_(None),
+                        PersonalDevCandidate.status.in_(("uploaded", "ready", "failed")),
+                        candidates._artifact_unreferenced(),
+                    )
+                )
+            ).scalar_one_or_none()
+            assert eligible == candidate_id
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            redeployed = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name=name,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=candidate_id,
+                    candidate_sha=candidate.candidate_sha,
+                    min_slots=0,
+                    max_slots=1,
+                    expected_operation_epoch=2,
+                    idempotency_key=uuid4(),
+                ),
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            assert redeployed.environment.status == "provisioning"
+            assert redeployed.environment.keep_data is False
+            redeployed_row = await session.get(DevInstance, name)
+            assert redeployed_row is not None
+            assert redeployed_row.capacity_namespace == f"loom-dev-{name}"
+            assert redeployed_row.capacity_database == f"loom_dev_{name}"
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0121"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+        )
+        assert downgrade.returncode != 0
+        assert "cannot downgrade 0122 with pre-activation abandonment records" in (
+            downgrade.stdout + downgrade.stderr
+        )
+    finally:
+        await engine.dispose()
+
+
 def test_in_flight_count_trigger(postgres_url: str) -> None:
     engine = create_engine(postgres_url)
     team_id = uuid4()
@@ -2150,10 +2621,19 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
     assert in_flight() == 1
 
 
+@pytest.mark.parametrize(
+    ("capacity_namespace", "capacity_database"),
+    (
+        pytest.param(None, None, id="missing"),
+        pytest.param("loom-dev-other", "loom_dev_other", id="mismatched"),
+    ),
+)
 def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
     postgres_url: str,
+    capacity_namespace: str | None,
+    capacity_database: str | None,
 ) -> None:
-    """Direct SQL cannot bind syntactically valid coordinates to the wrong owner name."""
+    """Direct SQL cannot omit or misbind coordinates for a personal environment."""
 
     engine = create_engine(postgres_url)
     user_id = uuid4()
@@ -2202,12 +2682,15 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
                         "deployment_generation, candidate_id, candidate_sha, "
                         "capacity_namespace, capacity_database, operation_id) "
                         "VALUES ('alice', :user_id, :team_id, 1, 1, :candidate_id, "
-                        "repeat('a', 64), 'loom-dev-other', 'loom_dev_other', :operation_id)"
+                        "repeat('a', 64), :capacity_namespace, :capacity_database, "
+                        ":operation_id)"
                     ),
                     {
                         "user_id": user_id,
                         "team_id": team_id,
                         "candidate_id": candidate_id,
+                        "capacity_namespace": capacity_namespace,
+                        "capacity_database": capacity_database,
                         "operation_id": uuid4(),
                     },
                 )
@@ -2218,11 +2701,13 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
 def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
     postgres_url: str,
 ) -> None:
-    """The 0097 derived-coordinate constraint must be present in ORM and database."""
+    """The current fail-closed coordinate rule must match ORM and database."""
 
     expected_model_sql = (
         "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
-        "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+        "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
+        "AND capacity_database IS NOT NULL "
+        "AND capacity_namespace = 'loom-dev-' || name "
         "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
     )
     model_checks = {
@@ -2252,6 +2737,8 @@ def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration
     assert "capacity_namespace is null" in normalized_database_sql
     assert "capacity_database is null" in normalized_database_sql
     assert "candidate_id is not null" in normalized_database_sql
+    assert "capacity_namespace is not null" in normalized_database_sql
+    assert "capacity_database is not null" in normalized_database_sql
     assert "capacity_namespace = ('loom-dev-'::text || name)" in normalized_database_sql
     assert (
         "capacity_database = ('loom_dev_'::text || replace(name, '-'::text, '_'::text))"

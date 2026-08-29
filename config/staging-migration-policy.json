@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "environment": "staging",
-  "expected_head": "0121",
+  "expected_head": "0122",
   "graph_policy": "single-head-closed-dag",
   "upgrade_policy": "expand-contract-before-destructive-change",
   "downgrade_policy": "revision-declared-fail-closed",

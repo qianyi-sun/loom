@@ -259,7 +259,7 @@ def _transition_inputs(tmp_path: Path) -> dict[str, Any]:
         "predecessor_shadow_sha256": predecessor_shadow_sha256,
         "alembic_ini_path": _ROOT / "migrations/alembic.ini",
         "expected_predecessor_head": "0112",
-        "expected_target_head": "0121",
+        "expected_target_head": "0122",
     }
 
 
@@ -304,7 +304,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["namespace"] == "loom-dev"
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0121"
+    assert plan["target"]["schema_head"] == "0122"
     predecessor_documents = list(
         yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
     )
@@ -331,6 +331,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0119",
         "0120",
         "0121",
+        "0122",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]
@@ -445,7 +446,7 @@ def test_transition_preparation_rejects_non_linear_alembic_edges(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("expected_predecessor_head", "0111"), ("expected_target_head", "0122")),
+    (("expected_predecessor_head", "0111"), ("expected_target_head", "0121")),
 )
 def test_transition_preparation_requires_the_reviewed_schema_boundary(
     tmp_path: Path,

@@ -499,6 +499,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             if (
                 environment is None
                 or environment.owner_user_id != requested.owner_user_id
+                or environment.owner_team_id != requested.owner_team_id
                 or environment.subject_id != prior.subject_id
                 or environment.subject_incarnation != prior.subject_incarnation
                 or environment.operation_id != prior.id
@@ -525,6 +526,15 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             raise PersonalDevEnvironmentEpochFencedError(
                 "personal-dev environment operation epoch changed"
             )
+        if environment.status == "failed" and environment.candidate_id is not None:
+            abandoned = await self._claim_pre_activation_abandonment(
+                environment,
+                requested=requested,
+                access_binding=access_binding,
+                now=now,
+            )
+            if abandoned is not None:
+                return abandoned
         if environment.status != "ready" or environment.candidate_id is None:
             raise PersonalDevEnvironmentConflictError(
                 f"personal-dev environment cannot be destroyed while {environment.status}"
@@ -645,6 +655,153 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 created_at=now,
                 updated_at=now,
                 started_at=now,
+            )
+        )
+        await self.session.flush()
+        return PersonalDevApplyReservation(
+            environment=_environment_record(environment),
+            operation=_operation_record(operation),
+            acquired=True,
+            requires_build_binding=False,
+        )
+
+    async def _claim_pre_activation_abandonment(
+        self,
+        environment: DevInstance,
+        *,
+        requested: PersonalDevEnvironmentDestroyRequest,
+        access_binding: PersonalDevAccessBinding,
+        now: datetime,
+    ) -> PersonalDevApplyReservation | None:
+        """Retire exactly one failed initial build that never reached activation."""
+        failed = (
+            await self.session.execute(
+                select(DevLifecycleOperation)
+                .where(DevLifecycleOperation.id == environment.operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            failed is None
+            or failed.id != environment.operation_id
+            or failed.kind != "create"
+            or failed.state != "failed"
+            or failed.checkpoint != "failed"
+            or failed.failure_reason != "candidate_build_failed"
+            or failed.operation_epoch != environment.operation_epoch
+            or failed.operation_epoch != requested.expected_operation_epoch
+            or failed.owner_user_id != requested.owner_user_id
+            or failed.owner_team_id != requested.owner_team_id
+            or failed.subject_id != environment.subject_id
+            or failed.subject_incarnation != environment.subject_incarnation
+            or failed.candidate_id != environment.candidate_id
+            or failed.candidate_sha != environment.candidate_sha
+        ):
+            return None
+        operation_evidence = (
+            failed.readiness_evidence_sha256,
+            failed.activation_acknowledgement_sha256,
+            failed.local_activation_sha256,
+            failed.capacity_expected_configuration_epoch,
+            failed.capacity_projection_request_sha256,
+            failed.capacity_configuration_epoch,
+            failed.capacity_configuration_sha256,
+            failed.capacity_reporter_incarnation,
+            failed.capacity_reporter_token_sha256,
+            failed.protected_admission_sha256,
+            failed.capacity_agent_installation_sha256,
+            failed.capacity_supported_pool_ids,
+            failed.capacity_supported_architectures,
+        )
+        environment_evidence = (
+            environment.capacity_configuration_epoch,
+            environment.capacity_configuration_sha256,
+            environment.capacity_reporter_incarnation,
+            environment.capacity_reporter_token_sha256,
+            environment.local_activation_sha256,
+            environment.protected_admission_sha256,
+            environment.capacity_agent_installation_sha256,
+            environment.capacity_supported_pool_ids,
+            environment.capacity_supported_architectures,
+        )
+        if any(value is not None for value in (*operation_evidence, *environment_evidence)):
+            return None
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.id == environment.candidate_id,
+                    PersonalDevCandidate.owner_user_id == requested.owner_user_id,
+                    PersonalDevCandidate.owner_team_id == requested.owner_team_id,
+                    PersonalDevCandidate.candidate_sha == environment.candidate_sha,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            return None
+        operation_id = uuid4()
+        attempt_id = uuid4()
+        operation_epoch = environment.operation_epoch + 1
+        operation = DevLifecycleOperation(
+            id=operation_id,
+            idempotency_key=requested.idempotency_key,
+            environment_name=environment.name,
+            subject_id=environment.subject_id,
+            subject_incarnation=environment.subject_incarnation,
+            owner_user_id=environment.owner_user_id,
+            owner_team_id=environment.owner_team_id,
+            operation_epoch=operation_epoch,
+            expected_operation_epoch=requested.expected_operation_epoch,
+            kind="destroy",
+            state="succeeded",
+            attempt_id=attempt_id,
+            attempt_sequence=0,
+            request_sha256=requested.request_sha256,
+            candidate_id=failed.candidate_id,
+            candidate_sha=failed.candidate_sha,
+            min_slots=environment.min_slots,
+            max_slots=environment.max_slots,
+            deployment_generation=environment.deployment_generation,
+            keep_data=requested.keep_data,
+            checkpoint="pre_activation_abandoned",
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+            finished_at=now,
+        )
+        self.session.add(operation)
+        environment.status = "deleted"
+        environment.candidate_id = None
+        environment.candidate_sha = candidate.source_commit
+        environment.capacity_namespace = None
+        environment.capacity_database = None
+        environment.operation_epoch = operation_epoch
+        environment.operation_id = operation_id
+        environment.operation_step = "pre_activation_abandoned"
+        environment.keep_data = requested.keep_data
+        environment.failure_reason = None
+        environment.ready_at = None
+        environment.deleted_at = now
+        environment.updated_at = now
+        await self.session.flush()
+        self.session.add(
+            DevLifecycleOperationAttempt(
+                id=attempt_id,
+                operation_id=operation_id,
+                subject_id=environment.subject_id,
+                subject_incarnation=environment.subject_incarnation,
+                operation_epoch=operation_epoch,
+                attempt_sequence=0,
+                state="succeeded",
+                checkpoint="pre_activation_abandoned",
+                credential_binding_version=1,
+                bootstrap_auth_kind=access_binding.auth_kind,
+                bootstrap_credential_hash=access_binding.credential_hash,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+                finished_at=now,
             )
         )
         await self.session.flush()
@@ -860,6 +1017,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             subject_incarnation = environment.subject_incarnation
             if environment.status == "deleted":
                 await self._assert_limits(requested, replacing_name=None)
+                identity = derive_identity(requested.name)
                 subject_incarnation = uuid4()
                 operation_epoch = environment.operation_epoch + 1
                 generation = 1
@@ -872,6 +1030,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 environment.deployment_generation = generation
                 environment.candidate_id = requested.candidate_id
                 environment.candidate_sha = requested.candidate_sha
+                environment.capacity_namespace = identity.namespace
+                environment.capacity_database = identity.database
                 environment.operation_epoch = operation_epoch
                 environment.operation_id = operation_id
                 environment.operation_step = "candidate_build"

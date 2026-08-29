@@ -774,6 +774,114 @@ async def test_personal_destroy_requires_epoch_and_submits_durable_authority() -
     assert captured[0][1].credential_hash == b"x" * 32
 
 
+async def test_personal_abandonment_replay_survives_candidate_gc_unbind() -> None:
+    candidate_id = UUID("00000000-0000-0000-0000-000000000010")
+    subject_id = UUID("00000000-0000-0000-0000-000000000012")
+    subject_incarnation = UUID("00000000-0000-0000-0000-000000000013")
+    destroy_id = UUID("00000000-0000-0000-0000-000000000015")
+    attempt_id = UUID("00000000-0000-0000-0000-000000000017")
+    key = UUID("00000000-0000-0000-0000-000000000016")
+    store = _Store()
+    store.rows["alice"] = DevInstanceRecord(
+        name="alice",
+        owner_user_id=_OWNER,
+        owner_team_id=_TEAM,
+        min_slots=0,
+        max_slots=1,
+        status="deleted",
+        deployment_generation=1,
+        candidate_sha="e" * 40,
+        candidate_id=None,
+        subject_id=subject_id,
+        subject_incarnation=subject_incarnation,
+        operation_epoch=2,
+        operation_id=destroy_id,
+        operation_step="pre_activation_abandoned",
+        created_at=_NOW,
+        updated_at=_NOW,
+        deleted_at=_NOW,
+    )
+    captured = []
+
+    class _Authority:
+        async def destroy(self, requested, *, access_binding, now=None):
+            captured.append((requested, access_binding))
+            environment = PersonalDevEnvironmentRecord(
+                name="alice",
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                owner_user_id=_OWNER,
+                owner_team_id=_TEAM,
+                min_slots=0,
+                max_slots=1,
+                status="deleted",
+                deployment_generation=1,
+                candidate_id=None,
+                candidate_sha="e" * 40,
+                operation_epoch=2,
+                operation_id=destroy_id,
+                operation_step="pre_activation_abandoned",
+                keep_data=False,
+                created_at=_NOW,
+                updated_at=_NOW,
+                deleted_at=_NOW,
+            )
+            operation = PersonalDevLifecycleOperationRecord(
+                id=destroy_id,
+                idempotency_key=key,
+                environment_name="alice",
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                owner_user_id=_OWNER,
+                owner_team_id=_TEAM,
+                operation_epoch=2,
+                expected_operation_epoch=1,
+                kind="destroy",
+                state="succeeded",
+                attempt_id=attempt_id,
+                attempt_sequence=0,
+                request_sha256=requested.request_sha256,
+                candidate_id=candidate_id,
+                candidate_sha="a" * 64,
+                min_slots=0,
+                max_slots=1,
+                deployment_generation=1,
+                checkpoint="pre_activation_abandoned",
+                keep_data=False,
+                created_at=_NOW,
+                updated_at=_NOW,
+                started_at=_NOW,
+                finished_at=_NOW,
+            )
+            return PersonalDevApplyReservation(
+                environment=environment,
+                operation=operation,
+                acquired=False,
+                requires_build_binding=False,
+            )
+
+    request = _request(store, configured=False)
+    request.app.state.settings = type("Settings", (), {"dev_instances_enabled": True})()
+    request.app.state.personal_dev_environment_authority_factory = lambda _session: _Authority()
+    response = Response()
+
+    result = await delete_dev_instance(
+        "alice",
+        request,
+        (object(), _ctx(_OWNER)),  # type: ignore[arg-type]
+        response,
+        keep_data=False,
+        expected_operation_epoch=1,
+        idempotency_key=key,
+    )
+
+    assert response.status_code == 200
+    assert result.status == "deleted"
+    assert result.operation_id == destroy_id
+    assert captured[0][0].expected_operation_epoch == 1
+    assert captured[0][1].credential_hash == b"x" * 32
+
+
 async def test_candidate_less_create_is_retired_when_personal_lifecycle_is_enabled() -> None:
     store = _Store()
     request = _request(store)
