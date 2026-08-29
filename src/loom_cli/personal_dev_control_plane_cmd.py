@@ -231,6 +231,7 @@ def _render_backup_restore_evidence(args: argparse.Namespace) -> int:
             restored_schema_head=args.restored_schema_head,
             minio_source_manifest_path=args.minio_source_manifest_file,
             minio_restored_manifest_path=args.minio_restored_manifest_file,
+            minio_payload_root=args.minio_payload_root,
             secret_key_inventory_path=args.secret_key_inventory_file,
             pre_shadow_status_path=args.pre_shadow_status_file,
             post_shadow_status_path=args.post_shadow_status_file,
@@ -1934,6 +1935,7 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
     backup.add_argument("--restored-schema-head", required=True)
     backup.add_argument("--minio-source-manifest-file", type=Path, required=True)
     backup.add_argument("--minio-restored-manifest-file", type=Path, required=True)
+    backup.add_argument("--minio-payload-root", type=Path, required=True)
     backup.add_argument("--secret-key-inventory-file", type=Path, required=True)
     backup.add_argument("--pre-shadow-status-file", type=Path, required=True)
     backup.add_argument("--post-shadow-status-file", type=Path, required=True)

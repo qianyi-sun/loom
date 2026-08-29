@@ -1135,6 +1135,8 @@ def _backup_evidence_argv(
         str(paths["minio.source.json"]),
         "--minio-restored-manifest-file",
         str(paths["minio.restored.json"]),
+        "--minio-payload-root",
+        str(paths["minio-payloads"]),
         "--secret-key-inventory-file",
         str(paths["secrets.json"]),
         "--pre-shadow-status-file",
@@ -1182,6 +1184,7 @@ def test_render_backup_restore_evidence_uses_supported_derived_command(
             "postgres.restored.tsv",
             "minio.source.json",
             "minio.restored.json",
+            "minio-payloads",
             "secrets.json",
             "pre.json",
             "post.json",
@@ -1205,6 +1208,7 @@ def test_render_backup_restore_evidence_uses_supported_derived_command(
     assert evidence["kind"] == "backup-restore-evidence"
     assert evidence["sha256"] == hashlib.sha256(captured.out.encode("ascii")).hexdigest()
     assert captured_inputs["postgres_dump_path"] == paths["postgres.dump"]
+    assert captured_inputs["minio_payload_root"] == paths["minio-payloads"]
     assert captured_inputs["storage_inventory_path"] == paths["storage.json"]
 
 
@@ -1229,6 +1233,7 @@ def test_render_backup_restore_evidence_rejects_unbound_cleanup_names(
             "postgres.restored.tsv",
             "minio.source.json",
             "minio.restored.json",
+            "minio-payloads",
             "secrets.json",
             "pre.json",
             "post.json",

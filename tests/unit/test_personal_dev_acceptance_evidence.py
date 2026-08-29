@@ -24,6 +24,7 @@ from loom.personal_dev_control_plane_config import (
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
 )
+from loom.personal_dev_minio_backup import load_personal_dev_minio_manifest
 from tests.unit.test_personal_dev_control_plane_acceptance_config import (
     _PROFILE_PATH,
     _plan_value,
@@ -76,16 +77,16 @@ def _rollback_shadow_manifest_payload(
         "kind: Namespace\n"
         "metadata:\n"
         "  annotations:\n"
-        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
-        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        f'    loom.dev/render-input-sha256: "{input_sha256}"\n'
+        f'    loom.dev/trusted-release-sha256: "{release_sha256}"\n'
         "  name: loom-dev\n"
         "---\n"
         "apiVersion: apps/v1\n"
         "kind: Deployment\n"
         "metadata:\n"
         "  annotations:\n"
-        f"    loom.dev/render-input-sha256: \"{input_sha256}\"\n"
-        f"    loom.dev/trusted-release-sha256: \"{release_sha256}\"\n"
+        f'    loom.dev/render-input-sha256: "{input_sha256}"\n'
+        f'    loom.dev/trusted-release-sha256: "{release_sha256}"\n'
         "  name: loom-personal-dev-management\n"
         "  namespace: loom-dev\n"
     ).encode("ascii")
@@ -129,9 +130,7 @@ def test_rollback_shadow_manifest_rejects_duplicate_yaml_bindings(
         input_sha256="1" * 64,
         release_sha256="2" * 64,
     )
-    valid_binding = (
-        '    loom.dev/render-input-sha256: "' + "1" * 64 + '"\n'
-    ).encode("ascii")
+    valid_binding = ('    loom.dev/render-input-sha256: "' + "1" * 64 + '"\n').encode("ascii")
     duplicate_bindings = (
         '    loom.dev/render-input-sha256: "'
         + "3" * 64
@@ -734,6 +733,12 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         _scanner_path,
         _backup_path,
     ) = _inputs(tmp_path)
+    release = replace(
+        release,
+        source_sha="a" * 40,
+        source_tree="b" * 40,
+    )
+    release_sha256 = "c" * 64
     if not web_expected:
         release = replace(
             release,
@@ -763,6 +768,8 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
     ).encode("ascii")
     source_manifest = owner_file("minio.source.json", manifest_payload)
     restored_manifest = owner_file("minio.restored.json", manifest_payload)
+    minio_payload_root = tmp_path / "minio-payloads"
+    minio_payload_root.mkdir(mode=0o700)
     secret_inventory = {
         "items": [
             {"keys": ["private-key"], "name": "loom-personal-dev-activation-agent"},
@@ -858,6 +865,7 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
         restored_schema_head="0112",
         minio_source_manifest_path=source_manifest,
         minio_restored_manifest_path=restored_manifest,
+        minio_payload_root=minio_payload_root,
         secret_key_inventory_path=secret_path,
         pre_shadow_status_path=pre_status,
         post_shadow_status_path=post_status,
@@ -872,26 +880,85 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
     )
     assert value["minio"]["source_object_count"] == 0  # type: ignore[index]
     assert value["cleanup"]["isolated_network_absent"] is True  # type: ignore[index]
+    canonical_v1 = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    assert canonical_v1 == bytes.fromhex(
+        "7b22636c65616e7570223a7b2269736f6c617465645f6d696e696f5f616273656e74223a747275652c2269736f6c6174"
+        "65645f6e6574776f726b5f616273656e74223a747275652c2269736f6c617465645f706f7374677265735f616273656e"
+        "74223a747275657d2c22636f6d706c657465645f6174223a22323032362d30382d32365431393a30353a30305a222c22"
+        "6d616e61676572223a7b2265786563757461626c655f6e65775f63617061636974795f6365696c696e67223a302c2270"
+        "6572736f6e616c5f776f726b65725f636f756e74223a307d2c226d696e696f223a7b226261636b75705f6d616e696665"
+        "73745f736861323536223a22653338383939303861326234346636353466663364346536363263303533393734303930"
+        "38643530633336663732646339663239393133656531363963336235222c22696d616765223a22717561792e696f2f6d"
+        "696e696f2f6d696e696f407368613235363a373737373737373737373737373737373737373737373737373737373737"
+        "37373737373737373737373737373737373737373737373737373737373737373737222c22726573746f7265645f6d61"
+        "6e69666573745f736861323536223a226533383839393038613262343466363534666633643465363632633035333937"
+        "3430393038643530633336663732646339663239393133656531363963336235222c22726573746f7265645f6f626a65"
+        "63745f636f756e74223a302c22736f757263655f6f626a6563745f636f756e74223a307d2c226e616d65737061636522"
+        "3a226c6f6f6d2d646576222c22706f737467726573223a7b2264756d705f736861323536223a22343464376436343463"
+        "306633643534373637613464313231633136303636316663373762353035303532633363386361666331656561613966"
+        "37373766383131222c22696d616765223a22646f636b65722e696f2f6c6962726172792f706f73746772657340736861"
+        "3235363a3636363636363636363636363636363636363636363636363636363636363636363636363636363636363636"
+        "3636363636363636363636363636363636363636222c22726573746f7265645f736368656d615f68656164223a223031"
+        "3132222c22726573746f7265645f73746174655f736861323536223a2237653335656164353838303232393238343462"
+        "616336643765313966373966343166306266646437373262623631303939306530653763363433376561663334222c22"
+        "736f757263655f736368656d615f68656164223a2230313132222c22736f757263655f73746174655f73686132353622"
+        "3a2237653335656164353838303232393238343462616336643765313966373966343166306266646437373262623631"
+        "303939306530653763363433376561663334227d2c2272656c656173655f736861323536223a22636363636363636363"
+        "636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363"
+        "63636363636363222c22736368656d61223a226c6f6f6d2d706572736f6e616c2d6465762d6261636b75702d72657374"
+        "6f72652d65766964656e63652d7631222c2273656372657473223a7b226b65795f696e76656e746f72795f7368613235"
+        "36223a223635666334376561343564626439653439373834343137626436626137363331656139363366363538306332"
+        "3966613534613762353834336263363432616463222c2276616c7565735f696e636c75646564223a66616c73657d2c22"
+        "736f75726365223a7b22636f6d6d6974223a226161616161616161616161616161616161616161616161616161616161"
+        "6161616161616161616161222c2274726565223a22626262626262626262626262626262626262626262626262626262"
+        "62626262626262626262626262227d2c22737461727465645f6174223a22323032362d30382d32365431393a30303a30"
+        "305a222c2273746f72616765223a7b226d696e696f5f707663223a22646174612d6c6f6f6d2d6465762d6d696e696f2d"
+        "30222c22706f7374677265735f707663223a22646174612d6c6f6f6d2d6465762d706f7374677265732d30222c227374"
+        "6f726167655f636c617373223a226c6f6e67686f726e227d7d"
+    )
+    assert hashlib.sha256(canonical_v1).hexdigest() == (
+        "d0f28f4c1429644bc519728f7d9737093189581da82b888ea1fc8135608923e9"
+    )
 
+    payload = b"retained payload"
+    payload_digest = hashlib.sha256(payload).hexdigest()
     nonempty_manifest_payload = json.dumps(
         {
             "buckets": ["artifacts", "trajectories"],
             "objects": [
                 {
-                    "bucket": "artifacts",
-                    "key": "owner/object",
-                    "sha256": "5" * 64,
-                    "size": 7,
+                    "bucket": bucket,
+                    "cache_control": None,
+                    "content_type": "application/octet-stream",
+                    "key": key,
+                    "metadata": {},
+                    "payload_sha256": payload_digest,
+                    "size_bytes": len(payload),
                 }
+                for bucket, key in (
+                    ("artifacts", "owner/first"),
+                    ("trajectories", "owner/second"),
+                )
             ],
+            "schema": "loom-personal-dev-minio-backup-manifest-v1",
         },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
     source_manifest.write_bytes(nonempty_manifest_payload)
     restored_manifest.write_bytes(nonempty_manifest_payload)
-    with pytest.raises(PersonalDevAcceptanceEvidenceError):
-        build_personal_dev_backup_restore_evidence(
+    retained_payload = minio_payload_root / payload_digest
+    retained_payload.write_bytes(payload)
+    retained_payload.chmod(0o600)
+
+    def build_retained(*, payload_root: Path = minio_payload_root) -> dict[str, object]:
+        return build_personal_dev_backup_restore_evidence(
             profile=profile,
             release=release,
             release_sha256=release_sha256,
@@ -904,11 +971,116 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
             restored_schema_head="0112",
             minio_source_manifest_path=source_manifest,
             minio_restored_manifest_path=restored_manifest,
+            minio_payload_root=payload_root,
             secret_key_inventory_path=secret_path,
             pre_shadow_status_path=pre_status,
             post_shadow_status_path=post_status,
             storage_inventory_path=storage_path,
         )
+
+    value = build_retained()
+
+    assert value["schema"] == "loom-personal-dev-backup-restore-evidence-v2"
+    assert value["minio"]["source_object_count"] == 2  # type: ignore[index]
+    assert value["minio"]["restored_object_count"] == 2  # type: ignore[index]
+    assert value["minio"]["retained_payload_count"] == 1  # type: ignore[index]
+    assert value["minio"]["retained_payload_bytes"] == len(payload)  # type: ignore[index]
+    manifest = load_personal_dev_minio_manifest(source_manifest)
+    assert (
+        value["minio"]["retained_payload_inventory_sha256"]
+        == hashlib.sha256(  # type: ignore[index]
+            manifest.payload_inventory_bytes
+        ).hexdigest()
+    )
+
+    restored_manifest.write_bytes(
+        nonempty_manifest_payload.replace(b"owner/second", b"owner/different")
+    )
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_retained()
+    restored_manifest.write_bytes(nonempty_manifest_payload)
+
+    retained_payload.unlink()
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_retained()
+    retained_payload.write_bytes(payload)
+    retained_payload.chmod(0o600)
+
+    extra_payload = minio_payload_root / "unexpected"
+    extra_payload.write_bytes(b"unexpected")
+    extra_payload.chmod(0o600)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_retained()
+    extra_payload.unlink()
+
+    retained_payload.write_bytes(b"corrupt payload")
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_retained()
+    retained_payload.write_bytes(payload)
+    retained_payload.chmod(0o600)
+
+    wrong_payload_root = tmp_path / "wrong-minio-payloads"
+    wrong_payload_root.mkdir(mode=0o700)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        build_retained(payload_root=wrong_payload_root)
+
+    for digest_key in (
+        "backup_manifest_sha256",
+        "restored_manifest_sha256",
+        "retained_payload_inventory_sha256",
+    ):
+        zero_digest = deepcopy(value)
+        zero_digest["minio"][digest_key] = "0" * 64  # type: ignore[index]
+        with pytest.raises(ValueError):
+            acceptance_evidence.PersonalDevBackupRestoreEvidence.model_validate(zero_digest)
+
+    v1_nonempty = deepcopy(value)
+    v1_nonempty["schema"] = "loom-personal-dev-backup-restore-evidence-v1"
+    with pytest.raises(ValueError):
+        acceptance_evidence.PersonalDevBackupRestoreEvidence.model_validate(v1_nonempty)
+
+    v2_empty = deepcopy(value)
+    v2_empty["schema"] = "loom-personal-dev-backup-restore-evidence-v2"
+    v2_empty["minio"] = {
+        "backup_manifest_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        "image": release.images.minio,
+        "restored_manifest_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        "restored_object_count": 0,
+        "source_object_count": 0,
+    }
+    with pytest.raises(ValueError):
+        acceptance_evidence.PersonalDevBackupRestoreEvidence.model_validate(v2_empty)
+
+    evidence_path = owner_file(
+        "retained-backup-restore-evidence.json",
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii"),
+    )
+    evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    assert (
+        load_personal_dev_backup_restore_evidence(
+            evidence_path,
+            expected_sha256=evidence_sha256,
+            release=release,
+            release_sha256=release_sha256,
+            expected_schema_head="0112",
+        ).schema_name
+        == "loom-personal-dev-backup-restore-evidence-v2"
+    )
+    for invalid_variant in (v1_nonempty, v2_empty):
+        evidence_payload = json.dumps(
+            invalid_variant,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        evidence_path.write_bytes(evidence_payload)
+        with pytest.raises(PersonalDevAcceptanceEvidenceError):
+            load_personal_dev_backup_restore_evidence(
+                evidence_path,
+                expected_sha256=hashlib.sha256(evidence_payload).hexdigest(),
+                release=release,
+                release_sha256=release_sha256,
+                expected_schema_head="0112",
+            )
 
     incomplete_bucket_payload = json.dumps(
         {"buckets": ["artifacts"], "objects": []},
@@ -931,6 +1103,7 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
             restored_schema_head="0112",
             minio_source_manifest_path=source_manifest,
             minio_restored_manifest_path=restored_manifest,
+            minio_payload_root=minio_payload_root,
             secret_key_inventory_path=secret_path,
             pre_shadow_status_path=pre_status,
             post_shadow_status_path=post_status,
@@ -940,8 +1113,7 @@ def test_backup_restore_evidence_is_derived_from_supporting_artifacts(
 
 def test_postgres_state_accepts_canonical_sequence_and_table_inventory() -> None:
     payload = (
-        "sequence\tpublic.example_id_seq\t7\tt\n"
-        f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
+        f"sequence\tpublic.example_id_seq\t7\tt\ntable\tpublic.alembic_version\t1\t{'5' * 64}\n"
     )
 
     acceptance_evidence._validate_postgres_state(payload.encode("ascii"))
@@ -951,10 +1123,7 @@ def test_postgres_state_accepts_canonical_sequence_and_table_inventory() -> None
     "payload",
     [
         "sequence\tpublic.example_id_seq\t7\tt\n",
-        (
-            f"table\tpublic.alembic_version\t1\t{'5' * 64}\n"
-            "sequence\tpublic.example_id_seq\t7\tt\n"
-        ),
+        (f"table\tpublic.alembic_version\t1\t{'5' * 64}\nsequence\tpublic.example_id_seq\t7\tt\n"),
         (
             "sequence\tpublic.example_id_seq\t7\tt\n"
             "sequence\tpublic.example_id_seq\t8\tt\n"
@@ -1499,9 +1668,7 @@ def _mutate_result(value: dict[str, object], mutation: str) -> None:
     elif mutation == "owner0-redeploy":
         owners[0]["redeployed"] = deepcopy(owners[1]["redeployed"])
     elif mutation == "rotated-subject":
-        owners[1]["redeployed"]["subject_id"] = (
-            "00000000-0000-0000-0000-000000000999"
-        )
+        owners[1]["redeployed"]["subject_id"] = "00000000-0000-0000-0000-000000000999"
     elif mutation == "unrotated-incarnation":
         owners[1]["redeployed"]["subject_incarnation"] = owners[1]["destroyed"][
             "subject_incarnation"

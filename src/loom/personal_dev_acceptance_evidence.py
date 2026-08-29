@@ -26,6 +26,10 @@ from loom.personal_dev_control_plane_config import (
     PersonalDevTrustedRelease,
 )
 from loom.personal_dev_expected_denial import expected_hidden_denial_sha256
+from loom.personal_dev_minio_backup import (
+    load_personal_dev_minio_manifest,
+    validate_personal_dev_minio_payload_root,
+)
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -39,7 +43,6 @@ _LAUNCHER_SOURCE_FILES = (
     "src/loom_capacity_executor/trusted_launcher.py",
 )
 _SCANNER_SOURCE_FILE = "src/loom/personal_dev_builder_tools.py"
-_MINIO_BUCKETS = ("artifacts", "trajectories")
 _SCANNER_ARGV = (
     "image",
     "--input",
@@ -132,7 +135,7 @@ class _PostgresRestore(_StrictModel):
         return self
 
 
-class _MinioRestore(_StrictModel):
+class _MinioRestoreEmpty(_StrictModel):
     backup_manifest_sha256: str
     image: str
     source_object_count: Literal[0]
@@ -147,10 +150,42 @@ class _MinioRestore(_StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _restored_state_matches(self) -> _MinioRestore:
+    def _restored_state_matches(self) -> _MinioRestoreEmpty:
         if (
             self.source_object_count != self.restored_object_count
             or self.backup_manifest_sha256 != self.restored_manifest_sha256
+        ):
+            raise ValueError("MinIO restore does not match the source snapshot")
+        return self
+
+
+class _MinioRestoreRetained(_StrictModel):
+    backup_manifest_sha256: str
+    image: str
+    source_object_count: int = Field(gt=0, le=10_000)
+    restored_object_count: int = Field(gt=0, le=10_000)
+    restored_manifest_sha256: str
+    retained_payload_inventory_sha256: str
+    retained_payload_count: int = Field(gt=0, le=10_000)
+    retained_payload_bytes: int = Field(ge=0, le=1024 * 1024 * 1024 * 1024)
+
+    @field_validator(
+        "backup_manifest_sha256",
+        "restored_manifest_sha256",
+        "retained_payload_inventory_sha256",
+    )
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        if _DIGEST.fullmatch(value) is None or value == "0" * 64:
+            raise ValueError("MinIO evidence digest is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _restored_state_matches(self) -> _MinioRestoreRetained:
+        if (
+            self.source_object_count != self.restored_object_count
+            or self.backup_manifest_sha256 != self.restored_manifest_sha256
+            or self.retained_payload_count > self.source_object_count
         ):
             raise ValueError("MinIO restore does not match the source snapshot")
         return self
@@ -186,14 +221,17 @@ class _CleanupBoundary(_StrictModel):
 
 
 class PersonalDevBackupRestoreEvidence(_StrictModel):
-    schema_name: Literal["loom-personal-dev-backup-restore-evidence-v1"] = Field(alias="schema")
+    schema_name: Literal[
+        "loom-personal-dev-backup-restore-evidence-v1",
+        "loom-personal-dev-backup-restore-evidence-v2",
+    ] = Field(alias="schema")
     source: _SourceBinding
     release_sha256: str
     namespace: Literal["loom-dev"]
     started_at: str
     completed_at: str
     postgres: _PostgresRestore
-    minio: _MinioRestore
+    minio: _MinioRestoreEmpty | _MinioRestoreRetained
     secrets: _SecretBoundary
     storage: _StorageBoundary
     manager: _ManagerBoundary
@@ -220,6 +258,14 @@ class PersonalDevBackupRestoreEvidence(_StrictModel):
         completed = datetime.strptime(self.completed_at, "%Y-%m-%dT%H:%M:%SZ")
         if completed < started:
             raise ValueError("backup/restore evidence time order is invalid")
+        if (
+            self.schema_name == "loom-personal-dev-backup-restore-evidence-v1"
+            and not isinstance(self.minio, _MinioRestoreEmpty)
+        ) or (
+            self.schema_name == "loom-personal-dev-backup-restore-evidence-v2"
+            and not isinstance(self.minio, _MinioRestoreRetained)
+        ):
+            raise ValueError("MinIO evidence schema variant is invalid")
         return self
 
 
@@ -709,9 +755,8 @@ def load_personal_dev_acceptance_result(
             zip(result.owners, plan.acceptance_owners, strict=True)
         ):
             initial = owner_result.initial
-            if (
-                initial.owner_team_id != str(plan_owner.team_id)
-                or initial.owner_user_id != str(plan_owner.user_id)
+            if initial.owner_team_id != str(plan_owner.team_id) or initial.owner_user_id != str(
+                plan_owner.user_id
             ):
                 raise ValueError("acceptance result owner order is invalid")
             _validate_ready_transition(
@@ -953,20 +998,28 @@ def _validate_source_root(
                 )
             ).strip()
         ).resolve(strict=True)
-        head = _git_output(
-            root,
-            "rev-parse",
-            "--verify",
-            "HEAD^{commit}",
-            maximum_bytes=128,
-        ).decode("ascii").strip()
-        tree = _git_output(
-            root,
-            "rev-parse",
-            "--verify",
-            "HEAD^{tree}",
-            maximum_bytes=128,
-        ).decode("ascii").strip()
+        head = (
+            _git_output(
+                root,
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+                maximum_bytes=128,
+            )
+            .decode("ascii")
+            .strip()
+        )
+        tree = (
+            _git_output(
+                root,
+                "rev-parse",
+                "--verify",
+                "HEAD^{tree}",
+                maximum_bytes=128,
+            )
+            .decode("ascii")
+            .strip()
+        )
         status = _git_output(
             root,
             "status",
@@ -976,12 +1029,7 @@ def _validate_source_root(
             *relative_files,
             maximum_bytes=4096,
         )
-        if (
-            top_level != root
-            or head != release.source_sha
-            or tree != release.source_tree
-            or status
-        ):
+        if top_level != root or head != release.source_sha or tree != release.source_tree or status:
             raise ValueError
         return root
     except (OSError, UnicodeError, ValueError):
@@ -993,13 +1041,17 @@ def _validate_source_root(
 def _source_file_sha256(source_root: Path, source_sha: str, relative: str) -> str:
     object_spec = f"{source_sha}:{relative}"
     try:
-        raw_size = _git_output(
-            source_root,
-            "cat-file",
-            "-s",
-            object_spec,
-            maximum_bytes=64,
-        ).decode("ascii").strip()
+        raw_size = (
+            _git_output(
+                source_root,
+                "cat-file",
+                "-s",
+                object_spec,
+                maximum_bytes=64,
+            )
+            .decode("ascii")
+            .strip()
+        )
         if re.fullmatch(r"[0-9]+", raw_size) is None:
             raise ValueError
         size = int(raw_size)
@@ -1164,10 +1216,10 @@ def _validate_postgres_state(payload: bytes) -> None:
                 ):
                     raise ValueError
             elif record_type == "sequence":
-                if (
-                    re.fullmatch(r"-?[0-9]+", numeric_value) is None
-                    or state_value not in {"f", "t"}
-                ):
+                if re.fullmatch(r"-?[0-9]+", numeric_value) is None or state_value not in {
+                    "f",
+                    "t",
+                }:
                     raise ValueError
             else:
                 raise ValueError
@@ -1184,39 +1236,6 @@ def _validate_postgres_state(payload: bytes) -> None:
         raise PersonalDevAcceptanceEvidenceError(
             "personal-dev acceptance evidence is invalid"
         ) from None
-
-
-def _validate_minio_manifest(value: Any) -> int:
-    if not isinstance(value, dict) or set(value) != {"buckets", "objects"}:
-        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-    buckets = value["buckets"]
-    objects = value["objects"]
-    if (
-        not isinstance(buckets, list)
-        or tuple(buckets) != _MINIO_BUCKETS
-        or not isinstance(objects, list)
-    ):
-        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-    identities: list[tuple[str, str]] = []
-    for item in objects:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"bucket", "key", "sha256", "size"}
-            or not isinstance(item["bucket"], str)
-            or item["bucket"] not in buckets
-            or not isinstance(item["key"], str)
-            or not item["key"]
-            or not isinstance(item["sha256"], str)
-            or _DIGEST.fullmatch(item["sha256"]) is None
-            or item["sha256"] == "0" * 64
-            or type(item["size"]) is not int
-            or item["size"] < 0
-        ):
-            raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-        identities.append((item["bucket"], item["key"]))
-    if identities != sorted(identities) or len(set(identities)) != len(identities):
-        raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-    return len(objects)
 
 
 def _validate_shadow_status(
@@ -1346,10 +1365,8 @@ def validate_personal_dev_rollback_shadow_manifest(
             annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
             if (
                 not isinstance(annotations, dict)
-                or annotations.get("loom.dev/render-input-sha256")
-                != expected_input_sha256
-                or annotations.get("loom.dev/trusted-release-sha256")
-                != expected_release_sha256
+                or annotations.get("loom.dev/render-input-sha256") != expected_input_sha256
+                or annotations.get("loom.dev/trusted-release-sha256") != expected_release_sha256
             ):
                 raise ValueError
     except (OSError, RecursionError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
@@ -1427,6 +1444,7 @@ def build_personal_dev_backup_restore_evidence(
     restored_schema_head: str,
     minio_source_manifest_path: Path,
     minio_restored_manifest_path: Path,
+    minio_payload_root: Path,
     secret_key_inventory_path: Path,
     pre_shadow_status_path: Path,
     post_shadow_status_path: Path,
@@ -1442,19 +1460,30 @@ def build_personal_dev_backup_restore_evidence(
     _validate_postgres_state(restored_state)
     if not hmac.compare_digest(source_state, restored_state):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
-    source_manifest, source_manifest_value = _parse_json_document(
-        minio_source_manifest_path, canonical=True
-    )
-    restored_manifest, restored_manifest_value = _parse_json_document(
-        minio_restored_manifest_path, canonical=True
-    )
-    object_count = _validate_minio_manifest(source_manifest_value)
+    try:
+        source_minio_manifest = load_personal_dev_minio_manifest(minio_source_manifest_path)
+        restored_minio_manifest = load_personal_dev_minio_manifest(minio_restored_manifest_path)
+        retained_inventory = validate_personal_dev_minio_payload_root(
+            source_minio_manifest,
+            minio_payload_root,
+        )
+    except ValueError:
+        raise PersonalDevAcceptanceEvidenceError(
+            "personal-dev acceptance evidence is invalid"
+        ) from None
+    source_manifest = source_minio_manifest.canonical_bytes
+    restored_manifest = restored_minio_manifest.canonical_bytes
+    object_count = source_minio_manifest.object_count
     if (
-        object_count != 0
-        or _validate_minio_manifest(restored_manifest_value) != object_count
+        restored_minio_manifest.object_count != object_count
         or not hmac.compare_digest(source_manifest, restored_manifest)
+        or retained_inventory != source_minio_manifest.payload_inventory_bytes
     ):
         raise PersonalDevAcceptanceEvidenceError("personal-dev acceptance evidence is invalid")
+
+    retained_payloads = {
+        object.payload_sha256: object.size_bytes for object in source_minio_manifest.objects
+    }
 
     secret_payload, secret_value = _parse_json_document(secret_key_inventory_path, canonical=False)
     expected_secret_inventory = {
@@ -1506,7 +1535,11 @@ def build_personal_dev_backup_restore_evidence(
             "source_state_sha256": state_sha256,
         },
         "release_sha256": release_sha256,
-        "schema": "loom-personal-dev-backup-restore-evidence-v1",
+        "schema": (
+            "loom-personal-dev-backup-restore-evidence-v1"
+            if object_count == 0
+            else "loom-personal-dev-backup-restore-evidence-v2"
+        ),
         "secrets": {
             "key_inventory_sha256": hashlib.sha256(secret_payload).hexdigest(),
             "values_included": False,
@@ -1519,6 +1552,13 @@ def build_personal_dev_backup_restore_evidence(
             "storage_class": "longhorn",
         },
     }
+    if object_count != 0:
+        value["minio"] = {
+            **value["minio"],  # type: ignore[dict-item]
+            "retained_payload_inventory_sha256": hashlib.sha256(retained_inventory).hexdigest(),
+            "retained_payload_count": len(retained_payloads),
+            "retained_payload_bytes": sum(retained_payloads.values()),
+        }
     try:
         parsed = PersonalDevBackupRestoreEvidence.model_validate(value)
     except ValueError:
