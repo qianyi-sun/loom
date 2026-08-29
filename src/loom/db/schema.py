@@ -1132,9 +1132,8 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_capacity_projection_check",
         ),
         CheckConstraint(
-            "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL "
-            "OR (kind = 'destroy' AND state = 'succeeded' "
-            "AND checkpoint = 'pre_activation_abandoned' "
+            "(checkpoint <> 'pre_activation_abandoned' OR ("
+            "kind = 'destroy' AND state = 'succeeded' "
             "AND readiness_evidence_sha256 IS NULL "
             "AND activation_acknowledgement_sha256 IS NULL "
             "AND local_activation_sha256 IS NULL "
@@ -1147,7 +1146,10 @@ class DevLifecycleOperation(Base):
             "AND protected_admission_sha256 IS NULL "
             "AND capacity_agent_installation_sha256 IS NULL "
             "AND capacity_supported_pool_ids IS NULL "
-            "AND capacity_supported_architectures IS NULL)",
+            "AND capacity_supported_architectures IS NULL)) AND ("
+            "state <> 'succeeded' OR kind = 'noop' "
+            "OR checkpoint = 'pre_activation_abandoned' "
+            "OR capacity_configuration_epoch IS NOT NULL)",
             name="dev_lifecycle_operations_capacity_completion_check",
         ),
         CheckConstraint(

@@ -14,9 +14,8 @@ depends_on = None
 _CONSTRAINT = "dev_lifecycle_operations_capacity_completion_check"
 _OLD_RULE = "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL"
 _NEW_RULE = (
-    "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL "
-    "OR (kind = 'destroy' AND state = 'succeeded' "
-    "AND checkpoint = 'pre_activation_abandoned' "
+    "(checkpoint <> 'pre_activation_abandoned' OR ("
+    "kind = 'destroy' AND state = 'succeeded' "
     "AND readiness_evidence_sha256 IS NULL "
     "AND activation_acknowledgement_sha256 IS NULL "
     "AND local_activation_sha256 IS NULL "
@@ -29,7 +28,10 @@ _NEW_RULE = (
     "AND protected_admission_sha256 IS NULL "
     "AND capacity_agent_installation_sha256 IS NULL "
     "AND capacity_supported_pool_ids IS NULL "
-    "AND capacity_supported_architectures IS NULL)"
+    "AND capacity_supported_architectures IS NULL)) AND ("
+    "state <> 'succeeded' OR kind = 'noop' "
+    "OR checkpoint = 'pre_activation_abandoned' "
+    "OR capacity_configuration_epoch IS NOT NULL)"
 )
 
 
@@ -45,9 +47,7 @@ def downgrade() -> None:
         BEGIN
             IF EXISTS (
                 SELECT 1 FROM dev_lifecycle_operations
-                WHERE kind = 'destroy'
-                  AND state = 'succeeded'
-                  AND checkpoint = 'pre_activation_abandoned'
+                WHERE checkpoint = 'pre_activation_abandoned'
             ) THEN
                 RAISE EXCEPTION 'cannot downgrade 0122 with pre-activation abandonment records';
             END IF;

@@ -19,6 +19,7 @@ from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import (
     DevInstance,
+    DevLifecycleOperation,
     PersonalDevCandidate,
     PersonalDevCandidateArtifactCollection,
     Team,
@@ -2081,8 +2082,49 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
         await engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("unsafe_model", "unsafe_evidence"),
+    (
+        pytest.param(
+            DevLifecycleOperation,
+            (
+                ("readiness_evidence_sha256", "1" * 64),
+                ("activation_acknowledgement_sha256", "2" * 64),
+                ("local_activation_sha256", "3" * 64),
+                ("capacity_expected_configuration_epoch", 1),
+                ("capacity_projection_request_sha256", "4" * 64),
+                ("capacity_configuration_epoch", 1),
+                ("capacity_configuration_sha256", "5" * 64),
+                ("capacity_reporter_incarnation", uuid4()),
+                ("capacity_reporter_token_sha256", "6" * 64),
+                ("protected_admission_sha256", "7" * 64),
+                ("capacity_agent_installation_sha256", "8" * 64),
+                ("capacity_supported_pool_ids", ["gb10"]),
+                ("capacity_supported_architectures", ["x86_64"]),
+            ),
+            id="operation-evidence",
+        ),
+        pytest.param(
+            DevInstance,
+            (
+                ("capacity_configuration_epoch", 1),
+                ("capacity_configuration_sha256", "1" * 64),
+                ("capacity_reporter_incarnation", uuid4()),
+                ("capacity_reporter_token_sha256", "2" * 64),
+                ("local_activation_sha256", "3" * 64),
+                ("protected_admission_sha256", "4" * 64),
+                ("capacity_agent_installation_sha256", "5" * 64),
+                ("capacity_supported_pool_ids", ["gb10"]),
+                ("capacity_supported_architectures", ["x86_64"]),
+            ),
+            id="environment-evidence",
+        ),
+    ),
+)
 async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
     postgres_url: str,
+    unsafe_model: type[DevLifecycleOperation] | type[DevInstance],
+    unsafe_evidence: tuple[tuple[str, object], ...],
 ) -> None:
     """A failed initial build can retire without invented teardown evidence."""
     engine = create_async_engine(postgres_url)
@@ -2220,6 +2262,7 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                 ":candidate_id, :candidate_sha, 0, 1, 1, false, :checkpoint, "
                 ":now, :now, :now, :now"
             )
+            failed_base_values = base_values.replace("'succeeded'", "'failed'")
             bindings = {
                 "id": uuid4(),
                 "key": uuid4(),
@@ -2243,7 +2286,16 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                     {**bindings, "checkpoint": "complete"},
                 )
             await session.rollback()
-            unsafe_evidence = {
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}) VALUES ({failed_base_values})"
+                    ),
+                    {**bindings, "checkpoint": "pre_activation_abandoned"},
+                )
+            await session.rollback()
+            schema_unsafe_evidence = {
                 "readiness_evidence_sha256": "1" * 64,
                 "activation_acknowledgement_sha256": "2" * 64,
                 "local_activation_sha256": "3" * 64,
@@ -2258,7 +2310,7 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                 "capacity_supported_pool_ids": '["gb10"]',
                 "capacity_supported_architectures": '["x86_64"]',
             }
-            for field, value in unsafe_evidence.items():
+            for field, value in schema_unsafe_evidence.items():
                 with pytest.raises(DBAPIError):
                     await session.execute(
                         text(
@@ -2275,6 +2327,37 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                         },
                     )
                 await session.rollback()
+            coherent_capacity_evidence = {
+                "local_activation_sha256": "1" * 64,
+                "capacity_expected_configuration_epoch": 7,
+                "capacity_projection_request_sha256": "2" * 64,
+                "capacity_configuration_epoch": 8,
+                "capacity_configuration_sha256": "3" * 64,
+                "capacity_reporter_incarnation": uuid4(),
+                "capacity_reporter_token_sha256": "4" * 64,
+                "protected_admission_sha256": "5" * 64,
+                "capacity_agent_installation_sha256": "6" * 64,
+                "capacity_supported_pool_ids": '["gb10"]',
+                "capacity_supported_architectures": '["x86_64"]',
+            }
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}, {', '.join(coherent_capacity_evidence)}) "
+                        f"VALUES ({base_values}, "
+                        f"{', '.join(f':{field}' for field in coherent_capacity_evidence)})"
+                    ),
+                    {
+                        **bindings,
+                        "id": uuid4(),
+                        "key": uuid4(),
+                        "attempt_id": uuid4(),
+                        "checkpoint": "pre_activation_abandoned",
+                        **coherent_capacity_evidence,
+                    },
+                )
+            await session.rollback()
 
         async with sessions() as session:
             authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
@@ -2297,6 +2380,19 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                     {"value": value, "operation_id": created.operation.id},
                 )
                 with pytest.raises(PersonalDevEnvironmentConflictError):
+                    await authority.destroy(
+                        replace(request, idempotency_key=uuid4()),
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            for field, value in unsafe_evidence:
+                row = await session.get(
+                    unsafe_model,
+                    created.operation.id if unsafe_model is DevLifecycleOperation else name,
+                )
+                assert row is not None
+                setattr(row, field, value)
+                with session.no_autoflush, pytest.raises(PersonalDevEnvironmentConflictError):
                     await authority.destroy(
                         replace(request, idempotency_key=uuid4()),
                         access_binding=_PERSONAL_DEV_ACCESS,
