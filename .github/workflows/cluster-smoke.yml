@@ -18,10 +18,7 @@ run-name: >-
              github.event.pull_request.number || 'none') ||
       github.event_name == 'pull_request' &&
       (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft' ||
-       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
-        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
-       (github.event.action == 'edited' && github.event.changes.base == null)) &&
+       github.event.action == 'converted_to_draft') &&
       format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.event.pull_request.head.sha,
              github.event.pull_request.base.sha,
@@ -70,8 +67,8 @@ on:
       - "src/loom_cli/templates/k8s/**"
       - ".github/workflows/cluster-smoke.yml"
   pull_request:
-    # Every relevant non-draft PR reports the protected gate name. The planner
-    # selects smoke from changed paths or labels and filters metadata events.
+    # Every non-draft PR event reports the protected gate name. The planner
+    # selects smoke from changed paths or labels; drafts remain filtered.
     types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   merge_group:
     types: [checks_requested]
@@ -80,24 +77,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Irrelevant metadata runs use a separate pending slot. Otherwise GitHub's
-  # one-pending-run rule lets a filtered event evict the admission
-  # replacement that must follow a canceled full run.
-  group: >-
-    cluster-smoke-${{ github.event.pull_request.number || github.ref }}-${{
-      github.event_name == 'pull_request' &&
-      (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
-       (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
-        contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
-       (github.event.action == 'edited' && github.event.changes.base != null)) &&
-      'admission' || 'background'
-    }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request' &&
-        (contains(fromJSON('["opened","reopened","ready_for_review","synchronize","converted_to_draft"]'), github.event.action) ||
-         (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
-          contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
-         (github.event.action == 'edited' && github.event.changes.base != null)) }}
+  group: cluster-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   plan:
@@ -107,17 +88,14 @@ jobs:
       required: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
     steps:
-      - name: Classify metadata event before checkout
+      - name: Classify draft event before checkout
         id: event
         shell: bash
         env:
           FILTERED_EVENT: >-
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft' ||
-                 (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
-                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
-                 (github.event.action == 'edited' && github.event.changes.base == null)) }}
+                 github.event.action == 'converted_to_draft') }}
         run: |
           set -euo pipefail
           if [[ "$FILTERED_EVENT" == "true" ]]; then
