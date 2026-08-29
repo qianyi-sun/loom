@@ -27,7 +27,11 @@ from loom_cli.cluster_workload_trust import (
 )
 from loom_cli.environment_state import staging_gb10_external_activation_blockers
 from loom_cli.gb10_release_gate import gb10_release_target_mismatches
-from loom_cli.rollout.gb10_slurm_acceptance import validate_gb10_slurm_acceptance
+from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.gb10_slurm_acceptance import (
+    GB10_SLURM_WORKER_HOSTS,
+    validate_gb10_slurm_acceptance,
+)
 
 _Outcome = Literal["pass", "fail"]
 _HF_MIRROR_BOUNDARY_ENVIRONMENTS = frozenset({"staging", "production"})
@@ -43,12 +47,15 @@ _GB10_DESIRED_CONTRACT_FIELDS = (
     "target_slots",
     "host_intents",
 )
-_STAGING_GB10_HOST_INTENTS = {f"trt-gb10-{index}": "active" for index in range(1, 16)}
-_STAGING_GB10_RETIRED_HOST_INTENTS = {f"trt-gb10-{index}": "stopped" for index in range(1, 16)}
-_STAGING_GB10_CANONICAL_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
+_STAGING_GB10_HOST_INTENTS = {
+    host: "active" if host in GB10_SLURM_WORKER_HOSTS else "stopped"
+    for host in FULL_GB10_HOSTS
+}
+_STAGING_GB10_RETIRED_HOST_INTENTS = {host: "stopped" for host in FULL_GB10_HOSTS}
+_STAGING_GB10_CANONICAL_NODES = list(GB10_SLURM_WORKER_HOSTS)
 _STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
-_STAGING_GB10_TARGET_SLOTS = 150
+_STAGING_GB10_TARGET_SLOTS = len(GB10_SLURM_WORKER_HOSTS) * _STAGING_GB10_MAX_CONCURRENT
 _SAFE_WORKLOAD_CONTRACT_ENV_VALUES = frozenset({"internal_trusted", "True", "False"})
 _RAW_SECRET_RE = re.compile(
     r"(?i)\b(?:HF_TOKEN|TOKEN|SECRET|API_KEY|ACCESS_KEY|SECRET_KEY)\s*[:=]\s*"
@@ -1540,7 +1547,10 @@ def _gb10_manifest_policy_mismatches(
         issues.append(
             "staging GB10 host_intents must stop all node-agent workers"
             if requires_retirement
-            else "staging GB10 host_intents must be the exact active 15-host inventory"
+            else (
+                "staging GB10 host_intents must activate the exact normal worker inventory "
+                "and stop exclusive hosts"
+            )
         )
     return issues
 

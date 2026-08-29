@@ -28,6 +28,23 @@ from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
 
+NORMAL_GB10_WORKER_HOSTS = (
+    "trt-gb10-1",
+    "trt-gb10-3",
+    "trt-gb10-4",
+    "trt-gb10-5",
+    "trt-gb10-6",
+    "trt-gb10-7",
+    "trt-gb10-8",
+    "trt-gb10-9",
+    "trt-gb10-10",
+    "trt-gb10-11",
+    "trt-gb10-12",
+    "trt-gb10-13",
+    "trt-gb10-14",
+    "trt-gb10-15",
+)
+
 
 class _Response:
     status = 201
@@ -414,7 +431,7 @@ def test_capacity_executor_binds_exact_profile_nodes_and_epoch(tmp_path: Path) -
     assert calls == [
         {
             "profile_sha256": plan.supervisor_profile_sha256,
-            "nodes": FULL_GB10_HOSTS,
+            "nodes": NORMAL_GB10_WORKER_HOSTS,
         }
     ]
 
@@ -459,7 +476,7 @@ def test_capacity_executor_accepts_published_plan_with_sorted_boot_id_keys(
     assert calls == [
         {
             "profile_sha256": plan.supervisor_profile_sha256,
-            "nodes": FULL_GB10_HOSTS,
+            "nodes": NORMAL_GB10_WORKER_HOSTS,
         }
     ]
 

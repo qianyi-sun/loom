@@ -1044,8 +1044,11 @@ installed generic helper cannot substitute a second implementation.
 `final.capacity` then sends only the typed `accept_capacity` request through
 the forced SSH broker to the root-owned installed GB10 acceptance authority on
 `gx10-01c7`. The authority is fixed to cluster `trt-gb10`, partition/account/QoS
-`loom-staging`, service identity `loom-rollout` UID 995/GID 2007, and nodes
-`trt-gb10-1` through `trt-gb10-15`; node 16 is never eligible. The broker's
+`loom-staging`, service identity `loom-rollout` UID 995/GID 2007, and normal
+worker nodes `trt-gb10-1` and `trt-gb10-3` through `trt-gb10-15`. Node 2 stays
+in the full 15-host rollout-readiness inventory but is not a normal-worker
+target because the separate exclusive task-image-builder reservation owns it;
+node 16 is never eligible. The broker's
 sanitized `PATH` is authoritative, while the authority names system
 executables by absolute path. Capacity never fetches, builds, publishes, or
 imports candidate runtime code.

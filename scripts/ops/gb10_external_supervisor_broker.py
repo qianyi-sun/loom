@@ -74,7 +74,8 @@ _TERMINATION_WINDOW_SECONDS = 45.0
 _FORCED_REAP_SECONDS = 2.0
 ROOT_UID = 0
 ROOT_GID = 0
-_GB10_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+# Node 2 belongs to the separate exclusive task-image-builder reservation.
+_GB10_NODES = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
 
 
 class BrokerError(RuntimeError):

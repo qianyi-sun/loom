@@ -105,7 +105,11 @@ def test_current_staging_rollout_docs_preserve_acceptance_boundary() -> None:
         "Do not run `loom cluster up`, `loom cluster rollout`, direct migration Jobs"
         in normalized_launch
     )
-    assert "canonical 15 Slurm nodes" in gb10
+    assert "normal worker policy scales from zero to 140 slots across 14 Slurm nodes" in (
+        normalized_gb10
+    )
+    assert "full readiness and retired node-agent inventory still covers" in normalized_gb10
+    assert "node 2 is excluded only from normal workers" in normalized_gb10
     assert "`trt-gb10-1` through `trt-gb10-15`" in normalized_gb10
     assert "`trt-gb10-16` remains outside Loom's accepted allocation boundary" in (
         normalized_gb10

@@ -19,7 +19,6 @@ from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
-from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
@@ -30,6 +29,23 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transiti
     _artifact,
 )
 from tests.loom_cli.rollout.rehearsal_fixtures import active_staging_profile_text
+
+NORMAL_GB10_WORKER_HOSTS = (
+    "trt-gb10-1",
+    "trt-gb10-3",
+    "trt-gb10-4",
+    "trt-gb10-5",
+    "trt-gb10-6",
+    "trt-gb10-7",
+    "trt-gb10-8",
+    "trt-gb10-9",
+    "trt-gb10-10",
+    "trt-gb10-11",
+    "trt-gb10-12",
+    "trt-gb10-13",
+    "trt-gb10-14",
+    "trt-gb10-15",
+)
 
 
 def _controller_artifact(tmp_path: Path) -> ExternalSupervisorArtifact:
@@ -155,11 +171,11 @@ def _capacity_artifact(artifact: ExternalSupervisorArtifact) -> dict[str, object
             "account": "loom-staging",
             "qos": "loom-staging",
         },
-        "nodes": list(FULL_GB10_HOSTS),
-        "node_count": 15,
-        "probed_nodes": list(FULL_GB10_HOSTS[1:]),
-        "probed_node_count": 14,
-        "deferred_busy_nodes": [FULL_GB10_HOSTS[0]],
+        "nodes": list(NORMAL_GB10_WORKER_HOSTS),
+        "node_count": 14,
+        "probed_nodes": list(NORMAL_GB10_WORKER_HOSTS[1:]),
+        "probed_node_count": 13,
+        "deferred_busy_nodes": [NORMAL_GB10_WORKER_HOSTS[0]],
         "trial_cache_registry": {
             "ca_sha256": "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3",
             "canary_digest": "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e",
@@ -184,6 +200,31 @@ def _capacity_response(acceptance: dict[str, object]) -> str:
         )
         + "\n"
     )
+
+
+def test_remote_capacity_accepts_normal_nodes_without_exclusive_builder(
+    tmp_path: Path,
+) -> None:
+    artifact, _ = _observation(tmp_path)
+    acceptance = _capacity_artifact(artifact)
+    acceptance.update(
+        {
+            "nodes": list(NORMAL_GB10_WORKER_HOSTS),
+            "node_count": 14,
+            "probed_nodes": list(NORMAL_GB10_WORKER_HOSTS),
+            "probed_node_count": 14,
+            "deferred_busy_nodes": [],
+        }
+    )
+    run = _Run(_capacity_response(acceptance))
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    evidence = transport.accept_capacity(
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    )
+
+    assert evidence.payload["nodes"] == list(NORMAL_GB10_WORKER_HOSTS)
 
 
 def test_gb10_user_systemd_control_uses_controller_service_home(
@@ -297,7 +338,7 @@ def test_remote_apply_and_reconcile_expose_only_typed_operations(tmp_path: Path)
             plan_digest="a" * 64,
             attestation_digest="b" * 64,
             transition_digest="c" * 64,
-            nodes=FULL_GB10_HOSTS,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
         )
 
 
@@ -311,7 +352,7 @@ def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
 
     evidence = transport.accept_capacity(
         profile_sha256="c" * 64,
-        nodes=FULL_GB10_HOSTS,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
     )
 
     assert dict(evidence.payload) == acceptance
@@ -319,7 +360,7 @@ def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
     assert request == {
         "candidate_sha": artifact.candidate_sha,
         "candidate_tree": artifact.candidate_tree,
-        "nodes": list(FULL_GB10_HOSTS),
+        "nodes": list(NORMAL_GB10_WORKER_HOSTS),
         "operation": "accept_capacity",
         "profile_sha256": "c" * 64,
         "schema_version": 1,
@@ -331,7 +372,7 @@ def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
     [
         ("candidate_tree", "d" * 40),
         ("profile_sha256", "d" * 64),
-        ("nodes", [*FULL_GB10_HOSTS[:-1], "trt-gb10-16"]),
+        ("nodes", [*NORMAL_GB10_WORKER_HOSTS[:-1], "trt-gb10-16"]),
         (
             "service_identity",
             {
@@ -358,7 +399,7 @@ def test_remote_capacity_acceptance_rejects_malformed_or_drifted_evidence(
     with pytest.raises(ValueError, match="acceptance evidence"):
         transport.accept_capacity(
             profile_sha256="c" * 64,
-            nodes=FULL_GB10_HOSTS,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
         )
 
 
@@ -370,7 +411,7 @@ def test_remote_capacity_rejects_noncanonical_request_before_ssh(tmp_path: Path)
     with pytest.raises(ValueError, match="capacity request"):
         transport.accept_capacity(
             profile_sha256="c" * 64,
-            nodes=(*FULL_GB10_HOSTS[:-1], "trt-gb10-16"),
+            nodes=(*NORMAL_GB10_WORKER_HOSTS[:-1], "trt-gb10-16"),
         )
 
     assert run.calls == []
@@ -386,7 +427,7 @@ def test_remote_capacity_rejects_non_integer_envelope_schema(tmp_path: Path) -> 
     with pytest.raises(RuntimeError, match="response drifted"):
         transport.accept_capacity(
             profile_sha256="c" * 64,
-            nodes=FULL_GB10_HOSTS,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
         )
 
 
@@ -395,7 +436,7 @@ def test_capacity_validator_normalizes_unhashable_expected_nodes(tmp_path: Path)
     acceptance = _capacity_artifact(artifact)
     acceptance["nodes"] = [["not-a-node"]]
     acceptance["node_count"] = 1
-    acceptance["probed_nodes"] = [FULL_GB10_HOSTS[0]]
+    acceptance["probed_nodes"] = [NORMAL_GB10_WORKER_HOSTS[0]]
     acceptance["probed_node_count"] = 1
     acceptance["deferred_busy_nodes"] = []
 
@@ -424,7 +465,7 @@ def test_capacity_validator_rejects_evidence_lifetime_over_thirty_minutes(
             candidate_sha=artifact.candidate_sha,
             candidate_tree=artifact.candidate_tree,
             profile_sha256="c" * 64,
-            nodes=FULL_GB10_HOSTS,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
             now=generated_at + timedelta(seconds=1),
         )
 

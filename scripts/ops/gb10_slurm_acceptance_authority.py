@@ -28,9 +28,12 @@ SLURM_QOS = "loom-staging"
 SLURM_PARTITION = "loom-staging"
 CLUSTER_NAME = "trt-gb10"
 CONTROLLER_HOST = "gx10-01c7"
-# Loom's canonical GB10 inventory remains nodes 1-15 even while a node is busy
-# in another partition.  Node 16 is outside Loom's allocation boundary.
-SLURM_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
+# Node 2 is exclusive task-image-builder capacity under the fixed
+# ``loom-task-image-builder`` reservation.  Normal workers use the separate
+# ``loom-staging`` QoS without that reservation, so only nodes 1 and 3-15 are
+# valid real-allocation targets.  Node 2 remains in the full legacy-agent
+# inventory below so rollout still proves its retired node agent is stopped.
+SLURM_NODES = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
 LEGACY_AGENT_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 PRIVATE_WORKER_SERVICE_ENV = {
     pool_name: {
@@ -1391,7 +1394,7 @@ def _parse_contract(
         or not _exact_value(policy.get("actuator"), "slurm")
         or policy.get("enabled") is not True
         or not _exact_value(policy.get("min_slots"), 0)
-        or not _exact_value(policy.get("max_slots"), 150)
+        or not _exact_value(policy.get("max_slots"), 140)
         or any(not _exact_value(config.get(key), value) for key, value in expected_config.items())
         or not isinstance(config.get("allowed_nodes"), list)
         or any(type(node) is not str for node in config["allowed_nodes"])
