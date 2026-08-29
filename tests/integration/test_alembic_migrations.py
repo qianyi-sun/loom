@@ -2131,6 +2131,7 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     owner_id = uuid4()
     team_id = uuid4()
+    other_team_id = uuid4()
     candidate_id = uuid4()
     now = datetime.now(UTC)
     name = f"a{uuid4().hex[:10]}"
@@ -2158,6 +2159,7 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
     try:
         async with sessions() as session:
             session.add(Team(id=team_id, name=f"abandon-{team_id}"))
+            session.add(Team(id=other_team_id, name=f"abandon-other-{other_team_id}"))
             session.add(
                 User(
                     id=owner_id,
@@ -2444,10 +2446,40 @@ async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
                 )
             ).one()
             assert tuple(terminal_attempt) == ("succeeded", "pre_activation_abandoned")
+            await session.execute(
+                text("UPDATE dev_instances SET owner_team_id = :team_id WHERE name = :name"),
+                {"team_id": other_team_id, "name": name},
+            )
+            await session.commit()
+            try:
+                with pytest.raises(PersonalDevEnvironmentOperationFencedError):
+                    await authority.destroy(
+                        request,
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            finally:
+                await session.execute(
+                    text("UPDATE dev_instances SET owner_team_id = :team_id WHERE name = :name"),
+                    {"team_id": team_id, "name": name},
+                )
+                await session.commit()
 
         async with sessions() as session:
             candidates = SqlAlchemyPersonalDevCandidateStore(session)
-            assert await candidates.mark_next_artifact_gc(now=now) is True
+            eligible = (
+                await session.execute(
+                    select(PersonalDevCandidate.id).where(
+                        PersonalDevCandidate.id == candidate_id,
+                        PersonalDevCandidate.artifact_state == "retained",
+                        PersonalDevCandidate.artifact_gc_unreferenced_at.is_(None),
+                        PersonalDevCandidate.artifact_gc_blocked_reason.is_(None),
+                        PersonalDevCandidate.status.in_(("uploaded", "ready", "failed")),
+                        candidates._artifact_unreferenced(),
+                    )
+                )
+            ).scalar_one_or_none()
+            assert eligible == candidate_id
         downgrade = subprocess.run(
             [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0121"],
             cwd=Path(__file__).resolve().parents[2],

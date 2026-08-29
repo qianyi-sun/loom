@@ -499,6 +499,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             if (
                 environment is None
                 or environment.owner_user_id != requested.owner_user_id
+                or environment.owner_team_id != requested.owner_team_id
                 or environment.subject_id != prior.subject_id
                 or environment.subject_incarnation != prior.subject_incarnation
                 or environment.operation_id != prior.id
