@@ -76,7 +76,7 @@ def postgres_url():
         repo_root = Path(__file__).resolve().parents[2]
         # Use the venv's alembic via `python -m alembic` so PATH doesn't matter.
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "0120"],
             cwd=repo_root,
             check=True,
         )
@@ -91,6 +91,116 @@ def postgres_url():
             check=True,
         )
         yield url
+
+
+async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
+    """Downgrading retains the safe constraint while restoring revision 0120."""
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0120"],
+            cwd=repo_root,
+            check=True,
+        )
+
+        engine = create_engine(postgres_url)
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            assert revision == "0120"
+        finally:
+            engine.dispose()
+
+        engine = create_async_engine(postgres_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        owner_id = uuid4()
+        team_id = uuid4()
+        candidate_id = uuid4()
+        now = datetime.now(UTC)
+        candidate = PersonalDevCandidateRecord(
+            id=candidate_id,
+            owner_user_id=owner_id,
+            owner_team_id=team_id,
+            candidate_sha="1" * 64,
+            source_sha256="2" * 64,
+            archive_sha256="3" * 64,
+            build_contract_sha256="4" * 64,
+            source_commit="5" * 40,
+            dirty=True,
+            manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+            object_bucket="artifacts",
+            object_key=(
+                f"personal-dev/sources/{team_id}/{owner_id}/{'1' * 64}/{candidate_id}/{'3' * 64}.tar"
+            ),
+            source_generation_id=candidate_id,
+            archive_size_bytes=10240,
+            status="uploaded",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            async with sessions() as session:
+                session.add(Team(id=team_id, name=f"downgrade-registry-{team_id}"))
+                session.add(
+                    User(
+                        id=owner_id,
+                        email=f"{owner_id}@example.test",
+                        username=f"downgrade-registry-{owner_id}",
+                        username_normalized=f"downgrade-registry-{owner_id}",
+                        status="active",
+                    )
+                )
+                await session.commit()
+
+            async with sessions() as session:
+                await SqlAlchemyPersonalDevCandidateStore(session).register(candidate)
+
+            async with sessions() as session:
+                await session.execute(
+                    text(
+                        "UPDATE personal_dev_candidates "
+                        "SET registry_prefix = :registry_prefix WHERE id = :candidate_id"
+                    ),
+                    {"registry_prefix": "r" * 309, "candidate_id": candidate_id},
+                )
+                await session.commit()
+
+            async with sessions() as session:
+                with pytest.raises(DBAPIError) as exc_info:
+                    await session.execute(
+                        text(
+                            "UPDATE personal_dev_candidates "
+                            "SET registry_prefix = :registry_prefix WHERE id = :candidate_id"
+                        ),
+                        {"registry_prefix": "r" * 310, "candidate_id": candidate_id},
+                    )
+                assert exc_info.value.orig.sqlstate == "23514"
+                await session.rollback()
+        finally:
+            await engine.dispose()
+
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
+        )
+        engine = create_engine(postgres_url)
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            assert revision == "0121"
+        finally:
+            engine.dispose()
+    finally:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
+        )
 
 
 def test_all_tables_exist(postgres_url: str) -> None:
@@ -353,6 +463,7 @@ async def test_personal_dev_candidate_registration_and_build_lease(
                 builder_id="builder-a",
                 now=now,
                 lease_seconds=60,
+                registry_prefix="ghcr.io/qianyi-sun/loom-dev",
             )
             assert claimed is not None
             assert claimed.build_attempt is not None
@@ -436,6 +547,80 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             assert retried.created is True
             assert retried.build_attempt is not None
             assert retried.build_attempt.attempt_sequence == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("prefix_length", "accepted"),
+    ((309, True), (310, False)),
+)
+async def test_personal_dev_candidate_registry_prefix_length_boundary(
+    postgres_url: str,
+    prefix_length: int,
+    accepted: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    candidate_id = uuid4()
+    now = datetime.now(UTC)
+    requested = PersonalDevCandidateRecord(
+        id=candidate_id,
+        owner_user_id=owner_id,
+        owner_team_id=team_id,
+        candidate_sha="1" * 64,
+        source_sha256="2" * 64,
+        archive_sha256="3" * 64,
+        build_contract_sha256="4" * 64,
+        source_commit="5" * 40,
+        dirty=True,
+        manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+        object_bucket="artifacts",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{'1' * 64}/{candidate_id}/{'3' * 64}.tar"
+        ),
+        source_generation_id=candidate_id,
+        archive_size_bytes=10240,
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"registry-boundary-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"registry-boundary-{owner_id}",
+                    username_normalized=f"registry-boundary-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            await SqlAlchemyPersonalDevCandidateStore(session).register(requested)
+
+        async with sessions() as session:
+            statement = text(
+                "UPDATE personal_dev_candidates "
+                "SET registry_prefix = :registry_prefix WHERE id = :candidate_id"
+            )
+            parameters = {
+                "registry_prefix": "r" * prefix_length,
+                "candidate_id": candidate_id,
+            }
+            if accepted:
+                await session.execute(statement, parameters)
+                await session.commit()
+            else:
+                with pytest.raises(DBAPIError) as exc_info:
+                    await session.execute(statement, parameters)
+                assert exc_info.value.orig.sqlstate == "23514"
+                await session.rollback()
     finally:
         await engine.dispose()
 

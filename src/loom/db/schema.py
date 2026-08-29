@@ -737,7 +737,8 @@ class PersonalDevCandidate(Base):
         ),
         CheckConstraint(
             "registry_prefix IS NULL OR ("
-            "registry_prefix ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,308}$' "
+            "length(registry_prefix) BETWEEN 1 AND 309 "
+            "AND registry_prefix ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]*$' "
             "AND right(registry_prefix, 1) NOT IN ('/', ':') "
             "AND position('://' in registry_prefix) = 0 "
             "AND position('@' in registry_prefix) = 0)",

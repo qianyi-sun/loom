@@ -47,7 +47,7 @@ kubeconfig="<absolute-reviewed-mode-0600-kubeconfig>"
 kubeconfig_sha256="<reviewed-kubeconfig-sha256>"
 expected_kube_context="<reviewed-context>"
 expected_predecessor_schema_head=0112
-expected_target_schema_head=0120
+expected_target_schema_head=0121
 evidence_dir="<new-absolute-owner-only-transition-evidence-directory-outside-repositories>"
 
 test -x "$loom_cli"
