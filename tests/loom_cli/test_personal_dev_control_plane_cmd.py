@@ -2993,30 +2993,32 @@ def test_docker_minio_transport_uses_fixed_isolated_client_boundary(
     client_calls = [call for call in calls if call[0] == "run"]
     assert result == PersonalDevMinioCommandResult(0, b"bounded", b"")
     assert captured == ("", "")
-    assert client_calls == [
-        [
-            "run",
-            "--rm",
-            "--network",
-            network_name,
-            "--env-file",
-            str(env_file),
-            "--mount",
-            f"type=bind,src={payload_root},dst=/loom-payloads,readonly",
-            "--entrypoint",
-            "/bin/sh",
-            release.images.minio_client,
-            "-euc",
-            'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio-restore:9000"; exec mc "$@"',
-            "sh",
-            "cp",
-            "--attr",
-            "Content-Type=application/x-tar",
-            f"/loom-payloads/{digest_path.name}",
-            raw_target,
-        ]
+    assert len(client_calls) == 1
+    client_call = client_calls[0]
+    cid_path = Path(client_call[client_call.index("--cidfile") + 1])
+    env_argument = client_call[client_call.index("--env-file") + 1]
+    assert client_call[:2] == ["run", "--rm"]
+    assert client_call[client_call.index("--network") + 1] == network_name
+    assert client_call[client_call.index("--mount") + 1] == (
+        f"type=bind,src={payload_root},dst=/loom-payloads,readonly"
+    )
+    assert env_argument.startswith("/proc/self/fd/")
+    assert env_argument.removeprefix("/proc/self/fd/").isdigit()
+    assert client_call[client_call.index("--entrypoint") :] == [
+        "--entrypoint",
+        "/bin/sh",
+        release.images.minio_client,
+        "-euc",
+        'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio-restore:9000"; exec mc "$@"',
+        "sh",
+        "cp",
+        "--attr",
+        "Content-Type=application/x-tar",
+        f"/loom-payloads/{digest_path.name}",
+        raw_target,
     ]
-    assert client_calls[0].count(raw_target) == 1
+    assert not cid_path.exists()
+    assert client_call.count(raw_target) == 1
     assert secret_marker not in json.dumps(calls)
 
 
@@ -3391,3 +3393,215 @@ def test_restore_minio_backup_sanitizes_every_public_failure(
     assert captured.out == ""
     assert captured.err == "error: personal-dev MinIO backup inputs are invalid\n"
     assert marker not in captured.err
+
+
+def test_minio_stream_helpers_discard_bounded_sensitive_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = b"SENSITIVE_STREAM_STDERR_MARKER"
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"sys.stderr.buffer.write({marker!r})\n"
+        "raise SystemExit(9)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    docker = tmp_path / "docker"
+    docker.write_text(executable.read_text(encoding="utf-8"), encoding="utf-8")
+    docker.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+
+    kubectl_result = command._SubprocessKubectlRunner(_reviewed_kubeconfig(tmp_path)).stream(
+        ["exec", "pod"],
+        destination=None,
+        maximum_stdout_bytes=0,
+        expected_size=None,
+        maximum_stderr_bytes=1024,
+        timeout_seconds=5,
+        retain_stderr=False,
+    )
+    docker_result = command._stream_docker_command(
+        ["version"],
+        destination=None,
+        maximum_stdout_bytes=0,
+        expected_size=None,
+        maximum_stderr_bytes=1024,
+        timeout_seconds=5,
+        retain_stderr=False,
+    )
+
+    for result in (kubectl_result, docker_result):
+        assert result.returncode == 9
+        assert result.stderr
+        assert marker not in result.stderr
+
+
+@pytest.mark.parametrize("surface", ["pod", "docker"])
+def test_minio_json_surfaces_normalize_bounded_recursion_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    deeply_nested = "[" * 1100 + "0" + "]" * 1100
+    if surface == "pod":
+
+        class _Runner:
+            def run(
+                self,
+                argv: object,
+                *,
+                timeout_seconds: int,
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(argv, 0, deeply_nested, "")
+
+        with pytest.raises(ValueError):
+            command._KubectlMinioTransport(_Runner(), namespace="loom-dev")
+        return
+
+    tmp_path.chmod(0o700)
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\n", encoding="utf-8")
+    env_file.chmod(0o600)
+
+    def _deep_inspect(*_args: object, **_kwargs: object) -> PersonalDevMinioCommandResult:
+        return PersonalDevMinioCommandResult(0, deeply_nested.encode("ascii"), b"")
+
+    monkeypatch.setattr(command, "_stream_docker_command", _deep_inspect)
+    with pytest.raises(ValueError):
+        command._DockerMinioTransport(
+            client_image="quay.io/minio/mc@sha256:" + "a" * 64,
+            minio_image="quay.io/minio/minio@sha256:" + "b" * 64,
+            restore_env_file=env_file,
+            payload_root=payload_root,
+            isolated_minio_name="loom-personal-dev-minio-restore-123456789abc",
+            isolated_network_name="loom-personal-dev-restore-123456789abc",
+        )
+
+
+def test_docker_minio_transport_requires_owner_only_restore_env_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    unsafe_parent = tmp_path / "unsafe-parent"
+    unsafe_parent.mkdir(mode=0o755)
+    env_file = unsafe_parent / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+
+    def _must_not_run(*_args: object, **_kwargs: object) -> PersonalDevMinioCommandResult:
+        raise AssertionError("Docker was invoked before env-parent validation")
+
+    monkeypatch.setattr(command, "_stream_docker_command", _must_not_run)
+    with pytest.raises(ValueError):
+        command._DockerMinioTransport(
+            client_image="quay.io/minio/mc@sha256:" + "a" * 64,
+            minio_image="quay.io/minio/minio@sha256:" + "b" * 64,
+            restore_env_file=env_file,
+            payload_root=payload_root,
+            isolated_minio_name="loom-personal-dev-minio-restore-123456789abc",
+            isolated_network_name="loom-personal-dev-restore-123456789abc",
+        )
+
+
+@pytest.mark.parametrize("failure", ["path-replaced", "stream-timeout"])
+def test_docker_minio_client_uses_verified_env_fd_and_force_removes_recorded_cid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    tmp_path.chmod(0o700)
+    minio_name = "loom-personal-dev-minio-restore-123456789abc"
+    network_name = "loom-personal-dev-restore-123456789abc"
+    minio_image = "quay.io/minio/minio@sha256:" + "b" * 64
+    client_image = "quay.io/minio/mc@sha256:" + "a" * 64
+    container, network = _isolated_docker_documents(
+        minio_image=minio_image,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    original = b"MINIO_ROOT_USER=original\n"
+    env_file.write_bytes(original)
+    env_file.chmod(0o600)
+    observed: dict[str, object] = {}
+
+    def _stream(
+        argv: list[str] | tuple[str, ...],
+        **kwargs: object,
+    ) -> PersonalDevMinioCommandResult:
+        values = list(argv)
+        if values[0] == "inspect":
+            return PersonalDevMinioCommandResult(
+                0,
+                json.dumps(container, sort_keys=True, separators=(",", ":")).encode(),
+                b"",
+            )
+        if values[:2] == ["network", "inspect"]:
+            return PersonalDevMinioCommandResult(
+                0,
+                json.dumps(network, sort_keys=True, separators=(",", ":")).encode(),
+                b"",
+            )
+        assert values[0] == "run"
+        env_argument = values[values.index("--env-file") + 1]
+        passed = kwargs.get("pass_fds")
+        assert isinstance(passed, tuple) and len(passed) == 1
+        descriptor = passed[0]
+        assert env_argument == f"/proc/self/fd/{descriptor}"
+        replacement = tmp_path / "replacement.env"
+        replacement.write_bytes(b"MINIO_ROOT_USER=replaced\n")
+        replacement.chmod(0o600)
+        os.replace(replacement, env_file)
+        observed["env"] = os.pread(descriptor, 4096, 0)
+        cid_path = Path(values[values.index("--cidfile") + 1])
+        cid_path.write_text("c" * 64 + "\n", encoding="ascii")
+        observed["cid_path"] = cid_path
+        if failure == "stream-timeout":
+            raise subprocess.TimeoutExpired(["docker", *values], 1)
+        return PersonalDevMinioCommandResult(0, b"bounded", b"")
+
+    cleanup_calls: list[tuple[str, ...]] = []
+
+    def _cleanup(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        cleanup_calls.append(tuple(argv))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(command, "_stream_docker_command", _stream)
+    monkeypatch.setattr(command.subprocess, "run", _cleanup)
+    transport = command._DockerMinioTransport(
+        client_image=client_image,
+        minio_image=minio_image,
+        restore_env_file=env_file,
+        payload_root=payload_root,
+        isolated_minio_name=minio_name,
+        isolated_network_name=network_name,
+    )
+
+    with pytest.raises((OSError, subprocess.TimeoutExpired)):
+        transport.run(("ls", "--json", "restore"), maximum_stdout_bytes=4096, timeout_seconds=1)
+
+    assert observed["env"] == original
+    assert cleanup_calls == [("docker", "rm", "--force", "c" * 64)]
+    assert not Path(observed["cid_path"]).exists()
+
+
+def test_docker_minio_client_rejects_noncanonical_cid_file(tmp_path: Path) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    cid_path = tmp_path / "cid"
+    cid_path.write_text(" " + "c" * 64, encoding="ascii")
+
+    with pytest.raises(OSError, match="CID is invalid"):
+        command._DockerMinioTransport._read_client_cid(cid_path)

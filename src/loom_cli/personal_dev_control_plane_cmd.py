@@ -82,7 +82,9 @@ _DOCKER_MINIO_WRAPPER = (
 _DOCKER_PAYLOAD_ROOT = "/loom-payloads"
 _MAX_DOCKER_INSPECT_BYTES = 1024 * 1024
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_STDERR_PRESENT = b"\x01"
 _KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
+_DirectoryIdentity = tuple[int, int, int, int, int]
 
 
 def _render(args: argparse.Namespace) -> int:
@@ -570,6 +572,7 @@ class _SubprocessKubectlRunner:
         expected_size: int | None,
         maximum_stderr_bytes: int,
         timeout_seconds: int,
+        retain_stderr: bool = True,
     ) -> PersonalDevMinioCommandResult:
         if (
             type(maximum_stdout_bytes) is not int
@@ -578,6 +581,7 @@ class _SubprocessKubectlRunner:
             or maximum_stderr_bytes < 0
             or type(timeout_seconds) is not int
             or not 1 <= timeout_seconds <= 3600
+            or type(retain_stderr) is not bool
             or (expected_size is not None and (type(expected_size) is not int or expected_size < 0))
         ):
             raise ValueError("kubectl stream bound is invalid")
@@ -607,6 +611,7 @@ class _SubprocessKubectlRunner:
         stdout = bytearray()
         stderr = bytearray()
         stdout_size = 0
+        stderr_size = 0
         selector = selectors.DefaultSelector()
         deadline = time.monotonic() + timeout_seconds
         try:
@@ -625,7 +630,7 @@ class _SubprocessKubectlRunner:
                     if key.data == "stdout":
                         remaining_bytes = maximum_stdout_bytes - stdout_size
                     else:
-                        remaining_bytes = maximum_stderr_bytes - len(stderr)
+                        remaining_bytes = maximum_stderr_bytes - stderr_size
                     try:
                         chunk = os.read(
                             key.fd,
@@ -639,7 +644,9 @@ class _SubprocessKubectlRunner:
                     if len(chunk) > remaining_bytes:
                         raise OSError(f"kubectl {key.data} exceeds its size bound")
                     if key.data == "stderr":
-                        stderr.extend(chunk)
+                        stderr_size += len(chunk)
+                        if retain_stderr:
+                            stderr.extend(chunk)
                         continue
                     stdout_size += len(chunk)
                     if destination is None:
@@ -667,7 +674,8 @@ class _SubprocessKubectlRunner:
             selector.close()
             process.stdout.close()
             process.stderr.close()
-        return PersonalDevMinioCommandResult(returncode, bytes(stdout), bytes(stderr))
+        safe_stderr = bytes(stderr) if retain_stderr else (_STDERR_PRESENT if stderr_size else b"")
+        return PersonalDevMinioCommandResult(returncode, bytes(stdout), safe_stderr)
 
 
 class _HashingDestination:
@@ -697,7 +705,10 @@ def _strict_json_value(payload: str) -> object:
             value[key] = item
         return value
 
-    return json.loads(payload, object_pairs_hook=reject_duplicates)
+    try:
+        return json.loads(payload, object_pairs_hook=reject_duplicates)
+    except (json.JSONDecodeError, RuntimeError, TypeError, ValueError):
+        raise ValueError("JSON document is invalid") from None
 
 
 def _strict_json_mapping(payload: str) -> Mapping[str, object]:
@@ -806,6 +817,7 @@ class _KubectlMinioTransport:
             expected_size=expected_size,
             maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
             timeout_seconds=timeout_seconds,
+            retain_stderr=False,
         )
         if result.returncode != 0 or result.stdout or result.stderr:
             raise ValueError("MinIO stream failed")
@@ -820,6 +832,8 @@ def _stream_docker_command(
     expected_size: int | None,
     maximum_stderr_bytes: int,
     timeout_seconds: int,
+    retain_stderr: bool = True,
+    pass_fds: tuple[int, ...] = (),
 ) -> PersonalDevMinioCommandResult:
     if (
         not isinstance(argv, Sequence)
@@ -830,6 +844,10 @@ def _stream_docker_command(
         or maximum_stderr_bytes < 0
         or type(timeout_seconds) is not int
         or not 1 <= timeout_seconds <= 3600
+        or type(retain_stderr) is not bool
+        or type(pass_fds) is not tuple
+        or any(type(descriptor) is not int or descriptor < 0 for descriptor in pass_fds)
+        or len(set(pass_fds)) != len(pass_fds)
         or (expected_size is not None and (type(expected_size) is not int or expected_size < 0))
     ):
         raise ValueError("Docker command bound is invalid")
@@ -840,6 +858,7 @@ def _stream_docker_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         close_fds=True,
+        pass_fds=pass_fds,
     )
     if process.stdout is None or process.stderr is None:  # pragma: no cover
         process.kill()
@@ -848,6 +867,7 @@ def _stream_docker_command(
     stdout = bytearray()
     stderr = bytearray()
     stdout_size = 0
+    stderr_size = 0
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + timeout_seconds
     try:
@@ -866,7 +886,7 @@ def _stream_docker_command(
                 if key.data == "stdout":
                     remaining_bytes = maximum_stdout_bytes - stdout_size
                 else:
-                    remaining_bytes = maximum_stderr_bytes - len(stderr)
+                    remaining_bytes = maximum_stderr_bytes - stderr_size
                 try:
                     chunk = os.read(
                         key.fd,
@@ -880,7 +900,9 @@ def _stream_docker_command(
                 if len(chunk) > remaining_bytes:
                     raise OSError(f"Docker {key.data} exceeds its size bound")
                 if key.data == "stderr":
-                    stderr.extend(chunk)
+                    stderr_size += len(chunk)
+                    if retain_stderr:
+                        stderr.extend(chunk)
                     continue
                 stdout_size += len(chunk)
                 if destination is None:
@@ -907,7 +929,8 @@ def _stream_docker_command(
         selector.close()
         process.stdout.close()
         process.stderr.close()
-    return PersonalDevMinioCommandResult(returncode, bytes(stdout), bytes(stderr))
+    safe_stderr = bytes(stderr) if retain_stderr else (_STDERR_PRESENT if stderr_size else b"")
+    return PersonalDevMinioCommandResult(returncode, bytes(stdout), safe_stderr)
 
 
 def _owner_only_file_identity(path: Path) -> _KubeconfigIdentity | None:
@@ -931,6 +954,60 @@ def _owner_only_file_identity(path: Path) -> _KubeconfigIdentity | None:
     return _kubeconfig_identity(metadata)
 
 
+def _owner_only_directory_identity(path: Path) -> _DirectoryIdentity | None:
+    if not isinstance(path, Path) or not path.is_absolute():
+        return None
+    try:
+        if path.resolve(strict=True) != path:
+            return None
+        metadata = path.lstat()
+    except (OSError, RuntimeError):
+        return None
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        return None
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+    )
+
+
+def _open_owner_only_file(
+    path: Path,
+    *,
+    expected_identity: _KubeconfigIdentity,
+) -> int:
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise OSError("owner-only file changed") from None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size <= 0
+            or _kubeconfig_identity(metadata) != expected_identity
+        ):
+            raise OSError("owner-only file changed")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 class _DockerMinioTransport:
     def __init__(
         self,
@@ -943,7 +1020,8 @@ class _DockerMinioTransport:
         isolated_network_name: str,
     ) -> None:
         env_identity = _owner_only_file_identity(restore_env_file)
-        if env_identity is None:
+        env_parent_identity = _owner_only_directory_identity(restore_env_file.parent)
+        if env_identity is None or env_parent_identity is None:
             raise ValueError("restore environment identity is invalid")
         if not isinstance(payload_root, Path) or not payload_root.is_absolute():
             raise ValueError("Docker restore input is invalid")
@@ -964,6 +1042,7 @@ class _DockerMinioTransport:
         self._minio_image = minio_image
         self._restore_env_file = restore_env_file
         self._restore_env_identity = env_identity
+        self._restore_env_parent_identity = env_parent_identity
         self._payload_root = payload_root
         self._isolated_minio_name = isolated_minio_name
         self._isolated_network_name = isolated_network_name
@@ -977,6 +1056,7 @@ class _DockerMinioTransport:
             expected_size=None,
             maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
             timeout_seconds=30,
+            retain_stderr=False,
         )
         if result.returncode != 0 or result.stderr:
             raise ValueError("Docker inspect failed")
@@ -986,7 +1066,11 @@ class _DockerMinioTransport:
             raise ValueError("Docker inspect output is invalid") from None
 
     def _validate_boundaries(self) -> None:
-        if _owner_only_file_identity(self._restore_env_file) != self._restore_env_identity:
+        if (
+            _owner_only_directory_identity(self._restore_env_file.parent)
+            != self._restore_env_parent_identity
+            or _owner_only_file_identity(self._restore_env_file) != self._restore_env_identity
+        ):
             raise OSError("restore environment changed")
         container_values = self._inspect(["inspect", self._isolated_minio_name])
         network_values = self._inspect(["network", "inspect", self._isolated_network_name])
@@ -1072,14 +1156,22 @@ class _DockerMinioTransport:
                 translated.append(item)
         return tuple(translated)
 
-    def _command(self, arguments: Sequence[str]) -> tuple[str, ...]:
+    def _command(
+        self,
+        arguments: Sequence[str],
+        *,
+        env_descriptor: int,
+        cid_path: Path,
+    ) -> tuple[str, ...]:
         return (
             "run",
             "--rm",
+            "--cidfile",
+            str(cid_path),
             "--network",
             self._isolated_network_name,
             "--env-file",
-            str(self._restore_env_file),
+            f"/proc/self/fd/{env_descriptor}",
             "--mount",
             f"type=bind,src={self._payload_root},dst={_DOCKER_PAYLOAD_ROOT},readonly",
             "--entrypoint",
@@ -1091,6 +1183,109 @@ class _DockerMinioTransport:
             *self._arguments(arguments),
         )
 
+    @staticmethod
+    def _read_client_cid(cid_path: Path) -> str | None:
+        flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(cid_path, flags)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise OSError("Docker client CID is invalid") from None
+        try:
+            metadata = os.fstat(descriptor)
+            payload = os.read(descriptor, 66)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+                or len(payload) > 65
+                or os.read(descriptor, 1)
+            ):
+                raise OSError("Docker client CID is invalid")
+        finally:
+            os.close(descriptor)
+        try:
+            if payload.endswith(b"\n"):
+                payload = payload[:-1]
+            value = payload.decode("ascii")
+        except UnicodeDecodeError:
+            raise OSError("Docker client CID is invalid") from None
+        if len(value) != 64 or _SHA256_RE.fullmatch(value) is None:
+            raise OSError("Docker client CID is invalid")
+        return value
+
+    @classmethod
+    def _force_remove_client(cls, cid_path: Path) -> None:
+        cid = cls._read_client_cid(cid_path)
+        if cid is None:
+            return
+        try:
+            removed = subprocess.run(
+                ["docker", "rm", "--force", cid],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise OSError("Docker client cleanup failed") from None
+        if removed.returncode != 0:
+            raise OSError("Docker client cleanup failed")
+
+    def _invoke_client(
+        self,
+        arguments: Sequence[str],
+        *,
+        destination: BinaryIO | None,
+        maximum_stdout_bytes: int,
+        expected_size: int | None,
+        timeout_seconds: int,
+        retain_stderr: bool,
+    ) -> PersonalDevMinioCommandResult:
+        self._validate_boundaries()
+        env_descriptor = _open_owner_only_file(
+            self._restore_env_file,
+            expected_identity=self._restore_env_identity,
+        )
+        cid_directory = Path(
+            tempfile.mkdtemp(
+                prefix=".loom-minio-client-",
+            )
+        )
+        cid_path = cid_directory / "cid"
+        try:
+            try:
+                result = _stream_docker_command(
+                    self._command(
+                        arguments,
+                        env_descriptor=env_descriptor,
+                        cid_path=cid_path,
+                    ),
+                    destination=destination,
+                    maximum_stdout_bytes=maximum_stdout_bytes,
+                    expected_size=expected_size,
+                    maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+                    timeout_seconds=timeout_seconds,
+                    retain_stderr=retain_stderr,
+                    pass_fds=(env_descriptor,),
+                )
+                self._validate_boundaries()
+            except BaseException:
+                self._force_remove_client(cid_path)
+                raise
+            return result
+        finally:
+            os.close(env_descriptor)
+            try:
+                cid_path.unlink(missing_ok=True)
+                cid_directory.rmdir()
+            except OSError:
+                raise OSError("Docker client authority cleanup failed") from None
+
     def run(
         self,
         arguments: Sequence[str],
@@ -1098,17 +1293,14 @@ class _DockerMinioTransport:
         maximum_stdout_bytes: int,
         timeout_seconds: int,
     ) -> PersonalDevMinioCommandResult:
-        self._validate_boundaries()
-        result = _stream_docker_command(
-            self._command(arguments),
+        return self._invoke_client(
+            arguments,
             destination=None,
             maximum_stdout_bytes=maximum_stdout_bytes,
             expected_size=None,
-            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
             timeout_seconds=timeout_seconds,
+            retain_stderr=True,
         )
-        self._validate_boundaries()
-        return result
 
     def stream(
         self,
@@ -1118,17 +1310,15 @@ class _DockerMinioTransport:
         expected_size: int,
         timeout_seconds: int,
     ) -> str:
-        self._validate_boundaries()
         hashing_destination = _HashingDestination(destination)
-        result = _stream_docker_command(
-            self._command(arguments),
+        result = self._invoke_client(
+            arguments,
             destination=hashing_destination,
             maximum_stdout_bytes=expected_size,
             expected_size=expected_size,
-            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
             timeout_seconds=timeout_seconds,
+            retain_stderr=False,
         )
-        self._validate_boundaries()
         if result.returncode != 0 or result.stdout or result.stderr:
             raise ValueError("MinIO stream failed")
         return hashing_destination.hexdigest()
