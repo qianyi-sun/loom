@@ -93,8 +93,8 @@ def postgres_url():
         yield url
 
 
-async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
-    """Downgrading retains the safe constraint while restoring revision 0120."""
+async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> None:
+    """Downgrading restores revision 0120 without abandonment rows."""
     repo_root = Path(__file__).resolve().parents[2]
     try:
         subprocess.run(
@@ -192,7 +192,7 @@ async def test_0121_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-            assert revision == "0121"
+            assert revision == "0122"
         finally:
             engine.dispose()
     finally:
@@ -2077,6 +2077,291 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
                 match="capacity capability evidence is invalid",
             ):
                 await authority.get(name)
+    finally:
+        await engine.dispose()
+
+
+async def test_personal_dev_destroy_abandons_only_failed_pre_activation_create(
+    postgres_url: str,
+) -> None:
+    """A failed initial build can retire without invented teardown evidence."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid4()
+    team_id = uuid4()
+    candidate_id = uuid4()
+    now = datetime.now(UTC)
+    name = f"a{uuid4().hex[:10]}"
+    candidate = PersonalDevCandidateRecord(
+        id=candidate_id,
+        owner_user_id=owner_id,
+        owner_team_id=team_id,
+        candidate_sha="a" * 64,
+        source_sha256="b" * 64,
+        archive_sha256="c" * 64,
+        build_contract_sha256="d" * 64,
+        source_commit="e" * 40,
+        dirty=False,
+        manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+        object_bucket="artifacts",
+        object_key=(
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{candidate_id}/{'c' * 64}.tar"
+        ),
+        source_generation_id=candidate_id,
+        archive_size_bytes=10240,
+        status="uploaded",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        async with sessions() as session:
+            session.add(Team(id=team_id, name=f"abandon-{team_id}"))
+            session.add(
+                User(
+                    id=owner_id,
+                    email=f"{owner_id}@example.test",
+                    username=f"user-{owner_id}",
+                    username_normalized=f"user-{owner_id}",
+                    status="active",
+                )
+            )
+            await session.commit()
+            await SqlAlchemyPersonalDevCandidateStore(session).register(candidate)
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            created = await authority.apply(
+                PersonalDevEnvironmentApplyRequest(
+                    name=name,
+                    owner_user_id=owner_id,
+                    owner_team_id=team_id,
+                    candidate_id=candidate_id,
+                    candidate_sha=candidate.candidate_sha,
+                    min_slots=0,
+                    max_slots=1,
+                    expected_operation_epoch=0,
+                    idempotency_key=uuid4(),
+                ),
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+
+        async with sessions() as session:
+            candidates = SqlAlchemyPersonalDevCandidateStore(session)
+            claim = await _claim_candidate_build(
+                candidates,
+                candidate_id=candidate_id,
+                builder_id="abandon-test-builder",
+                now=now,
+            )
+            assert claim.build_attempt is not None
+            running = await candidates.start_build(
+                attempt_id=claim.build_attempt.id,
+                builder_id="abandon-test-builder",
+                lease_epoch=claim.build_attempt.lease_epoch,
+                now=now,
+            )
+            await candidates.finish_build(
+                attempt_id=running.id,
+                builder_id="abandon-test-builder",
+                lease_epoch=running.lease_epoch,
+                now=now,
+                failure_reason="build failed",
+            )
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            claim = await authority.claim_next_reconciliation(
+                reconciler_id="abandon-test-reconciler",
+                now=now,
+                lease_seconds=60,
+            )
+            assert claim is not None
+            if claim.operation.id != created.operation.id:
+                assert claim.candidate.status == "failed"
+                await authority.fail_pre_activation(
+                    operation_id=claim.operation.id,
+                    operation_epoch=claim.operation.operation_epoch,
+                    attempt_id=claim.attempt.id,
+                    reconciler_id="abandon-test-reconciler",
+                    lease_epoch=claim.attempt.lease_epoch,
+                    failure_reason="candidate_build_failed",
+                    now=now,
+                )
+                claim = await authority.claim_next_reconciliation(
+                    reconciler_id="abandon-test-reconciler",
+                    now=now,
+                    lease_seconds=60,
+                )
+                assert claim is not None
+            assert claim.operation.id == created.operation.id
+            failed = await authority.fail_pre_activation(
+                operation_id=created.operation.id,
+                operation_epoch=created.operation.operation_epoch,
+                attempt_id=claim.attempt.id,
+                reconciler_id="abandon-test-reconciler",
+                lease_epoch=claim.attempt.lease_epoch,
+                failure_reason="candidate_build_failed",
+                now=now,
+            )
+            assert failed.environment.status == "failed"
+            assert failed.operation.failure_reason == "candidate_build_failed"
+
+            base_columns = (
+                "id, idempotency_key, environment_name, subject_id, subject_incarnation, "
+                "owner_user_id, owner_team_id, operation_epoch, expected_operation_epoch, "
+                "kind, state, attempt_id, attempt_sequence, request_sha256, candidate_id, "
+                "candidate_sha, min_slots, max_slots, deployment_generation, keep_data, "
+                "checkpoint, created_at, updated_at, started_at, finished_at"
+            )
+            base_values = (
+                ":id, :key, :name, :subject_id, :subject_incarnation, :owner_id, :team_id, "
+                "2, 1, 'destroy', 'succeeded', :attempt_id, 0, :request_sha256, "
+                ":candidate_id, :candidate_sha, 0, 1, 1, false, :checkpoint, "
+                ":now, :now, :now, :now"
+            )
+            bindings = {
+                "id": uuid4(),
+                "key": uuid4(),
+                "name": name,
+                "subject_id": created.environment.subject_id,
+                "subject_incarnation": created.environment.subject_incarnation,
+                "owner_id": owner_id,
+                "team_id": team_id,
+                "attempt_id": uuid4(),
+                "request_sha256": "f" * 64,
+                "candidate_id": candidate_id,
+                "candidate_sha": candidate.candidate_sha,
+                "now": now,
+            }
+            with pytest.raises(DBAPIError):
+                await session.execute(
+                    text(
+                        "INSERT INTO dev_lifecycle_operations ("
+                        f"{base_columns}) VALUES ({base_values})"
+                    ),
+                    {**bindings, "checkpoint": "complete"},
+                )
+            await session.rollback()
+            unsafe_evidence = {
+                "readiness_evidence_sha256": "1" * 64,
+                "activation_acknowledgement_sha256": "2" * 64,
+                "local_activation_sha256": "3" * 64,
+                "capacity_expected_configuration_epoch": 1,
+                "capacity_projection_request_sha256": "4" * 64,
+                "capacity_configuration_epoch": 1,
+                "capacity_configuration_sha256": "5" * 64,
+                "capacity_reporter_incarnation": uuid4(),
+                "capacity_reporter_token_sha256": "6" * 64,
+                "protected_admission_sha256": "7" * 64,
+                "capacity_agent_installation_sha256": "8" * 64,
+                "capacity_supported_pool_ids": '["gb10"]',
+                "capacity_supported_architectures": '["x86_64"]',
+            }
+            for field, value in unsafe_evidence.items():
+                with pytest.raises(DBAPIError):
+                    await session.execute(
+                        text(
+                            "INSERT INTO dev_lifecycle_operations ("
+                            f"{base_columns}, {field}) VALUES ({base_values}, :unsafe)"
+                        ),
+                        {
+                            **bindings,
+                            "id": uuid4(),
+                            "key": uuid4(),
+                            "attempt_id": uuid4(),
+                            "checkpoint": "pre_activation_abandoned",
+                            "unsafe": value,
+                        },
+                    )
+                await session.rollback()
+
+        async with sessions() as session:
+            authority = SqlAlchemyPersonalDevEnvironmentAuthority(session)
+            request = PersonalDevEnvironmentDestroyRequest(
+                name=name,
+                owner_user_id=owner_id,
+                owner_team_id=team_id,
+                expected_operation_epoch=1,
+                idempotency_key=uuid4(),
+            )
+            for field, value in (
+                ("failure_reason", "provisioning_failed"),
+                ("checkpoint", "candidate_build"),
+            ):
+                await session.execute(
+                    text(
+                        "UPDATE dev_lifecycle_operations SET "
+                        f"{field} = :value WHERE id = :operation_id"
+                    ),
+                    {"value": value, "operation_id": created.operation.id},
+                )
+                with pytest.raises(PersonalDevEnvironmentConflictError):
+                    await authority.destroy(
+                        replace(request, idempotency_key=uuid4()),
+                        access_binding=_PERSONAL_DEV_ACCESS,
+                        now=now,
+                    )
+            with pytest.raises(PersonalDevEnvironmentEpochFencedError):
+                await authority.destroy(
+                    replace(request, expected_operation_epoch=2, idempotency_key=uuid4()),
+                    access_binding=_PERSONAL_DEV_ACCESS,
+                    now=now,
+                )
+            abandoned = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            replay = await authority.destroy(
+                request,
+                access_binding=_PERSONAL_DEV_ACCESS,
+                now=now,
+            )
+            assert abandoned.acquired is True
+            assert replay.acquired is False
+            assert abandoned.operation.kind == "destroy"
+            assert abandoned.operation.state == "succeeded"
+            assert abandoned.operation.checkpoint == "pre_activation_abandoned"
+            assert abandoned.operation.operation_epoch == 2
+            assert abandoned.operation.subject_id == created.operation.subject_id
+            assert abandoned.operation.subject_incarnation == created.operation.subject_incarnation
+            assert abandoned.environment.status == "deleted"
+            assert abandoned.environment.candidate_id is None
+            assert abandoned.environment.deleted_at == now
+            assert (await authority.get_operation(created.operation.id)).state == "failed"  # type: ignore[union-attr]
+            assert (
+                await authority.claim_next_reconciliation(
+                    reconciler_id="abandon-test-no-reconciliation",
+                    now=now,
+                    lease_seconds=60,
+                )
+                is None
+            )
+            terminal_attempt = (
+                await session.execute(
+                    text(
+                        "SELECT state, checkpoint FROM dev_lifecycle_operation_attempts "
+                        "WHERE operation_id = :operation_id"
+                    ),
+                    {"operation_id": abandoned.operation.id},
+                )
+            ).one()
+            assert tuple(terminal_attempt) == ("succeeded", "pre_activation_abandoned")
+
+        async with sessions() as session:
+            candidates = SqlAlchemyPersonalDevCandidateStore(session)
+            assert await candidates.mark_next_artifact_gc(now=now) is True
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0121"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+        )
+        assert downgrade.returncode != 0
+        assert "cannot downgrade 0122 with pre-activation abandonment records" in (
+            downgrade.stdout + downgrade.stderr
+        )
     finally:
         await engine.dispose()
 
