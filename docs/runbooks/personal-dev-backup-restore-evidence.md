@@ -7,15 +7,14 @@ disabled, activation replicas are zero, no `loom-dev-` or `loom-build-`
 namespace exists, no personal worker exists, and the global manager executable
 new-capacity ceiling is exactly zero.
 
-The procedure is read-only against live Postgres and MinIO. It restores the
-Postgres dump and exact empty MinIO bucket set into disposable local Docker
-containers with no published port, compares exact logical state, then removes
-those containers and their private network. Nonempty MinIO state fails closed:
-the pinned streaming client does not preserve Loom's required object content
-type and custom metadata. It never copies a Kubernetes Secret value into
-evidence. The only Secret-derived operations execute inside the existing
-Postgres and MinIO Pods; their environment values are neither printed nor
-returned.
+The procedure is read-only against live Postgres and MinIO. It captures the
+supported MinIO object payloads and metadata into an owner-only retained,
+content-addressed inventory, restores them into disposable local Docker
+containers with no published port, independently reads them back, compares the
+canonical manifests, then removes those containers and their private network.
+It never copies a Kubernetes Secret value into evidence. The only
+Secret-derived operations execute inside the existing Postgres and MinIO Pods;
+their environment values are neither printed nor returned.
 
 Every Python entry point is bound to the reviewed checkout's `src` tree. The
 schema comparison derives its sole expected Alembic head from that checkout's
@@ -56,6 +55,7 @@ postgres_dump="$evidence_dir/postgres.dump"
 postgres_source_state="$evidence_dir/postgres.source-state.tsv"
 postgres_restored_state="$evidence_dir/postgres.restored-state.tsv"
 minio_backup="$evidence_dir/minio"
+minio_payload_root="$minio_backup/payloads"
 minio_source_manifest="$evidence_dir/minio.source-manifest.json"
 minio_restored_manifest="$evidence_dir/minio.restored-manifest.json"
 secret_inventory="$evidence_dir/secret-key-inventory.json"
@@ -299,53 +299,39 @@ test "$restored_schema_head" = "$expected_service_schema_head"
 cmp -s "$postgres_source_state" "$postgres_restored_state"
 ```
 
-## 4. Prove and recreate the exact empty MinIO bucket set
+## 4. Capture and independently restore supported MinIO state
 
-The acceptance safeguard requires both retained buckets to contain zero
-objects. This is the measured live prerequisite and prevents a payload-only
-restore from silently discarding required `Content-Type` or custom metadata.
-The exact empty bucket set is recreated and re-listed through the isolated S3
-API. Any live or restored object is a stop condition.
+Run this section only after the pre-shadow status and storage-inventory checks
+in section 2 have succeeded. `capture-minio-backup` is the only live-MinIO
+operation: it is read-only, captures the fixed `artifacts` and `trajectories`
+buckets, and publishes a new source manifest plus retained payload authority.
+The payload root is content addressed by SHA-256; raw object keys never become
+local path components. The capture output root is non-reusable: the source
+manifest and payload root must not already exist.
+
+Supported object state is payload bytes; required `Content-Type`; optional
+`Cache-Control`; and up to 64 validated `X-Amz-Meta-*` values. The bounded
+authority permits at most 10,000 objects, 64 GiB per object, 1 TiB total
+payload bytes, 1,024 UTF-8 bytes per key, and 16 KiB of supported metadata per
+object. Object ETags and modification times are observations only: they are
+not restore equality inputs because MinIO may change them during restore.
+
+Bucket versioning, object-lock retention, bucket encryption, and object tags
+are unsupported. Any unsupported feature, unsupported metadata, out-of-limit
+object, or inconsistent live readback stops the command before it publishes
+authority; it is never silently discarded. Public command failures use only a
+stable generic error and never expose credentials, raw object keys, metadata
+values, Secret content, kubeconfig content, capability URLs, or subprocess
+text.
 
 ```bash
-minio_pod="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get pod \
-  -l app=loom-dev-minio -o json | jq -er '
-    [.items[] | select(.status.phase == "Running") | .metadata.name] |
-    if length == 1 then .[0] else error("minio pod cardinality") end')"
-
-mc_live() {
-  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec "$minio_pod" \
-    -c admin -- /bin/sh -euc \
-    'export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"; exec mc "$@"' \
-    sh "$@"
-}
-
-mc_live ls --json local | jq -r 'select(.type == "folder") | .key | rtrimstr("/")' |
-  LC_ALL=C sort -u > "$minio_backup/buckets.txt"
-chmod 0600 "$minio_backup/buckets.txt"
-: > "$minio_backup/objects.jsonl"
-while IFS= read -r bucket; do
-  test -n "$bucket"
-  mc_live ls --recursive --json "local/$bucket" > "$minio_backup/$bucket.list.jsonl"
-  chmod 0600 "$minio_backup/$bucket.list.jsonl"
-  test ! -s "$minio_backup/$bucket.list.jsonl"
-done < "$minio_backup/buckets.txt"
-chmod 0600 "$minio_backup/objects.jsonl"
-
-"$python_cli" - "$minio_backup/buckets.txt" "$minio_backup/objects.jsonl" \
-  "$minio_source_manifest" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-buckets = sorted(filter(None, Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()))
-objects = [json.loads(line) for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()]
-objects.sort(key=lambda item: (item["bucket"], item["key"]))
-payload = json.dumps({"buckets": buckets, "objects": objects}, sort_keys=True,
-                     separators=(",", ":"), ensure_ascii=True).encode("ascii")
-Path(sys.argv[3]).write_bytes(payload)
-PY
-chmod 0600 "$minio_source_manifest"
+"$loom_cli" admin personal-dev-control-plane capture-minio-backup \
+  --namespace loom-dev \
+  --kubeconfig "$kubeconfig" \
+  --source-manifest-file "$minio_source_manifest" \
+  --payload-root "$minio_payload_root" \
+  > "$evidence_dir/minio.capture.json"
+chmod 0600 "$minio_source_manifest" "$evidence_dir/minio.capture.json"
 
 printf 'MINIO_ROOT_USER=restore\nMINIO_ROOT_PASSWORD=%s\n' \
   "$(openssl rand -hex 24)" > "$restore_env"
@@ -355,56 +341,26 @@ docker run --detach --network "$restore_network" --network-alias minio-restore \
   --name "$minio_restore" \
   --env-file "$restore_env" "$minio_image" server /data >/dev/null
 
-mc_restore() {
-  docker run --rm --network "$restore_network" --env-file "$restore_env" \
-    --entrypoint /bin/sh "$minio_client_image" -euc \
-    'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio-restore:9000"; exec mc "$@"' \
-    sh "$@"
-}
-for attempt in $(seq 1 60); do
-  if mc_restore ready restore >/dev/null 2>&1; then break; fi
-  test "$attempt" -lt 60
-  sleep 1
-done
-while IFS= read -r bucket; do
-  mc_restore mb --ignore-existing "restore/$bucket" >/dev/null
-done < "$minio_backup/buckets.txt"
-
-mc_restore ls --json restore | jq -r \
-  'select(.type == "folder") | .key | rtrimstr("/")' |
-  LC_ALL=C sort -u > "$evidence_dir/minio.restored-buckets.txt"
-chmod 0600 "$evidence_dir/minio.restored-buckets.txt"
-: > "$evidence_dir/minio.restored-objects.jsonl"
-while IFS= read -r bucket; do
-  test -n "$bucket"
-  mc_restore ls --recursive --json "restore/$bucket" \
-    > "$evidence_dir/minio.restored-$bucket.list.jsonl"
-  chmod 0600 "$evidence_dir/minio.restored-$bucket.list.jsonl"
-  test ! -s "$evidence_dir/minio.restored-$bucket.list.jsonl"
-done < "$evidence_dir/minio.restored-buckets.txt"
-chmod 0600 "$evidence_dir/minio.restored-objects.jsonl"
-
-"$python_cli" - "$evidence_dir/minio.restored-buckets.txt" \
-  "$evidence_dir/minio.restored-objects.jsonl" \
-  "$minio_restored_manifest" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-buckets = sorted(filter(None, Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()))
-objects = [json.loads(line) for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()]
-objects.sort(key=lambda item: (item["bucket"], item["key"]))
-payload = json.dumps({"buckets": buckets, "objects": objects}, sort_keys=True,
-                     separators=(",", ":"), ensure_ascii=True).encode("ascii")
-Path(sys.argv[3]).write_bytes(payload)
-PY
-chmod 0600 "$minio_restored_manifest"
+"$loom_cli" admin personal-dev-control-plane restore-minio-backup \
+  --trusted-release-file "$trusted_release" \
+  --trusted-release-sha256 "$trusted_release_sha256" \
+  --source-manifest-file "$minio_source_manifest" \
+  --payload-root "$minio_payload_root" \
+  --restored-manifest-file "$minio_restored_manifest" \
+  --restore-env-file "$restore_env" \
+  --isolated-minio-name "$minio_restore" \
+  --isolated-network-name "$restore_network" \
+  > "$evidence_dir/minio.restore.json"
+chmod 0600 "$minio_restored_manifest" "$evidence_dir/minio.restore.json"
 cmp -s "$minio_source_manifest" "$minio_restored_manifest"
 ```
 
-The restored-manifest producer re-lists every bucket and proves every bucket
-remains empty through the isolated S3 API. MinIO readiness, a local directory,
-or a manually edited manifest is not accepted as restore evidence.
+The restore command uses the trusted-release MinIO and client images only on
+the internal Docker network, verifies no published port, restores each
+content-addressed payload with its supported attributes, and independently
+lists, stats, and streams the isolated objects before emitting a separate
+canonical restored manifest. A local directory, a copied source manifest, or
+MinIO readiness is not restore evidence.
 
 ## 5. Cleanup and emit the canonical record
 
@@ -441,6 +397,7 @@ result_render_evidence="$evidence_dir/backup-restore-evidence.render.json"
   --restored-schema-head "$restored_schema_head" \
   --minio-source-manifest-file "$minio_source_manifest" \
   --minio-restored-manifest-file "$minio_restored_manifest" \
+  --minio-payload-root "$minio_payload_root" \
   --secret-key-inventory-file "$secret_inventory" \
   --pre-shadow-status-file "$evidence_dir/pre-backup.shadow-status.json" \
   --post-shadow-status-file "$evidence_dir/post-restore.shadow-status.json" \
@@ -462,7 +419,8 @@ source/release/image/schema mismatch, unequal source/restored state, included
 Secret values, nonzero capacity/worker observations, or incomplete container
 or private-network cleanup.
 
-Retain the dump, empty-bucket listings, both source/restored manifests, the
-Secret-key inventory, pre/post shadow status, storage inventory, and the
-canonical result under the owner-only evidence root. They are the restorable
-backup and its proof, not temporary QA output.
+Retain the dump, content-addressed MinIO payload root, both independent
+source/restored manifests, capture/restore summaries, the Secret-key
+inventory, pre/post shadow status, storage inventory, and the canonical result
+under the owner-only evidence root. They are the restorable backup and its
+proof, not temporary QA output.
