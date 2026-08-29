@@ -459,6 +459,7 @@ def _capture_impl(
         not isinstance(source_manifest_path, Path)
         or not isinstance(payload_root, Path)
         or _has_symlinked_ancestor(source_manifest_path)
+        or _has_symlinked_ancestor(payload_root)
         or _would_pollute_payload_root(source_manifest_path, payload_root)
         or _path_exists_without_following(source_manifest_path)
         or _path_exists_without_following(payload_root)
@@ -545,6 +546,7 @@ def _restore_impl(
         or not isinstance(payload_root, Path)
         or not isinstance(restored_manifest_path, Path)
         or _has_symlinked_ancestor(restored_manifest_path)
+        or _has_symlinked_ancestor(payload_root)
         or _would_pollute_payload_root(restored_manifest_path, payload_root)
         or _path_exists_without_following(restored_manifest_path)
     ):

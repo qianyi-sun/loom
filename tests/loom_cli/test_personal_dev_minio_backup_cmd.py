@@ -661,6 +661,40 @@ def test_capture_rejects_a_manifest_symlink_ancestor_into_the_payload_root(
     assert not source_manifest_path.exists()
 
 
+@pytest.mark.parametrize("spelling", ("direct", "dotdot"))
+def test_capture_rejects_a_payload_root_symlink_ancestor_into_the_manifest_parent(
+    tmp_path: Path,
+    spelling: str,
+) -> None:
+    marker = "credential-key-sensitive-marker"
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir(mode=0o700)
+    edge = backup_root / "edge"
+    edge.mkdir(mode=0o700)
+    alias = tmp_path / f"{marker}-alias"
+    alias.symlink_to(backup_root, target_is_directory=True)
+    payload_root = (
+        alias / "payloads" if spelling == "direct" else alias / "edge" / ".." / "payloads"
+    )
+    source_manifest_path = backup_root / "payloads" / "source.json"
+    transport = _RecordingTransport(_capture_actions())
+
+    with pytest.raises(PersonalDevMinioBackupError) as raised:
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert str(raised.value) == "personal-dev MinIO backup is invalid"
+    assert marker not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert transport.calls == []
+    assert not (backup_root / "payloads").exists()
+    assert not source_manifest_path.exists()
+
+
 def test_capture_rejects_a_no_tags_message_without_its_bounded_target(
     tmp_path: Path,
 ) -> None:
@@ -958,6 +992,41 @@ def test_restore_rejects_a_manifest_symlink_ancestor_into_the_payload_root(
         )
 
     assert transport.calls == []
+    assert not restored_manifest_path.exists()
+
+
+@pytest.mark.parametrize("spelling", ("direct", "dotdot"))
+def test_restore_rejects_a_payload_root_symlink_ancestor_into_the_manifest_parent(
+    tmp_path: Path,
+    spelling: str,
+) -> None:
+    marker = "credential-key-sensitive-marker"
+    source_manifest_path, real_payload_root, _, object = _source_authority(tmp_path)
+    edge = real_payload_root.parent / "edge"
+    edge.mkdir(mode=0o700)
+    alias = tmp_path / f"{marker}-alias"
+    alias.symlink_to(real_payload_root.parent, target_is_directory=True)
+    payload_root = (
+        alias / "payloads" if spelling == "direct" else alias / "edge" / ".." / "payloads"
+    )
+    restored_manifest_path = real_payload_root / "restored.json"
+    inventory_before = {entry.name for entry in real_payload_root.iterdir()}
+    transport = _RecordingTransport(_restore_actions(payload_root=payload_root, object=object))
+
+    with pytest.raises(PersonalDevMinioBackupError) as raised:
+        restore_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+            restored_manifest_path=restored_manifest_path,
+        )
+
+    assert str(raised.value) == "personal-dev MinIO backup is invalid"
+    assert marker not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert transport.calls == []
+    assert {entry.name for entry in real_payload_root.iterdir()} == inventory_before
     assert not restored_manifest_path.exists()
 
 
