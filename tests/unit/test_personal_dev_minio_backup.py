@@ -230,6 +230,13 @@ def test_listing_keeps_a_semicolon_in_a_safe_key_as_an_argv_identity() -> None:
     )
 
 
+@pytest.mark.parametrize("size", [True, 1.0])
+def test_listing_rejects_non_integral_json_sizes(size: object) -> None:
+    # Replacing exact integer validation with equality would accept JSON booleans or floats.
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        parse_personal_dev_minio_listing(_json_line(_list_record(size=size)), bucket="artifacts")
+
+
 @pytest.mark.parametrize(
     "record",
     [
@@ -309,6 +316,37 @@ def test_stat_rejection_has_only_the_stable_non_sensitive_error(
     assert "sensitive-marker" not in str(raised.value)
 
 
+@pytest.mark.parametrize("size", [True, 1.0])
+def test_stat_rejects_non_integral_json_sizes(tmp_path: Path, size: object) -> None:
+    payload_path = tmp_path / "temporary"
+    payload_path.write_bytes(b"x")
+    payload_path.chmod(0o600)
+    listed = PersonalDevMinioListedObject("artifacts", "personal-dev/source/candidate.tar", 1)
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        normalize_personal_dev_minio_object(
+            listed=listed,
+            stat_payload=_json_line(_stat_record(size=size)),
+            payload_path=payload_path,
+        )
+
+
+def test_object_rejects_metadata_larger_than_the_16_kib_authority_limit() -> None:
+    # Removing aggregate accounting accepts a metadata set that cannot be safe restore authority.
+    metadata = {f"key-{index}": "v" * 2048 for index in range(8)}
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        PersonalDevMinioObject(
+            bucket="artifacts",
+            key="personal-dev/source/candidate.tar",
+            payload_sha256="a" * 64,
+            size_bytes=0,
+            content_type="text/plain",
+            cache_control=None,
+            metadata=metadata,
+        )
+
+
 def _payload_manifest(
     payload: bytes = b"payload",
 ) -> tuple[PersonalDevMinioManifest, PersonalDevMinioObject]:
@@ -332,7 +370,15 @@ def _install_payload(
         payload_root=payload_root,
         object=object,
     )
+
     assert installed == payload_root / object.payload_sha256
+    assert not temporary_path.exists()
+    assert installed.stat().st_nlink == 1
+    assert (
+        validate_personal_dev_minio_payload_root(manifest, payload_root)
+        == manifest.payload_inventory_bytes
+    )
+
     return payload_root, manifest, object
 
 
@@ -384,6 +430,32 @@ def test_payload_install_deduplicates_identical_content_without_retaining_a_hard
     )
 
 
+def test_payload_install_is_idempotent_when_temporary_name_is_already_the_digest(
+    tmp_path: Path,
+) -> None:
+    # Unconditionally unlinking temporary_path would delete the retained authority here.
+    manifest, object = _payload_manifest()
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    retained_path = payload_root / object.payload_sha256
+    retained_path.write_bytes(b"payload")
+    retained_path.chmod(0o600)
+
+    assert (
+        install_personal_dev_minio_payload(
+            temporary_path=retained_path,
+            payload_root=payload_root,
+            object=object,
+        )
+        == retained_path
+    )
+    assert retained_path.read_bytes() == b"payload"
+    assert (
+        validate_personal_dev_minio_payload_root(manifest, payload_root)
+        == manifest.payload_inventory_bytes
+    )
+
+
 def _replace_payload_with_symlink(root: Path, object: PersonalDevMinioObject) -> None:
     (root / object.payload_sha256).unlink()
     os.symlink("elsewhere", root / object.payload_sha256)
@@ -416,6 +488,26 @@ def test_payload_root_rejects_any_extra_missing_or_unsafe_payload_entry(
 
     with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
         validate_personal_dev_minio_payload_root(manifest, payload_root)
+
+
+def test_payload_root_rejects_a_digest_named_payload_with_wrong_size(tmp_path: Path) -> None:
+    payload_root, _, object = _install_payload(tmp_path)
+    wrong_size_manifest = build_personal_dev_minio_manifest(
+        (
+            PersonalDevMinioObject(
+                bucket=object.bucket,
+                key=object.key,
+                payload_sha256=object.payload_sha256,
+                size_bytes=object.size_bytes - 1,
+                content_type=object.content_type,
+                cache_control=object.cache_control,
+                metadata=object.metadata,
+            ),
+        )
+    )
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        validate_personal_dev_minio_payload_root(wrong_size_manifest, payload_root)
 
 
 def test_payload_root_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -486,6 +578,19 @@ def test_manifest_loader_rejects_non_owner_only_files_and_symlinks(tmp_path: Pat
             load_personal_dev_minio_manifest(path)
 
 
+def test_manifest_loader_rejects_a_safe_file_below_an_unsafe_parent(tmp_path: Path) -> None:
+    # Omitting parent validation permits a canonical file in a directory another user can mutate.
+    unsafe_parent = tmp_path / "unsafe"
+    unsafe_parent.mkdir(mode=0o755)
+    unsafe_parent.chmod(0o755)
+    path = unsafe_parent / "manifest.json"
+    path.write_bytes(build_personal_dev_minio_manifest(()).canonical_bytes)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        load_personal_dev_minio_manifest(path)
+
+
 def test_manifest_write_rejects_a_non_owner_only_parent_directory(tmp_path: Path) -> None:
     # Removing the parent-directory gate would place evidence in a writable location.
     unsafe_parent = tmp_path / "unsafe"
@@ -506,3 +611,26 @@ def test_public_parsers_reject_non_bytes_without_leaking_input() -> None:
 
     assert str(raised.value) == "personal-dev MinIO backup is invalid"
     assert "sensitive-marker" not in str(raised.value)
+
+
+def test_public_failures_do_not_retain_sensitive_parser_or_filesystem_causes(
+    tmp_path: Path,
+) -> None:
+    # Re-raising implementation errors as causes leaves paths and malformed input in a traceback.
+    for action in (
+        lambda: parse_personal_dev_minio_listing(b'{"sensitive-marker":', bucket="artifacts"),
+        lambda: load_personal_dev_minio_manifest(tmp_path / "sensitive-marker-missing.json"),
+    ):
+        with pytest.raises(PersonalDevMinioBackupError) as raised:
+            action()
+        assert str(raised.value) == "personal-dev MinIO backup is invalid"
+        assert raised.value.__cause__ is None
+
+
+def test_manifest_builder_enforces_the_manifest_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Returning a manifest after its canonical encoding crosses the ceiling emits oversized authority.
+    object = _object()
+    monkeypatch.setattr(minio_backup, "_MAX_MANIFEST_BYTES", 1)
+
+    with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
+        build_personal_dev_minio_manifest((object,))

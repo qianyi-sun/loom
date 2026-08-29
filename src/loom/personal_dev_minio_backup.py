@@ -58,8 +58,8 @@ def _validate_key(value: object) -> str:
         raise _invalid()
     try:
         encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise _invalid() from exc
+    except UnicodeEncodeError:
+        raise _invalid() from None
     if (
         len(encoded) > _MAX_KEY_BYTES
         or "\\" in value
@@ -76,8 +76,8 @@ def _validate_attribute(value: object, *, content_type: bool = False) -> str:
         raise _invalid()
     try:
         encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise _invalid() from exc
+    except UnicodeEncodeError:
+        raise _invalid() from None
     if len(encoded) > _MAX_METADATA_VALUE_BYTES:
         raise _invalid()
     if content_type and _CONTENT_TYPE_RE.fullmatch(value) is None:
@@ -94,8 +94,8 @@ def _canonical_bytes(payload: object) -> bytes:
             ensure_ascii=True,
             allow_nan=False,
         ).encode("ascii")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise _invalid() from exc
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise _invalid() from None
     if len(value) > _MAX_MANIFEST_BYTES:
         raise _invalid()
     return value
@@ -199,6 +199,8 @@ class PersonalDevMinioManifest:
             digest_sizes[item.payload_sha256] = item.size_bytes
         if sum(item.size_bytes for item in self.objects) > _MAX_TOTAL_BYTES:
             raise _invalid()
+        if len(self.canonical_bytes) > _MAX_MANIFEST_BYTES:
+            raise _invalid()
 
     @property
     def canonical_bytes(self) -> bytes:
@@ -240,8 +242,8 @@ def build_personal_dev_minio_manifest(
     """Build a canonical manifest from already-normalized objects."""
     try:
         return PersonalDevMinioManifest(tuple(objects))
-    except (TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (TypeError, ValueError):
+        raise _invalid() from None
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -259,8 +261,8 @@ def _load_manifest_value(payload: bytes) -> PersonalDevMinioManifest:
     try:
         decoded = payload.decode("ascii")
         value = json.loads(decoded, object_pairs_hook=_reject_duplicate_json_keys)
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise _invalid() from None
     if not isinstance(value, dict) or set(value) not in (
         {"buckets", "objects"},
         {"buckets", "objects", "schema"},
@@ -301,8 +303,8 @@ def _load_manifest_value(payload: bytes) -> PersonalDevMinioManifest:
                 }
             )
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (KeyError, TypeError, ValueError):
+        raise _invalid() from None
     if len(manifest.objects) != len(objects) or manifest.canonical_bytes != payload:
         raise _invalid()
     return manifest
@@ -313,6 +315,7 @@ def load_personal_dev_minio_manifest(path: Path) -> PersonalDevMinioManifest:
     if not isinstance(path, Path):
         raise _invalid()
     try:
+        _validate_payload_root(path.parent)
         _, _, _, payload = _read_owner_only_payload(
             path,
             maximum_size=_MAX_MANIFEST_BYTES,
@@ -321,8 +324,8 @@ def load_personal_dev_minio_manifest(path: Path) -> PersonalDevMinioManifest:
         if payload is None:
             raise _invalid()
         return _load_manifest_value(payload)
-    except (OSError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError, ValueError):
+        raise _invalid() from None
 
 
 def _load_json_lines(payload: bytes) -> tuple[dict[str, object], ...]:
@@ -340,8 +343,8 @@ def _load_json_lines(payload: bytes) -> tuple[dict[str, object], ...]:
             )
             if isinstance(value, dict)
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise _invalid() from None
 
 
 def _validate_observation(value: object) -> str:
@@ -380,8 +383,8 @@ def parse_personal_dev_minio_listing(
             and _validate_observation(record["lastModified"])
             and ("checksum" not in record or _validate_observation(record["checksum"]))
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (KeyError, TypeError, ValueError):
+        raise _invalid() from None
     if len(listed) != len(records):
         raise _invalid()
     return listed
@@ -448,6 +451,7 @@ def normalize_personal_dev_minio_object(
             record["status"] != "success"
             or record["type"] != "file"
             or record["name"] != listed.key
+            or type(record["size"]) is not int
             or record["size"] != listed.size_bytes
         ):
             raise _invalid()
@@ -468,8 +472,8 @@ def normalize_personal_dev_minio_object(
             cache_control=cache_control,
             metadata=metadata,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (KeyError, TypeError, ValueError):
+        raise _invalid() from None
 
 
 def personal_dev_minio_restore_attributes(object: PersonalDevMinioObject) -> str:
@@ -514,8 +518,8 @@ def _validate_payload_stat(value: os.stat_result) -> None:
 def _validate_payload_root(path: Path) -> os.stat_result:
     try:
         value = os.lstat(path)
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     if (
         not stat.S_ISDIR(value.st_mode)
         or stat.S_IMODE(value.st_mode) != 0o700
@@ -539,8 +543,8 @@ def _read_owner_only_payload(
             raise _invalid()
         flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
-    except (OSError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError, ValueError):
+        raise _invalid() from None
     try:
         opened = os.fstat(descriptor)
         _validate_payload_stat(opened)
@@ -562,8 +566,8 @@ def _read_owner_only_payload(
             current
         ) != _stat_identity(opened):
             raise _invalid()
-    except (OSError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError, ValueError):
+        raise _invalid() from None
     finally:
         try:
             os.close(descriptor)
@@ -577,8 +581,8 @@ def _create_payload_root(path: Path) -> None:
         path.mkdir(mode=0o700)
     except FileExistsError:
         pass
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     _validate_payload_root(path)
 
 
@@ -601,19 +605,21 @@ def install_personal_dev_minio_payload(
     if temporary_digest != object.payload_sha256 or temporary_size != object.size_bytes:
         raise _invalid()
     final_path = payload_root / object.payload_sha256
+    if temporary_path == final_path:
+        return final_path
     try:
         os.link(temporary_path, final_path, follow_symlinks=False)
     except FileExistsError:
         existing_digest, existing_size, _, _ = _read_owner_only_payload(final_path)
         if existing_digest != object.payload_sha256 or existing_size != object.size_bytes:
             raise _invalid() from None
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     try:
         os.unlink(temporary_path)
         final_digest, final_size, final_stat, _ = _read_owner_only_payload(final_path)
-    except (OSError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError, ValueError):
+        raise _invalid() from None
     if (
         final_digest != object.payload_sha256
         or final_size != object.size_bytes
@@ -638,8 +644,8 @@ def validate_personal_dev_minio_payload_root(
     before_root = _validate_payload_root(payload_root)
     try:
         names_before = {entry.name for entry in os.scandir(payload_root)}
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     if names_before != set(expected):
         raise _invalid()
     for digest, size_bytes in expected.items():
@@ -650,8 +656,8 @@ def validate_personal_dev_minio_payload_root(
     after_root = _validate_payload_root(payload_root)
     try:
         names_after = {entry.name for entry in os.scandir(payload_root)}
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     if _stat_identity(before_root) != _stat_identity(after_root) or names_after != set(expected):
         raise _invalid()
     return manifest.payload_inventory_bytes
@@ -668,8 +674,8 @@ def write_personal_dev_minio_manifest(path: Path, manifest: PersonalDevMinioMani
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
             0o600,
         )
-    except (OSError, TypeError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError):
+        raise _invalid() from None
     try:
         created = os.fstat(descriptor)
         _validate_payload_stat(created)
@@ -683,8 +689,8 @@ def write_personal_dev_minio_manifest(path: Path, manifest: PersonalDevMinioMani
         _validate_payload_stat(finished)
         if _file_handle_identity(created) != _file_handle_identity(finished):
             raise _invalid()
-    except (OSError, TypeError, ValueError) as exc:
-        raise _invalid() from exc
+    except (OSError, TypeError, ValueError):
+        raise _invalid() from None
     finally:
         try:
             os.close(descriptor)
