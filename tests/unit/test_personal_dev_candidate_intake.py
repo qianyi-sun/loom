@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -100,6 +101,28 @@ class _Registry:
                 registration
                 for registration in self.by_identity.values()
                 if registration.candidate.id == candidate_id
+            ),
+            None,
+        )
+
+    async def reconcile_registration(
+        self,
+        requested: PersonalDevCandidateRecord,
+    ) -> CandidateRegistration | None:
+        return next(
+            (
+                CandidateRegistration(
+                    candidate=registration.candidate,
+                    build_attempt=registration.build_attempt,
+                    created=False,
+                )
+                for registration in self.by_identity.values()
+                if (
+                    registration.candidate.object_bucket == requested.object_bucket
+                    and registration.candidate.object_key == requested.object_key
+                    and registration.candidate.source_generation_id
+                    == requested.source_generation_id
+                )
             ),
             None,
         )
@@ -276,6 +299,131 @@ async def test_collection_race_deletes_only_its_unique_unversioned_generation(
     assert "VersionId" not in object_store.deleted[0]
 
 
+async def test_unexpected_registration_failure_removes_only_its_published_generation(
+    tmp_path: Path,
+) -> None:
+    class _UnexpectedRegistry(_Registry):
+        requested: PersonalDevCandidateRecord | None = None
+
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            self.requested = requested
+            raise RuntimeError("registry failure must not reach the client")
+
+    registry = _UnexpectedRegistry()
+    object_store = _ObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=registry, object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev candidate registration failed"
+    assert object_store.objects == {}
+    assert registry.requested is not None
+    assert object_store.deleted == [
+        {
+            "Bucket": "artifacts",
+            "Key": registry.requested.object_key,
+            "VersionId": "v1",
+        }
+    ]
+
+
+async def test_unexpected_registration_cleanup_failure_is_generic(tmp_path: Path) -> None:
+    class _UnexpectedRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            del requested
+            raise RuntimeError("registry failure must not reach the client")
+
+    class _FailingCleanupObjectStore(_ObjectStore):
+        def delete_object(self, **kwargs: object) -> None:
+            self.deleted.append(dict(kwargs))
+            raise RuntimeError("cleanup failure must not reach the client")
+
+    object_store = _FailingCleanupObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=_UnexpectedRegistry(), object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev rejected source cleanup failed"
+    assert "registry failure" not in exc.value.detail
+    assert "cleanup failure" not in exc.value.detail
+    assert object_store.deleted[0]["VersionId"] == "v1"
+
+
+async def test_committed_registration_that_raises_is_reconciled_without_cleanup(
+    tmp_path: Path,
+) -> None:
+    class _CommittedThenRaisesRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            await super().register(requested)
+            raise RuntimeError("commit acknowledgement was lost")
+
+    object_store = _ObjectStore()
+    registration, _, _ = await _intake(
+        tmp_path,
+        registry=_CommittedThenRaisesRegistry(),
+        object_store=object_store,
+    )
+
+    assert registration.created is False
+    assert tuple(object_store.objects) == (("artifacts", registration.candidate.object_key),)
+    assert (
+        str(registration.candidate.source_generation_id)
+        == registration.candidate.object_key.split("/")[-2]
+    )
+    assert object_store.deleted == []
+
+
+async def test_inconclusive_registration_reconciliation_retains_source_and_hides_errors(
+    tmp_path: Path,
+) -> None:
+    class _InconclusiveRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            del requested
+            raise RuntimeError("commit acknowledgement was lost")
+
+        async def reconcile_registration(
+            self,
+            requested: PersonalDevCandidateRecord,
+        ) -> CandidateRegistration | None:
+            del requested
+            raise RuntimeError("database reconciliation is unavailable")
+
+    object_store = _ObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=_InconclusiveRegistry(), object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev candidate registration failed"
+    assert "acknowledgement" not in exc.value.detail
+    assert "reconciliation" not in exc.value.detail
+    assert len(object_store.objects) == 1
+    assert object_store.deleted == []
+
+
+async def test_reconciliation_requires_unchanged_immutable_registration(
+    tmp_path: Path,
+) -> None:
+    class _MismatchedCommittedRegistry(_Registry):
+        async def register(self, requested: PersonalDevCandidateRecord) -> CandidateRegistration:
+            registration = await super().register(requested)
+            identity = next(iter(self.by_identity))
+            self.by_identity[identity] = CandidateRegistration(
+                candidate=replace(registration.candidate, source_commit="f" * 40),
+                build_attempt=registration.build_attempt,
+                created=registration.created,
+            )
+            raise RuntimeError("commit acknowledgement was lost")
+
+    object_store = _ObjectStore()
+    with pytest.raises(HTTPException) as exc:
+        await _intake(tmp_path, registry=_MismatchedCommittedRegistry(), object_store=object_store)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev candidate registration failed"
+    assert len(object_store.objects) == 1
+    assert object_store.deleted == []
+
+
 async def test_digest_mismatch_and_oversize_fail_before_publication(tmp_path: Path) -> None:
     registry = _Registry()
     object_store = _ObjectStore()
@@ -432,9 +580,7 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
     images: dict[str, object] = {
         component: {
             "index": f"registry.example/loom-{component}@sha256:" + "2" * 64,
-            "platforms": {
-                platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS
-            },
+            "platforms": {platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS},
         }
         for component in PERSONAL_DEV_COMPONENTS
     }
@@ -454,10 +600,7 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
         "safety_evidence": {
             "bucket": candidate.object_bucket,
             "content_type": "application/vnd.loom.personal-dev-safety-evidence.v1+json",
-            "key": (
-                f"personal-dev/evidence/{candidate.candidate_sha}/"
-                "test/safety-evidence.json"
-            ),
+            "key": (f"personal-dev/evidence/{candidate.candidate_sha}/test/safety-evidence.json"),
             "sha256": "5" * 64,
             "size_bytes": 1024,
         },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta
 from typing import cast
 from uuid import UUID
@@ -158,9 +159,19 @@ def _same_registration(
         and existing.build_contract_sha256 == requested.build_contract_sha256
         and existing.source_commit == requested.source_commit
         and existing.dirty is requested.dirty
-        and dict(existing.manifest_json) == dict(requested.manifest_json)
+        and _canonical_json(existing.manifest_json) == _canonical_json(requested.manifest_json)
         and existing.object_bucket == requested.object_bucket
         and existing.archive_size_bytes == requested.archive_size_bytes
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     )
 
 
@@ -203,8 +214,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                     PersonalDevCandidate.owner_team_id == requested.owner_team_id,
                     PersonalDevCandidate.source_sha256 == requested.source_sha256,
                     PersonalDevCandidate.archive_sha256 == requested.archive_sha256,
-                    PersonalDevCandidate.build_contract_sha256
-                    == requested.build_contract_sha256,
+                    PersonalDevCandidate.build_contract_sha256 == requested.build_contract_sha256,
                 )
                 .with_for_update(),
             )
@@ -213,9 +223,7 @@ class SqlAlchemyPersonalDevCandidateStore:
             candidate_record = _candidate_record(existing)
             if not _same_registration(candidate_record, requested):
                 await self.session.rollback()
-                raise ValueError(
-                    "personal-dev candidate replay changed an immutable binding"
-                )
+                raise ValueError("personal-dev candidate replay changed an immutable binding")
             if existing.artifact_state == "collecting":
                 await self.session.rollback()
                 raise PersonalDevArtifactCollectionInProgressError(
@@ -380,6 +388,40 @@ class SqlAlchemyPersonalDevCandidateStore:
             created=False,
         )
 
+    async def reconcile_registration(
+        self,
+        requested: PersonalDevCandidateRecord,
+    ) -> CandidateRegistration | None:
+        """Read a potentially committed exact upload after a register error."""
+        await self.session.rollback()
+        self.session.expire_all()
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.object_bucket == requested.object_bucket,
+                    PersonalDevCandidate.object_key == requested.object_key,
+                    PersonalDevCandidate.source_generation_id == requested.source_generation_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            return None
+        attempt = (
+            await self.session.execute(
+                select(PersonalDevCandidateBuildAttempt)
+                .where(PersonalDevCandidateBuildAttempt.candidate_id == candidate.id)
+                .order_by(PersonalDevCandidateBuildAttempt.attempt_sequence.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return CandidateRegistration(
+            candidate=_candidate_record(candidate),
+            build_attempt=_attempt_record(attempt) if attempt is not None else None,
+            created=False,
+        )
+
     async def list_visible(
         self,
         *,
@@ -503,11 +545,7 @@ class SqlAlchemyPersonalDevCandidateStore:
     ) -> PersonalDevArtifactGcClaim | None:
         """Lease one grace-expired mark or an expired prior collection."""
 
-        if (
-            not collector_id
-            or collector_id.strip() != collector_id
-            or len(collector_id) > 128
-        ):
+        if not collector_id or collector_id.strip() != collector_id or len(collector_id) > 128:
             raise ValueError("personal-dev artifact collector identifier is invalid")
         if now.tzinfo is None:
             raise ValueError("personal-dev artifact GC time must include a timezone")
@@ -636,8 +674,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                     PersonalDevCandidate.artifact_state == "collecting",
                     PersonalDevCandidate.artifact_gc_claimed_by == collector_id,
                     PersonalDevCandidate.artifact_gc_lease_epoch == lease_epoch,
-                    PersonalDevCandidate.artifact_gc_manifest_sha256
-                    == manifest_sha256,
+                    PersonalDevCandidate.artifact_gc_manifest_sha256 == manifest_sha256,
                     PersonalDevCandidate.artifact_gc_lease_expires_at > now,
                 )
                 .with_for_update(),
@@ -659,14 +696,10 @@ class SqlAlchemyPersonalDevCandidateStore:
                 await self.session.execute(
                     select(
                         func.coalesce(
-                            func.max(
-                                PersonalDevCandidateArtifactCollection.collection_sequence
-                            ),
+                            func.max(PersonalDevCandidateArtifactCollection.collection_sequence),
                             0,
                         )
-                    ).where(
-                        PersonalDevCandidateArtifactCollection.candidate_id == candidate_id
-                    ),
+                    ).where(PersonalDevCandidateArtifactCollection.candidate_id == candidate_id),
                 )
             ).scalar_one()
         )
@@ -865,9 +898,7 @@ class SqlAlchemyPersonalDevCandidateStore:
             raise ValueError("lease_seconds must be a positive integer")
         if registry_prefix is not None:
             validate_personal_dev_registry_prefix(registry_prefix)
-        await self.session.execute(
-            select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS))
-        )
+        await self.session.execute(select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS)))
         live_global = int(
             (
                 await self.session.execute(

@@ -394,7 +394,11 @@ async def test_personal_dev_candidate_registration_and_build_lease(
         build_contract_sha256="d" * 64,
         source_commit="e" * 40,
         dirty=True,
-        manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
+        manifest_json={
+            "schema_version": 1,
+            "attestation_scope": "personal-dev-only",
+            "captured_paths": ("app.py", "package.json"),
+        },
         object_bucket="artifacts",
         object_key=(
             f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{candidate_id}/{'c' * 64}.tar"
@@ -423,15 +427,9 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             store = SqlAlchemyPersonalDevCandidateStore(session)
             created = await store.register(requested)
             assert created.created is True
-            retried = await store.register(
-                _reupload(requested),
-            )
-            assert retried.created is False
-            assert retried.candidate.id == created.candidate.id
-            assert retried.candidate.object_key == requested.object_key
-            assert retried.candidate.source_generation_id == requested.source_generation_id
-            assert retried.build_attempt is None
 
+        async with sessions() as session:
+            store = SqlAlchemyPersonalDevCandidateStore(session)
             subject_id = uuid4()
             subject_incarnation = uuid4()
             operation_id = uuid4()
@@ -475,16 +473,16 @@ async def test_personal_dev_candidate_registration_and_build_lease(
                 now=now,
             )
             assert running.state == "running"
-            finished = await store.finish_build(
+            failed = await store.finish_build(
                 attempt_id=running.id,
                 builder_id="builder-a",
                 lease_epoch=1,
                 now=now,
-                publication=_publication(claimed.candidate, now),
+                failure_reason="build_failed",
             )
-            assert finished.candidate.status == "ready"
-            assert finished.build_attempt is not None
-            assert finished.build_attempt.state == "succeeded"
+            assert failed.candidate.status == "failed"
+            assert failed.build_attempt is not None
+            assert failed.build_attempt.state == "failed"
             with pytest.raises(PersonalDevBuildLeaseFencedError):
                 await store.heartbeat_build(
                     attempt_id=running.id,
@@ -493,6 +491,13 @@ async def test_personal_dev_candidate_registration_and_build_lease(
                     now=now,
                     lease_seconds=60,
                 )
+
+            replay = await store.register(_reupload(requested))
+            assert replay.created is False
+            assert replay.candidate.id == requested.id
+            assert replay.candidate.status == "failed"
+            assert replay.candidate.object_key == requested.object_key
+            assert replay.build_attempt is None
 
         async with sessions() as session:
             store = SqlAlchemyPersonalDevCandidateStore(session)
