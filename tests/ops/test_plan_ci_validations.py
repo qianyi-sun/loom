@@ -6,31 +6,36 @@ from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_every_non_draft_pr_runs_full_protected_gate() -> None:
+@pytest.mark.parametrize(
+    ("action", "action_label", "base_changed"),
+    [
+        ("opened", "", False),
+        ("ready_for_review", "", False),
+        ("reopened", "", False),
+        ("synchronize", "", False),
+        ("labeled", "triage", False),
+        ("unlabeled", "triage", False),
+        ("edited", "", False),
+        ("edited", "", True),
+    ],
+)
+def test_every_non_draft_pr_event_runs_full_protected_gate(
+    action: str,
+    action_label: str,
+    base_changed: bool,
+) -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels=set(),
         event_name="pull_request",
-        pull_request_action="synchronize",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_base_changed=base_changed,
     )
 
     assert plan.event_relevant is True
     assert plan.full_gate is True
     assert plan.gate_mode == "full"
-
-
-def test_merge_ready_label_has_no_special_authority() -> None:
-    plan = plan_validations(
-        changed_paths=["src/loom/config.py"],
-        labels={"ci:merge-ready"},
-        event_name="pull_request",
-        pull_request_action="labeled",
-        pull_request_action_label="ci:merge-ready",
-    )
-
-    assert plan.event_relevant is False
-    assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
 
 
 def test_draft_pr_is_filtered() -> None:
@@ -58,32 +63,6 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
 
     assert plan.event_relevant is False
     assert plan.full_gate is False
-    assert plan.gate_mode == "filtered"
-
-
-@pytest.mark.parametrize(
-    ("action", "action_label", "base_changed"),
-    [
-        ("labeled", "triage", False),
-        ("unlabeled", "triage", False),
-        ("edited", "", False),
-    ],
-)
-def test_irrelevant_pr_metadata_event_is_filtered(
-    action: str,
-    action_label: str,
-    base_changed: bool,
-) -> None:
-    plan = plan_validations(
-        changed_paths=["src/loom/config.py"],
-        labels=set(),
-        event_name="pull_request",
-        pull_request_action=action,
-        pull_request_action_label=action_label,
-        pull_request_base_changed=base_changed,
-    )
-
-    assert plan.event_relevant is False
     assert plan.gate_mode == "filtered"
 
 
