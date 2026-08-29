@@ -435,6 +435,9 @@ def _models(args: argparse.Namespace) -> int:
     always runs so the operator sees the resulting state."""
     def _body() -> int:
         cfg = require_logged_in()
+        headers, rc = _optional_admin_actor_headers(args)
+        if rc is not None:
+            return rc
         with authed_client(cfg) as c:
             row = _resolve_by_name(c, args.name)
             conn_id = row["id"]
@@ -447,6 +450,7 @@ def _models(args: argparse.Namespace) -> int:
                     # batch upserts. 30s is the same default as the
                     # other authed_client calls; spell it for clarity.
                     timeout=30.0,
+                    headers=headers,
                 )
                 refresh_body = assert_2xx(
                     resp, action=f"refresh models for {args.name!r}",
@@ -488,6 +492,7 @@ def _models(args: argparse.Namespace) -> int:
                     f"/api/v1/provider-connections/{conn_id}/models/"
                     f"{encoded_model}/preflight",
                     timeout=30.0,
+                    headers=headers,
                 )
                 preflight_body = assert_2xx(
                     resp,
@@ -904,6 +909,14 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Run one minimal generation request against MODEL to verify "
             "this connection/key can call it. MODEL must already be cached."
+        ),
+    )
+    p_models.add_argument(
+        "--admin-actor",
+        default=None,
+        help=(
+            "Sets X-Loom-Admin-Actor for --refresh and --preflight when "
+            "using a singleton admin credential."
         ),
     )
     p_models.add_argument(

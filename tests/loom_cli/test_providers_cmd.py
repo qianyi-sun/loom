@@ -810,6 +810,35 @@ def test_models_refresh_posts_then_lists(
     ]
 
 
+def test_models_refresh_with_admin_actor_sends_audit_header(
+    mock_server: MockServer,
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    refresh_path = f"/api/v1/provider-connections/{conn['id']}/models/refresh"
+    mock_server.canned[("POST", refresh_path)] = httpx.Response(
+        200,
+        json={"added": 0, "refreshed": 0, "missing": 0, "items": []},
+    )
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": []})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--refresh",
+        "--admin-actor", "release-operator",
+    ])
+
+    assert rc == 0
+    refresh_request = next(
+        request for request in mock_server.requests
+        if request.method == "POST" and request.url.path == refresh_path
+    )
+    assert refresh_request.headers["X-Loom-Admin-Actor"] == "release-operator"
+
+
 def test_models_preflight_posts_then_lists(
     mock_server: MockServer, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -849,6 +878,35 @@ def test_models_preflight_posts_then_lists(
         ),
         ("GET", f"/api/v1/provider-connections/{conn['id']}/models"),
     ]
+
+
+def test_models_preflight_with_admin_actor_sends_audit_header(
+    mock_server: MockServer,
+) -> None:
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    preflight_path = (
+        f"/api/v1/provider-connections/{conn['id']}/models/gpt-private/preflight"
+    )
+    model = _make_model(model_id="gpt-private", last_preflight_status="valid")
+    mock_server.canned[("POST", preflight_path)] = httpx.Response(200, json=model)
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": [model]})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--preflight", "gpt-private",
+        "--admin-actor", "release-operator",
+    ])
+
+    assert rc == 0
+    preflight_request = next(
+        request for request in mock_server.requests
+        if request.method == "POST" and request.url.path == preflight_path
+    )
+    assert preflight_request.headers["X-Loom-Admin-Actor"] == "release-operator"
 
 
 def test_models_hide_posts_hide_then_lists(
