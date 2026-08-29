@@ -31,17 +31,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "personal_dev_candidates_registry_prefix_check",
-        "personal_dev_candidates",
-        type_="check",
-    )
-    op.create_check_constraint(
-        "personal_dev_candidates_registry_prefix_check",
-        "personal_dev_candidates",
-        "registry_prefix IS NULL OR ("
-        "registry_prefix ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,308}$' "
-        "AND right(registry_prefix, 1) NOT IN ('/', ':') "
-        "AND position('://' in registry_prefix) = 0 "
-        "AND position('@' in registry_prefix) = 0)",
-    )
+    raise RuntimeError("cannot downgrade 0121: registry-prefix constraint repair is irreversible")

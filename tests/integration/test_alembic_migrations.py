@@ -76,7 +76,7 @@ def postgres_url():
         repo_root = Path(__file__).resolve().parents[2]
         # Use the venv's alembic via `python -m alembic` so PATH doesn't matter.
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "0120"],
             cwd=repo_root,
             check=True,
         )
@@ -91,6 +91,39 @@ def postgres_url():
             check=True,
         )
         yield url
+
+
+def test_0121_downgrade_fails_closed_and_preserves_revision(postgres_url: str) -> None:
+    """The repaired constraint cannot safely be reverted to its invalid predecessor."""
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "downgrade", "0120"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        assert result.returncode != 0
+        assert "cannot downgrade 0121: registry-prefix constraint repair is irreversible" in (
+            result.stdout + result.stderr
+        )
+
+        engine = create_engine(postgres_url)
+        try:
+            with engine.connect() as connection:
+                revision = connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            assert revision == "0121"
+        finally:
+            engine.dispose()
+    finally:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
+        )
 
 
 def test_all_tables_exist(postgres_url: str) -> None:
