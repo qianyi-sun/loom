@@ -162,6 +162,12 @@ class CandidateRegistry(Protocol):
         requested: PersonalDevCandidateRecord,
     ) -> CandidateRegistration: ...
 
+    async def reconcile_registration(
+        self,
+        requested: PersonalDevCandidateRecord,
+    ) -> CandidateRegistration | None:
+        """Freshly look up a registration that references this exact upload."""
+
 
 def _publication_timestamp(value: str) -> datetime:
     try:
@@ -281,8 +287,7 @@ def validate_personal_dev_candidate_publication(
     evidence_object = value["safety_evidence"]
     if (
         not isinstance(evidence_object, dict)
-        or set(evidence_object)
-        != {"bucket", "content_type", "key", "sha256", "size_bytes"}
+        or set(evidence_object) != {"bucket", "content_type", "key", "sha256", "size_bytes"}
         or evidence_object["bucket"] != candidate.object_bucket
         or evidence_object["content_type"]
         != "application/vnd.loom.personal-dev-safety-evidence.v1+json"

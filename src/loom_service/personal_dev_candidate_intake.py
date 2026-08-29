@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 from collections.abc import Mapping
@@ -269,6 +270,20 @@ async def intake_personal_dev_candidate(
                 detail="personal-dev candidate artifacts are being collected; retry",
             ) from exc
         except Exception as exc:
+            try:
+                reconciled = await registry.reconcile_registration(requested)
+            except Exception as reconciliation_exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="personal-dev candidate registration failed",
+                ) from reconciliation_exc
+            if reconciled is not None:
+                if _same_reconciled_registration(reconciled.candidate, requested):
+                    return reconciled
+                raise HTTPException(
+                    status_code=503,
+                    detail="personal-dev candidate registration failed",
+                ) from exc
             await _cleanup_published_generation(
                 object_store,
                 bucket=bucket,
@@ -287,6 +302,37 @@ async def intake_personal_dev_candidate(
                 version_id=published_version_id,
             )
         return registration
+
+
+def _same_reconciled_registration(
+    existing: PersonalDevCandidateRecord,
+    requested: PersonalDevCandidateRecord,
+) -> bool:
+    return (
+        existing.owner_user_id == requested.owner_user_id
+        and existing.owner_team_id == requested.owner_team_id
+        and existing.candidate_sha == requested.candidate_sha
+        and existing.source_sha256 == requested.source_sha256
+        and existing.archive_sha256 == requested.archive_sha256
+        and existing.build_contract_sha256 == requested.build_contract_sha256
+        and existing.source_commit == requested.source_commit
+        and existing.dirty is requested.dirty
+        and _canonical_json(existing.manifest_json) == _canonical_json(requested.manifest_json)
+        and existing.object_bucket == requested.object_bucket
+        and existing.object_key == requested.object_key
+        and existing.source_generation_id == requested.source_generation_id
+        and existing.archive_size_bytes == requested.archive_size_bytes
+    )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
 
 
 __all__ = [

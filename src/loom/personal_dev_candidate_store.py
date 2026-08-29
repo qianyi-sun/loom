@@ -388,6 +388,40 @@ class SqlAlchemyPersonalDevCandidateStore:
             created=False,
         )
 
+    async def reconcile_registration(
+        self,
+        requested: PersonalDevCandidateRecord,
+    ) -> CandidateRegistration | None:
+        """Read a potentially committed exact upload after a register error."""
+        await self.session.rollback()
+        self.session.expire_all()
+        candidate = (
+            await self.session.execute(
+                select(PersonalDevCandidate)
+                .where(
+                    PersonalDevCandidate.object_bucket == requested.object_bucket,
+                    PersonalDevCandidate.object_key == requested.object_key,
+                    PersonalDevCandidate.source_generation_id == requested.source_generation_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if candidate is None:
+            return None
+        attempt = (
+            await self.session.execute(
+                select(PersonalDevCandidateBuildAttempt)
+                .where(PersonalDevCandidateBuildAttempt.candidate_id == candidate.id)
+                .order_by(PersonalDevCandidateBuildAttempt.attempt_sequence.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return CandidateRegistration(
+            candidate=_candidate_record(candidate),
+            build_attempt=_attempt_record(attempt) if attempt is not None else None,
+            created=False,
+        )
+
     async def list_visible(
         self,
         *,
