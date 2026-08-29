@@ -286,14 +286,22 @@ match. It is control evidence, not a credential.
 
 The storage evidence is produced by the
 [personal-development backup and isolated restore procedure](../runbooks/personal-dev-backup-restore-evidence.md).
-It dumps live Postgres and proves the live MinIO buckets empty while the plane
-is in ready shadow with ceiling zero and no personal worker, restores both into
-private disposable Docker resources using the exact trusted-release images,
-and compares schema, per-table row counts and canonical-row digests, exact
-sequence state, and the required empty MinIO bucket set. Nonempty object state
-fails closed because the pinned streaming client cannot preserve Loom's
-required content type and custom metadata. The canonical record contains only
-state digests, Secret names/key-name inventory digest, fixed PVC identities,
+It dumps live Postgres and, while the plane is in ready shadow with ceiling
+zero and no personal worker, captures durable MinIO rollout authority for
+nonempty payloads and supported metadata. Capture retains payload bytes in a
+new owner-only content-addressed inventory and binds them to a source canonical
+manifest; its live credentials remain inside the MinIO Pod, and raw object keys
+never map to local paths. Restore uses the exact
+trusted-release images in private disposable Docker resources, reads the
+isolated objects back independently, and compares a separate restored canonical
+manifest with the source manifest. The authority supports payload bytes,
+required `Content-Type`, optional `Cache-Control`, and bounded custom
+`X-Amz-Meta-*` metadata; ETags and modification times are observations, not
+equality inputs. Versioning, object-lock retention, bucket encryption, object
+tags, unsupported metadata, or a limit violation block rollout rather than
+being silently discarded. The historical v1 authority remains empty-only; v2
+binds the retained payload inventory. The canonical record contains only state
+digests, Secret names/key-name inventory digest, fixed PVC identities,
 zero-capacity observations, and cleanup proof. It rejects Secret values and
 cannot be substituted by readiness, object counts alone, or an operator-authored
 claim.

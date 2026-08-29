@@ -3326,7 +3326,9 @@ def test_acceptance_evidence_is_source_derived_and_bound_to_every_command() -> N
     assert "<absolute-owner-only-scanner-finding-policy>" not in runbook
 
 
-def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> None:
+def test_backup_restore_runbook_performs_complete_isolated_api_readback(
+    tmp_path: Path,
+) -> None:
     runbook = _read("docs/runbooks/personal-dev-backup-restore-evidence.md")
     runbook_index = _read("docs/runbooks/README.md")
     fleet = _read("deploy/dev-fleet/README.md")
@@ -3347,10 +3349,127 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback() -> Non
     assert 'docker network create --internal "$restore_network"' in runbook
     assert "--network-alias minio-restore" in runbook
     assert '"$minio_image" server /data' in runbook
+    assert '--trusted-release-file "$trusted_release"' in runbook
+    assert '--trusted-release-sha256 "$trusted_release_sha256"' in runbook
+    assert "capture-minio-backup" in runbook
+    assert "restore-minio-backup" in runbook
+    assert "ready restore" in runbook
+    assert runbook.index("ready restore") < runbook.index(
+        '"$loom_cli" admin personal-dev-control-plane restore-minio-backup'
+    )
     assert '"$minio_client_image" -euc' in runbook
+    assert '--payload-root "$minio_payload_root"' in runbook
+    assert '--source-manifest-file "$minio_source_manifest"' in runbook
+    assert '--restored-manifest-file "$minio_restored_manifest"' in runbook
+    assert '--minio-payload-root "$minio_payload_root"' in runbook
+    assert runbook.index("capture-minio-backup") > runbook.index(
+        '> "$evidence_dir/storage-inventory.json"'
+    )
+    assert runbook.index("cleanup_restore_resources\ntrap - EXIT") < runbook.index(
+        "render-backup-restore-evidence"
+    )
+
+    loom_cli = tmp_path / "loom"
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    variables = {
+        "loom_cli": loom_cli,
+        "kubeconfig": tmp_path / "kubeconfig",
+        "trusted_release": tmp_path / "trusted-release.json",
+        "trusted_release_sha256": "a" * 64,
+        "minio_source_manifest": evidence_dir / "minio.source-manifest.json",
+        "minio_payload_root": evidence_dir / "minio" / "payloads",
+        "minio_restored_manifest": evidence_dir / "minio.restored-manifest.json",
+        "restore_env": evidence_dir / "minio-restore.env",
+        "minio_restore": "loom-personal-dev-minio-restore-aaaaaaaaaaaa",
+        "restore_network": "loom-personal-dev-restore-aaaaaaaaaaaa",
+        "evidence_dir": evidence_dir,
+        "profile": tmp_path / "profile.toml",
+        "started_at": "2026-08-29T00:00:00Z",
+        "completed_at": "2026-08-29T00:01:00Z",
+        "postgres_dump": evidence_dir / "postgres.dump",
+        "postgres_source_state": evidence_dir / "postgres.source.tsv",
+        "postgres_restored_state": evidence_dir / "postgres.restored.tsv",
+        "source_schema_head": "0112",
+        "restored_schema_head": "0112",
+        "secret_inventory": evidence_dir / "secret-key-inventory.json",
+        "postgres_restore": "loom-personal-dev-pg-restore-aaaaaaaaaaaa",
+        "result_tmp": evidence_dir / "backup-restore.json",
+        "result_render_evidence": evidence_dir / "backup-restore.render.json",
+    }
+
+    def assert_documented_invocation(
+        command: str,
+        output: str,
+        operation: str,
+        expected_arguments: tuple[str, ...],
+    ) -> None:
+        invocation = _shell_command_block(runbook, command, output)
+        arguments = tmp_path / f"{len(expected_arguments)}-arguments"
+        loom_cli.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {shlex.quote(str(arguments))}\n",
+            encoding="utf-8",
+        )
+        loom_cli.chmod(0o700)
+        program = "set -euo pipefail\n" + "\n".join(
+            f"{name}={shlex.quote(str(value))}" for name, value in variables.items()
+        )
+        result = subprocess.run(
+            ["bash", "-c", f"{program}\n{invocation}\n"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        captured = tuple(arguments.read_text(encoding="utf-8").splitlines())
+        assert captured[:3] == ("admin", "personal-dev-control-plane", operation)
+        for index in range(0, len(expected_arguments), 2):
+            option = expected_arguments[index]
+            assert captured[captured.index(option) : captured.index(option) + 2] == (
+                option,
+                expected_arguments[index + 1],
+            )
+
+    assert_documented_invocation(
+        '"$loom_cli" admin personal-dev-control-plane capture-minio-backup',
+        '> "$evidence_dir/minio.capture.json"',
+        "capture-minio-backup",
+        (
+            "--source-manifest-file",
+            str(variables["minio_source_manifest"]),
+            "--payload-root",
+            str(variables["minio_payload_root"]),
+        ),
+    )
+    assert_documented_invocation(
+        '"$loom_cli" admin personal-dev-control-plane restore-minio-backup',
+        '> "$evidence_dir/minio.restore.json"',
+        "restore-minio-backup",
+        (
+            "--source-manifest-file",
+            str(variables["minio_source_manifest"]),
+            "--payload-root",
+            str(variables["minio_payload_root"]),
+            "--restored-manifest-file",
+            str(variables["minio_restored_manifest"]),
+        ),
+    )
+    assert_documented_invocation(
+        '"$loom_cli" admin personal-dev-control-plane render-backup-restore-evidence',
+        '> "$result_tmp" 2> "$result_render_evidence"',
+        "render-backup-restore-evidence",
+        (
+            "--minio-payload-root",
+            str(variables["minio_payload_root"]),
+        ),
+    )
+
     assert 'mc_live cat "local/$bucket/$key"' not in runbook
-    assert 'test ! -s "$minio_backup/$bucket.list.jsonl"' in runbook
-    assert 'test ! -s "$evidence_dir/minio.restored-$bucket.list.jsonl"' in runbook
+    assert "mc_live()" not in runbook
+    assert "mc_restore()" not in runbook
+    assert "test ! -s" not in runbook
+    assert "$bucket" not in runbook
+    assert "$key" not in runbook
     assert 'mc_restore pipe "restore/$bucket/$key"' not in runbook
     assert 'mc_restore cat "restore/$bucket/$key"' not in runbook
     assert 'cmp -s "$minio_source_manifest" "$minio_restored_manifest"' in runbook
