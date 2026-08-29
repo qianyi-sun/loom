@@ -39,8 +39,10 @@ from loom.personal_dev_control_plane_status import (
     PersonalDevShadowComponent,
     PersonalDevShadowStatus,
 )
+from loom.personal_dev_minio_backup import PersonalDevMinioManifest
 from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
+from loom_cli.personal_dev_minio_backup_cmd import PersonalDevMinioCommandResult
 from tests.unit.test_personal_dev_acceptance_evidence import (
     _result_plan,
     _result_value,
@@ -382,6 +384,164 @@ def _status_argv(
         "--trusted-release-sha256",
         digest,
     ]
+
+
+def _capture_minio_argv(kubeconfig: Path, tmp_path: Path) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "capture-minio-backup",
+        "--namespace",
+        "loom-dev",
+        "--kubeconfig",
+        str(kubeconfig),
+        "--source-manifest-file",
+        str(tmp_path / "minio.source.json"),
+        "--payload-root",
+        str(tmp_path / "payloads"),
+    ]
+
+
+def _restore_minio_argv(
+    release: Path,
+    digest: str,
+    tmp_path: Path,
+) -> list[str]:
+    suffix = digest[:12]
+    return [
+        "personal-dev-control-plane",
+        "restore-minio-backup",
+        "--trusted-release-file",
+        str(release),
+        "--trusted-release-sha256",
+        digest,
+        "--source-manifest-file",
+        str(tmp_path / "minio.source.json"),
+        "--payload-root",
+        str(tmp_path / "payloads"),
+        "--restored-manifest-file",
+        str(tmp_path / "minio.restored.json"),
+        "--restore-env-file",
+        str(tmp_path / "restore.env"),
+        "--isolated-minio-name",
+        f"loom-personal-dev-minio-restore-{suffix}",
+        "--isolated-network-name",
+        f"loom-personal-dev-restore-{suffix}",
+    ]
+
+
+def _isolated_docker_documents(
+    *,
+    minio_image: str,
+    minio_name: str,
+    network_name: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    container_id = "a" * 64
+    network_id = "b" * 64
+    container = [
+        {
+            "Config": {"Image": minio_image},
+            "HostConfig": {"NetworkMode": network_name, "PortBindings": {}},
+            "Id": container_id,
+            "Name": f"/{minio_name}",
+            "NetworkSettings": {
+                "Networks": {
+                    network_name: {
+                        "Aliases": [container_id[:12], "minio-restore"],
+                        "DriverOpts": None,
+                        "EndpointID": "c" * 64,
+                        "Gateway": "172.31.0.1",
+                        "GlobalIPv6Address": "",
+                        "GlobalIPv6PrefixLen": 0,
+                        "GwPriority": 0,
+                        "IPAMConfig": None,
+                        "IPAddress": "172.31.0.2",
+                        "IPPrefixLen": 16,
+                        "IPv6Gateway": "",
+                        "Links": None,
+                        "MacAddress": "02:42:ac:1f:00:02",
+                        "NetworkID": network_id,
+                    }
+                },
+                "Ports": {"9000/tcp": None, "9001/tcp": None},
+            },
+            "State": {"Running": True, "Status": "running"},
+        }
+    ]
+    network = [
+        {
+            "Attachable": False,
+            "Containers": {
+                container_id: {
+                    "EndpointID": "c" * 64,
+                    "IPv4Address": "172.31.0.2/16",
+                    "IPv6Address": "",
+                    "MacAddress": "02:42:ac:1f:00:02",
+                    "Name": minio_name,
+                }
+            },
+            "Driver": "bridge",
+            "EnableIPv4": True,
+            "EnableIPv6": False,
+            "Id": network_id,
+            "Ingress": False,
+            "Internal": True,
+            "Labels": {},
+            "Name": network_name,
+            "Options": {},
+            "Scope": "local",
+        }
+    ]
+    return container, network
+
+
+def _fake_docker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    container_document: list[dict[str, object]],
+    network_document: list[dict[str, object]],
+    stdout: bytes = b"bounded",
+    stderr: bytes = b"",
+    returncode: int = 0,
+) -> Path:
+    executable = tmp_path / "docker"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "with pathlib.Path(os.environ['LOOM_TEST_DOCKER_LOG']).open('a', encoding='utf-8') as stream:\n"
+        "    stream.write(json.dumps(argv, separators=(',', ':')) + '\\n')\n"
+        "if argv and argv[0] == 'inspect':\n"
+        "    sys.stdout.write(os.environ['LOOM_TEST_CONTAINER_INSPECT'])\n"
+        "elif argv[:2] == ['network', 'inspect']:\n"
+        "    sys.stdout.write(os.environ['LOOM_TEST_NETWORK_INSPECT'])\n"
+        "elif argv and argv[0] == 'run':\n"
+        "    sys.stdout.buffer.write(bytes.fromhex(os.environ['LOOM_TEST_DOCKER_STDOUT']))\n"
+        "    sys.stderr.buffer.write(bytes.fromhex(os.environ['LOOM_TEST_DOCKER_STDERR']))\n"
+        "    raise SystemExit(int(os.environ['LOOM_TEST_DOCKER_RETURNCODE']))\n"
+        "else:\n"
+        "    raise SystemExit(91)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    log = tmp_path / "docker.calls.jsonl"
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LOOM_TEST_DOCKER_LOG", str(log))
+    monkeypatch.setenv(
+        "LOOM_TEST_CONTAINER_INSPECT",
+        json.dumps(container_document, sort_keys=True, separators=(",", ":")),
+    )
+    monkeypatch.setenv(
+        "LOOM_TEST_NETWORK_INSPECT",
+        json.dumps(network_document, sort_keys=True, separators=(",", ":")),
+    )
+    monkeypatch.setenv("LOOM_TEST_DOCKER_STDOUT", stdout.hex())
+    monkeypatch.setenv("LOOM_TEST_DOCKER_STDERR", stderr.hex())
+    monkeypatch.setenv("LOOM_TEST_DOCKER_RETURNCODE", str(returncode))
+    return log
 
 
 def _acceptance_argv(
@@ -2417,3 +2577,817 @@ def test_status_subprocess_runner_pins_kubeconfig_bytes_against_in_place_rewrite
 
     assert not rewriter.is_alive()
     assert consumed.read_text(encoding="utf-8") == reviewed_payload
+
+
+# Production break caught: capture can be invoked without one of its fixed authorities.
+@pytest.mark.parametrize(
+    "omitted",
+    ["--namespace", "--kubeconfig", "--source-manifest-file", "--payload-root"],
+)
+def test_capture_minio_backup_requires_every_authority_argument(
+    tmp_path: Path,
+    omitted: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv = _capture_minio_argv(_reviewed_kubeconfig(tmp_path), tmp_path)
+    index = argv.index(omitted)
+    del argv[index : index + 2]
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert f"the following arguments are required: {omitted}" in captured.err
+
+
+# Production break caught: capture is widened to a namespace other than loom-dev.
+def test_capture_minio_backup_accepts_only_the_exact_live_namespace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv = _capture_minio_argv(_reviewed_kubeconfig(tmp_path), tmp_path)
+    argv[argv.index("loom-dev")] = "attacker-namespace"
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert "invalid choice: 'attacker-namespace'" in captured.err
+
+
+# Production break caught: restore can run without a release, retained payload, or isolation binding.
+@pytest.mark.parametrize(
+    "omitted",
+    [
+        "--trusted-release-file",
+        "--trusted-release-sha256",
+        "--source-manifest-file",
+        "--payload-root",
+        "--restored-manifest-file",
+        "--restore-env-file",
+        "--isolated-minio-name",
+        "--isolated-network-name",
+    ],
+)
+def test_restore_minio_backup_requires_every_authority_argument(
+    tmp_path: Path,
+    omitted: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release, digest = _release(tmp_path)
+    argv = _restore_minio_argv(release, digest, tmp_path)
+    index = argv.index(omitted)
+    del argv[index : index + 2]
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert f"the following arguments are required: {omitted}" in captured.err
+
+
+# Production break caught: live MinIO credentials or raw object keys escape positional in-pod argv.
+def test_kubectl_minio_transport_confines_credentials_and_raw_keys_to_admin_exec() -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    pod_payload = json.dumps(
+        {
+            "apiVersion": "v1",
+            "items": [
+                {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "labels": {"app": "loom-dev-minio"},
+                        "name": "loom-dev-minio-0",
+                        "namespace": "loom-dev",
+                    },
+                    "status": {"phase": "Running"},
+                }
+            ],
+            "kind": "List",
+            "metadata": {"resourceVersion": "123"},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class _Runner:
+        def run(
+            self,
+            argv: list[str] | tuple[str, ...],
+            *,
+            timeout_seconds: int,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(("run", tuple(argv)))
+            assert timeout_seconds == 30
+            return subprocess.CompletedProcess(argv, 0, pod_payload, "")
+
+        def stream(
+            self,
+            argv: list[str] | tuple[str, ...],
+            *,
+            destination: object,
+            maximum_stdout_bytes: int,
+            expected_size: int | None,
+            maximum_stderr_bytes: int,
+            timeout_seconds: int,
+        ) -> PersonalDevMinioCommandResult:
+            calls.append(("stream", tuple(argv)))
+            assert destination is None
+            assert maximum_stdout_bytes == 4096
+            assert expected_size is None
+            assert maximum_stderr_bytes == 64 * 1024
+            assert timeout_seconds == 60
+            return PersonalDevMinioCommandResult(0, b"bounded", b"")
+
+    raw_key = "owner/raw key $(credential-marker).tar"
+    transport = command._KubectlMinioTransport(_Runner(), namespace="loom-dev")
+    result = transport.run(
+        ("stat", "--json", f"local/artifacts/{raw_key}"),
+        maximum_stdout_bytes=4096,
+        timeout_seconds=60,
+    )
+
+    assert result == PersonalDevMinioCommandResult(0, b"bounded", b"")
+    assert calls[0] == (
+        "run",
+        (
+            "--namespace",
+            "loom-dev",
+            "get",
+            "pods",
+            "--selector",
+            "app=loom-dev-minio",
+            "--output=json",
+        ),
+    )
+    exec_argv = calls[1][1]
+    assert exec_argv[:9] == (
+        "--namespace",
+        "loom-dev",
+        "exec",
+        "loom-dev-minio-0",
+        "-c",
+        "admin",
+        "--",
+        "/bin/sh",
+        "-euc",
+    )
+    assert exec_argv[9:] == (
+        'export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"; exec mc "$@"',
+        "sh",
+        "stat",
+        "--json",
+        f"local/artifacts/{raw_key}",
+    )
+    assert exec_argv.count(f"local/artifacts/{raw_key}") == 1
+
+
+# Production break caught: kubectl binary output is buffered whole or may exceed its exact size.
+def test_kubectl_stream_writes_incrementally_and_enforces_exact_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'abcdefghijkl')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    monkeypatch.setattr(command, "_KUBECTL_READ_BYTES", 4)
+    writes: list[bytes] = []
+
+    class _Destination:
+        def write(self, value: bytes) -> int:
+            writes.append(value)
+            return len(value)
+
+    runner = command._SubprocessKubectlRunner(_reviewed_kubeconfig(tmp_path))
+    result = runner.stream(
+        ["exec", "pod"],
+        destination=_Destination(),
+        maximum_stdout_bytes=12,
+        expected_size=12,
+        maximum_stderr_bytes=64,
+        timeout_seconds=5,
+    )
+
+    assert result == PersonalDevMinioCommandResult(0, b"", b"")
+    assert b"".join(writes) == b"abcdefghijkl"
+    assert len(writes) >= 3
+    with pytest.raises(OSError, match="size"):
+        runner.stream(
+            ["exec", "pod"],
+            destination=io.BytesIO(),
+            maximum_stdout_bytes=11,
+            expected_size=11,
+            maximum_stderr_bytes=64,
+            timeout_seconds=5,
+        )
+
+
+# Production break caught: capture success exposes object identities instead of the safe canonical summary.
+def test_capture_minio_backup_emits_only_safe_canonical_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    manifest = PersonalDevMinioManifest(())
+    observed: dict[str, object] = {}
+
+    class _Transport:
+        def __init__(self, runner: object, *, namespace: str) -> None:
+            observed.update(runner=runner, namespace=namespace)
+
+    class _Runner:
+        def __init__(self, path: Path) -> None:
+            observed["kubeconfig"] = path
+
+    def _capture(**kwargs: object) -> PersonalDevMinioManifest:
+        observed.update(kwargs)
+        return manifest
+
+    monkeypatch.setattr(command, "_SubprocessKubectlRunner", _Runner)
+    monkeypatch.setattr(command, "_KubectlMinioTransport", _Transport)
+    monkeypatch.setattr(command, "capture_personal_dev_minio_backup", _capture)
+
+    result = dispatch(_capture_minio_argv(kubeconfig, tmp_path))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert captured.out == (
+        '{"object_count":0,"payload_bytes":0,'
+        '"schema":"loom-personal-dev-minio-backup-summary-v1",'
+        f'"source_manifest_sha256":"{hashlib.sha256(manifest.canonical_bytes).hexdigest()}"}}\n'
+    )
+    assert observed["namespace"] == "loom-dev"
+    assert observed["kubeconfig"] == kubeconfig
+    assert observed["source_manifest_path"] == tmp_path / "minio.source.json"
+    assert observed["payload_root"] == tmp_path / "payloads"
+
+
+# Production break caught: Docker restore accepts a non-owner-only or aliased credential file.
+@pytest.mark.parametrize("unsafe", ["relative", "world-readable", "symlink"])
+def test_docker_minio_transport_requires_absolute_owner_only_restore_env_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe: str,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("SENSITIVE_RESTORE_MARKER=value\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    if unsafe == "relative":
+        selected = Path("restore.env")
+    elif unsafe == "world-readable":
+        env_file.chmod(0o644)
+        selected = env_file
+    else:
+        selected = tmp_path / "restore-link.env"
+        selected.symlink_to(env_file)
+
+    with pytest.raises(ValueError):
+        command._DockerMinioTransport(
+            client_image=release.images.minio_client,
+            minio_image=release.images.minio,
+            restore_env_file=selected,
+            payload_root=payload_root,
+            isolated_minio_name=f"loom-personal-dev-minio-restore-{suffix}",
+            isolated_network_name=f"loom-personal-dev-restore-{suffix}",
+        )
+
+
+# Production break caught: restore can target a published, untrusted, or shared Docker store.
+@pytest.mark.parametrize(
+    "unsafe",
+    ["image", "published-port", "wrong-network", "external-network", "extra-peer", "alias"],
+)
+def test_docker_minio_transport_rejects_untrusted_isolation_topology(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe: str,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    container, network = _isolated_docker_documents(
+        minio_image=release.images.minio,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    if unsafe == "image":
+        container[0]["Config"] = {"Image": "quay.io/minio/minio@sha256:" + "f" * 64}
+    elif unsafe == "published-port":
+        container[0]["HostConfig"] = {
+            "NetworkMode": network_name,
+            "PortBindings": {"9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "9000"}]},
+        }
+    elif unsafe == "wrong-network":
+        container[0]["NetworkSettings"] = {"Networks": {"bridge": {}}, "Ports": {}}
+    elif unsafe == "external-network":
+        network[0]["Internal"] = False
+    elif unsafe == "extra-peer":
+        network[0]["Containers"]["d" * 64] = {  # type: ignore[index]
+            "EndpointID": "e" * 64,
+            "IPv4Address": "172.31.0.3/16",
+            "IPv6Address": "",
+            "MacAddress": "02:42:ac:1f:00:03",
+            "Name": "unexpected-peer",
+        }
+    else:
+        networks = container[0]["NetworkSettings"]["Networks"]  # type: ignore[index]
+        networks[network_name]["Aliases"] = ["a" * 12]  # type: ignore[index]
+    _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+    )
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("SENSITIVE_RESTORE_MARKER=value\n", encoding="utf-8")
+    env_file.chmod(0o600)
+
+    with pytest.raises(ValueError):
+        command._DockerMinioTransport(
+            client_image=release.images.minio_client,
+            minio_image=release.images.minio,
+            restore_env_file=env_file,
+            payload_root=payload_root,
+            isolated_minio_name=minio_name,
+            isolated_network_name=network_name,
+        )
+
+
+# Production break caught: client execution loses its pinned image/network/env/read-only mount or argv separation.
+def test_docker_minio_transport_uses_fixed_isolated_client_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    container, network = _isolated_docker_documents(
+        minio_image=release.images.minio,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    log = _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+    )
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    digest_path = payload_root / ("d" * 64)
+    digest_path.write_bytes(b"payload")
+    digest_path.chmod(0o600)
+    env_file = tmp_path / "restore.env"
+    secret_marker = "SENSITIVE_RESTORE_MARKER"
+    env_file.write_text(f"{secret_marker}=value\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    raw_target = "restore/artifacts/owner/raw key $(marker).tar"
+    transport = command._DockerMinioTransport(
+        client_image=release.images.minio_client,
+        minio_image=release.images.minio,
+        restore_env_file=env_file,
+        payload_root=payload_root,
+        isolated_minio_name=minio_name,
+        isolated_network_name=network_name,
+    )
+
+    result = transport.run(
+        ("cp", "--attr", "Content-Type=application/x-tar", str(digest_path), raw_target),
+        maximum_stdout_bytes=4096,
+        timeout_seconds=60,
+    )
+
+    captured = capsys.readouterr()
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    client_calls = [call for call in calls if call[0] == "run"]
+    assert result == PersonalDevMinioCommandResult(0, b"bounded", b"")
+    assert captured == ("", "")
+    assert client_calls == [
+        [
+            "run",
+            "--rm",
+            "--network",
+            network_name,
+            "--env-file",
+            str(env_file),
+            "--mount",
+            f"type=bind,src={payload_root},dst=/loom-payloads,readonly",
+            "--entrypoint",
+            "/bin/sh",
+            release.images.minio_client,
+            "-euc",
+            'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio-restore:9000"; exec mc "$@"',
+            "sh",
+            "cp",
+            "--attr",
+            "Content-Type=application/x-tar",
+            f"/loom-payloads/{digest_path.name}",
+            raw_target,
+        ]
+    ]
+    assert client_calls[0].count(raw_target) == 1
+    assert secret_marker not in json.dumps(calls)
+
+
+# Production break caught: restore accepts caller-chosen names/images or emits more than the safe summary.
+def test_restore_minio_backup_derives_release_images_and_emits_safe_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    container, network = _isolated_docker_documents(
+        minio_image=release.images.minio,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+    )
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\nMINIO_ROOT_PASSWORD=marker\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    manifest = PersonalDevMinioManifest(())
+    observed: dict[str, object] = {}
+
+    def _restore(**kwargs: object) -> PersonalDevMinioManifest:
+        observed.update(kwargs)
+        return manifest
+
+    monkeypatch.setattr(command, "restore_personal_dev_minio_backup", _restore)
+
+    result = dispatch(_restore_minio_argv(release_path, release_digest, tmp_path))
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert captured.out == (
+        '{"object_count":0,"payload_bytes":0,'
+        '"schema":"loom-personal-dev-minio-backup-summary-v1",'
+        f'"source_manifest_sha256":"{hashlib.sha256(manifest.canonical_bytes).hexdigest()}"}}\n'
+    )
+    transport = observed["transport"]
+    assert transport._client_image == release.images.minio_client
+    assert transport._minio_image == release.images.minio
+    assert observed["source_manifest_path"] == tmp_path / "minio.source.json"
+    assert observed["payload_root"] == tmp_path / "payloads"
+    assert observed["restored_manifest_path"] == tmp_path / "minio.restored.json"
+
+
+# Production break caught: capture accepts zero/multiple/non-Running pods from the exact selector.
+@pytest.mark.parametrize("pod_state", ["empty", "multiple", "pending"])
+def test_kubectl_minio_transport_requires_one_exact_running_pod(pod_state: str) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "labels": {"app": "loom-dev-minio"},
+            "name": "loom-dev-minio-0",
+            "namespace": "loom-dev",
+        },
+        "status": {"phase": "Pending" if pod_state == "pending" else "Running"},
+    }
+    items = [] if pod_state == "empty" else [pod]
+    if pod_state == "multiple":
+        items.append(
+            {
+                **pod,
+                "metadata": {**pod["metadata"], "name": "loom-dev-minio-1"},
+            }
+        )
+    payload = json.dumps(
+        {"apiVersion": "v1", "items": items, "kind": "List", "metadata": {}},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    class _Runner:
+        def run(self, argv: object, *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, payload, "")
+
+    with pytest.raises(ValueError):
+        command._KubectlMinioTransport(_Runner(), namespace="loom-dev")
+
+
+# Production break caught: a stream uses the mutable kubeconfig path or omits post-command identity validation.
+def test_kubectl_stream_uses_only_proc_fd_and_revalidates_kubeconfig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_path = tmp_path / "observed-kubeconfig-path"
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "pathlib.Path(os.environ['LOOM_TEST_OBSERVED']).write_text(sys.argv[2], encoding='utf-8')\n"
+        "pathlib.Path(os.environ['LOOM_TEST_MUTATE']).write_text('sensitive-kubeconfig-change', encoding='utf-8')\n"
+        "sys.stdout.buffer.write(b'x')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LOOM_TEST_OBSERVED", str(observed_path))
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    monkeypatch.setenv("LOOM_TEST_MUTATE", str(kubeconfig))
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    runner = command._SubprocessKubectlRunner(kubeconfig)
+
+    with pytest.raises(OSError, match="kubeconfig changed"):
+        runner.stream(
+            ["exec", "pod"],
+            destination=io.BytesIO(),
+            maximum_stdout_bytes=1,
+            expected_size=1,
+            maximum_stderr_bytes=64,
+            timeout_seconds=5,
+        )
+
+    assert observed_path.read_text(encoding="utf-8").startswith("/proc/self/fd/")
+    assert str(kubeconfig) not in observed_path.read_text(encoding="utf-8")
+
+
+# Production break caught: a timeout or stderr overflow leaves its kubectl child running.
+@pytest.mark.parametrize("failure", ["timeout", "stderr-bound"])
+def test_kubectl_stream_kills_and_reaps_process_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    pid_path = tmp_path / "kubectl.pid"
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "pathlib.Path(os.environ['LOOM_TEST_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
+        "if os.environ['LOOM_TEST_FAILURE'] == 'stderr-bound':\n"
+        "    sys.stderr.buffer.write(b'sensitive-stderr-marker' * 8)\n"
+        "    sys.stderr.buffer.flush()\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LOOM_TEST_PID", str(pid_path))
+    monkeypatch.setenv("LOOM_TEST_FAILURE", failure)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    runner = command._SubprocessKubectlRunner(_reviewed_kubeconfig(tmp_path))
+
+    with pytest.raises((OSError, subprocess.TimeoutExpired)) as raised:
+        runner.stream(
+            ["exec", "pod"],
+            destination=io.BytesIO(),
+            maximum_stdout_bytes=1,
+            expected_size=1,
+            maximum_stderr_bytes=32,
+            timeout_seconds=1,
+        )
+
+    pid = int(pid_path.read_text(encoding="ascii"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert "sensitive-stderr-marker" not in str(raised.value)
+
+
+# Production break caught: Docker readback buffers payloads or trusts a non-exact byte count.
+def test_docker_minio_stream_hashes_incrementally_without_retaining_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    container, network = _isolated_docker_documents(
+        minio_image=release.images.minio,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+        stdout=b"readback-payload",
+    )
+    payload_root = tmp_path / "payloads"
+    payload_root.mkdir(mode=0o700)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\nMINIO_ROOT_PASSWORD=marker\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    transport = command._DockerMinioTransport(
+        client_image=release.images.minio_client,
+        minio_image=release.images.minio,
+        restore_env_file=env_file,
+        payload_root=payload_root,
+        isolated_minio_name=minio_name,
+        isolated_network_name=network_name,
+    )
+    destination = io.BytesIO()
+
+    digest = transport.stream(
+        ("cat", "restore/artifacts/raw key"),
+        destination=destination,
+        expected_size=len(b"readback-payload"),
+        timeout_seconds=60,
+    )
+
+    assert destination.getvalue() == b"readback-payload"
+    assert digest == hashlib.sha256(b"readback-payload").hexdigest()
+
+
+# Production break caught: release-bound isolated restore names can be caller-selected.
+@pytest.mark.parametrize("option", ["--isolated-minio-name", "--isolated-network-name"])
+def test_restore_minio_backup_rejects_names_not_bound_to_release(
+    tmp_path: Path,
+    option: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release, digest = _release(tmp_path)
+    argv = _restore_minio_argv(release, digest, tmp_path)
+    argv[argv.index(option) + 1] = "sensitive-caller-selected-name"
+
+    result = dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev MinIO backup inputs are invalid\n"
+
+
+# Production break caught: a looping payload-root symlink escapes the stable public error surface.
+def test_restore_minio_backup_sanitizes_payload_root_symlink_loop(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release, digest = _release(tmp_path)
+    env_file = tmp_path / "restore.env"
+    env_file.write_text("MINIO_ROOT_USER=restore\nMINIO_ROOT_PASSWORD=marker\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    payload_root = tmp_path / "looped-payloads"
+    payload_root.symlink_to(payload_root, target_is_directory=True)
+    argv = _restore_minio_argv(release, digest, tmp_path)
+    argv[argv.index("--payload-root") + 1] = str(payload_root)
+
+    result = dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev MinIO backup inputs are invalid\n"
+
+
+# Production break caught: sensitive Kubernetes/workflow/timeout failures reach public streams.
+@pytest.mark.parametrize("failure", ["kubeconfig", "object-metadata", "timeout"])
+def test_capture_minio_backup_sanitizes_every_public_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    marker = f"SENSITIVE_{failure}_MARKER"
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    if failure == "kubeconfig":
+
+        class _Runner:
+            def __init__(self, _path: Path) -> None:
+                raise OSError(marker)
+
+        monkeypatch.setattr(command, "_SubprocessKubectlRunner", _Runner)
+    else:
+
+        class _Runner:
+            def __init__(self, _path: Path) -> None:
+                pass
+
+        class _Transport:
+            def __init__(self, _runner: object, *, namespace: str) -> None:
+                assert namespace == "loom-dev"
+
+        def _failed_capture(**_kwargs: object) -> PersonalDevMinioManifest:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(["kubectl", marker], 60, stderr=marker)
+            raise ValueError(f"raw-key={marker}; metadata={marker}")
+
+        monkeypatch.setattr(command, "_SubprocessKubectlRunner", _Runner)
+        monkeypatch.setattr(command, "_KubectlMinioTransport", _Transport)
+        monkeypatch.setattr(command, "capture_personal_dev_minio_backup", _failed_capture)
+
+    result = dispatch(_capture_minio_argv(kubeconfig, tmp_path))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev MinIO backup inputs are invalid\n"
+    assert marker not in captured.err
+
+
+# Production break caught: Docker inspect/stderr/transport markers reach public streams.
+@pytest.mark.parametrize("failure", ["inspect", "command-stderr", "transport"])
+def test_restore_minio_backup_sanitizes_every_public_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    marker = f"SENSITIVE_{failure}_MARKER"
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    release_path, release_digest = _release(tmp_path)
+    release = load_personal_dev_trusted_release(release_path, release_digest)
+    suffix = release_digest[:12]
+    minio_name = f"loom-personal-dev-minio-restore-{suffix}"
+    network_name = f"loom-personal-dev-restore-{suffix}"
+    container, network = _isolated_docker_documents(
+        minio_image=release.images.minio,
+        minio_name=minio_name,
+        network_name=network_name,
+    )
+    if failure == "inspect":
+        container[0]["Config"] = {"Image": marker}
+    _fake_docker(
+        tmp_path,
+        monkeypatch,
+        container_document=container,
+        network_document=network,
+        stdout=b"" if failure == "command-stderr" else b"bounded",
+        stderr=marker.encode() if failure == "command-stderr" else b"",
+        returncode=9 if failure == "command-stderr" else 0,
+    )
+    env_file = tmp_path / "restore.env"
+    env_file.write_text(
+        f"MINIO_ROOT_USER=restore\nMINIO_ROOT_PASSWORD={marker}\n", encoding="utf-8"
+    )
+    env_file.chmod(0o600)
+    if failure == "transport":
+
+        class _Transport:
+            def __init__(self, **_kwargs: object) -> None:
+                raise TimeoutError(marker)
+
+        monkeypatch.setattr(command, "_DockerMinioTransport", _Transport)
+    elif failure == "command-stderr":
+
+        def _failed_restore(*, transport: object, **_kwargs: object) -> PersonalDevMinioManifest:
+            result = transport.run(
+                ("ls", "--json", "restore"),
+                maximum_stdout_bytes=4096,
+                timeout_seconds=60,
+            )
+            raise ValueError(result.stderr.decode("ascii"))
+
+        monkeypatch.setattr(command, "restore_personal_dev_minio_backup", _failed_restore)
+
+    result = dispatch(_restore_minio_argv(release_path, release_digest, tmp_path))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev MinIO backup inputs are invalid\n"
+    assert marker not in captured.err

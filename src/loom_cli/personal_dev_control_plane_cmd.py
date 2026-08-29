@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import selectors
 import stat
 import subprocess
@@ -15,7 +16,7 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import yaml  # type: ignore[import-untyped]
 
@@ -54,14 +55,33 @@ from loom.personal_dev_schema_transition import (
     prepare_personal_dev_schema_transition,
     validate_personal_dev_schema_transition_source_root,
 )
+from loom_cli.personal_dev_minio_backup_cmd import (
+    PersonalDevMinioCommandResult,
+    capture_personal_dev_minio_backup,
+    restore_personal_dev_minio_backup,
+)
 
 _RENDER_ERROR = "error: personal-dev control-plane render inputs are invalid\n"
 _STATUS_ERROR = "error: personal-dev control-plane status inputs are invalid\n"
 _EVIDENCE_ERROR = "error: personal-dev acceptance evidence inputs are invalid\n"
 _SCHEMA_TRANSITION_ERROR = "error: personal-dev schema transition inputs are invalid\n"
 _VERIFICATION_ERROR = "error: personal-dev acceptance result inputs are invalid\n"
+_MINIO_BACKUP_ERROR = "error: personal-dev MinIO backup inputs are invalid\n"
 _KUBECTL_READ_BYTES = 64 * 1024
 _MAX_KUBECONFIG_BYTES = 1024 * 1024
+_MAX_MINIO_STDERR_BYTES = 64 * 1024
+_MINIO_POD_NAME_RE = re.compile(r"[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?")
+_KUBECTL_MINIO_WRAPPER = (
+    'export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}'
+    '@127.0.0.1:9000"; exec mc "$@"'
+)
+_DOCKER_MINIO_WRAPPER = (
+    'export MC_HOST_restore="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}'
+    '@minio-restore:9000"; exec mc "$@"'
+)
+_DOCKER_PAYLOAD_ROOT = "/loom-payloads"
+_MAX_DOCKER_INSPECT_BYTES = 1024 * 1024
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
 
 
@@ -541,6 +561,578 @@ class _SubprocessKubectlRunner:
             streams["stderr"][1].decode("utf-8"),
         )
 
+    def stream(
+        self,
+        argv: Sequence[str],
+        *,
+        destination: BinaryIO | None,
+        maximum_stdout_bytes: int,
+        expected_size: int | None,
+        maximum_stderr_bytes: int,
+        timeout_seconds: int,
+    ) -> PersonalDevMinioCommandResult:
+        if (
+            type(maximum_stdout_bytes) is not int
+            or maximum_stdout_bytes < 0
+            or type(maximum_stderr_bytes) is not int
+            or maximum_stderr_bytes < 0
+            or type(timeout_seconds) is not int
+            or not 1 <= timeout_seconds <= 3600
+            or (expected_size is not None and (type(expected_size) is not int or expected_size < 0))
+        ):
+            raise ValueError("kubectl stream bound is invalid")
+        self._validate_kubeconfig()
+        kubeconfig_descriptor = self._open_kubeconfig()
+        command = [
+            "kubectl",
+            "--kubeconfig",
+            f"/proc/self/fd/{kubeconfig_descriptor}",
+            *argv,
+        ]
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+                pass_fds=(kubeconfig_descriptor,),
+            )
+        finally:
+            os.close(kubeconfig_descriptor)
+        if process.stdout is None or process.stderr is None:  # pragma: no cover
+            process.kill()
+            process.wait()
+            raise OSError("kubectl output pipes are unavailable")
+        stdout = bytearray()
+        stderr = bytearray()
+        stdout_size = 0
+        selector = selectors.DefaultSelector()
+        deadline = time.monotonic() + timeout_seconds
+        try:
+            os.set_blocking(process.stdout.fileno(), False)
+            os.set_blocking(process.stderr.fileno(), False)
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout_seconds)
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired(command, timeout_seconds)
+                for key, _mask in events:
+                    if key.data == "stdout":
+                        remaining_bytes = maximum_stdout_bytes - stdout_size
+                    else:
+                        remaining_bytes = maximum_stderr_bytes - len(stderr)
+                    try:
+                        chunk = os.read(
+                            key.fd,
+                            min(_KUBECTL_READ_BYTES, max(1, remaining_bytes + 1)),
+                        )
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if len(chunk) > remaining_bytes:
+                        raise OSError(f"kubectl {key.data} exceeds its size bound")
+                    if key.data == "stderr":
+                        stderr.extend(chunk)
+                        continue
+                    stdout_size += len(chunk)
+                    if destination is None:
+                        stdout.extend(chunk)
+                    else:
+                        view = memoryview(chunk)
+                        while view:
+                            written = destination.write(view)
+                            if not isinstance(written, int) or written <= 0:
+                                raise OSError("kubectl destination write failed")
+                            view = view[written:]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout_seconds)
+            returncode = process.wait(timeout=remaining)
+            if expected_size is not None and stdout_size != expected_size:
+                raise OSError("kubectl stdout size differs from expected size")
+            self._validate_kubeconfig()
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
+        finally:
+            selector.close()
+            process.stdout.close()
+            process.stderr.close()
+        return PersonalDevMinioCommandResult(returncode, bytes(stdout), bytes(stderr))
+
+
+class _HashingDestination:
+    def __init__(self, destination: BinaryIO | None) -> None:
+        self._destination = destination
+        self._sha256 = hashlib.sha256()
+
+    def write(self, payload: bytes | memoryview) -> int:
+        value = bytes(payload)
+        self._sha256.update(value)
+        if self._destination is not None:
+            written = self._destination.write(value)
+            if written != len(value):
+                raise OSError("MinIO destination write failed")
+        return len(value)
+
+    def hexdigest(self) -> str:
+        return self._sha256.hexdigest()
+
+
+def _strict_json_value(payload: str) -> object:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+
+    return json.loads(payload, object_pairs_hook=reject_duplicates)
+
+
+def _strict_json_mapping(payload: str) -> Mapping[str, object]:
+    value = _strict_json_value(payload)
+    if not isinstance(value, Mapping):
+        raise ValueError("JSON document is invalid")
+    return value
+
+
+class _KubectlMinioTransport:
+    def __init__(self, runner: _SubprocessKubectlRunner, *, namespace: str) -> None:
+        if namespace != "loom-dev":
+            raise ValueError("MinIO namespace is invalid")
+        self._runner = runner
+        self._namespace = namespace
+        observed = runner.run(
+            [
+                "--namespace",
+                namespace,
+                "get",
+                "pods",
+                "--selector",
+                "app=loom-dev-minio",
+                "--output=json",
+            ],
+            timeout_seconds=30,
+        )
+        if observed.returncode != 0 or observed.stderr:
+            raise ValueError("MinIO pod discovery failed")
+        document = _strict_json_mapping(observed.stdout)
+        items = document.get("items")
+        if (
+            document.get("apiVersion") != "v1"
+            or document.get("kind") != "List"
+            or not isinstance(items, list)
+            or len(items) != 1
+        ):
+            raise ValueError("MinIO pod cardinality is invalid")
+        pod = items[0]
+        if not isinstance(pod, Mapping):
+            raise ValueError("MinIO pod is invalid")
+        metadata = pod.get("metadata")
+        status = pod.get("status")
+        if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
+            raise ValueError("MinIO pod is invalid")
+        labels = metadata.get("labels")
+        name = metadata.get("name")
+        if (
+            not isinstance(labels, Mapping)
+            or labels.get("app") != "loom-dev-minio"
+            or metadata.get("namespace") != namespace
+            or not isinstance(name, str)
+            or _MINIO_POD_NAME_RE.fullmatch(name) is None
+            or status.get("phase") != "Running"
+        ):
+            raise ValueError("MinIO pod identity is invalid")
+        self._pod_name = name
+
+    def _command(self, arguments: Sequence[str]) -> tuple[str, ...]:
+        if not isinstance(arguments, Sequence) or any(type(item) is not str for item in arguments):
+            raise TypeError("MinIO arguments are invalid")
+        return (
+            "--namespace",
+            self._namespace,
+            "exec",
+            self._pod_name,
+            "-c",
+            "admin",
+            "--",
+            "/bin/sh",
+            "-euc",
+            _KUBECTL_MINIO_WRAPPER,
+            "sh",
+            *arguments,
+        )
+
+    def run(
+        self,
+        arguments: Sequence[str],
+        *,
+        maximum_stdout_bytes: int,
+        timeout_seconds: int,
+    ) -> PersonalDevMinioCommandResult:
+        return self._runner.stream(
+            self._command(arguments),
+            destination=None,
+            maximum_stdout_bytes=maximum_stdout_bytes,
+            expected_size=None,
+            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def stream(
+        self,
+        arguments: Sequence[str],
+        *,
+        destination: BinaryIO | None,
+        expected_size: int,
+        timeout_seconds: int,
+    ) -> str:
+        hashing_destination = _HashingDestination(destination)
+        result = self._runner.stream(
+            self._command(arguments),
+            destination=hashing_destination,
+            maximum_stdout_bytes=expected_size,
+            expected_size=expected_size,
+            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+            timeout_seconds=timeout_seconds,
+        )
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise ValueError("MinIO stream failed")
+        return hashing_destination.hexdigest()
+
+
+def _stream_docker_command(
+    argv: Sequence[str],
+    *,
+    destination: BinaryIO | None,
+    maximum_stdout_bytes: int,
+    expected_size: int | None,
+    maximum_stderr_bytes: int,
+    timeout_seconds: int,
+) -> PersonalDevMinioCommandResult:
+    if (
+        not isinstance(argv, Sequence)
+        or any(type(item) is not str for item in argv)
+        or type(maximum_stdout_bytes) is not int
+        or maximum_stdout_bytes < 0
+        or type(maximum_stderr_bytes) is not int
+        or maximum_stderr_bytes < 0
+        or type(timeout_seconds) is not int
+        or not 1 <= timeout_seconds <= 3600
+        or (expected_size is not None and (type(expected_size) is not int or expected_size < 0))
+    ):
+        raise ValueError("Docker command bound is invalid")
+    command = ["docker", *argv]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+    )
+    if process.stdout is None or process.stderr is None:  # pragma: no cover
+        process.kill()
+        process.wait()
+        raise OSError("Docker output pipes are unavailable")
+    stdout = bytearray()
+    stderr = bytearray()
+    stdout_size = 0
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout_seconds)
+            events = selector.select(remaining)
+            if not events:
+                raise subprocess.TimeoutExpired(command, timeout_seconds)
+            for key, _mask in events:
+                if key.data == "stdout":
+                    remaining_bytes = maximum_stdout_bytes - stdout_size
+                else:
+                    remaining_bytes = maximum_stderr_bytes - len(stderr)
+                try:
+                    chunk = os.read(
+                        key.fd,
+                        min(_KUBECTL_READ_BYTES, max(1, remaining_bytes + 1)),
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if len(chunk) > remaining_bytes:
+                    raise OSError(f"Docker {key.data} exceeds its size bound")
+                if key.data == "stderr":
+                    stderr.extend(chunk)
+                    continue
+                stdout_size += len(chunk)
+                if destination is None:
+                    stdout.extend(chunk)
+                else:
+                    view = memoryview(chunk)
+                    while view:
+                        written = destination.write(view)
+                        if not isinstance(written, int) or written <= 0:
+                            raise OSError("Docker destination write failed")
+                        view = view[written:]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
+        returncode = process.wait(timeout=remaining)
+        if expected_size is not None and stdout_size != expected_size:
+            raise OSError("Docker stdout size differs from expected size")
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+    return PersonalDevMinioCommandResult(returncode, bytes(stdout), bytes(stderr))
+
+
+def _owner_only_file_identity(path: Path) -> _KubeconfigIdentity | None:
+    if not isinstance(path, Path) or not path.is_absolute():
+        return None
+    try:
+        if path.resolve(strict=True) != path:
+            return None
+        metadata = path.lstat()
+    except (OSError, RuntimeError):
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size <= 0
+    ):
+        return None
+    return _kubeconfig_identity(metadata)
+
+
+class _DockerMinioTransport:
+    def __init__(
+        self,
+        *,
+        client_image: str,
+        minio_image: str,
+        restore_env_file: Path,
+        payload_root: Path,
+        isolated_minio_name: str,
+        isolated_network_name: str,
+    ) -> None:
+        env_identity = _owner_only_file_identity(restore_env_file)
+        if env_identity is None:
+            raise ValueError("restore environment identity is invalid")
+        if not isinstance(payload_root, Path) or not payload_root.is_absolute():
+            raise ValueError("Docker restore input is invalid")
+        try:
+            payload_root_is_exact = payload_root.resolve(strict=False) == payload_root
+        except (OSError, RuntimeError):
+            raise ValueError("Docker restore input is invalid") from None
+        if (
+            not payload_root_is_exact
+            or "," in str(payload_root)
+            or not isinstance(client_image, str)
+            or not isinstance(minio_image, str)
+            or not isinstance(isolated_minio_name, str)
+            or not isinstance(isolated_network_name, str)
+        ):
+            raise ValueError("Docker restore input is invalid")
+        self._client_image = client_image
+        self._minio_image = minio_image
+        self._restore_env_file = restore_env_file
+        self._restore_env_identity = env_identity
+        self._payload_root = payload_root
+        self._isolated_minio_name = isolated_minio_name
+        self._isolated_network_name = isolated_network_name
+        self._validate_boundaries()
+
+    def _inspect(self, argv: Sequence[str]) -> object:
+        result = _stream_docker_command(
+            argv,
+            destination=None,
+            maximum_stdout_bytes=_MAX_DOCKER_INSPECT_BYTES,
+            expected_size=None,
+            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+            timeout_seconds=30,
+        )
+        if result.returncode != 0 or result.stderr:
+            raise ValueError("Docker inspect failed")
+        try:
+            return _strict_json_value(result.stdout.decode("ascii"))
+        except UnicodeDecodeError:
+            raise ValueError("Docker inspect output is invalid") from None
+
+    def _validate_boundaries(self) -> None:
+        if _owner_only_file_identity(self._restore_env_file) != self._restore_env_identity:
+            raise OSError("restore environment changed")
+        container_values = self._inspect(["inspect", self._isolated_minio_name])
+        network_values = self._inspect(["network", "inspect", self._isolated_network_name])
+        if (
+            not isinstance(container_values, list)
+            or len(container_values) != 1
+            or not isinstance(container_values[0], Mapping)
+            or not isinstance(network_values, list)
+            or len(network_values) != 1
+            or not isinstance(network_values[0], Mapping)
+        ):
+            raise ValueError("Docker isolation inspection is invalid")
+        container = container_values[0]
+        network = network_values[0]
+        config = container.get("Config")
+        host = container.get("HostConfig")
+        settings = container.get("NetworkSettings")
+        state = container.get("State")
+        container_id = container.get("Id")
+        network_id = network.get("Id")
+        if (
+            not isinstance(config, Mapping)
+            or config.get("Image") != self._minio_image
+            or not isinstance(host, Mapping)
+            or host.get("NetworkMode") != self._isolated_network_name
+            or host.get("PortBindings") not in (None, {})
+            or not isinstance(settings, Mapping)
+            or not isinstance(state, Mapping)
+            or state.get("Running") is not True
+            or container.get("Name") != f"/{self._isolated_minio_name}"
+            or not isinstance(container_id, str)
+            or _SHA256_RE.fullmatch(container_id) is None
+            or not isinstance(network_id, str)
+            or _SHA256_RE.fullmatch(network_id) is None
+        ):
+            raise ValueError("Docker MinIO container is not trusted")
+        ports = settings.get("Ports")
+        attachments = settings.get("Networks")
+        if (
+            not isinstance(ports, Mapping)
+            or any(value is not None for value in ports.values())
+            or not isinstance(attachments, Mapping)
+            or set(attachments) != {self._isolated_network_name}
+        ):
+            raise ValueError("Docker MinIO network attachment is invalid")
+        attachment = attachments[self._isolated_network_name]
+        if not isinstance(attachment, Mapping):
+            raise ValueError("Docker MinIO network attachment is invalid")
+        aliases = attachment.get("Aliases")
+        if (
+            attachment.get("NetworkID") != network_id
+            or not isinstance(aliases, list)
+            or any(not isinstance(alias, str) for alias in aliases)
+            or aliases.count("minio-restore") != 1
+        ):
+            raise ValueError("Docker MinIO restore alias is invalid")
+        members = network.get("Containers")
+        if (
+            network.get("Name") != self._isolated_network_name
+            or network.get("Internal") is not True
+            or network.get("Ingress") is not False
+            or not isinstance(members, Mapping)
+            or set(members) != {container_id}
+            or not isinstance(members[container_id], Mapping)
+            or members[container_id].get("Name") != self._isolated_minio_name
+        ):
+            raise ValueError("Docker restore network is not isolated")
+        if _owner_only_file_identity(self._restore_env_file) != self._restore_env_identity:
+            raise OSError("restore environment changed")
+
+    def _arguments(self, arguments: Sequence[str]) -> tuple[str, ...]:
+        if not isinstance(arguments, Sequence) or any(type(item) is not str for item in arguments):
+            raise TypeError("MinIO arguments are invalid")
+        prefix = f"{self._payload_root}{os.sep}"
+        translated: list[str] = []
+        for item in arguments:
+            if item.startswith(prefix):
+                source = Path(item)
+                if source.parent != self._payload_root or _SHA256_RE.fullmatch(source.name) is None:
+                    raise ValueError("retained payload argument is invalid")
+                translated.append(f"{_DOCKER_PAYLOAD_ROOT}/{source.name}")
+            else:
+                translated.append(item)
+        return tuple(translated)
+
+    def _command(self, arguments: Sequence[str]) -> tuple[str, ...]:
+        return (
+            "run",
+            "--rm",
+            "--network",
+            self._isolated_network_name,
+            "--env-file",
+            str(self._restore_env_file),
+            "--mount",
+            f"type=bind,src={self._payload_root},dst={_DOCKER_PAYLOAD_ROOT},readonly",
+            "--entrypoint",
+            "/bin/sh",
+            self._client_image,
+            "-euc",
+            _DOCKER_MINIO_WRAPPER,
+            "sh",
+            *self._arguments(arguments),
+        )
+
+    def run(
+        self,
+        arguments: Sequence[str],
+        *,
+        maximum_stdout_bytes: int,
+        timeout_seconds: int,
+    ) -> PersonalDevMinioCommandResult:
+        self._validate_boundaries()
+        result = _stream_docker_command(
+            self._command(arguments),
+            destination=None,
+            maximum_stdout_bytes=maximum_stdout_bytes,
+            expected_size=None,
+            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+            timeout_seconds=timeout_seconds,
+        )
+        self._validate_boundaries()
+        return result
+
+    def stream(
+        self,
+        arguments: Sequence[str],
+        *,
+        destination: BinaryIO | None,
+        expected_size: int,
+        timeout_seconds: int,
+    ) -> str:
+        self._validate_boundaries()
+        hashing_destination = _HashingDestination(destination)
+        result = _stream_docker_command(
+            self._command(arguments),
+            destination=hashing_destination,
+            maximum_stdout_bytes=expected_size,
+            expected_size=expected_size,
+            maximum_stderr_bytes=_MAX_MINIO_STDERR_BYTES,
+            timeout_seconds=timeout_seconds,
+        )
+        self._validate_boundaries()
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise ValueError("MinIO stream failed")
+        return hashing_destination.hexdigest()
+
 
 def _kubeconfig_identity(opened: os.stat_result) -> _KubeconfigIdentity:
     return (
@@ -719,6 +1311,81 @@ def _anonymous_kubeconfig_snapshot(payload: bytes) -> int:
 def _safe_kubeconfig(path: Path) -> _KubeconfigIdentity | None:
     loaded = _load_safe_kubeconfig(path)
     return None if loaded is None else loaded[0]
+
+
+def _minio_backup_summary(manifest: Any) -> str:
+    return (
+        json.dumps(
+            {
+                "object_count": manifest.object_count,
+                "payload_bytes": manifest.total_payload_bytes,
+                "schema": "loom-personal-dev-minio-backup-summary-v1",
+                "source_manifest_sha256": hashlib.sha256(manifest.canonical_bytes).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+
+
+def _capture_minio_backup(args: argparse.Namespace) -> int:
+    try:
+        runner = _SubprocessKubectlRunner(args.kubeconfig)
+        transport = _KubectlMinioTransport(runner, namespace=args.namespace)
+        manifest = capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=args.source_manifest_file,
+            payload_root=args.payload_root,
+        )
+        output = _minio_backup_summary(manifest)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        sys.stderr.write(_MINIO_BACKUP_ERROR)
+        return 2
+    try:
+        sys.stdout.write(output)
+    except BrokenPipeError:
+        return 0
+    return 0
+
+
+def _restore_minio_backup(args: argparse.Namespace) -> int:
+    try:
+        release = load_personal_dev_trusted_release(
+            args.trusted_release_file,
+            args.trusted_release_sha256,
+        )
+        suffix = args.trusted_release_sha256[:12]
+        if (
+            args.isolated_minio_name != f"loom-personal-dev-minio-restore-{suffix}"
+            or args.isolated_network_name != f"loom-personal-dev-restore-{suffix}"
+        ):
+            raise ValueError("isolated restore identity is not release-bound")
+        transport = _DockerMinioTransport(
+            client_image=release.images.minio_client,
+            minio_image=release.images.minio,
+            restore_env_file=args.restore_env_file,
+            payload_root=args.payload_root,
+            isolated_minio_name=args.isolated_minio_name,
+            isolated_network_name=args.isolated_network_name,
+        )
+        manifest = restore_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=args.source_manifest_file,
+            payload_root=args.payload_root,
+            restored_manifest_path=args.restored_manifest_file,
+        )
+        output = _minio_backup_summary(manifest)
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        sys.stderr.write(_MINIO_BACKUP_ERROR)
+        return 2
+    try:
+        sys.stdout.write(output)
+    except BrokenPipeError:
+        return 0
+    return 0
 
 
 def _verify_acceptance_result(args: argparse.Namespace) -> int:
@@ -948,17 +1615,17 @@ def _add_bound_evidence_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
-    """Register the render-only and read-only personal-dev operator surface."""
+    """Register the bounded personal-dev observation and recovery surface."""
 
     parent = subparsers.add_parser(
         "personal-dev-control-plane",
         allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Render or observe the zero-capacity personal-development management plane.",
+        help="Render, observe, or recover the personal-development management plane.",
         description=(
-            "render-only and read-only personal-development management-plane shadow "
+            "render-only and read-only live personal-development management-plane shadow, "
             "acceptance, or operational mode\n"
-            "these commands never mutate resources\n"
+            "recovery mutates only a release-bound isolated Docker store, never live resources\n"
             "physical capacity unchanged"
         ),
     )
@@ -966,6 +1633,36 @@ def add_personal_dev_control_plane_subparser(subparsers: Any) -> None:
         dest="personal_dev_control_plane_op",
         required=True,
     )
+    capture_minio = operations.add_parser(
+        "capture-minio-backup",
+        allow_abbrev=False,
+        help="Capture live MinIO read-only into retained payload authority.",
+    )
+    capture_minio.add_argument(
+        "--namespace",
+        choices=["loom-dev"],
+        required=True,
+        help="Exact shared infrastructure namespace.",
+    )
+    capture_minio.add_argument("--kubeconfig", type=Path, required=True)
+    capture_minio.add_argument("--source-manifest-file", type=Path, required=True)
+    capture_minio.add_argument("--payload-root", type=Path, required=True)
+    capture_minio.set_defaults(handler=_capture_minio_backup)
+
+    restore_minio = operations.add_parser(
+        "restore-minio-backup",
+        allow_abbrev=False,
+        help="Restore retained MinIO payloads into a release-bound isolated store.",
+    )
+    restore_minio.add_argument("--trusted-release-file", type=Path, required=True)
+    restore_minio.add_argument("--trusted-release-sha256", required=True)
+    restore_minio.add_argument("--source-manifest-file", type=Path, required=True)
+    restore_minio.add_argument("--payload-root", type=Path, required=True)
+    restore_minio.add_argument("--restored-manifest-file", type=Path, required=True)
+    restore_minio.add_argument("--restore-env-file", type=Path, required=True)
+    restore_minio.add_argument("--isolated-minio-name", required=True)
+    restore_minio.add_argument("--isolated-network-name", required=True)
+    restore_minio.set_defaults(handler=_restore_minio_backup)
     render = operations.add_parser(
         "render",
         allow_abbrev=False,
