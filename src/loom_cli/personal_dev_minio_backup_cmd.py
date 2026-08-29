@@ -143,6 +143,21 @@ def _run_success(
     return result.stdout
 
 
+def _one_nonzero_json(result: PersonalDevMinioCommandResult) -> dict[str, object]:
+    if result.returncode == 0:
+        raise _invalid()
+    if result.stdout and result.stderr:
+        expected_stderr = f"command terminated with exit code {result.returncode}\n".encode("ascii")
+        if result.returncode < 1 or result.stderr != expected_stderr:
+            raise _invalid()
+        payload = result.stdout
+    elif result.stdout or result.stderr:
+        payload = result.stdout or result.stderr
+    else:
+        raise _invalid()
+    return _one_json(payload, maximum_bytes=_MAX_FEATURE_BYTES)
+
+
 def _run_absent(
     transport: PersonalDevMinioTransport,
     arguments: tuple[str, ...],
@@ -153,9 +168,7 @@ def _run_absent(
         timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
     )
     _validate_result(result, maximum_stdout_bytes=_MAX_FEATURE_BYTES)
-    if result.returncode == 0 or bool(result.stdout) == bool(result.stderr):
-        raise _invalid()
-    return _one_json(result.stdout or result.stderr, maximum_bytes=_MAX_FEATURE_BYTES)
+    return _one_nonzero_json(result)
 
 
 def _bounded_observation(value: object, *, maximum_bytes: int = 4096) -> str:
@@ -367,9 +380,7 @@ def _check_tags(
             raise _invalid()
         _check_object_url(value["url"], listed=listed)
         return
-    if bool(result.stdout) == bool(result.stderr):
-        raise _invalid()
-    value = _one_json(result.stdout or result.stderr, maximum_bytes=_MAX_FEATURE_BYTES)
+    value = _one_nonzero_json(result)
     try:
         error = value["error"]
         cause = error["cause"]  # type: ignore[index]

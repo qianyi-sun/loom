@@ -438,6 +438,118 @@ def _replace_run(
     actions[index] = _Run(arguments, result)
 
 
+def _rewrite_absence_results(
+    actions: list[_Run | _Stream],
+    *,
+    command: str,
+    stderr_shape: str,
+    every_occurrence: bool = True,
+) -> None:
+    matches = [
+        index
+        for index, action in enumerate(actions)
+        if isinstance(action, _Run) and action.arguments[0] == command
+    ]
+    for index in matches if every_occurrence else matches[:1]:
+        action = actions[index]
+        assert isinstance(action, _Run)
+        payload = action.result.stdout or action.result.stderr
+        assert payload
+        returncode = {
+            "kubectl-two": 2,
+            "success": 0,
+        }.get(stderr_shape, action.result.returncode)
+        stderr = {
+            "none": b"",
+            "kubectl": b"command terminated with exit code 1\n",
+            "kubectl-two": b"command terminated with exit code 2\n",
+            "mismatched": b"command terminated with exit code 2\n",
+            "arbitrary": b"transport warning\n",
+            "suffixed": b"command terminated with exit code 1\ntransport warning\n",
+            "missing-newline": b"command terminated with exit code 1",
+            "dual-json": payload,
+            "success": b"command terminated with exit code 0\n",
+        }[stderr_shape]
+        actions[index] = _Run(
+            action.arguments,
+            _result(payload, stderr=stderr, returncode=returncode),
+        )
+
+
+@pytest.mark.parametrize("command", ("retention", "encrypt", "tag"))
+def test_capture_accepts_absence_json_on_stdout(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    actions = _capture_actions()
+    _rewrite_absence_results(actions, command=command, stderr_shape="none")
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    manifest = capture_personal_dev_minio_backup(
+        transport=_RecordingTransport(actions),
+        source_manifest_path=source_manifest_path,
+        payload_root=payload_root,
+    )
+
+    assert source_manifest_path.read_bytes() == manifest.canonical_bytes
+
+
+@pytest.mark.parametrize("command", ("retention", "encrypt", "tag"))
+@pytest.mark.parametrize("stderr_shape", ("kubectl", "kubectl-two"))
+def test_capture_accepts_exact_kubectl_trailer_after_absence_json(
+    tmp_path: Path,
+    command: str,
+    stderr_shape: str,
+) -> None:
+    actions = _capture_actions()
+    _rewrite_absence_results(actions, command=command, stderr_shape=stderr_shape)
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    manifest = capture_personal_dev_minio_backup(
+        transport=_RecordingTransport(actions),
+        source_manifest_path=source_manifest_path,
+        payload_root=payload_root,
+    )
+
+    assert source_manifest_path.read_bytes() == manifest.canonical_bytes
+
+
+@pytest.mark.parametrize("command", ("retention", "encrypt", "tag"))
+@pytest.mark.parametrize(
+    "stderr_shape",
+    (
+        "mismatched",
+        "arbitrary",
+        "suffixed",
+        "missing-newline",
+        "dual-json",
+        "success",
+    ),
+)
+def test_capture_rejects_every_other_dual_stream_absence_shape(
+    tmp_path: Path,
+    command: str,
+    stderr_shape: str,
+) -> None:
+    actions = _capture_actions()
+    _rewrite_absence_results(
+        actions,
+        command=command,
+        stderr_shape=stderr_shape,
+        every_occurrence=False,
+    )
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=_RecordingTransport(actions),
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert not source_manifest_path.exists()
+
+
 @pytest.mark.parametrize("preexisting", ("manifest", "payload-root", "dangling-manifest"))
 def test_capture_rejects_every_preexisting_output_path_before_transport(
     tmp_path: Path,
