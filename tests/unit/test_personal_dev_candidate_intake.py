@@ -482,9 +482,7 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
     images: dict[str, object] = {
         component: {
             "index": f"registry.example/loom-{component}@sha256:" + "2" * 64,
-            "platforms": {
-                platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS
-            },
+            "platforms": {platform: "sha256:" + "3" * 64 for platform in PERSONAL_DEV_PLATFORMS},
         }
         for component in PERSONAL_DEV_COMPONENTS
     }
@@ -504,10 +502,7 @@ async def test_candidate_publication_requires_complete_immutable_safety_binding(
         "safety_evidence": {
             "bucket": candidate.object_bucket,
             "content_type": "application/vnd.loom.personal-dev-safety-evidence.v1+json",
-            "key": (
-                f"personal-dev/evidence/{candidate.candidate_sha}/"
-                "test/safety-evidence.json"
-            ),
+            "key": (f"personal-dev/evidence/{candidate.candidate_sha}/test/safety-evidence.json"),
             "sha256": "5" * 64,
             "size_bytes": 1024,
         },

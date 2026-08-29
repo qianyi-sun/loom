@@ -214,8 +214,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                     PersonalDevCandidate.owner_team_id == requested.owner_team_id,
                     PersonalDevCandidate.source_sha256 == requested.source_sha256,
                     PersonalDevCandidate.archive_sha256 == requested.archive_sha256,
-                    PersonalDevCandidate.build_contract_sha256
-                    == requested.build_contract_sha256,
+                    PersonalDevCandidate.build_contract_sha256 == requested.build_contract_sha256,
                 )
                 .with_for_update(),
             )
@@ -224,9 +223,7 @@ class SqlAlchemyPersonalDevCandidateStore:
             candidate_record = _candidate_record(existing)
             if not _same_registration(candidate_record, requested):
                 await self.session.rollback()
-                raise ValueError(
-                    "personal-dev candidate replay changed an immutable binding"
-                )
+                raise ValueError("personal-dev candidate replay changed an immutable binding")
             if existing.artifact_state == "collecting":
                 await self.session.rollback()
                 raise PersonalDevArtifactCollectionInProgressError(
@@ -514,11 +511,7 @@ class SqlAlchemyPersonalDevCandidateStore:
     ) -> PersonalDevArtifactGcClaim | None:
         """Lease one grace-expired mark or an expired prior collection."""
 
-        if (
-            not collector_id
-            or collector_id.strip() != collector_id
-            or len(collector_id) > 128
-        ):
+        if not collector_id or collector_id.strip() != collector_id or len(collector_id) > 128:
             raise ValueError("personal-dev artifact collector identifier is invalid")
         if now.tzinfo is None:
             raise ValueError("personal-dev artifact GC time must include a timezone")
@@ -647,8 +640,7 @@ class SqlAlchemyPersonalDevCandidateStore:
                     PersonalDevCandidate.artifact_state == "collecting",
                     PersonalDevCandidate.artifact_gc_claimed_by == collector_id,
                     PersonalDevCandidate.artifact_gc_lease_epoch == lease_epoch,
-                    PersonalDevCandidate.artifact_gc_manifest_sha256
-                    == manifest_sha256,
+                    PersonalDevCandidate.artifact_gc_manifest_sha256 == manifest_sha256,
                     PersonalDevCandidate.artifact_gc_lease_expires_at > now,
                 )
                 .with_for_update(),
@@ -670,14 +662,10 @@ class SqlAlchemyPersonalDevCandidateStore:
                 await self.session.execute(
                     select(
                         func.coalesce(
-                            func.max(
-                                PersonalDevCandidateArtifactCollection.collection_sequence
-                            ),
+                            func.max(PersonalDevCandidateArtifactCollection.collection_sequence),
                             0,
                         )
-                    ).where(
-                        PersonalDevCandidateArtifactCollection.candidate_id == candidate_id
-                    ),
+                    ).where(PersonalDevCandidateArtifactCollection.candidate_id == candidate_id),
                 )
             ).scalar_one()
         )
@@ -876,9 +864,7 @@ class SqlAlchemyPersonalDevCandidateStore:
             raise ValueError("lease_seconds must be a positive integer")
         if registry_prefix is not None:
             validate_personal_dev_registry_prefix(registry_prefix)
-        await self.session.execute(
-            select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS))
-        )
+        await self.session.execute(select(func.pg_advisory_xact_lock(*_BUILD_CLAIM_LOCK_KEYS)))
         live_global = int(
             (
                 await self.session.execute(
