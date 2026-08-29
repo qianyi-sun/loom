@@ -587,6 +587,7 @@ def test_capture_sanitizes_transport_and_output_failures(
     assert str(raised.value) == "personal-dev MinIO backup is invalid"
     assert marker not in str(raised.value)
     assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
     assert not source_manifest_path.exists()
 
 
@@ -637,6 +638,29 @@ def test_capture_never_places_the_manifest_inside_the_payload_inventory(
     assert not source_manifest_path.exists()
 
 
+def test_capture_rejects_a_manifest_symlink_ancestor_into_the_payload_root(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / "backup"
+    backup_root.mkdir(mode=0o700)
+    payload_root = backup_root / "payloads"
+    alias = tmp_path / "backup-alias"
+    alias.symlink_to(backup_root, target_is_directory=True)
+    source_manifest_path = alias / "payloads" / "source.json"
+    transport = _RecordingTransport(_capture_actions())
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert transport.calls == []
+    assert not payload_root.exists()
+    assert not source_manifest_path.exists()
+
+
 def test_capture_rejects_a_no_tags_message_without_its_bounded_target(
     tmp_path: Path,
 ) -> None:
@@ -654,6 +678,23 @@ def test_capture_rejects_a_no_tags_message_without_its_bounded_target(
         }
     )
     transport = _RecordingTransport(_capture_actions(tags=_result(stderr=malformed, returncode=1)))
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        capture_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+        )
+
+    assert not source_manifest_path.exists()
+
+
+def test_capture_binds_the_no_tags_response_to_the_requested_object(
+    tmp_path: Path,
+) -> None:
+    stale = _tags_absent("artifacts/personal-dev/source/another.tar")
+    transport = _RecordingTransport(_capture_actions(tags=_result(stderr=stale, returncode=1)))
     source_manifest_path, payload_root = _capture_paths(tmp_path)
 
     with pytest.raises(PersonalDevMinioBackupError):
@@ -899,6 +940,27 @@ def test_restore_never_places_the_manifest_inside_the_payload_inventory(
     assert not restored_manifest_path.exists()
 
 
+def test_restore_rejects_a_manifest_symlink_ancestor_into_the_payload_root(
+    tmp_path: Path,
+) -> None:
+    source_manifest_path, payload_root, _, object = _source_authority(tmp_path)
+    alias = tmp_path / "backup-authority-alias"
+    alias.symlink_to(payload_root.parent, target_is_directory=True)
+    restored_manifest_path = alias / "payloads" / "restored.json"
+    transport = _RecordingTransport(_restore_actions(payload_root=payload_root, object=object))
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        restore_personal_dev_minio_backup(
+            transport=transport,
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+            restored_manifest_path=restored_manifest_path,
+        )
+
+    assert transport.calls == []
+    assert not restored_manifest_path.exists()
+
+
 def test_restore_revalidates_retained_inventory_before_publication(tmp_path: Path) -> None:
     source_manifest_path, payload_root, restored_manifest_path, object = _source_authority(tmp_path)
     actions = _restore_actions(payload_root=payload_root, object=object)
@@ -929,4 +991,62 @@ def test_restore_revalidates_retained_inventory_before_publication(tmp_path: Pat
             restored_manifest_path=restored_manifest_path,
         )
 
+    assert not restored_manifest_path.exists()
+
+
+def test_restore_binds_the_no_tags_response_to_the_requested_object(
+    tmp_path: Path,
+) -> None:
+    source_manifest_path, payload_root, restored_manifest_path, object = _source_authority(tmp_path)
+    actions = _restore_actions(payload_root=payload_root, object=object)
+    target = f"restore/{object.bucket}/{object.key}"
+    _replace_run(
+        actions,
+        ("tag", "list", "--json", target),
+        _result(
+            stderr=_tags_absent("artifacts/personal-dev/source/another.tar"),
+            returncode=1,
+        ),
+    )
+
+    with pytest.raises(PersonalDevMinioBackupError):
+        restore_personal_dev_minio_backup(
+            transport=_RecordingTransport(actions),
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+            restored_manifest_path=restored_manifest_path,
+        )
+
+    assert not restored_manifest_path.exists()
+
+
+def test_restore_public_error_does_not_retain_a_sensitive_transport_exception(
+    tmp_path: Path,
+) -> None:
+    marker = "credential-key-sensitive-marker"
+    source_manifest_path, payload_root, restored_manifest_path, _ = _source_authority(tmp_path)
+
+    class _SensitiveTransport(_RecordingTransport):
+        def run(
+            self,
+            arguments: Sequence[str],
+            *,
+            maximum_stdout_bytes: int,
+            timeout_seconds: int,
+        ) -> PersonalDevMinioCommandResult:
+            del arguments, maximum_stdout_bytes, timeout_seconds
+            raise TimeoutError(marker)
+
+    with pytest.raises(PersonalDevMinioBackupError) as raised:
+        restore_personal_dev_minio_backup(
+            transport=_SensitiveTransport(()),
+            source_manifest_path=source_manifest_path,
+            payload_root=payload_root,
+            restored_manifest_path=restored_manifest_path,
+        )
+
+    assert str(raised.value) == "personal-dev MinIO backup is invalid"
+    assert marker not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
     assert not restored_manifest_path.exists()

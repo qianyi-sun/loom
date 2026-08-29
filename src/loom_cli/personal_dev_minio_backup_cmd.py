@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from loom.personal_dev_minio_backup import (
     PersonalDevMinioBackupError,
@@ -328,6 +330,12 @@ def _check_tags(
     except (KeyError, TypeError):
         raise _invalid() from None
     message_prefix = "No tags found  for "
+    observed_message = _bounded_observation(message) if isinstance(message, str) else ""
+    try:
+        target = urlsplit(observed_message.removeprefix(message_prefix))
+    except ValueError:
+        raise _invalid() from None
+    expected_path = f"/{listed.bucket}/{listed.key}".encode()
     if (
         set(value) != {"status", "error"}
         or value["status"] != "error"
@@ -341,8 +349,13 @@ def _check_tags(
             "error": {},
         }
         or not isinstance(message, str)
-        or not _bounded_observation(message).startswith(message_prefix)
+        or not observed_message.startswith(message_prefix)
         or len(message) == len(message_prefix)
+        or target.scheme not in {"http", "https"}
+        or not target.netloc
+        or target.query
+        or target.fragment
+        or unquote_to_bytes(target.path) != expected_path
     ):
         raise _invalid()
 
@@ -422,6 +435,20 @@ def _would_pollute_payload_root(path: Path, payload_root: Path) -> bool:
     )
 
 
+def _has_symlinked_ancestor(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:-1]:
+        current /= component
+        try:
+            value = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(value.st_mode):
+            return True
+    return False
+
+
 def _capture_impl(
     *,
     transport: PersonalDevMinioTransport,
@@ -431,6 +458,7 @@ def _capture_impl(
     if (
         not isinstance(source_manifest_path, Path)
         or not isinstance(payload_root, Path)
+        or _has_symlinked_ancestor(source_manifest_path)
         or _would_pollute_payload_root(source_manifest_path, payload_root)
         or _path_exists_without_following(source_manifest_path)
         or _path_exists_without_following(payload_root)
@@ -501,7 +529,8 @@ def capture_personal_dev_minio_backup(
             payload_root=payload_root,
         )
     except Exception:
-        raise _invalid() from None
+        pass
+    raise _invalid()
 
 
 def _restore_impl(
@@ -515,6 +544,7 @@ def _restore_impl(
         not isinstance(source_manifest_path, Path)
         or not isinstance(payload_root, Path)
         or not isinstance(restored_manifest_path, Path)
+        or _has_symlinked_ancestor(restored_manifest_path)
         or _would_pollute_payload_root(restored_manifest_path, payload_root)
         or _path_exists_without_following(restored_manifest_path)
     ):
@@ -603,4 +633,5 @@ def restore_personal_dev_minio_backup(
             restored_manifest_path=restored_manifest_path,
         )
     except Exception:
-        raise _invalid() from None
+        pass
+    raise _invalid()
