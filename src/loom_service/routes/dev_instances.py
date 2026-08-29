@@ -1000,7 +1000,7 @@ async def delete_dev_instance(
         _require_user_identity(ctx)
     store = _store(request, session)
     visible = _visible(await store.get(name), ctx, operation="destroy")
-    if visible.candidate_id is not None:
+    if visible.candidate_id is not None or visible.operation_step == "pre_activation_abandoned":
         if expected_operation_epoch is None or idempotency_key is None:
             raise HTTPException(
                 status_code=400,
