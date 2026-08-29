@@ -13,6 +13,8 @@ class ExecutionActuatorSettings(BaseSettings):
     target_id: str = Field(min_length=1, max_length=80)
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
     runtime_class_name: str | None = Field(default=None, min_length=1, max_length=63)
+    node_selector: dict[str, str] = Field(default_factory=dict)
+    tolerations: tuple[dict[str, str], ...] = ()
     service_account_name: str = "loom-execution-attempt"
     credential_broker_url: str = (
         "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"

@@ -32,6 +32,8 @@ class ExecutionTargetRuntime:
     target_id: str
     namespace: str
     runtime_class_name: str | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: tuple[dict[str, str], ...] = ()
     service_account_name: str = "loom-execution-attempt"
     credential_broker_url: str = (
         "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"
@@ -249,6 +251,8 @@ def render_execution_job(
                     "enableServiceLinks": False,
                     "serviceAccountName": target.service_account_name,
                     "runtimeClassName": target.runtime_class_name,
+                    "nodeSelector": dict(target.node_selector or {}),
+                    "tolerations": [dict(item) for item in target.tolerations],
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": plan.run_as_user,
@@ -316,6 +320,10 @@ def render_execution_job(
     }
     if target.runtime_class_name is None:
         del job["spec"]["template"]["spec"]["runtimeClassName"]
+    if not target.node_selector:
+        del job["spec"]["template"]["spec"]["nodeSelector"]
+    if not target.tolerations:
+        del job["spec"]["template"]["spec"]["tolerations"]
     return job
 
 

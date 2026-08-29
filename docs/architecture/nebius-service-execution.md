@@ -467,7 +467,10 @@ delivery leases. It renders one deterministic `batch/v1` Job per execution
 unit, requires an immutable image digest, exact CPU/RAM/ephemeral-storage
 requests and limits, a non-root restricted security context, and an attempt
 service account with token automount disabled. A custom `RuntimeClass` may be
-configured but is not required. It never receives Nebius credentials and its Kubernetes service
+configured but is not required. The target-local actuator configuration also
+supplies the exact node selector and tolerations copied into every Job, so an
+execution lease cannot fall back to a system node when the execution group is
+at zero. It never receives Nebius credentials and its Kubernetes service
 account has namespace-only Job create/get/list/watch/delete plus Pod
 get/list/watch permissions. There is no Secret read, Pod exec, log, node,
 namespace, CRD, or cluster-wide permission.

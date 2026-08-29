@@ -194,6 +194,35 @@ def test_job_renderer_uses_default_runtime_when_no_runtime_class_is_configured()
     assert pod["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
 
 
+def test_job_renderer_applies_target_node_placement() -> None:
+    lease = _lease()
+    target = ExecutionTargetRuntime(
+        target_id="nebius-eu-north1-staging",
+        namespace="loom-nebius-staging",
+        node_selector={"loom.nebius/node-role": "execution"},
+        tolerations=(
+            {
+                "key": "loom.nebius/execution",
+                "operator": "Equal",
+                "value": "true",
+                "effect": "NoSchedule",
+            },
+        ),
+    )
+
+    pod = render_execution_job(lease, target=target)["spec"]["template"]["spec"]
+
+    assert pod["nodeSelector"] == {"loom.nebius/node-role": "execution"}
+    assert pod["tolerations"] == [
+        {
+            "key": "loom.nebius/execution",
+            "operator": "Equal",
+            "value": "true",
+            "effect": "NoSchedule",
+        }
+    ]
+
+
 def test_job_renderer_rejects_mutable_image_missing_limits_and_wrong_scope() -> None:
     lease = _lease()
     target = ExecutionTargetRuntime(
