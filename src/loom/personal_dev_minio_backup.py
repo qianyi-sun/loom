@@ -49,6 +49,12 @@ def _is_plain_int(value: object) -> bool:
     return type(value) is int
 
 
+def _validate_plain_int(value: object) -> int:
+    if type(value) is not int:
+        raise _invalid()
+    return value
+
+
 def _has_unsafe_delimiter(value: str) -> bool:
     return ";" in value or any(ord(character) < 32 or ord(character) == 127 for character in value)
 
@@ -402,8 +408,8 @@ def parse_personal_dev_minio_listing(
         listed = tuple(
             PersonalDevMinioListedObject(
                 bucket=bucket,
-                key=record["key"],
-                size_bytes=record["size"],
+                key=_validate_key(record["key"]),
+                size_bytes=_validate_plain_int(record["size"]),
             )
             for record in records
             if set(record)

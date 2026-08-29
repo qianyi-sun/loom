@@ -300,7 +300,7 @@ def _check_encryption(
     try:
         error = value["error"]
         cause = error["cause"]  # type: ignore[index]
-        detail = cause["error"]  # type: ignore[index]
+        detail = cause["error"]
     except (KeyError, TypeError):
         raise _invalid() from None
     if (

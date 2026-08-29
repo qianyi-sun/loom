@@ -16,7 +16,7 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Protocol
 
 import yaml  # type: ignore[import-untyped]
 
@@ -85,6 +85,10 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _STDERR_PRESENT = b"\x01"
 _KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
 _DirectoryIdentity = tuple[int, int, int, int, int]
+
+
+class _BinaryWriteDestination(Protocol):
+    def write(self, payload: bytes | memoryview, /) -> int: ...
 
 
 def _render(args: argparse.Namespace) -> int:
@@ -568,7 +572,7 @@ class _SubprocessKubectlRunner:
         self,
         argv: Sequence[str],
         *,
-        destination: BinaryIO | None,
+        destination: _BinaryWriteDestination | None,
         maximum_stdout_bytes: int,
         expected_size: int | None,
         maximum_stderr_bytes: int,
@@ -828,7 +832,7 @@ class _KubectlMinioTransport:
 def _stream_docker_command(
     argv: Sequence[str],
     *,
-    destination: BinaryIO | None,
+    destination: _BinaryWriteDestination | None,
     maximum_stdout_bytes: int,
     expected_size: int | None,
     maximum_stderr_bytes: int,
@@ -1241,7 +1245,7 @@ class _DockerMinioTransport:
         self,
         arguments: Sequence[str],
         *,
-        destination: BinaryIO | None,
+        destination: _BinaryWriteDestination | None,
         maximum_stdout_bytes: int,
         expected_size: int | None,
         timeout_seconds: int,
