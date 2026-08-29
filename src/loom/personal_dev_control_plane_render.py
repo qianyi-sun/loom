@@ -3052,6 +3052,13 @@ def _network_policies(
         "to": [{"ipBlock": {"cidr": profile.network.kubernetes_api_cidr}}],
         "ports": [{"protocol": "TCP", "port": profile.network.kubernetes_api_port}],
     }
+    api_endpoints = tuple(
+        {
+            "to": [{"ipBlock": {"cidr": cidr}}],
+            "ports": [{"protocol": "TCP", "port": profile.network.kubernetes_api_endpoint_port}],
+        }
+        for cidr in profile.network.kubernetes_api_endpoint_cidrs
+    )
     postgres = {
         "to": [{"podSelector": {"matchLabels": {"app": "loom-dev-postgres"}}}],
         "ports": [{"protocol": "TCP", "port": 5432}],
@@ -3162,7 +3169,7 @@ def _network_policies(
         {
             "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
             "policyTypes": ["Egress"],
-            "egress": [dns, postgres, minio, manager, api],
+            "egress": [dns, postgres, minio, manager, api, *api_endpoints],
         },
     )
     capacity_manager_ingress = policy(
@@ -3255,6 +3262,7 @@ def _network_policies(
                 },
                 minio,
                 api,
+                *api_endpoints,
             ],
         },
     )
