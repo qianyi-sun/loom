@@ -3462,7 +3462,7 @@ def test_backup_restore_runbook_performs_complete_isolated_api_readback(
     assert 'mc_live cat "local/$bucket/$key"' not in runbook
     assert "mc_live()" not in runbook
     assert "mc_restore()" not in runbook
-    assert 'test ! -s' not in runbook
+    assert "test ! -s" not in runbook
     assert "$bucket" not in runbook
     assert "$key" not in runbook
     assert 'mc_restore pipe "restore/$bucket/$key"' not in runbook
