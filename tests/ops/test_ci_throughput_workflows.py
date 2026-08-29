@@ -287,9 +287,9 @@ def test_source_workflows_share_native_run_identity() -> None:
 
         assert "github.event.pull_request.draft" in run_name
         assert "github.event.action == 'converted_to_draft'" in run_name
-        assert """fromJSON('["labeled","unlabeled"]')""" in run_name
-        assert "github.event.action == 'edited'" in run_name
-        assert "github.event.changes.base == null" in run_name
+        assert """fromJSON('["labeled","unlabeled"]')""" not in run_name
+        assert "github.event.action == 'edited'" not in run_name
+        assert "github.event.changes.base == null" not in run_name
         for label in (
             "ci:integration",
             "ci:integration-docker",
@@ -330,7 +330,7 @@ def test_source_workflows_have_no_publisher_generation_contract() -> None:
         assert "authoritative-gates.yml" not in plan_step["run"]
 
 
-def test_filtered_metadata_events_finish_before_checkout_or_gate() -> None:
+def test_draft_events_finish_before_checkout_or_gate() -> None:
     for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         jobs = workflow["jobs"]
@@ -344,9 +344,12 @@ def test_filtered_metadata_events_finish_before_checkout_or_gate() -> None:
         planner_step = next(step for step in plan_job["steps"] if step.get("id") == plan_step_id)
         gate_id = GATE_CONTRACTS[workflow_path][0]
 
-        assert event_step["name"] == "Classify metadata event before checkout"
         assert event_step["id"] == "event"
-        assert "github.event.pull_request.draft" in event_step["env"]["FILTERED_EVENT"]
+        assert _normalized_expression(event_step["env"]["FILTERED_EVENT"]) == (
+            "${{ github.event_name == 'pull_request' && "
+            "(github.event.pull_request.draft || "
+            "github.event.action == 'converted_to_draft') }}"
+        )
         assert "checkout_required=false" in event_step["run"]
         assert "gate_mode=filtered" in event_step["run"]
         assert checkout_step["if"] == "steps.event.outputs.checkout_required == 'true'"
@@ -355,7 +358,7 @@ def test_filtered_metadata_events_finish_before_checkout_or_gate() -> None:
         assert "outputs.gate_mode != 'filtered'" in jobs[gate_id]["if"]
 
 
-def test_filtered_metadata_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
+def test_draft_classifier_emits_no_checkout_contract(tmp_path: Path) -> None:
     for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
         event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
         github_output = tmp_path / (Path(workflow_path).stem + "-output.txt")
@@ -2043,36 +2046,23 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
     assert "pull_request|merge_group)" not in plan_script
 
 
-def test_protected_workflows_cancel_only_superseded_gate_runs() -> None:
+def test_protected_workflows_cancel_superseded_pr_runs() -> None:
     for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
         cancel = workflow["concurrency"]["cancel-in-progress"]
 
-        assert "github.event_name == 'pull_request'" in cancel
-        assert "synchronize" in cancel
-        assert "ready_for_review" in cancel
-        assert "converted_to_draft" in cancel
-        assert "ci:integration" in cancel
-        assert "ci:coverage-summary" in cancel
-        assert "github.event.changes.base != null" in cancel
-        assert "ci:merge-ready" not in cancel
+        assert _normalized_expression(cancel) == "${{ github.event_name == 'pull_request' }}"
 
 
-def test_protected_workflows_isolate_irrelevant_metadata_pending_runs() -> None:
+def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
     for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
         group = workflow["concurrency"]["group"]
 
-        assert "admission" in group
-        assert "background" in group
-        assert "github.event_name == 'pull_request'" in group
-        assert "synchronize" in group
-        assert "ready_for_review" in group
-        assert "converted_to_draft" in group
-        assert "ci:integration" in group
-        assert "ci:coverage-summary" in group
-        assert "github.event.changes.base != null" in group
-        assert "ci:merge-ready" not in group
+        assert "github.event.pull_request.number || github.ref" in group
+        assert "admission" not in group
+        assert "background" not in group
+        assert "github.event.action" not in group
 
 
 def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
