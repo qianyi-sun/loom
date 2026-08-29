@@ -46,6 +46,24 @@ async def run_verify(
     all_prefixes = await object_store.list_task_prefixes(
         bucket=bucket, benchmark=benchmark,
     )
+    # Immutable publication history is not a set of live tasks. Fail closed
+    # even if a stale canonical prefix also exists: only the registered task
+    # rows can identify the current revision.
+    if any(
+        ".loom-revisions" in prefix.rstrip("/").split("/")
+        for prefix in all_prefixes
+    ):
+        return {
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "results": [],
+            "blocked_reason": (
+                "benchmark contains immutable .loom-revisions; legacy object-listing "
+                "verification cannot identify the live task sources; use "
+                f"`loom datasets audit {benchmark} --verify-bundles`"
+            ),
+        }
     if not all_prefixes:
         return {"total": 0, "passed": 0, "failed": 0, "results": []}
 

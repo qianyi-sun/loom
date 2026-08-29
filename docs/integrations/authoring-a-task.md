@@ -459,9 +459,11 @@ depending on a worker fixture mount:
 loom datasets publish-local ./team-evals --bucket loom-benchmarks
 ```
 
-That path registers task sources such as
-`s3://loom-benchmarks/team-evals/alpha/`, which the worker already materializes
-through the object-store backend.
+That path registers immutable task sources such as
+`s3://loom-benchmarks/team-evals/alpha/.loom-revisions/<task-checksum>/<mode-manifest-sha256>/`,
+which the worker already materializes through the object-store backend. The
+revision binds file contents and executable modes, so database rollback cannot
+overwrite bytes referenced by the previously registered task.
 If a wrapper must pass sources explicitly, use safe references such as
 `--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`; literal credential values

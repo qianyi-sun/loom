@@ -620,6 +620,36 @@ def test_verify_minio_env_precedence(
     assert capsys.readouterr().out.count("passed=1") == 2
 
 
+def test_verify_reports_immutable_revision_discovery_as_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("LOOM_MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("LOOM_MINIO_ACCESS_KEY", "access")
+    monkeypatch.setenv("LOOM_MINIO_SECRET_KEY", "secret")
+
+    class FakeObjectStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    async def fake_verify(**_kwargs: object) -> dict[str, object]:
+        return {
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "results": [],
+            "blocked_reason": "use registered task sources",
+        }
+
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+    monkeypatch.setattr("loom_benchmark_tool.verify_cmd.run_verify", fake_verify)
+
+    assert dispatch(["verify", "team-evals"]) == 2
+    out = capsys.readouterr().out
+    assert "BLOCKED: use registered task sources" in out
+    assert "WARNING: no tasks found" not in out
+
+
 def test_import_passes_instance_ids_to_benchmark_tool(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

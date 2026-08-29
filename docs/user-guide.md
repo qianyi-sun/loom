@@ -1362,9 +1362,13 @@ loom datasets publish-local ./team-evals --bucket loom-benchmarks
 loom datasets audit team-evals
 ```
 
-`publish-local` uploads each task bundle under
-`s3://loom-benchmarks/team-evals/<task-id>/` and registers task rows with those
-sources. The worker uses the existing object-store materializer at runtime. If a
+`publish-local` uploads each task bundle under the immutable revision prefix
+`s3://loom-benchmarks/team-evals/<task-id>/.loom-revisions/<task-checksum>/<mode-manifest-sha256>/`
+and registers task rows with those sources. The two digests cover both file
+contents and Loom's generated executable-mode metadata. A failed database
+transaction can therefore leave only an unreferenced revision; it cannot
+overwrite the bytes referenced by the live row. The worker uses the existing
+object-store materializer at runtime. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
 are part of the uploaded bundle. Service-mode trial workers are **pull-only**:
 they wait for a ready native-arch materialization in the loopback registry
@@ -1375,6 +1379,13 @@ The secret-bearing `publish-local` flags also accept safe references such as
 `--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`, but literal credential
 values are rejected because argv is visible in process listings.
+
+`loom datasets verify` refuses to sample a benchmark containing the hidden
+`.loom-revisions` namespace because it cannot identify the live revision
+without consulting the database. For a `publish-local` benchmark, use
+`loom datasets audit team-evals --verify-bundles`; it verifies the immutable
+bundle sources referenced by the registered task rows.
+
 Tasks may narrow the Docker build root with `environment.docker_build_context`,
 and build-only contexts under `.loom-build/` are not uploaded into the agent
 workspace. Tasks can also declare `environment.sidecars` for Docker services

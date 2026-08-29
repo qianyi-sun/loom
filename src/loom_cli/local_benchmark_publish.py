@@ -2,8 +2,9 @@
 
 This is the production-oriented companion to ``validate-local`` and the
 dev-only ``sync-config`` path: validate the same folder contract, upload each
-task bundle under an ``s3://`` prefix the worker already knows how to
-materialize, and upsert benchmark/task rows into the service database.
+task bundle under a checksum-addressed ``s3://`` prefix the worker already
+knows how to materialize, and upsert benchmark/task rows into the service
+database without overwriting bytes referenced by an existing row.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from loom.task_bundle_compat import (
 from loom.terminal_bench_normalize import (
     normalize_terminal_bench_task_toml,
 )
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import ObjectStore, bundle_file_metadata_sha256
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
 from loom_cli.local_benchmark_validate import (
@@ -93,7 +94,8 @@ async def publish_local_benchmark(
     try:
         async with session_factory() as session:
             await session.execute(
-                pg_insert(Benchmark).values(
+                pg_insert(Benchmark)
+                .values(
                     id=entry.id,
                     display_name=entry.display_name,
                     upstream_kind=S3_FOLDER_KIND,
@@ -104,7 +106,8 @@ async def publish_local_benchmark(
                     series=entry.series,
                     splits=[],
                     imported_by=imported_by or PUBLISH_IMPORTED_BY,
-                ).on_conflict_do_update(
+                )
+                .on_conflict_do_update(
                     index_elements=["id"],
                     set_={
                         "display_name": entry.display_name,
@@ -124,8 +127,6 @@ async def publish_local_benchmark(
                 bundle_dir = task_toml.parent
                 rel = bundle_dir.relative_to(result.task_root)
                 task_id = entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
-                prefix = _task_prefix(entry.id, rel)
-                source = f"s3://{bucket}/{prefix}"
 
                 # #369: bundles whose files live under `environment/` but
                 # whose Dockerfile does `COPY . /app/` and references
@@ -152,16 +153,9 @@ async def publish_local_benchmark(
                     if compatibility_issues:
                         raise LocalBenchmarkValidationError(
                             "task bundle compatibility preflight failed for "
-                            f"{task_id}:\n"
-                            + format_compatibility_issues(compatibility_issues),
+                            f"{task_id}:\n" + format_compatibility_issues(compatibility_issues),
                         )
 
-                    uploaded_objects += await upload_task_dir(
-                        store=object_store,
-                        bucket=bucket,
-                        prefix=prefix,
-                        task_dir=staged,
-                    )
                     with (staged / task_toml.name).open("rb") as f:
                         raw_cfg: dict[str, Any] = tomllib.load(f)
                     # #341: normalize Terminal-Bench-shaped task.toml
@@ -173,12 +167,32 @@ async def publish_local_benchmark(
                     raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
                     _promote_cpu_arch_if_runtime_fallback(raw_cfg, staged)
                     checksum = task_checksum(staged)
+                    metadata_digest = bundle_file_metadata_sha256(staged).removeprefix(
+                        "sha256:",
+                    )
+                    source_provenance = {
+                        "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
+                    }
+                    prefix = _task_revision_prefix(
+                        entry.id,
+                        rel,
+                        checksum,
+                        metadata_digest,
+                    )
+                    source = f"s3://{bucket}/{prefix}"
+                    uploaded_objects += await upload_task_dir(
+                        store=object_store,
+                        bucket=bucket,
+                        prefix=prefix,
+                        task_dir=staged,
+                    )
                 existing = await _get_task(session, task_id)
                 if existing is None:
                     inserted += 1
                 elif (
                     existing.checksum != checksum
                     or existing.source != source
+                    or existing.source_provenance != source_provenance
                     or existing.benchmark_id != entry.id
                     or existing.license != entry.license_spdx
                 ):
@@ -187,19 +201,23 @@ async def publish_local_benchmark(
                     unchanged += 1
 
                 await session.execute(
-                    pg_insert(TaskRow).values(
+                    pg_insert(TaskRow)
+                    .values(
                         id=task_id,
                         checksum=checksum,
                         config=raw_cfg,
                         source=source,
+                        source_provenance=source_provenance,
                         license=entry.license_spdx,
                         benchmark_id=entry.id,
-                    ).on_conflict_do_update(
+                    )
+                    .on_conflict_do_update(
                         index_elements=["id"],
                         set_={
                             "checksum": checksum,
                             "config": raw_cfg,
                             "source": source,
+                            "source_provenance": source_provenance,
                             "license": entry.license_spdx,
                             "benchmark_id": entry.id,
                         },
@@ -229,10 +247,21 @@ def _task_prefix(benchmark_id: str, rel: Path) -> str:
     return f"{benchmark_id}/{rel.as_posix().strip('/')}/"
 
 
+def _task_revision_prefix(
+    benchmark_id: str,
+    rel: Path,
+    checksum: str,
+    metadata_digest: str,
+) -> str:
+    return f"{_task_prefix(benchmark_id, rel)}.loom-revisions/{checksum}/{metadata_digest}/"
+
+
 async def _get_task(session, task_id: str):  # type: ignore[no-untyped-def]
-    return (await session.execute(
-        select(TaskRow).where(TaskRow.id == task_id),
-    )).scalar_one_or_none()
+    return (
+        await session.execute(
+            select(TaskRow).where(TaskRow.id == task_id),
+        )
+    ).scalar_one_or_none()
 
 
 def _flatten_environment_subdir(bundle_dir: Path) -> list[str]:
@@ -267,7 +296,8 @@ def _flatten_environment_subdir(bundle_dir: Path) -> list[str]:
 
 
 def _promote_cpu_arch_if_runtime_fallback(
-    raw_cfg: dict[str, Any], bundle_dir: Path,
+    raw_cfg: dict[str, Any],
+    bundle_dir: Path,
 ) -> None:
     """If the bundle's Dockerfile uses a base image the worker will
     substitute an arm64 build for at trial time, promote an unspecified

@@ -1124,6 +1124,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         f"passed={report['passed']} "
         f"failed={report['failed']}",
     )
+    blocked_reason = report.get("blocked_reason")
+    if isinstance(blocked_reason, str) and blocked_reason:
+        print(f"  BLOCKED: {blocked_reason}")
+        return 2
     for r in report["results"]:
         if not r["passed"]:
             print(f"  FAIL {r['task_id']}: {r['stderr_tail']}")
