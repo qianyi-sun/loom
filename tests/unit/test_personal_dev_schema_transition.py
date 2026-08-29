@@ -259,7 +259,7 @@ def _transition_inputs(tmp_path: Path) -> dict[str, Any]:
         "predecessor_shadow_sha256": predecessor_shadow_sha256,
         "alembic_ini_path": _ROOT / "migrations/alembic.ini",
         "expected_predecessor_head": "0112",
-        "expected_target_head": "0120",
+        "expected_target_head": "0121",
     }
 
 
@@ -304,7 +304,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["namespace"] == "loom-dev"
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0120"
+    assert plan["target"]["schema_head"] == "0121"
     predecessor_documents = list(
         yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
     )
@@ -330,6 +330,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0118",
         "0119",
         "0120",
+        "0121",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]
@@ -387,8 +388,8 @@ def test_transition_preparation_fails_closed_on_unbound_input(
         inputs["alembic_ini_path"] = linked_config
     elif mutation == "same-head":
         backup = json.loads(inputs["backup_evidence_path"].read_text(encoding="ascii"))
-        backup["postgres"]["source_schema_head"] = "0120"
-        backup["postgres"]["restored_schema_head"] = "0120"
+        backup["postgres"]["source_schema_head"] = "0121"
+        backup["postgres"]["restored_schema_head"] = "0121"
         inputs["backup_evidence_sha256"] = _write_json(
             inputs["backup_evidence_path"],
             backup,
@@ -411,7 +412,7 @@ def test_transition_preparation_rejects_branched_path_to_sole_merge_head(
             "0113": "0112",
             "0114a": "0113",
             "0114b": "0113",
-            "0120": ("0114a", "0114b"),
+            "0121": ("0114a", "0114b"),
         },
     )
 
@@ -427,14 +428,14 @@ def test_transition_preparation_rejects_non_linear_alembic_edges(
     inputs = _transition_inputs(tmp_path)
     arguments: dict[str, object] = {}
     if edge_kind == "dependency":
-        arguments["dependencies"] = {"0120": "0112"}
+        arguments["dependencies"] = {"0121": "0112"}
     elif edge_kind == "branch-label":
         arguments["branch_labels"] = {"0113": "forward-branch"}
     else:
         raise AssertionError(edge_kind)
     inputs["alembic_ini_path"] = _write_alembic_graph(
         tmp_path / "non-linear-migrations",
-        {"0112": None, "0113": "0112", "0120": "0113"},
+        {"0112": None, "0113": "0112", "0121": "0113"},
         **arguments,
     )
 
@@ -444,7 +445,7 @@ def test_transition_preparation_rejects_non_linear_alembic_edges(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("expected_predecessor_head", "0111"), ("expected_target_head", "0121")),
+    (("expected_predecessor_head", "0111"), ("expected_target_head", "0122")),
 )
 def test_transition_preparation_requires_the_reviewed_schema_boundary(
     tmp_path: Path,
@@ -464,7 +465,7 @@ def test_transition_preparation_normalizes_invalid_alembic_graph(
     inputs = _transition_inputs(tmp_path)
     inputs["alembic_ini_path"] = _write_alembic_graph(
         tmp_path / "invalid-migrations",
-        {"0120": "missing_parent"},
+        {"0121": "missing_parent"},
     )
 
     with pytest.raises(PersonalDevSchemaTransitionError):

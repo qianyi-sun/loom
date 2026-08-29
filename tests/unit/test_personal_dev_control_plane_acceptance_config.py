@@ -131,7 +131,7 @@ def _plan_value(
             "images": release.canonical_value()["images"],
         },
         "storage": {
-            "schema_head": "0120",
+            "schema_head": "0121",
             "backup_restore_evidence_sha256": "b" * 64,
         },
         "activation": {
