@@ -627,10 +627,21 @@ def test_public_failures_do_not_retain_sensitive_parser_or_filesystem_causes(
         assert raised.value.__cause__ is None
 
 
-def test_manifest_builder_enforces_the_manifest_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Returning a manifest after its canonical encoding crosses the ceiling emits oversized authority.
-    object = _object()
-    monkeypatch.setattr(minio_backup, "_MAX_MANIFEST_BYTES", 1)
+def test_manifest_builder_rejects_an_authority_larger_than_the_real_64_mib_limit() -> None:
+    # Removing build-time canonical-byte validation returns authority with 67,200,000 metadata bytes.
+    metadata = {f"k{index}": "x" * 1680 for index in range(4)}
+    objects = tuple(
+        PersonalDevMinioObject(
+            bucket="artifacts",
+            key=f"personal-dev/over-limit/{index:05d}",
+            payload_sha256="a" * 64,
+            size_bytes=0,
+            content_type="text/plain",
+            cache_control=None,
+            metadata=metadata,
+        )
+        for index in range(10_000)
+    )
 
     with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
-        build_personal_dev_minio_manifest((object,))
+        build_personal_dev_minio_manifest(objects)
