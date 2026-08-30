@@ -86,6 +86,7 @@ from loom_service.routes import (
     monitor,
     overview,
     personal_dev_candidates,
+    personal_dev_native_builder,
     pipeline,
     pipeline_stage1_smoke,
     pipeline_stage1_smoke_prepare,
@@ -108,6 +109,7 @@ from loom_service.session_auth import (
     staging_admin_browser_request_allowed,
 )
 from loom_service.storage import (
+    configure_personal_dev_native_builder_storage,
     create_minio_client,
 )
 from loom_service.taskset_gc import run_loop as taskset_gc_run_loop
@@ -312,6 +314,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.pipeline_judge_profile_reader = pipeline_binding_resolver
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+        configure_personal_dev_native_builder_storage(app.state, settings)
         app.state.http_client = http_client
         app.state.gateway_client = gateway_client
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
@@ -486,6 +489,15 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             if callable(close_minio):
                 with contextlib.suppress(Exception):
                     close_minio()
+            native_presign = getattr(
+                app.state,
+                "_owned_personal_dev_native_builder_presign_client",
+                None,
+            )
+            close_native_presign = getattr(native_presign, "close", None)
+            if callable(close_native_presign):
+                with contextlib.suppress(Exception):
+                    close_native_presign()
             owned_engine = getattr(app.state, "_owned_service_engine", None)
             dispose = getattr(owned_engine, "dispose", None)
             if callable(dispose):
@@ -565,6 +577,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(dev_instances.router, prefix="/api/v1")
     app.include_router(dev_instances.internal_router, prefix="/api/v1/internal")
     app.include_router(personal_dev_candidates.router, prefix="/api/v1")
+    app.include_router(personal_dev_native_builder.router, prefix="/api/v1/internal")
     app.include_router(run_library.router, prefix="/api/v1")
     app.include_router(rate_cards.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")

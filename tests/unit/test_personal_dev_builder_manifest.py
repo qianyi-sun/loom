@@ -4,6 +4,7 @@ import json
 
 from loom.personal_dev_builder_manifest import (
     PersonalDevBuilderManifestConfig,
+    personal_dev_builder_contract,
     personal_dev_builder_manifest_documents,
 )
 from tests.unit.test_personal_dev_builder import _registration
@@ -13,6 +14,25 @@ def _config() -> PersonalDevBuilderManifestConfig:
     return PersonalDevBuilderManifestConfig(
         builder_image="registry.example/loom-personal-dev-builder@sha256:" + "a" * 64,
     )
+
+
+def test_public_builder_contract_is_byte_identical_to_manifest_contract() -> None:
+    registration = _registration()
+    for platform in ("linux/amd64", "linux/arm64"):
+        documents = personal_dev_builder_manifest_documents(
+            registration,
+            platform=platform,
+            config=_config(),
+        )
+        config_map = next(
+            document for document in documents if document["kind"] == "ConfigMap"
+        )
+
+        assert config_map["data"]["contract.json"] == personal_dev_builder_contract(
+            registration,
+            platform=platform,
+            config=_config(),
+        )
 
 
 def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
