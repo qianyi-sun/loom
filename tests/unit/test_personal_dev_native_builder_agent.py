@@ -719,6 +719,7 @@ class _FakeContainer:
             },
             "HostConfig": {
                 "Runtime": options.get("runtime"),
+                "CgroupParent": options.get("cgroup_parent"),
                 "ReadonlyRootfs": options.get("read_only"),
                 "CapDrop": options.get("cap_drop"),
                 "CapAdd": options.get("cap_add"),
@@ -899,6 +900,7 @@ async def test_docker_runtime_creates_exact_two_sandbox_contract_before_start() 
     assert buildkit_image == client_image == grant.builder_image
     for options in (buildkit, restricted):
         assert options["runtime"] == "runsc-personal-dev-native"
+        assert options["cgroup_parent"] == "loom-personal-dev-builder.slice"
         assert options["user"] == "1000:1000"
         assert options["network"] == network.name
         assert options["read_only"] is True
@@ -1187,7 +1189,10 @@ async def test_docker_runtime_revalidates_labels_immediately_before_cleanup() ->
     assert not any(event.startswith("remove:") for event in client.events)
 
 
-@pytest.mark.parametrize("mutation", ["tmpfs", "config", "networks", "alias"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["tmpfs", "cgroup-parent", "config", "networks", "alias"],
+)
 async def test_docker_runtime_detects_security_and_tmpfs_shape_drift(
     mutation: str,
 ) -> None:
@@ -1204,6 +1209,8 @@ async def test_docker_runtime_detects_security_and_tmpfs_shape_drift(
     _image, _options, buildkit = client.containers.created[0]
     if mutation == "tmpfs":
         buildkit.attrs["HostConfig"]["Tmpfs"]["/var/lib/loom-buildkit"] = "rw,size=64g"
+    elif mutation == "cgroup-parent":
+        buildkit.attrs["HostConfig"]["CgroupParent"] = "system.slice"
     elif mutation == "config":
         buildkit.attrs["Config"] = None
     elif mutation == "networks":

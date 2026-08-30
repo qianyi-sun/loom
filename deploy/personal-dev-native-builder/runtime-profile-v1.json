@@ -1,0 +1,143 @@
+{
+  "archive": {
+    "members": {
+      "containerd-shim-runsc-v1": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "01d14562fa37f8364e03daeb9d7c075303fc5a855b9e391d9dd48332e378372b",
+        "size": 40996082
+      },
+      "gvisor-bin/checkpointgofer": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "1657354d07034c88b04bfa1fbeae5f6b0e604b5c06014ad69074570bb5bf4697",
+        "size": 65454284
+      },
+      "gvisor-bin/gvisor_sentry": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "e6cd92fc1e8ef48b4b8eebb48885fbfd53b3d0887104b0ba098f734f8ace1ec5",
+        "size": 45132467
+      },
+      "gvisor-bin/runsc-metric-server": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "634e880d71f598f0e356b9a865ca88e8413cbd0da0e3ac031e7a37b28dc2828d",
+        "size": 49185196
+      },
+      "runsc": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "ac5dbcbacc73f5999b24d322e7ef127db6bd5a41645de816afde228efbaaea70",
+        "size": 97995630
+      }
+    },
+    "sha512": "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7",
+    "url": "https://storage.googleapis.com/gvisor/releases/release/20260810/aarch64/gvisor.tar.bz2"
+  },
+  "host": {
+    "architecture": "aarch64",
+    "cgroup_driver": "systemd",
+    "cgroup_version": 2,
+    "device": "/dev/kvm",
+    "docker_api_version": "1.51",
+    "docker_storage_driver": "overlay2",
+    "docker_version": "28.3.3",
+    "minimum_cpus": 20,
+    "minimum_disk_free_bytes": 100000000000,
+    "minimum_memory_bytes": 120000000000,
+    "name": "gx10-01c7"
+  },
+  "identity": {
+    "agent_gid": 24850,
+    "agent_name": "loom-pdev-native",
+    "agent_uid": 24850,
+    "private_key_mode": 256,
+    "socket_gid": 24851,
+    "socket_group": "loom-pdev-docker",
+    "socket_mode": 432
+  },
+  "installation": {
+    "agent_service": "/etc/systemd/system/loom-personal-dev-native-builder-agent.service",
+    "agent_service_template": "/etc/loom/personal-dev-native-builder/loom-personal-dev-native-builder-agent.service.in",
+    "agent_state": "/var/lib/loom-personal-dev-builder/agent",
+    "ca_file": "/etc/loom/personal-dev-native-builder/service-ca.pem",
+    "config_root": "/etc/loom/personal-dev-native-builder",
+    "data_root": "/var/lib/loom-personal-dev-builder",
+    "docker_socket": "/run/loom-personal-dev-builder/docker.sock",
+    "dockerd_config": "/etc/loom/personal-dev-native-builder/dockerd.json",
+    "dockerd_service": "/etc/systemd/system/loom-personal-dev-builder-dockerd.service",
+    "exec_root": "/run/loom-personal-dev-builder",
+    "nftables": "/etc/loom/personal-dev-native-builder/provider-network.nft",
+    "primary_docker_socket": "/var/run/docker.sock",
+    "private_key": "/etc/loom/personal-dev-native-builder/agent-ed25519",
+    "profile": "/etc/loom/personal-dev-native-builder/runtime-profile-v1.json",
+    "release_root": "/opt/loom/gvisor/release-20260810.0",
+    "runsc_config": "/etc/loom/personal-dev-native-builder/runsc.toml",
+    "slice_unit": "/etc/systemd/system/loom-personal-dev-builder.slice",
+    "sysusers": "/etc/sysusers.d/loom-personal-dev-native-builder.conf"
+  },
+  "network": {
+    "address_pool": "172.28.0.0/16",
+    "bridge_prefix_length": 24,
+    "dns_servers": [
+      "1.1.1.1",
+      "1.0.0.1"
+    ],
+    "egress_tcp_ports": [
+      80,
+      443
+    ],
+    "nft_table": "loom_personal_dev_builder"
+  },
+  "release": {
+    "runsc_spec_version": "1.2.1",
+    "tag_commit": "5ceb9a5fd5750d6c73dd166441f28306039300d0",
+    "version": "release-20260810.0"
+  },
+  "resources": {
+    "agent_cpu_nanos": 1000000000,
+    "agent_memory_bytes": 1073741824,
+    "agent_pids_max": 256,
+    "buildkit_cpu_nanos": 3000000000,
+    "buildkit_memory_bytes": 17179869184,
+    "client_cpu_nanos": 1000000000,
+    "client_memory_bytes": 17179869184,
+    "max_concurrency": 2,
+    "slice_cpu_quota_percent": 900,
+    "slice_memory_max_bytes": 77309411328,
+    "slice_tasks_max": 8192
+  },
+  "runtime": {
+    "flags": {
+      "allow-flag-override": "false",
+      "allow-packet-socket-write": "false",
+      "allow-suid": "false",
+      "debug": "false",
+      "directfs": "false",
+      "file-access": "exclusive",
+      "file-access-mounts": "shared",
+      "gvisor-marker-file": "true",
+      "host-fifo": "none",
+      "host-settings": "check",
+      "host-uds": "none",
+      "ignore-cgroups": "false",
+      "mount-cgroup-v2": "true",
+      "net-raw": "false",
+      "network": "sandbox",
+      "oci-seccomp": "true",
+      "platform": "kvm",
+      "platform_device_path": "/dev/kvm",
+      "profile": "false",
+      "restore-spec-validation": "enforce",
+      "rootless": "false",
+      "sidecar-release-enforcement-policy": "ALWAYS",
+      "strace": "false",
+      "systemd-cgroup": "true",
+      "watchdog-action": "panic"
+    },
+    "handler": "runsc-personal-dev-native",
+    "runtime_type": "io.containerd.runsc.v1"
+  },
+  "schema": "loom.personal-dev-native-builder-runtime-profile.v1"
+}

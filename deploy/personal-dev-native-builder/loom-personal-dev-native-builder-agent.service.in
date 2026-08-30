@@ -1,0 +1,17 @@
+[Unit]
+Description=Loom personal development native builder agent
+After=network-online.target loom-personal-dev-builder-dockerd.service
+Wants=network-online.target
+Requires=loom-personal-dev-builder-dockerd.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/docker image inspect @@AGENT_IMAGE@@
+ExecStart=/usr/bin/docker run --rm --name=loom-personal-dev-native-builder-agent --pull=never --cgroup-parent=loom-personal-dev-builder.slice --cpus=1 --memory=1073741824 --memory-swap=1073741824 --pids-limit=256 --read-only --cap-drop=ALL --security-opt=no-new-privileges:true --user=24850:24850 --group-add=24851 --hostname=gx10-01c7 --mount=type=bind,src=/etc/loom/personal-dev-native-builder/agent-ed25519,dst=/run/loom-native-builder/agent-ed25519,readonly --mount=type=bind,src=/etc/loom/personal-dev-native-builder/service-ca.pem,dst=/run/loom-native-builder/service-ca.pem,readonly --mount=type=bind,src=/run/loom-personal-dev-builder/docker.sock,dst=/run/loom-personal-dev-builder/docker.sock --tmpfs=/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=0700,uid=24850,gid=24850 --env=LOOM_NATIVE_BUILDER_SERVICE_URL=@@SERVICE_URL@@ --env=LOOM_NATIVE_BUILDER_AGENT_INSTANCE_ID=@@AGENT_INSTANCE_ID@@ --env=LOOM_NATIVE_BUILDER_KEY_ID=@@KEY_ID@@ --env=LOOM_NATIVE_BUILDER_PRIVATE_KEY_FILE=/run/loom-native-builder/agent-ed25519 --env=LOOM_NATIVE_BUILDER_CA_FILE=/run/loom-native-builder/service-ca.pem --env=LOOM_NATIVE_BUILDER_AGENT_IMAGE=@@AGENT_IMAGE@@ --env=LOOM_NATIVE_BUILDER_BUILDER_IMAGE=@@BUILDER_IMAGE@@ --env=LOOM_NATIVE_BUILDER_RUNTIME_PROFILE_SHA256=@@RUNTIME_PROFILE_SHA256@@ --env=LOOM_NATIVE_BUILDER_DOCKER_SOCKET=/run/loom-personal-dev-builder/docker.sock --env=LOOM_NATIVE_BUILDER_AGENT_UID=24850 --env=LOOM_NATIVE_BUILDER_SOCKET_GID=24851 --env=LOOM_NATIVE_BUILDER_MAX_CONCURRENCY=2 --env=LOOM_NATIVE_BUILDER_POLL_INTERVAL_SECONDS=2 --env=LOOM_NATIVE_BUILDER_HEARTBEAT_INTERVAL_SECONDS=10 --env=LOOM_NATIVE_BUILDER_HEARTBEAT_GRACE_SECONDS=30 --env=LOOM_NATIVE_BUILDER_HTTP_TIMEOUT_SECONDS=15 --env=LOOM_NATIVE_BUILDER_HEALTH_TIMEOUT_SECONDS=60 --env=LOOM_NATIVE_BUILDER_HEALTH_POLL_SECONDS=0.5 --env=LOOM_NATIVE_BUILDER_LOG_LEVEL=INFO @@AGENT_IMAGE@@
+ExecStop=/usr/bin/docker stop --time=30 loom-personal-dev-native-builder-agent
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+Slice=loom-personal-dev-builder.slice
+UMask=0077

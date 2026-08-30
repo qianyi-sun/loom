@@ -33,6 +33,7 @@ _GRANT_PATH = "/api/v1/internal/personal-dev/native-builder/grants"
 _MAX_RESPONSE_BYTES = 512 * 1024
 _DOCKER_SOCKET = "/run/loom-personal-dev-builder/docker.sock"
 _DOCKER_ROOT = "/var/lib/loom-personal-dev-builder"
+_CGROUP_PARENT = "loom-personal-dev-builder.slice"
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 _MANAGED_LABEL_KEYS = {
     "loom.personal-dev-native-builder.managed",
@@ -653,6 +654,7 @@ class DockerPersonalDevNativeBuildRuntime:
             and config.get("Labels") == labels
             and config.get("User") == "1000:1000"
             and host.get("Runtime") == "runsc-personal-dev-native"
+            and host.get("CgroupParent") == _CGROUP_PARENT
             and host.get("ReadonlyRootfs") is True
             and host.get("Memory") == 16 * 1024 * 1024 * 1024
             and host.get("MemorySwap") == 16 * 1024 * 1024 * 1024
@@ -1066,6 +1068,7 @@ class DockerPersonalDevNativeBuildRuntime:
             "detach": True,
             "user": "1000:1000",
             "runtime": "runsc-personal-dev-native",
+            "cgroup_parent": _CGROUP_PARENT,
             "network": network_name,
             "read_only": True,
             "mem_limit": 16 * 1024 * 1024 * 1024,
