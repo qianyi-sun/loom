@@ -191,11 +191,12 @@ jq -e --arg predecessor_head "$expected_predecessor_schema_head" \
   .capacity.executable_new_capacity_ceiling == 0 and
   .rollback.method == "full-predecessor-database-restore" and
   .rollback.requires_exact_state_match == true and
-  .rollback.delete_after_predecessor_apply == [
-    "deployment.apps/loom-personal-dev-web",
-    "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",
-    "service/loom-personal-dev-web"
-  ]' "$plan_tmp" >/dev/null
+  (.rollback.delete_after_predecessor_apply == [] or
+   .rollback.delete_after_predecessor_apply == [
+     "deployment.apps/loom-personal-dev-web",
+     "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",
+     "service/loom-personal-dev-web"
+   ])' "$plan_tmp" >/dev/null
 test "$(sha256sum "$job_tmp" | awk '{print $1}')" = \
   "$(jq -r .migration.job_sha256 "$plan_tmp")"
 mv "$job_tmp" "$transition_job"
@@ -884,7 +885,10 @@ the old management Deployment.
 The exact succeeded predecessor migration Job must still exist. Recovery
 preserves that Job and deletes only the target migration Job and its Pods, so
 reapplying the predecessor shadow updates an already-complete Job rather than
-starting a schema writer concurrently with predecessor management.
+starting a schema writer concurrently with predecessor management. After that
+apply, delete the complete Web resource set only when the pinned transition
+plan records it as target-only. An empty deletion set means the predecessor
+already owns Web and must retain it; any partial or unrelated set fails closed.
 
 ```bash
 stop_target_migration() {
@@ -968,12 +972,27 @@ apply_reviewed_predecessor_shadow() {
   chmod 0600 "$evidence_dir/rollback-predecessor.apply.txt" || return
 }
 remove_forward_only_web() {
-  kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete \
-    deployment/loom-personal-dev-web \
-    networkpolicy/loom-personal-dev-web-ingress \
-    service/loom-personal-dev-web \
-    --ignore-not-found --wait=true --timeout=300s \
-    > "$evidence_dir/rollback-remove-forward-web.txt" || return
+  local deletion_mode
+  deletion_mode="$(jq -er '
+    if .rollback.delete_after_predecessor_apply == [] then "none"
+    elif .rollback.delete_after_predecessor_apply == [
+      "deployment.apps/loom-personal-dev-web",
+      "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",
+      "service/loom-personal-dev-web"
+    ] then "web"
+    else error("invalid forward-only rollback deletion set")
+    end' "$transition_plan")" || return
+  if test "$deletion_mode" = web; then
+    kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete \
+      deployment/loom-personal-dev-web \
+      networkpolicy/loom-personal-dev-web-ingress \
+      service/loom-personal-dev-web \
+      --ignore-not-found --wait=true --timeout=300s \
+      > "$evidence_dir/rollback-remove-forward-web.txt" || return
+  else
+    printf '%s\n' predecessor-owned-web-retained \
+      > "$evidence_dir/rollback-remove-forward-web.txt" || return
+  fi
   chmod 0600 "$evidence_dir/rollback-remove-forward-web.txt" || return
 }
 wait_for_predecessor_shadow() {

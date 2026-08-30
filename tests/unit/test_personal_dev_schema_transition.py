@@ -151,7 +151,11 @@ def _run_source_validation(
     )
 
 
-def _transition_inputs(tmp_path: Path) -> dict[str, Any]:
+def _transition_inputs(
+    tmp_path: Path,
+    *,
+    predecessor_includes_web: bool = False,
+) -> dict[str, Any]:
     current_value = _release_value()
     current_release_path = tmp_path / "current-release.json"
     current_release_sha256 = _write_json(current_release_path, current_value)
@@ -162,13 +166,14 @@ def _transition_inputs(tmp_path: Path) -> dict[str, Any]:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
     predecessor_value = _release_value()
-    predecessor_value["schema_version"] = 2
     predecessor_value["source_sha"] = "9" * 40
     predecessor_value["source_tree"] = "8" * 40
     predecessor_value["images"]["loom_service"] = (
         "ghcr.io/qianyi-sun/loom-service@sha256:" + "d" * 64
     )
-    del predecessor_value["images"]["loom_web"]
+    if not predecessor_includes_web:
+        predecessor_value["schema_version"] = 2
+        del predecessor_value["images"]["loom_web"]
     predecessor_release_path = tmp_path / "predecessor-release.json"
     predecessor_release_sha256 = _write_json(
         predecessor_release_path,
@@ -178,8 +183,12 @@ def _transition_inputs(tmp_path: Path) -> dict[str, Any]:
         predecessor_release_path,
         predecessor_release_sha256,
     )
-    predecessor_profile = load_personal_dev_control_plane_profile(
-        _legacy_profile(tmp_path / "predecessor-profile.toml")
+    predecessor_profile = (
+        profile
+        if predecessor_includes_web
+        else load_personal_dev_control_plane_profile(
+            _legacy_profile(tmp_path / "predecessor-profile.toml")
+        )
     )
     predecessor_shadow = render_shadow_personal_dev_control_plane(
         predecessor_profile,
@@ -342,6 +351,16 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert migration_job["spec"]["template"]["spec"]["containers"][0]["image"] == (
         inputs["current_release"].images.loom_service
     )
+
+
+def test_transition_preparation_preserves_web_owned_by_predecessor(
+    tmp_path: Path,
+) -> None:
+    inputs = _transition_inputs(tmp_path, predecessor_includes_web=True)
+
+    prepared = prepare_personal_dev_schema_transition(**inputs)
+
+    assert prepared.plan["rollback"]["delete_after_predecessor_apply"] == []
 
 
 @pytest.mark.parametrize(
