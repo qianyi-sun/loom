@@ -411,14 +411,17 @@ with the predecessor because the schema intentionally differs.
 ## 3. Prove live invariants and quiesce
 
 The exact predecessor checkout may predate trusted-release and kubeconfig
-descriptor loading. Only its two status invocations therefore receive the
-original regular release and kubeconfig pathnames. Immediately before and after
-each invocation, the runbook proves those pathnames are still the same
-owner-only inodes pinned on descriptors 31 and 36 with the reviewed digests and
-context. The predecessor loaders independently enforce no-follow open, owner,
-mode, link count, size, stable metadata, canonical release JSON, and a
-self-contained kubeconfig. Target-source invocations and every direct kubectl
-call continue to consume only the pinned descriptors.
+descriptor loading. Its two status invocations therefore receive the original
+regular release and kubeconfig pathnames. The target status command accepts its
+trusted release on the pinned descriptor, but its hardened kubectl runner also
+requires the original regular kubeconfig pathname at the public boundary before
+it creates anonymous snapshots for child processes. Immediately before and
+after every regular-path invocation, the runbook proves those pathnames are
+still the same owner-only inodes pinned on descriptors 31 and 36 with the
+reviewed digests and context. The loaders independently enforce no-follow open,
+owner, mode, link count, size, stable metadata, canonical release JSON, and a
+self-contained kubeconfig. Every direct kubectl call continues to consume only
+the pinned kubeconfig descriptor.
 
 ```bash
 target_shadow="$evidence_dir/target-shadow.yaml"
@@ -644,6 +647,50 @@ run_predecessor_shadow_status() {
   }
   if ! assert_predecessor_release_compat_path ||
     ! assert_predecessor_kubeconfig_compat_path; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if mv "$temporary" "$destination"; then return 0; fi
+  rm -f -- "$temporary"
+  return 1
+}
+assert_target_status_compat_paths() {
+  assert_pinned_owner_only_sha256 \
+    30 "$trusted_release_sha256" 16777216 || return 1
+  assert_open_owner_only_sha256 \
+    "$kubeconfig_source" 36 "$kubeconfig_sha256" 1048576 || return 1
+  test "$(kubectl --kubeconfig "$kubeconfig" config current-context)" = \
+    "$expected_kube_context" || return 1
+  assert_open_owner_only_sha256 \
+    "$kubeconfig_source" 36 "$kubeconfig_sha256" 1048576 || return 1
+  assert_pinned_owner_only_sha256 \
+    30 "$trusted_release_sha256" 16777216
+}
+run_target_shadow_status() {
+  local destination="$1"
+  local status=0
+  local temporary
+  case "$destination" in "$evidence_dir/"*) ;; *) return 1 ;; esac
+  test ! -e "$destination" && test ! -L "$destination" || return 1
+  assert_target_status_compat_paths || return 1
+  temporary="$(mktemp "$evidence_dir/target-status.XXXXXX.json")" || return 1
+  if PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/dev/null \
+    PYTHONPATH="$repo/src" "$loom_cli" admin personal-dev-control-plane \
+    status --namespace loom-dev --kubeconfig "$kubeconfig_source" \
+    --file "$profile" --trusted-release-file "$trusted_release" \
+    --trusted-release-sha256 "$trusted_release_sha256" \
+    > "$temporary"; then
+    :
+  else
+    status=$?
+    rm -f -- "$temporary"
+    return "$status"
+  fi
+  chmod 0600 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  if ! assert_target_status_compat_paths; then
     rm -f -- "$temporary"
     return 1
   fi
@@ -900,12 +947,7 @@ wait_for_target_shadow() {
     --namespace loom-dev --timeout=300s || return
 }
 assert_target_shadow_ready() {
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/dev/null \
-    PYTHONPATH="$repo/src" "$loom_cli" admin personal-dev-control-plane status \
-    --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" \
-    --trusted-release-file "$trusted_release" \
-    --trusted-release-sha256 "$trusted_release_sha256" \
-    > "$evidence_dir/target-shadow.status.json" || return
+  run_target_shadow_status "$evidence_dir/target-shadow.status.json" || return
   chmod 0600 "$evidence_dir/target-shadow.status.json" || return
   jq -e '.mode == "shadow" and .ready == true and .blockers == [] and
     .manager_ceiling == 0 and .worker_available == false and
@@ -943,6 +985,10 @@ starting a schema writer concurrently with predecessor management. After that
 apply, delete the complete Web resource set only when the pinned transition
 plan records it as target-only. An empty deletion set means the predecessor
 already owns Web and must retain it; any partial or unrelated set fails closed.
+Other retained migration Jobs and Pods are immutable historical evidence:
+recovery preserves them only when every Job is complete, every Pod is succeeded
+and owned by a complete Job, and none is being deleted. Any active, failed,
+orphaned, or deleting historical entry fails closed before target deletion.
 
 ```bash
 stop_target_migration() {
@@ -954,21 +1000,34 @@ stop_target_migration() {
   chmod 0600 "$inventory" || return
   jq -e --arg predecessor "$predecessor_migration_job_name" \
     --arg target "$migration_job_name" '
-      (.items | type == "array") and
-      ([.items[] | select(
-        .kind == "Job" and .metadata.name == $predecessor and
+      def completed_job:
+        .kind == "Job" and
+        (.metadata.deletionTimestamp // null) == null and
         (.status.succeeded // 0) == 1 and
-        (.status.active // 0) == 0 and (.status.failed // 0) == 0
-      )] | length == 1) and
-      all(.items[];
-        if .kind == "Job" then
-          (.metadata.name == $predecessor or .metadata.name == $target)
-        elif .kind == "Pod" then
-          ((.metadata.labels["batch.kubernetes.io/job-name"] //
-            .metadata.labels["job-name"] // "") as $owner |
-            ($owner == $predecessor or $owner == $target) and
-            ($owner != $predecessor or .status.phase == "Succeeded"))
-        else false end
+        (.status.active // 0) == 0 and (.status.failed // 0) == 0;
+      def pod_owner:
+        (.metadata.labels["batch.kubernetes.io/job-name"] //
+         .metadata.labels["job-name"] // "");
+      (.items | type == "array") and
+      (.items as $items |
+        ([$items[] | select(
+          completed_job and .metadata.name == $predecessor
+        )] | length == 1) and
+        all($items[];
+          if .kind == "Job" then
+            (.metadata.name == $target or completed_job)
+          elif .kind == "Pod" then
+            (pod_owner as $owner |
+              if $owner == $target then true
+              else
+                (.metadata.deletionTimestamp // null) == null and
+                .status.phase == "Succeeded" and
+                any($items[];
+                  completed_job and .metadata.name == $owner
+                )
+              end)
+          else false end
+        )
       )' "$inventory" >/dev/null || return
   kubectl --kubeconfig "$kubeconfig" --namespace loom-dev delete job \
     "$migration_job_name" --ignore-not-found \
@@ -983,20 +1042,35 @@ stop_target_migration() {
     jobs,pods -l app=loom-personal-dev-migration -o json \
     > "$remaining" || return
   chmod 0600 "$remaining" || return
-  jq -e --arg predecessor "$predecessor_migration_job_name" '
-      (.items | type == "array") and
-      ([.items[] | select(
-        .kind == "Job" and .metadata.name == $predecessor and
+  jq -e --arg predecessor "$predecessor_migration_job_name" \
+    --arg target "$migration_job_name" '
+      def completed_job:
+        .kind == "Job" and
+        (.metadata.deletionTimestamp // null) == null and
         (.status.succeeded // 0) == 1 and
-        (.status.active // 0) == 0 and (.status.failed // 0) == 0
-      )] | length == 1) and
-      all(.items[];
-        if .kind == "Job" then .metadata.name == $predecessor
-        elif .kind == "Pod" then
-          ((.metadata.labels["batch.kubernetes.io/job-name"] //
-            .metadata.labels["job-name"] // "") == $predecessor and
-            .status.phase == "Succeeded")
-        else false end
+        (.status.active // 0) == 0 and (.status.failed // 0) == 0;
+      def pod_owner:
+        (.metadata.labels["batch.kubernetes.io/job-name"] //
+         .metadata.labels["job-name"] // "");
+      (.items | type == "array") and
+      (.items as $items |
+        ([$items[] | select(
+          completed_job and .metadata.name == $predecessor
+        )] | length == 1) and
+        ([$items[] | select(
+          .metadata.name == $target or pod_owner == $target
+        )] | length == 0) and
+        all($items[];
+          if .kind == "Job" then completed_job
+          elif .kind == "Pod" then
+            ((.metadata.deletionTimestamp // null) == null and
+             .status.phase == "Succeeded" and
+             (pod_owner as $owner |
+               any($items[];
+                 completed_job and .metadata.name == $owner
+               )))
+          else false end
+        )
       )' "$remaining" >/dev/null || return
 }
 assert_only_restore_connection() {

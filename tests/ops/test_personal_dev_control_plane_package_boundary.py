@@ -504,6 +504,190 @@ def test_predecessor_status_discards_output_after_kubeconfig_drift(tmp_path: Pat
     assert not status_path.exists()
 
 
+def _run_target_status_compatibility_guard(
+    tmp_path: Path,
+    *,
+    reject_after_observation: bool,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_open_owner_only_sha256",
+            "assert_target_status_compat_paths",
+            "run_target_shadow_status",
+        )
+    )
+    invocation_log = tmp_path / "invocation.log"
+    status_path = tmp_path / "target.status.json"
+    profile = tmp_path / "profile.toml"
+    profile.write_text("profile\n", encoding="ascii")
+    trusted_release = tmp_path / "trusted-release.json"
+    trusted_release.write_text("{}", encoding="ascii")
+    trusted_release.chmod(0o600)
+    kubeconfig_source = tmp_path / "reviewed-kubeconfig"
+    kubeconfig_source.write_text("reviewed kubeconfig\n", encoding="ascii")
+    kubeconfig_source.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    kubectl = fake_bin / "kubectl"
+    kubectl.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'test "$1" = --kubeconfig\n'
+        'test "$2" = "$EXPECTED_PINNED_KUBECONFIG"\n'
+        'test "$3" = config\n'
+        'test "$4" = current-context\n'
+        'printf "%s\\n" "$EXPECTED_KUBE_CONTEXT"\n',
+        encoding="ascii",
+    )
+    kubectl.chmod(0o700)
+    target_cli = tmp_path / "target-loom"
+    target_cli.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "observed_kubeconfig=\n"
+        "observed_release=\n"
+        'while test "$#" -gt 0; do\n'
+        '  case "$1" in\n'
+        '    --kubeconfig) observed_kubeconfig="$2"; shift 2 ;;\n'
+        '    --trusted-release-file) observed_release="$2"; shift 2 ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        'test "$observed_kubeconfig" = "$EXPECTED_KUBECONFIG"\n'
+        'test "$observed_release" = "$EXPECTED_TRUSTED_RELEASE"\n'
+        'printf \'%s\\n%s\\n\' "$observed_kubeconfig" "$observed_release" '
+        '> "$INVOCATION_LOG"\n'
+        'if test "$TAMPER_KUBECONFIG" = 1; then\n'
+        '  replacement="${EXPECTED_KUBECONFIG}.replacement"\n'
+        '  printf "%s\\n" tampered > "$replacement"\n'
+        '  chmod 0600 "$replacement"\n'
+        '  mv "$replacement" "$EXPECTED_KUBECONFIG"\n'
+        "fi\n"
+        "printf '%s\\n' '{\"ready\":true}'\n",
+        encoding="ascii",
+    )
+    target_cli.chmod(0o700)
+    trusted_release_sha256 = hashlib.sha256(trusted_release.read_bytes()).hexdigest()
+    kubeconfig_sha256 = hashlib.sha256(kubeconfig_source.read_bytes()).hexdigest()
+    program = (
+        "set -euo pipefail\n"
+        f"{functions}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"profile={shlex.quote(str(profile))}\n"
+        f"kubeconfig_source={shlex.quote(str(kubeconfig_source))}\n"
+        f"kubeconfig_sha256={kubeconfig_sha256}\n"
+        "expected_kube_context=reviewed-context\n"
+        "trusted_release=/proc/self/fd/30\n"
+        f"trusted_release_sha256={trusted_release_sha256}\n"
+        "repo=/unused/target\n"
+        f"loom_cli={shlex.quote(str(target_cli))}\n"
+        f"exec 30< {shlex.quote(str(trusted_release))}\n"
+        'exec 36<"$kubeconfig_source"\n'
+        "kubeconfig=/proc/self/fd/36\n"
+        f"run_target_shadow_status {shlex.quote(str(status_path))}\n"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", program],
+        cwd=_ROOT,
+        env=_synthetic_checkout_env(
+            EXPECTED_KUBECONFIG=str(kubeconfig_source),
+            EXPECTED_KUBE_CONTEXT="reviewed-context",
+            EXPECTED_PINNED_KUBECONFIG="/proc/self/fd/36",
+            EXPECTED_TRUSTED_RELEASE="/proc/self/fd/30",
+            INVOCATION_LOG=str(invocation_log),
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+            TAMPER_KUBECONFIG="1" if reject_after_observation else "0",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, status_path, invocation_log
+
+
+def test_target_status_uses_guarded_regular_kubeconfig_path(tmp_path: Path) -> None:
+    result, status_path, invocation_log = _run_target_status_compatibility_guard(
+        tmp_path,
+        reject_after_observation=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert json.loads(status_path.read_bytes()) == {"ready": True}
+    assert invocation_log.read_text(encoding="ascii").splitlines() == [
+        str(tmp_path / "reviewed-kubeconfig"),
+        "/proc/self/fd/30",
+    ]
+
+
+def test_target_status_discards_output_after_compatibility_drift(tmp_path: Path) -> None:
+    result, status_path, _invocation_log = _run_target_status_compatibility_guard(
+        tmp_path,
+        reject_after_observation=True,
+    )
+
+    assert result.returncode != 0
+    assert not status_path.exists()
+
+
+def test_schema_transition_target_ready_uses_guarded_status_runner(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "assert_target_shadow_ready")
+    call_log = tmp_path / "calls.txt"
+    status = json.dumps(
+        {
+            "blockers": [],
+            "components": [{"name": "personal-workers", "observed": 0}],
+            "manager_ceiling": 0,
+            "mode": "shadow",
+            "ready": True,
+            "worker_available": False,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    program = (
+        "set -euo pipefail\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        'record() { printf "%s\\n" "$1" >> '
+        f"{shlex.quote(str(call_log))}; }}\n"
+        "run_target_shadow_status() {\n"
+        "  record guarded-target-status\n"
+        '  test "$1" = "$evidence_dir/target-shadow.status.json"\n'
+        f"  printf '%s\\n' {shlex.quote(status)} > \"$1\"\n"
+        "}\n"
+        "direct_status() {\n"
+        "  record unguarded-target-status\n"
+        f"  printf '%s\\n' {shlex.quote(status)}\n"
+        "}\n"
+        "repo=/unused/target\n"
+        "loom_cli=direct_status\n"
+        "profile=/unused/profile\n"
+        "kubeconfig=/proc/self/fd/36\n"
+        "trusted_release=/proc/self/fd/30\n"
+        f"trusted_release_sha256={'a' * 64}\n"
+        f"{function}\n"
+        "assert_target_shadow_ready\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert call_log.read_text(encoding="ascii").splitlines() == ["guarded-target-status"]
+
+
 _WEB_V2_COMPONENT_NAMES = (
     "cluster-resources",
     "manager",
@@ -4759,12 +4943,49 @@ def test_schema_transition_recovery_preserves_succeeded_predecessor_migration(
         },
         "status": {"phase": "Running"},
     }
+    historical_job = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "labels": {"app": "loom-personal-dev-migration"},
+            "name": "historical-migration",
+        },
+        "status": {"active": 0, "failed": 0, "succeeded": 1},
+    }
+    historical_pod = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "labels": {
+                "app": "loom-personal-dev-migration",
+                "batch.kubernetes.io/job-name": "historical-migration",
+            },
+            "name": "historical-migration-pod",
+        },
+        "status": {"phase": "Succeeded"},
+    }
     inventory_before = json.dumps(
-        {"items": [predecessor_job, predecessor_pod, target_job, target_pod]},
+        {
+            "items": [
+                predecessor_job,
+                predecessor_pod,
+                target_job,
+                target_pod,
+                historical_job,
+                historical_pod,
+            ]
+        },
         separators=(",", ":"),
     )
     inventory_after = json.dumps(
-        {"items": [predecessor_job, predecessor_pod]},
+        {
+            "items": [
+                predecessor_job,
+                predecessor_pod,
+                historical_job,
+                historical_pod,
+            ]
+        },
         separators=(",", ":"),
     )
     empty_inventory = '{"items":[]}'
@@ -4880,6 +5101,112 @@ def test_schema_transition_recovery_rejects_orphan_migration_pod(
     )
 
     assert result.returncode != 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "active-job",
+        "failed-job",
+        "running-pod",
+        "deleting-job",
+        "deleting-pod",
+    ),
+)
+def test_schema_transition_recovery_rejects_unsafe_historical_migration(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "stop_target_migration")
+    predecessor_name = "predecessor-migration"
+    target_name = "target-migration"
+    historical_name = "historical-migration"
+
+    def job(name: str, *, active: int, succeeded: int) -> dict[str, object]:
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "labels": {"app": "loom-personal-dev-migration"},
+                "name": name,
+            },
+            "status": {"active": active, "failed": 0, "succeeded": succeeded},
+        }
+
+    def pod(name: str, owner: str, *, phase: str) -> dict[str, object]:
+        return {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "labels": {
+                    "app": "loom-personal-dev-migration",
+                    "batch.kubernetes.io/job-name": owner,
+                },
+                "name": name,
+            },
+            "status": {"phase": phase},
+        }
+
+    historical_job = job(historical_name, active=0, succeeded=1)
+    historical_pod = pod("historical-pod", historical_name, phase="Succeeded")
+    if mutation == "active-job":
+        historical_job["status"] = {"active": 1, "failed": 0, "succeeded": 0}
+    elif mutation == "failed-job":
+        historical_job["status"] = {"active": 0, "failed": 1, "succeeded": 0}
+    elif mutation == "running-pod":
+        historical_pod["status"] = {"phase": "Running"}
+    elif mutation == "deleting-job":
+        historical_job["metadata"]["deletionTimestamp"] = "2026-08-30T00:00:00Z"  # type: ignore[index]
+    elif mutation == "deleting-pod":
+        historical_pod["metadata"]["deletionTimestamp"] = "2026-08-30T00:00:00Z"  # type: ignore[index]
+    inventory = json.dumps(
+        {
+            "items": [
+                job(predecessor_name, active=0, succeeded=1),
+                pod("predecessor-pod", predecessor_name, phase="Succeeded"),
+                job(target_name, active=1, succeeded=0),
+                pod("target-pod", target_name, phase="Running"),
+                historical_job,
+                historical_pod,
+            ]
+        },
+        separators=(",", ":"),
+    )
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "kubeconfig=/unused/kubeconfig\n"
+        f"predecessor_migration_job_name={predecessor_name}\n"
+        f"migration_job_name={target_name}\n"
+        "kubectl() {\n"
+        '  printf "%s\\n" "$*" >> "$call_log"\n'
+        '  case " $* " in\n'
+        '    *" get jobs,pods "*" -o json "*)\n'
+        f"      printf '%s\\n' {shlex.quote(inventory)}\n"
+        "      ;;\n"
+        '    *" delete job "*|*" delete pods "*) ;;\n'
+        "    *) return 91 ;;\n"
+        "  esac\n"
+        "}\n"
+        f"{function}\n"
+        "stop_target_migration\n"
+    )
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert call_log.read_text(encoding="ascii").splitlines() == [
+        "--kubeconfig /unused/kubeconfig --namespace loom-dev get jobs,pods "
+        "-l app=loom-personal-dev-migration -o json"
+    ]
 
 
 @pytest.mark.parametrize(
