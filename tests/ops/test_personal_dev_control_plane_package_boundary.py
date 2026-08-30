@@ -4469,18 +4469,47 @@ def test_schema_transition_recovery_validates_boundary_before_every_mutation_pha
     )
 
 
-def test_schema_transition_rollback_removes_exact_forward_only_web_resources(
+@pytest.mark.parametrize(
+    ("rollback_deletions", "expected_returncode", "expected_delete"),
+    [
+        ([], 0, False),
+        (
+            [
+                "deployment.apps/loom-personal-dev-web",
+                "networkpolicy.networking.k8s.io/loom-personal-dev-web-ingress",
+                "service/loom-personal-dev-web",
+            ],
+            0,
+            True,
+        ),
+        (["deployment.apps/loom-personal-dev-web"], 1, False),
+    ],
+)
+def test_schema_transition_rollback_removes_only_planned_forward_web_resources(
     tmp_path: Path,
+    rollback_deletions: list[str],
+    expected_returncode: int,
+    expected_delete: bool,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
     start = runbook.index("\nremove_forward_only_web() {") + 1
     end = runbook.index("\n}\nwait_for_predecessor_shadow() {", start) + 2
     function = runbook[start:end]
     call_log = tmp_path / "calls.txt"
+    transition_plan = tmp_path / "schema-transition-plan.json"
+    transition_plan.write_text(
+        json.dumps(
+            {"rollback": {"delete_after_predecessor_apply": rollback_deletions}},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="ascii",
+    )
     program = (
         "set -uo pipefail\n"
         f"call_log={shlex.quote(str(call_log))}\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        f"transition_plan={shlex.quote(str(transition_plan))}\n"
         "kubeconfig=/unused/kubeconfig\n"
         "predecessor_shadow=/unused/predecessor.yaml\n"
         'kubectl() { printf "%s\\n" "$*" >> "$call_log"; }\n'
@@ -4495,16 +4524,21 @@ def test_schema_transition_rollback_removes_exact_forward_only_web_resources(
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    calls = call_log.read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 1
-    command = calls[0].split()
-    assert command.count("delete") == 1
-    assert {
-        "deployment/loom-personal-dev-web",
-        "networkpolicy/loom-personal-dev-web-ingress",
-        "service/loom-personal-dev-web",
-    }.issubset(command)
+    if expected_returncode == 0:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+    assert call_log.exists() is expected_delete
+    if expected_delete:
+        calls = call_log.read_text(encoding="utf-8").splitlines()
+        assert len(calls) == 1
+        command = calls[0].split()
+        assert command.count("delete") == 1
+        assert {
+            "deployment/loom-personal-dev-web",
+            "networkpolicy/loom-personal-dev-web-ingress",
+            "service/loom-personal-dev-web",
+        }.issubset(command)
 
 
 def test_schema_transition_recovery_preserves_succeeded_predecessor_migration(

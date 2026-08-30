@@ -625,10 +625,14 @@ def prepare_personal_dev_schema_transition(
             profile,
             current_release,
         )
-        if current_identities - predecessor_identities != {
-            *_FORWARD_ONLY_IDENTITIES,
-            current_migration_identity,
-        } or predecessor_identities - current_identities != {predecessor_migration_identity}:
+        current_only = current_identities - predecessor_identities
+        predecessor_only = predecessor_identities - current_identities
+        forward_only_identities = current_only - {current_migration_identity}
+        if (
+            forward_only_identities not in (set(), set(_FORWARD_ONLY_IDENTITIES))
+            or current_only != forward_only_identities | {current_migration_identity}
+            or predecessor_only != {predecessor_migration_identity}
+        ):
             raise ValueError
         migration_job = json.loads(migration_job_json)
         job_sha256 = hashlib.sha256(migration_job_json).hexdigest()
@@ -655,7 +659,10 @@ def prepare_personal_dev_schema_transition(
                 "source_tree": predecessor_release.source_tree,
             },
             "rollback": {
-                "delete_after_predecessor_apply": sorted(_FORWARD_ONLY_IDENTITIES.values()),
+                "delete_after_predecessor_apply": sorted(
+                    _FORWARD_ONLY_IDENTITIES[identity]
+                    for identity in forward_only_identities
+                ),
                 "method": "full-predecessor-database-restore",
                 "requires_exact_state_match": True,
             },
