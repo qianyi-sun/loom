@@ -380,6 +380,130 @@ def _run_schema_transition_predecessor_checkout_head(
     )
 
 
+def _run_predecessor_status_compatibility_guard(
+    tmp_path: Path,
+    *,
+    tamper_kubeconfig: bool,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_open_owner_only_sha256",
+            "assert_predecessor_release_compat_path",
+            "assert_predecessor_kubeconfig_compat_path",
+            "run_predecessor_shadow_status",
+        )
+    )
+    reviewed_kubeconfig = tmp_path / "reviewed-kubeconfig"
+    reviewed_kubeconfig.write_text("reviewed-kubeconfig\n", encoding="ascii")
+    reviewed_kubeconfig.chmod(0o600)
+    predecessor_release = tmp_path / "predecessor-release.json"
+    predecessor_release.write_text("{}", encoding="ascii")
+    predecessor_release.chmod(0o600)
+    predecessor_repo = tmp_path / "predecessor"
+    (predecessor_repo / "src").mkdir(parents=True)
+    predecessor_profile = predecessor_repo / "profile.toml"
+    predecessor_profile.write_text("profile\n", encoding="ascii")
+    invocation_log = tmp_path / "invocation.log"
+    status_path = tmp_path / "predecessor.status.json"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    kubectl = fake_bin / "kubectl"
+    kubectl.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'test "$1" = --kubeconfig\n'
+        'test "$2" = "$EXPECTED_PINNED_KUBECONFIG"\n'
+        'test "$3" = config\n'
+        'test "$4" = current-context\n'
+        'printf "%s\\n" "$EXPECTED_KUBE_CONTEXT"\n',
+        encoding="ascii",
+    )
+    kubectl.chmod(0o700)
+    predecessor_cli = tmp_path / "predecessor-loom"
+    predecessor_cli.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'observed=""\n'
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --kubeconfig; then observed="$2"; shift 2; else shift; fi\n'
+        "done\n"
+        'test "$observed" = "$EXPECTED_KUBECONFIG"\n'
+        'printf "%s\\n" "$observed" > "$INVOCATION_LOG"\n'
+        'if test "$TAMPER_KUBECONFIG" = 1; then\n'
+        '  replacement="${EXPECTED_KUBECONFIG}.replacement"\n'
+        '  printf "%s\\n" tampered > "$replacement"\n'
+        '  chmod 0600 "$replacement"\n'
+        '  mv "$replacement" "$EXPECTED_KUBECONFIG"\n'
+        "fi\n"
+        "printf '%s\\n' '{\"ready\":true}'\n",
+        encoding="ascii",
+    )
+    predecessor_cli.chmod(0o700)
+    kubeconfig_sha256 = hashlib.sha256(reviewed_kubeconfig.read_bytes()).hexdigest()
+    release_sha256 = hashlib.sha256(predecessor_release.read_bytes()).hexdigest()
+    program = (
+        "set -euo pipefail\n"
+        f"{functions}\n"
+        f"kubeconfig_source={shlex.quote(str(reviewed_kubeconfig))}\n"
+        f"kubeconfig_sha256={kubeconfig_sha256}\n"
+        "expected_kube_context=reviewed-context\n"
+        f"predecessor_release_source={shlex.quote(str(predecessor_release))}\n"
+        f"predecessor_release_sha256={release_sha256}\n"
+        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
+        f"predecessor_profile={shlex.quote(str(predecessor_profile))}\n"
+        f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
+        f"evidence_dir={shlex.quote(str(tmp_path))}\n"
+        "exec 31<\"$predecessor_release_source\"\n"
+        "exec 36<\"$kubeconfig_source\"\n"
+        "predecessor_release=/proc/self/fd/31\n"
+        "kubeconfig=/proc/self/fd/36\n"
+        f"run_predecessor_shadow_status {shlex.quote(str(status_path))}\n"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", program],
+        cwd=_ROOT,
+        env=_synthetic_checkout_env(
+            EXPECTED_KUBECONFIG=str(reviewed_kubeconfig),
+            EXPECTED_KUBE_CONTEXT="reviewed-context",
+            EXPECTED_PINNED_KUBECONFIG="/proc/self/fd/36",
+            INVOCATION_LOG=str(invocation_log),
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+            TAMPER_KUBECONFIG="1" if tamper_kubeconfig else "0",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result, status_path, invocation_log
+
+
+def test_predecessor_status_uses_guarded_regular_kubeconfig_path(tmp_path: Path) -> None:
+    result, status_path, invocation_log = _run_predecessor_status_compatibility_guard(
+        tmp_path,
+        tamper_kubeconfig=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(status_path.read_bytes()) == {"ready": True}
+    assert invocation_log.read_text(encoding="utf-8").strip() == str(
+        tmp_path / "reviewed-kubeconfig"
+    )
+
+
+def test_predecessor_status_discards_output_after_kubeconfig_drift(tmp_path: Path) -> None:
+    result, status_path, _invocation_log = _run_predecessor_status_compatibility_guard(
+        tmp_path,
+        tamper_kubeconfig=True,
+    )
+
+    assert result.returncode != 0
+    assert not status_path.exists()
+
+
 _WEB_V2_COMPONENT_NAMES = (
     "cluster-resources",
     "manager",
@@ -4878,28 +5002,6 @@ def test_schema_transition_predecessor_capacity_uses_predecessor_cli(
     assert call_log.read_text(encoding="ascii").splitlines() == ["predecessor-loom"]
 
 
-def test_schema_transition_predecessor_cli_uses_guarded_regular_release_path() -> None:
-    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
-    guard = _fenced_shell_function(runbook, "assert_predecessor_release_compat_path")
-    assert (
-        "assert_open_owner_only_sha256 \\\n"
-        '    "$predecessor_release_source" 31 "$predecessor_release_sha256" '
-        "16777216"
-    ) in guard
-
-    live_start = runbook.index('predecessor_status="$evidence_dir/predecessor.status.json"')
-    live_end = runbook.index('chmod 0600 "$predecessor_status"', live_start)
-    live_status = runbook[live_start:live_end]
-    assert "assert_predecessor_release_compat_path\n" in live_status
-    assert '--trusted-release-file "$predecessor_release_source"' in live_status
-    assert '--trusted-release-file "$predecessor_release"' not in live_status
-
-    recovery_status = _fenced_shell_function(runbook, "assert_predecessor_shadow_ready")
-    assert "assert_predecessor_release_compat_path || return" in recovery_status
-    assert '--trusted-release-file "$predecessor_release_source"' in recovery_status
-    assert '--trusted-release-file "$predecessor_release"' not in recovery_status
-
-
 def test_schema_transition_predecessor_compat_path_rejects_pathname_replacement(
     tmp_path: Path,
 ) -> None:
@@ -4940,26 +5042,12 @@ def test_schema_transition_predecessor_compat_path_rejects_pathname_replacement(
     assert result.returncode != 0
 
 
-def test_schema_transition_predecessor_ready_uses_predecessor_cli(
+def test_schema_transition_predecessor_ready_uses_guarded_status_runner(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
-    functions = "\n".join(
-        _fenced_shell_function(runbook, name)
-        for name in (
-            "assert_predecessor_release_compat_path",
-            "assert_predecessor_shadow_ready",
-        )
-    )
+    function = _fenced_shell_function(runbook, "assert_predecessor_shadow_ready")
     call_log = tmp_path / "calls.txt"
-    target_cli = tmp_path / "target-loom"
-    predecessor_cli = tmp_path / "predecessor-loom"
-    _write_schema_transition_cli_stub(
-        target_cli,
-        call_log=call_log,
-        output="target launcher must not run",
-        returncode=23,
-    )
     status = json.dumps(
         {
             "blockers": [],
@@ -4972,34 +5060,17 @@ def test_schema_transition_predecessor_ready_uses_predecessor_cli(
         sort_keys=True,
         separators=(",", ":"),
     )
-    _write_schema_transition_cli_stub(
-        predecessor_cli,
-        call_log=call_log,
-        output=status,
-    )
-    predecessor_repo = tmp_path / "predecessor"
-    (predecessor_repo / "src").mkdir(parents=True)
     program = (
         "set -euo pipefail\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
-        f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
-        f"loom_cli={shlex.quote(str(target_cli))}\n"
-        f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
         'record() { printf "%s\\n" "$1" >> '
         f"{shlex.quote(str(call_log))}; }}\n"
-        "assert_open_owner_only_sha256() {\n"
-        "  record predecessor-release-path\n"
-        '  test "$1" = "$predecessor_release_source"\n'
-        '  test "$2" = 31\n'
-        '  test "$3" = "$predecessor_release_sha256"\n'
-        '  test "$4" = 16777216\n'
+        "run_predecessor_shadow_status() {\n"
+        "  record guarded-predecessor-status\n"
+        '  test "$1" = "$evidence_dir/rollback-predecessor.status.json"\n'
+        f"  printf '%s\\n' {shlex.quote(status)} > \"$1\"\n"
         "}\n"
-        "predecessor_profile=/unused/profile\n"
-        "predecessor_release=/proc/self/fd/31\n"
-        "predecessor_release_source=/reviewed/predecessor-release.json\n"
-        f"predecessor_release_sha256={'a' * 64}\n"
-        "kubeconfig=/unused/kubeconfig\n"
-        f"{functions}\n"
+        f"{function}\n"
         "assert_predecessor_shadow_ready\n"
     )
 
@@ -5013,8 +5084,7 @@ def test_schema_transition_predecessor_ready_uses_predecessor_cli(
 
     assert result.returncode == 0, result.stderr
     assert call_log.read_text(encoding="ascii").splitlines() == [
-        "predecessor-release-path",
-        "predecessor-loom",
+        "guarded-predecessor-status"
     ]
 
 
