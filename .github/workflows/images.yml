@@ -772,7 +772,9 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.stage1_images != '[]'
     runs-on: ${{ fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
-    timeout-minutes: 90
+    timeout-minutes: 120
+    env:
+      STAGE1_TRIVY_TIMEOUT: 45m0s
     permissions:
       contents: read
     strategy:
@@ -864,6 +866,7 @@ jobs:
             --config-file /tmp/loom-stage1-trivy.yaml \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
           "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
+            --timeout "$STAGE1_TRIVY_TIMEOUT" \
             --format json --output "$EVIDENCE_ROOT/scan.json" \
             --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
             --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" \
@@ -872,7 +875,8 @@ jobs:
             --component "$IMAGE" --architecture amd64 \
             --report "$EVIDENCE_ROOT/scan.json" \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          "$trivy_bin" image --format spdx-json \
+          "$trivy_bin" image --timeout "$STAGE1_TRIVY_TIMEOUT" \
+            --format spdx-json \
             --output "$EVIDENCE_ROOT/sbom.spdx.json" \
             --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$LOCAL_IMAGE"
 
@@ -1814,7 +1818,9 @@ jobs:
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.stage1_images != '[]'
     runs-on: [self-hosted, linux, x64, loom-ci-image]
-    timeout-minutes: 90
+    timeout-minutes: 120
+    env:
+      STAGE1_TRIVY_TIMEOUT: 45m0s
     permissions:
       attestations: write
       contents: read
@@ -1904,6 +1910,7 @@ jobs:
             --config-file /tmp/loom-stage1-trivy.yaml \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
           "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
+            --timeout "$STAGE1_TRIVY_TIMEOUT" \
             --format json --output "$evidence_root/scan.json" \
             --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
             --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
@@ -1911,7 +1918,8 @@ jobs:
             --component "$IMAGE" --architecture amd64 \
             --report "$evidence_root/scan.json" \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          "$trivy_bin" image --format spdx-json \
+          "$trivy_bin" image --timeout "$STAGE1_TRIVY_TIMEOUT" \
+            --format spdx-json \
             --output "$evidence_root/sbom.spdx.json" \
             --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
           trivy_cache="$RUNNER_TEMP/loom-trivy-cache"

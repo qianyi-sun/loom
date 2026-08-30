@@ -604,6 +604,28 @@ def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() 
     assert {"stage1-build", "stage1-publish", "stage1-publish-index"} <= set(gate["needs"])
 
 
+def test_stage1_scans_have_bounded_large_image_timeout() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    candidate = jobs["stage1-build"]
+    publish = jobs["stage1-publish"]
+
+    candidate_scan = next(
+        step["run"]
+        for step in candidate["steps"]
+        if step.get("name") == "Scan candidate and generate exact SPDX SBOM"
+    )
+    publish_scan = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Build, inspect, scan, and prepare Stage 1 child"
+    )
+
+    for job, scan_script in ((candidate, candidate_scan), (publish, publish_scan)):
+        assert job.get("timeout-minutes") == 120
+        assert job.get("env", {}).get("STAGE1_TRIVY_TIMEOUT") == "45m0s"
+        assert scan_script.count('--timeout "$STAGE1_TRIVY_TIMEOUT"') == 2
+
+
 @pytest.mark.parametrize(
     ("event_name", "stage1_build", "stage1_publish", "stage1_index"),
     [
