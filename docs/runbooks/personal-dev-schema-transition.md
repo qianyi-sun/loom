@@ -291,16 +291,27 @@ cleanup_rehearsal() {
   docker network rm "$rehearsal_network" >/dev/null 2>&1 || true
 }
 trap cleanup_rehearsal EXIT
+# The image entrypoint briefly accepts connections through a bootstrap server
+# before replacing PID 1 with the final PostgreSQL server.
+wait_for_final_postgres() {
+  local container="$1"
+  for attempt in $(seq 1 60); do
+    if docker exec "$container" /bin/sh -euc \
+      'read -r comm </proc/1/comm; test "$comm" = postgres' \
+      >/dev/null 2>&1 && \
+      docker exec "$container" \
+      pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+      return
+    fi
+    test "$attempt" -lt 60
+    sleep 1
+  done
+}
 start_rehearsal_postgres() {
   docker run --detach --network "$rehearsal_network" \
     --network-alias transition-postgres --name "$rehearsal_postgres" \
     --env POSTGRES_HOST_AUTH_METHOD=trust "$postgres_image" >/dev/null
-  for attempt in $(seq 1 60); do
-    if docker exec "$rehearsal_postgres" \
-      pg_isready -U postgres -d postgres >/dev/null 2>&1; then return; fi
-    test "$attempt" -lt 60
-    sleep 1
-  done
+  wait_for_final_postgres "$rehearsal_postgres"
 }
 capture_docker_postgres_state() {
   local container="$1"
