@@ -263,7 +263,18 @@ def test_listing_rejects_malformed_client_urls(url: str) -> None:
         parse_personal_dev_minio_listing(_json_line(record), bucket="artifacts")
 
 
-def test_stat_accepts_the_exact_trusted_client_observation_surface(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "checksum",
+    (
+        {"CRC32": "AAAAAA=="},
+        {"CRC32C": "AAAAAA==-3"},
+    ),
+    ids=("crc32", "crc32c-multipart"),
+)
+def test_stat_accepts_supported_32_bit_checksum_observations(
+    tmp_path: Path,
+    checksum: dict[str, str],
+) -> None:
     payload_path = tmp_path / "temporary"
     payload_path.write_bytes(b"x")
     payload_path.chmod(0o600)
@@ -274,7 +285,7 @@ def test_stat_accepts_the_exact_trusted_client_observation_surface(tmp_path: Pat
     )
     record = {
         **_stat_record(name="candidate.tar"),
-        "checksum": {"CRC32C": "AAAAAA==-3"},
+        "checksum": checksum,
     }
 
     normalized = normalize_personal_dev_minio_object(
@@ -311,17 +322,21 @@ def test_stat_rejects_the_obsolete_full_key_fixture_surface(tmp_path: Path) -> N
     ("name", "checksum"),
     [
         ("another.tar", {"CRC32C": "AAAAAA==-3"}),
-        ("candidate.tar", {"CRC32": "AAAAAA==-3"}),
+        ("candidate.tar", {"CRC64NVME": "AAAAAAAAAAA="}),
+        ("candidate.tar", {"CRC32": "not-base64"}),
         ("candidate.tar", {"CRC32C": "AAAAAA==-0"}),
         ("candidate.tar", {"CRC32C": "not-base64"}),
+        ("candidate.tar", {"CRC32": "AAAAAA==", "CRC32C": "AAAAAA=="}),
         ("candidate.tar", {"CRC32C": "AAAAAA==-3", "extra": "AAAAAA=="}),
         ("candidate.tar", "AAAAAA==-3"),
     ],
     ids=(
         "wrong-basename",
         "wrong-algorithm",
+        "malformed-crc32",
         "zero-parts",
         "malformed-value",
+        "multiple-supported-algorithms",
         "extra-algorithm",
         "non-object-checksum",
     ),
