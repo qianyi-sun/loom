@@ -406,9 +406,20 @@ def _pid_is_live(pid: int) -> bool:
     try:
         if Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()[2] == "Z":
             return False
-    except (FileNotFoundError, IndexError):
+    except (FileNotFoundError, ProcessLookupError, IndexError):
         return False
     return True
+
+
+def test_pid_liveness_treats_procfs_esrch_as_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def process_disappeared(*_args: object, **_kwargs: object) -> str:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(Path, "read_text", process_disappeared)
+
+    assert not _pid_is_live(os.getpid())
 
 
 def test_cgroup_population_proof_includes_descendant_cgroups(tmp_path: Path) -> None:
