@@ -28,8 +28,10 @@ MAX_PERSONAL_DEV_STATUS_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOTAL_TIMEOUT_SECONDS = 60.0
 _CALL_TIMEOUT_SECONDS = 10
 _MAX_INVENTORY_ITEMS = 4096
+_MAX_NATIVE_BUILDER_STATUS_BYTES = 16 * 1024
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
+_NATIVE_REASON = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _CONTEXT = re.compile(r"[A-Za-z0-9_.:@/-]{1,253}")
 _MIGRATION_JOB = re.compile(r"loom-personal-dev-migrate-([0-9a-f]{16})-([0-9a-f]{16})")
 _MIGRATION_V1_IMAGE = re.compile(r"ghcr\.io/qianyi-sun/loom-service@sha256:[0-9a-f]{64}")
@@ -173,6 +175,19 @@ _ACCEPTANCE_MANAGER_COMMAND = (
         "/run/loom-personal-dev/management/files",
         observe_identity=True,
     ),
+)
+_NATIVE_BUILDER_COMMAND = (
+    "--request-timeout=10s",
+    "--namespace",
+    _NAMESPACE,
+    "exec",
+    "deployment/loom-personal-dev-management",
+    "-c",
+    "management",
+    "--",
+    "python",
+    "-m",
+    "loom_personal_dev_native_builder_probe",
 )
 _DEPLOYMENTS_COMMAND = (
     "get",
@@ -897,9 +912,46 @@ def _shadow_flags_valid(deployment: Mapping[str, Any]) -> bool:
         for name in (
             "LOOM_SVC_DEV_INSTANCES_ENABLED",
             "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED",
+            "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED",
             "LOOM_SVC_K8S_WORKER_ENABLED",
         )
     )
+
+
+def _native_management_binding(
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+) -> dict[str, str] | None:
+    native = plan.native_builder
+    agent_image = plan.release.images.personal_dev_native_builder_agent
+    if native is None or agent_image is None:
+        return None
+    return {
+        "LOOM_SVC_MINIO_PUBLIC_ENDPOINT": native.public_store_origin,
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE": agent_image,
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID": (
+            str(native.agent_instance_id)
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_KEY_ID": native.agent_key_id,
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED": "true",
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_FRESHNESS_SEC": (
+            str(native.freshness_seconds)
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_MAX_CONCURRENCY": (
+            str(native.max_concurrency)
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PROTOCOL_VERSION": (
+            str(native.protocol_version)
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_FILE": (
+            "/run/loom-personal-dev/native-builder-public/files/public-key"
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_SHA256": (
+            native.public_key_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_RUNTIME_PROFILE_SHA256": (
+            native.runtime_profile_sha256
+        ),
+    }
 
 
 def _acceptance_management_binding_valid(
@@ -945,6 +997,10 @@ def _acceptance_management_binding_valid(
             plan.builder.trusted_launcher_profile_sha256
         ),
     }
+    native_expected = _native_management_binding(plan)
+    if native_expected is None:
+        return False
+    expected.update(native_expected)
     return all(environment.get(name) == value for name, value in expected.items())
 
 
@@ -992,6 +1048,10 @@ def _operational_management_binding_valid(
             plan.builder.trusted_launcher_profile_sha256
         ),
     }
+    native_expected = _native_management_binding(plan)
+    if native_expected is None:
+        return False
+    expected.update(native_expected)
     return all(environment.get(name) == value for name, value in expected.items())
 
 
@@ -1701,6 +1761,167 @@ def _acceptance_manager_status(
     return binding.executable_new_capacity_ceiling, not blockers, blockers
 
 
+_NATIVE_AGENT_FIELDS = {
+    "active_grant_ids",
+    "agent_image",
+    "agent_instance_id",
+    "agent_key_id",
+    "available",
+    "builder_image",
+    "host_architecture",
+    "host_boot_id",
+    "host_name",
+    "last_seen_at",
+    "managed_grant_ids",
+    "max_concurrency",
+    "platform",
+    "protocol_version",
+    "provider",
+    "readiness_evidence_sha256",
+    "runtime_profile_sha256",
+    "unavailable_reason",
+}
+
+
+def _native_probe_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    canonical = parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(UTC) if value == canonical else None
+
+
+def _native_grant_inventory(value: object, *, maximum: int) -> tuple[UUID, ...] | None:
+    if not isinstance(value, list) or len(value) > maximum:
+        return None
+    parsed: list[UUID] = []
+    for item in value:
+        if not _canonical_nonzero_uuid(item):
+            return None
+        parsed.append(UUID(item))
+    result = tuple(parsed)
+    if result != tuple(sorted(set(result), key=str)):
+        return None
+    return result
+
+
+def _native_builder_status(
+    result: subprocess.CompletedProcess[str] | None,
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+    *,
+    now: datetime,
+) -> tuple[int, bool, set[str]]:
+    if result is not None and result.returncode == 3:
+        return 0, False, {"native_builder_inventory_drift"}
+    if result is not None and result.returncode == 4:
+        return 0, False, {"native_builder_public_store_unavailable"}
+    if result is None or result.returncode != 0:
+        return 0, False, {"native_builder_agent_stale"}
+    try:
+        payload = result.stdout.encode("ascii")
+        if (
+            result.stderr
+            or len(payload) > _MAX_NATIVE_BUILDER_STATUS_BYTES
+            or not payload.endswith(b"\n")
+        ):
+            raise ValueError("native builder probe framing is invalid")
+        document = _json_document(result.stdout)
+        if (
+            set(document) != {"agent", "schema"}
+            or document.get("schema")
+            != "loom-personal-dev-native-builder-agent-status-v1"
+            or json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+            + b"\n"
+            != payload
+        ):
+            raise ValueError("native builder probe document is invalid")
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        return 0, False, {"native_builder_identity_mismatch"}
+
+    agent = document["agent"]
+    if agent is None:
+        return 0, False, {"native_builder_agent_stale"}
+    if not isinstance(agent, Mapping) or set(agent) != _NATIVE_AGENT_FIELDS:
+        return 0, False, {"native_builder_identity_mismatch"}
+
+    last_seen_at = _native_probe_timestamp(agent.get("last_seen_at"))
+    native = plan.native_builder
+    if native is None:
+        return 1, False, {"native_builder_disabled"}
+    if (
+        last_seen_at is None
+        or last_seen_at > now
+        or (now - last_seen_at).total_seconds() > native.freshness_seconds
+    ):
+        return 1, False, {"native_builder_agent_stale"}
+
+    identity_matches = (
+        _canonical_nonzero_uuid(agent.get("agent_instance_id"))
+        and agent.get("agent_instance_id") == str(native.agent_instance_id)
+        and isinstance(agent.get("agent_key_id"), str)
+        and agent.get("agent_key_id") == native.agent_key_id
+        and agent.get("provider") == native.provider
+        and agent.get("platform") == native.platform
+        and type(agent.get("protocol_version")) is int
+        and agent.get("protocol_version") == native.protocol_version
+        and agent.get("host_name") == native.host_name
+        and agent.get("host_architecture") == "aarch64"
+        and _canonical_nonzero_uuid(agent.get("host_boot_id"))
+        and agent.get("host_boot_id") == str(native.host_boot_id)
+    )
+    if not identity_matches:
+        return 1, False, {"native_builder_identity_mismatch"}
+
+    managed = _native_grant_inventory(agent.get("managed_grant_ids"), maximum=64)
+    active = _native_grant_inventory(
+        agent.get("active_grant_ids"),
+        maximum=native.max_concurrency,
+    )
+    agent_image = plan.release.images.personal_dev_native_builder_agent
+    inventory_matches = (
+        managed is not None
+        and active is not None
+        and active == managed
+        and agent_image is not None
+        and agent.get("agent_image") == agent_image
+        and agent.get("builder_image") == plan.release.images.personal_dev_builder
+        and agent.get("runtime_profile_sha256") == native.runtime_profile_sha256
+        and type(agent.get("max_concurrency")) is int
+        and agent.get("max_concurrency") == native.max_concurrency
+        and isinstance(agent.get("readiness_evidence_sha256"), str)
+        and _DIGEST.fullmatch(agent["readiness_evidence_sha256"]) is not None
+        and agent.get("readiness_evidence_sha256") != "0" * 64
+    )
+    if not inventory_matches:
+        return 1, False, {"native_builder_inventory_drift"}
+
+    available = agent.get("available")
+    reason = agent.get("unavailable_reason")
+    if type(available) is not bool or (
+        reason is not None
+        and (not isinstance(reason, str) or _NATIVE_REASON.fullmatch(reason) is None)
+    ):
+        return 1, False, {"native_builder_inventory_drift"}
+    if available is not (reason is None):
+        return 1, False, {"native_builder_inventory_drift"}
+    if not available:
+        if reason == "public_store_unavailable":
+            return 1, False, {"native_builder_public_store_unavailable"}
+        if reason == "managed_resource_shape_drift":
+            return 1, False, {"native_builder_inventory_drift"}
+        return 1, False, {"native_builder_disabled"}
+    return 1, True, set()
+
+
 def _personal_worker_signature(item: Mapping[str, Any]) -> bool:
     metadata = _metadata(item)
     if metadata is None:
@@ -1811,7 +2032,11 @@ def _observe_personal_dev_status(
         "--output=json",
     )
     mode_commands = (
-        (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND)
+        (
+            _ACCEPTANCE_MANAGER_COMMAND,
+            _NATIVE_BUILDER_COMMAND,
+            _DEPLOYMENTS_COMMAND,
+        )
         if enabled
         else (_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND)
     )
@@ -2245,6 +2470,17 @@ def _observe_personal_dev_status(
             if management is None or not _shadow_flags_valid(management):
                 blockers.add("management_shadow_flags_invalid")
         elif acceptance_plan is not None:
+            management_environment = (
+                _literal_environment(management) if management is not None else None
+            )
+            if (
+                management_environment is None
+                or management_environment.get(
+                    "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED"
+                )
+                != "true"
+            ):
+                blockers.add("native_builder_disabled")
             if management is None or not _acceptance_management_binding_valid(
                 management,
                 acceptance_plan,
@@ -2254,6 +2490,17 @@ def _observe_personal_dev_status(
                 blockers.add("management_acceptance_probe_invalid")
         else:
             assert operational_plan is not None
+            management_environment = (
+                _literal_environment(management) if management is not None else None
+            )
+            if (
+                management_environment is None
+                or management_environment.get(
+                    "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED"
+                )
+                != "true"
+            ):
+                blockers.add("native_builder_disabled")
             if management is None or not _operational_management_binding_valid(
                 management,
                 operational_plan,
@@ -2427,6 +2674,21 @@ def _observe_personal_dev_status(
         )
         blockers.update(manager_blockers)
 
+    native_builder_observed = 0
+    native_builder_ok = not enabled
+    if enabled:
+        assert enabled_plan is not None
+        (
+            native_builder_observed,
+            native_builder_ok,
+            native_builder_blockers,
+        ) = _native_builder_status(
+            results[_NATIVE_BUILDER_COMMAND],
+            enabled_plan,
+            now=datetime.now(UTC),
+        )
+        blockers.update(native_builder_blockers)
+
     personal_workers = 0
     worker_inventory_ok = False
     try:
@@ -2453,6 +2715,14 @@ def _observe_personal_dev_status(
     ]
     if web_expected:
         component_values.append(PersonalDevShadowComponent("web", web_observed, web_ready))
+    if enabled:
+        component_values.append(
+            PersonalDevShadowComponent(
+                "native-builder",
+                native_builder_observed,
+                native_builder_ok,
+            )
+        )
     component_values.append(
         PersonalDevShadowComponent(
             "personal-workers",
@@ -2464,7 +2734,9 @@ def _observe_personal_dev_status(
     stable_blockers = tuple(sorted(blockers))
     if enabled:
         shared_ready = namespace_ok and runtime_ok and namespaced_ok and cluster_ok
-        application_ready = shared_ready and activation_ready and web_ready
+        application_ready = (
+            shared_ready and activation_ready and web_ready and native_builder_ok
+        )
         capacity_publication_ready = manager_ok and manager_ceiling == 0
         ready = application_ready and capacity_publication_ready and not stable_blockers
         input_sha256 = expected.input_sha256 if digest_observed else None

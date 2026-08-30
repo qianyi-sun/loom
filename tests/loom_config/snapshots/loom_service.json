@@ -504,6 +504,61 @@
     "default": "16",
     "required": false
   },
+  "personal_dev_native_builder_agent_image": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_native_builder_agent_instance_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_native_builder_agent_key_id": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_native_builder_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "personal_dev_native_builder_freshness_sec": {
+    "annotation": "<class 'int'>",
+    "default": "60",
+    "required": false
+  },
+  "personal_dev_native_builder_max_concurrency": {
+    "annotation": "<class 'int'>",
+    "default": "2",
+    "required": false
+  },
+  "personal_dev_native_builder_poll_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "1.0",
+    "required": false
+  },
+  "personal_dev_native_builder_protocol_version": {
+    "annotation": "<class 'int'>",
+    "default": "1",
+    "required": false
+  },
+  "personal_dev_native_builder_public_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "personal_dev_native_builder_public_key_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_native_builder_runtime_profile_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_operational_binding_json": {
     "annotation": "<class 'str'>",
     "default": "'{}'",

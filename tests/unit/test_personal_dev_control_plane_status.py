@@ -7,7 +7,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ import yaml
 
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
+    PersonalDevAcceptancePlanError,
     PersonalDevOperationalPlan,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
@@ -45,6 +46,16 @@ _STATEFULSET_UIDS = {
     "loom-dev-minio": "00000000-0000-0000-0000-000000000102",
 }
 _MIGRATION_JOB_UID = "00000000-0000-0000-0000-000000000103"
+_NATIVE_AGENT_INSTANCE_ID = "10000000-0000-0000-0000-000000000001"
+_NATIVE_HOST_BOOT_ID = "20000000-0000-0000-0000-000000000001"
+_NATIVE_AGENT_KEY_ID = "gb10-native-builder-v1"
+_NATIVE_PUBLIC_KEY_SHA256 = "c" * 64
+_NATIVE_RUNTIME_PROFILE_SHA256 = "d" * 64
+_NATIVE_PUBLIC_STORE_ORIGIN = "https://minio.dev.yylx.world"
+_NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS = ("207.35.188.227/32",)
+_NATIVE_AGENT_IMAGE = (
+    "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
+)
 
 _CONTEXT = ("config", "current-context")
 _NAMESPACES = ("get", "namespaces", "--output=json")
@@ -127,6 +138,19 @@ _ACCEPTANCE_MANAGER = (
     "/run/loom-personal-dev/management/files/capacity-lifecycle-token",
     "--observe-identity",
 )
+_NATIVE_BUILDER = (
+    "--request-timeout=10s",
+    "--namespace",
+    "loom-dev",
+    "exec",
+    "deployment/loom-personal-dev-management",
+    "-c",
+    "management",
+    "--",
+    "python",
+    "-m",
+    "loom_personal_dev_native_builder_probe",
+)
 _DEPLOYMENTS = (
     "get",
     "deployments.apps",
@@ -137,7 +161,7 @@ _DEPLOYMENTS = (
 
 def _release_value() -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -149,6 +173,7 @@ def _release_value() -> dict[str, object]:
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
+            "personal_dev_native_builder_agent": _NATIVE_AGENT_IMAGE,
             "personal_dev_scanner_cache": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
             ),
@@ -223,6 +248,7 @@ class _FakeRunner:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            + ("\n" if command == _NATIVE_BUILDER else "")
         )
         return subprocess.CompletedProcess(list(argv), 0, stdout, "")
 
@@ -465,6 +491,25 @@ def _quota_value(profile: Any) -> dict[str, int]:
     }
 
 
+def _prepared_profile() -> Any:
+    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    assert profile.native_builder is not None
+    return replace(
+        profile,
+        native_builder=replace(
+            profile.native_builder,
+            prepared=True,
+            agent_instance_id=_NATIVE_AGENT_INSTANCE_ID,
+            agent_key_id=_NATIVE_AGENT_KEY_ID,
+            public_key_sha256=_NATIVE_PUBLIC_KEY_SHA256,
+            host_name="gx10-01c7",
+            runtime_profile_sha256=_NATIVE_RUNTIME_PROFILE_SHA256,
+            public_store_origin=_NATIVE_PUBLIC_STORE_ORIGIN,
+            public_store_endpoint_cidrs=_NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS,
+        ),
+    )
+
+
 def _acceptance_inputs(
     tmp_path: Path,
 ) -> tuple[RenderedPersonalDevControlPlane, PersonalDevAcceptancePlan]:
@@ -481,7 +526,7 @@ def _acceptance_inputs(
         release_path,
         hashlib.sha256(payload).hexdigest(),
     )
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = _prepared_profile()
     shadow = render_shadow_personal_dev_control_plane(profile, release)
     protocol_sha256 = hashlib.sha256(
         json.dumps(
@@ -491,10 +536,16 @@ def _acceptance_inputs(
         ).encode("ascii")
     ).hexdigest()
     value = {
-        "acceptance_owner": {
-            "team_id": "00000000-0000-0000-0000-000000000201",
-            "user_id": "00000000-0000-0000-0000-000000000301",
-        },
+        "acceptance_owners": [
+            {
+                "team_id": "00000000-0000-0000-0000-000000000201",
+                "user_id": "00000000-0000-0000-0000-000000000301",
+            },
+            {
+                "team_id": "00000000-0000-0000-0000-000000000202",
+                "user_id": "00000000-0000-0000-0000-000000000302",
+            },
+        ],
         "activation": {
             "key_id": "personal-dev-agent-v1",
             "public_key_sha256": "c" * 64,
@@ -524,6 +575,23 @@ def _acceptance_inputs(
             "execution_epoch": 11,
             "execution_state": "prepared",
         },
+        "native_builder": {
+            "agent_instance_id": _NATIVE_AGENT_INSTANCE_ID,
+            "agent_key_id": _NATIVE_AGENT_KEY_ID,
+            "freshness_seconds": 60,
+            "host_boot_id": _NATIVE_HOST_BOOT_ID,
+            "host_name": "gx10-01c7",
+            "max_concurrency": 2,
+            "platform": "linux/arm64",
+            "protocol_version": 1,
+            "provider": "gb10-gvisor-docker-v1",
+            "public_key_sha256": _NATIVE_PUBLIC_KEY_SHA256,
+            "public_store_origin": _NATIVE_PUBLIC_STORE_ORIGIN,
+            "public_store_endpoint_cidrs": list(
+                _NATIVE_PUBLIC_STORE_ENDPOINT_CIDRS
+            ),
+            "runtime_profile_sha256": _NATIVE_RUNTIME_PROFILE_SHA256,
+        },
         "principals": {
             "lifecycle_principal_id": "personal-dev-lifecycle",
             "reporter_principal_id": "personal-dev-reporter",
@@ -535,11 +603,11 @@ def _acceptance_inputs(
             "shadow_manifest_sha256": hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
             "trusted_release_sha256": hashlib.sha256(release.canonical_bytes()).hexdigest(),
         },
-        "schema_version": 1,
+        "schema_version": 3,
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0122",
+            "schema_head": "0123",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -571,8 +639,9 @@ def _operational_inputs(
 ) -> tuple[RenderedPersonalDevControlPlane, PersonalDevOperationalPlan]:
     _expected, acceptance = _acceptance_inputs(tmp_path)
     value = acceptance.canonical_value()
-    value.pop("acceptance_owner")
+    value.pop("acceptance_owners")
     value.pop("window")
+    value["schema_version"] = 2
     value["approval"] = {
         "acceptance_result_sha256": "4" * 64,
         "approved_at": "2026-08-17T20:00:00Z",
@@ -592,7 +661,7 @@ def _operational_inputs(
         release_path,
         hashlib.sha256(release_payload).hexdigest(),
     )
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = _prepared_profile()
     return (
         render_operational_personal_dev_control_plane(
             profile,
@@ -709,6 +778,7 @@ def _enabled_healthy_runner(
             "execution_state": plan.manager.execution_state,
             "observer_principal_id": plan.principals.lifecycle_principal_id,
         },
+        _NATIVE_BUILDER: _native_builder_status(plan),
         _DEPLOYMENTS: {
             "apiVersion": "v1",
             "kind": "List",
@@ -716,6 +786,40 @@ def _enabled_healthy_runner(
         },
     }
     return _FakeRunner(responses)
+
+
+def _native_builder_status(
+    plan: PersonalDevAcceptancePlan | PersonalDevOperationalPlan,
+) -> dict[str, object]:
+    native = plan.native_builder
+    assert native is not None
+    agent_image = plan.release.images.personal_dev_native_builder_agent
+    assert agent_image is not None
+    return {
+        "agent": {
+            "active_grant_ids": [],
+            "agent_image": agent_image,
+            "agent_instance_id": str(native.agent_instance_id),
+            "agent_key_id": native.agent_key_id,
+            "available": True,
+            "builder_image": plan.release.images.personal_dev_builder,
+            "host_architecture": "aarch64",
+            "host_boot_id": str(native.host_boot_id),
+            "host_name": native.host_name,
+            "last_seen_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "managed_grant_ids": [],
+            "max_concurrency": native.max_concurrency,
+            "platform": native.platform,
+            "protocol_version": native.protocol_version,
+            "provider": native.provider,
+            "readiness_evidence_sha256": "e" * 64,
+            "runtime_profile_sha256": native.runtime_profile_sha256,
+            "unavailable_reason": None,
+        },
+        "schema": "loom-personal-dev-native-builder-agent-status-v1",
+    }
 
 
 def _acceptance_healthy_fixture(
@@ -755,6 +859,14 @@ def _pod_by_app(runner: _FakeRunner, app: str) -> dict[str, Any]:
         for item in _items(runner, _NAMESPACED)
         if item["kind"] == "Pod" and item["metadata"]["labels"].get("app") == app
     )
+
+
+def _native_agent(runner: _FakeRunner) -> dict[str, Any]:
+    document = runner.responses[_NATIVE_BUILDER]
+    assert isinstance(document, dict)
+    agent = document["agent"]
+    assert isinstance(agent, dict)
+    return agent
 
 
 def _with_statefulset_ordinals(
@@ -857,6 +969,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
             {"name": "manager", "observed": 1, "ready": True},
             {"name": "namespaced-resources", "observed": 35, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
+            {"name": "native-builder", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
             {"name": "web", "observed": 1, "ready": True},
@@ -876,6 +989,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         _NAMESPACED,
         _CLUSTER,
         _ACCEPTANCE_MANAGER,
+        _NATIVE_BUILDER,
         _DEPLOYMENTS,
     ]
     assert all(1 <= timeout <= 10 for _call, timeout in runner.calls)
@@ -885,53 +999,226 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
-def test_acceptance_status_v2_two_owners_preserves_observed_resource_shape(
+def test_acceptance_status_requires_one_fresh_native_agent(tmp_path: Path) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runner.responses[_NATIVE_BUILDER] = {
+        "agent": None,
+        "schema": "loom-personal-dev-native-builder-agent-status-v1",
+    }
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert result.application_ready is False
+    assert result.capacity_publication_ready is True
+    assert result.worker_available is False
+    assert result.manager_ceiling == 0
+    assert "native_builder_agent_stale" in result.blockers
+
+
+def test_acceptance_status_reports_management_native_provider_disabled(
     tmp_path: Path,
 ) -> None:
-    v1_expected, v1_plan = _acceptance_inputs(tmp_path)
-    value = v1_plan.canonical_value()
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    management = _item(
+        runner,
+        _NAMESPACED,
+        "Deployment",
+        "loom-personal-dev-management",
+    )
+    environment = management["spec"]["template"]["spec"]["containers"][0]["env"]
+    enabled = next(
+        entry
+        for entry in environment
+        if entry["name"] == "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED"
+    )
+    enabled["value"] = "false"
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert result.application_ready is False
+    assert "native_builder_disabled" in result.blockers
+
+
+@pytest.mark.parametrize("offset_seconds", [-61, 300])
+def test_acceptance_status_rejects_stale_or_future_native_agent(
+    tmp_path: Path,
+    offset_seconds: int,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    observed = datetime.now(UTC) + timedelta(seconds=offset_seconds)
+    _native_agent(runner)["last_seen_at"] = observed.replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "native_builder_agent_stale" in result.blockers
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "blocker"),
+    [
+        ("agent_instance_id", "10000000-0000-0000-0000-000000000002", "native_builder_identity_mismatch"),
+        ("agent_key_id", "gb10-native-builder-v2", "native_builder_identity_mismatch"),
+        ("host_name", "gx10-ffff", "native_builder_identity_mismatch"),
+        ("host_architecture", "x86_64", "native_builder_identity_mismatch"),
+        ("host_boot_id", "20000000-0000-0000-0000-000000000002", "native_builder_identity_mismatch"),
+        ("provider", "wrong-provider", "native_builder_identity_mismatch"),
+        ("platform", "linux/amd64", "native_builder_identity_mismatch"),
+        ("protocol_version", 2, "native_builder_identity_mismatch"),
+        ("agent_image", "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "f" * 64, "native_builder_inventory_drift"),
+        ("builder_image", "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "f" * 64, "native_builder_inventory_drift"),
+        ("runtime_profile_sha256", "f" * 64, "native_builder_inventory_drift"),
+        ("max_concurrency", 1, "native_builder_inventory_drift"),
+        ("readiness_evidence_sha256", "0" * 64, "native_builder_inventory_drift"),
+    ],
+)
+def test_acceptance_status_rejects_native_identity_or_inventory_drift(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    blocker: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    _native_agent(runner)[field] = value
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+
+
+def test_acceptance_status_rejects_unknown_inactive_managed_grant(tmp_path: Path) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    _native_agent(runner)["managed_grant_ids"] = [
+        "30000000-0000-0000-0000-000000000001"
+    ]
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "native_builder_inventory_drift" in result.blockers
+
+
+def test_acceptance_status_allows_exact_active_native_grants(tmp_path: Path) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    grant_id = "30000000-0000-0000-0000-000000000001"
+    agent = _native_agent(runner)
+    agent["managed_grant_ids"] = [grant_id]
+    agent["active_grant_ids"] = [grant_id]
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is True
+    assert "native_builder_inventory_drift" not in result.blockers
+
+
+@pytest.mark.parametrize(
+    ("reason", "blocker"),
+    [
+        ("host_runtime_unavailable", "native_builder_disabled"),
+        ("public_store_unavailable", "native_builder_public_store_unavailable"),
+    ],
+)
+def test_acceptance_status_maps_native_unavailability_to_exact_blocker(
+    tmp_path: Path,
+    reason: str,
+    blocker: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    agent = _native_agent(runner)
+    agent["available"] = False
+    agent["unavailable_reason"] = reason
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+
+
+@pytest.mark.parametrize("payload", ["{}", "{" + "x" * 65536])
+def test_acceptance_status_rejects_malformed_or_oversized_native_probe(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runner.responses[_NATIVE_BUILDER] = subprocess.CompletedProcess(
+        list(_NATIVE_BUILDER),
+        0,
+        payload,
+        "",
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "native_builder_identity_mismatch" in result.blockers
+
+
+def test_acceptance_status_maps_probe_inventory_exit_to_drift(tmp_path: Path) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runner.responses[_NATIVE_BUILDER] = subprocess.CompletedProcess(
+        list(_NATIVE_BUILDER),
+        3,
+        "",
+        "personal-dev native-builder probe failed\n",
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "native_builder_inventory_drift" in result.blockers
+
+
+def test_acceptance_status_maps_probe_public_store_exit_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runner.responses[_NATIVE_BUILDER] = subprocess.CompletedProcess(
+        list(_NATIVE_BUILDER),
+        4,
+        "",
+        "personal-dev native-builder probe failed\n",
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "native_builder_public_store_unavailable" in result.blockers
+
+
+def test_acceptance_plan_v2_parses_but_cannot_render_enabled_status(
+    tmp_path: Path,
+) -> None:
+    _expected, native_plan = _acceptance_inputs(tmp_path)
+    value = native_plan.canonical_value()
     value["schema_version"] = 2
-    owner_0 = value.pop("acceptance_owner")
-    owner_1 = {
-        "team_id": "00000000-0000-0000-0000-000000000006",
-        "user_id": "00000000-0000-0000-0000-000000000005",
-    }
-    value["acceptance_owners"] = sorted(
-        [owner_0, owner_1],
-        key=lambda item: (item["team_id"], item["user_id"]),
-    )
-    value["quotas"]["global_live_instances"] = 2
-    value["quotas"]["builder_global_concurrency"] = 2
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
-    profile = replace(
-        profile,
-        limits=replace(
-            profile.limits,
-            global_live_instances=2,
-            builder_global_concurrency=2,
-        ),
-    )
+    value.pop("native_builder")
     release_path = tmp_path / "acceptance-trusted-release.json"
     release_payload = release_path.read_bytes()
     release = load_personal_dev_trusted_release(
         release_path,
         hashlib.sha256(release_payload).hexdigest(),
     )
-    shadow = render_shadow_personal_dev_control_plane(profile, release)
-    value["release"]["shadow_manifest_sha256"] = hashlib.sha256(
-        shadow.yaml_text.encode("utf-8")
-    ).hexdigest()
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
     path = tmp_path / "acceptance-plan-v2.json"
     path.write_bytes(payload)
     path.chmod(0o600)
     plan = load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
-    expected = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
 
-    result = _observe_acceptance(expected, plan, _enabled_healthy_runner(expected, plan))
+    assert plan.schema_version == 2
+    assert plan.native_builder is None
 
-    assert result.ready is True
-    assert expected.resource_count == v1_expected.resource_count
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            _prepared_profile(),
+            release,
+            plan,
+            now=_NOW,
+        )
 
 
 def test_healthy_operational_is_durable_and_zero_capacity(tmp_path: Path) -> None:
@@ -955,6 +1242,7 @@ def test_healthy_operational_is_durable_and_zero_capacity(tmp_path: Path) -> Non
         _NAMESPACED,
         _CLUSTER,
         _ACCEPTANCE_MANAGER,
+        _NATIVE_BUILDER,
         _DEPLOYMENTS,
     ]
 

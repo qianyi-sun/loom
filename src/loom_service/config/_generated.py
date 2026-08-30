@@ -121,6 +121,17 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_capacity_pool_capabilities_json: str = "[{\"capability_id\":\"oldlab-x86-none\",\"pool_id\":\"oldlab\",\"operating_system\":\"linux\",\"cpu_architecture\":\"x86_64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]},{\"capability_id\":\"gb10-arm-none\",\"pool_id\":\"gb10\",\"operating_system\":\"linux\",\"cpu_architecture\":\"arm64\",\"gpu_vendor\":\"none\",\"network_policies\":[\"public\"]}]"
     personal_dev_capacity_private_key_file: Path = Path("/var/run/loom-personal-dev-capacity/private-key.pem")
     personal_dev_global_live_instance_limit: int = 16
+    personal_dev_native_builder_agent_image: str = ""
+    personal_dev_native_builder_agent_instance_id: str = ""
+    personal_dev_native_builder_agent_key_id: str = ""
+    personal_dev_native_builder_enabled: bool = False
+    personal_dev_native_builder_freshness_sec: int = 60
+    personal_dev_native_builder_max_concurrency: int = 2
+    personal_dev_native_builder_poll_interval_sec: float = 1.0
+    personal_dev_native_builder_protocol_version: int = 1
+    personal_dev_native_builder_public_key_file: Path | None = None
+    personal_dev_native_builder_public_key_sha256: str = ""
+    personal_dev_native_builder_runtime_profile_sha256: str = ""
     personal_dev_operational_binding_json: str = "{}"
     personal_dev_operational_plan_sha256: str = ""
     personal_dev_per_owner_aggregate_max_slots: int = 16

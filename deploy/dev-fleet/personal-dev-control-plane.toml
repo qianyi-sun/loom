@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 namespace = "loom-dev"
 personal_namespace_prefix = "loom-dev-"
 min_slots_default = 0
@@ -6,6 +6,7 @@ max_slots_limit = 8
 executable_new_capacity_ceiling = 0
 dev_instances_enabled = false
 personal_dev_builder_enabled = false
+personal_dev_native_builder_enabled = false
 activation_agent_replicas = 0
 protocol_versions_json = "{\"capacity-agent\":\"v1\",\"claim-guard\":\"v1\",\"control-plane-worker\":\"v1\",\"database-migrations\":\"expand-compatible-v1\",\"personal-dev-activation\":\"v1\"}"
 
@@ -13,6 +14,7 @@ protocol_versions_json = "{\"capacity-agent\":\"v1\",\"claim-guard\":\"v1\",\"co
 management_secret = "loom-personal-dev-management"
 activation_public_secret = "loom-personal-dev-activation-public"
 activation_private_secret = "loom-personal-dev-activation-agent"
+native_builder_public_secret = "loom-personal-dev-native-builder-public"
 management_service_account = "loom-personal-dev-management"
 builder_service_account = "loom-personal-dev-builder"
 activation_service_account = "loom-personal-dev-activation-agent"
@@ -35,6 +37,21 @@ runtime_handler = "runsc-personal-dev"
 runtime_profile_sha256 = "6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"
 publisher_identity = "system:serviceaccount:loom-dev:loom-personal-dev-management"
 registry_prefix = "ghcr.io/qianyi-sun/loom-dev"
+
+[native_builder]
+prepared = false
+agent_instance_id = ""
+agent_key_id = ""
+public_key_sha256 = ""
+host_name = ""
+runtime_profile_sha256 = ""
+public_store_origin = ""
+public_store_endpoint_cidrs = []
+provider = "gb10-gvisor-docker-v1"
+platform = "linux/arm64"
+protocol_version = 1
+freshness_seconds = 60
+max_concurrency = 2
 
 [network]
 public_origin = "https://loom-service.dev.yylx.world"

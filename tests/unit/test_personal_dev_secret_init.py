@@ -93,9 +93,13 @@ def test_setgid_private_destination_is_rejected_on_identical_replay(
 
 @pytest.mark.parametrize(
     ("profile", "filename"),
-    [("activation-public", "public-key"), ("activation-private", "private-key")],
+    [
+        ("activation-public", "public-key"),
+        ("activation-private", "private-key"),
+        ("native-builder-public", "public-key"),
+    ],
 )
-def test_activation_profiles_copy_only_their_one_key(
+def test_single_key_profiles_copy_only_their_authorized_key(
     tmp_path: Path,
     profile: str,
     filename: str,

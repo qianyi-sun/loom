@@ -330,6 +330,71 @@ python_type = "bool"
 default     = false
 description = "Enable the restricted personal candidate builder only after its immutable image, runtime class, scanner evidence, and registry publisher are installed."
 
+[service_config.personal_dev_native_builder_enabled]
+used_by     = ["loom-service"]
+python_type = "bool"
+default     = false
+description = "Enable the release-bound GB10 native arm64 provider. Disabled is inert and retains the legacy all-Kubernetes builder only for rollback and local tests."
+
+[service_config.personal_dev_native_builder_agent_instance_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Canonical nonzero UUID of the one approved durable GB10 native-builder agent instance."
+
+[service_config.personal_dev_native_builder_agent_key_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Stable identifier of the Ed25519 key authorized to sign native-builder poll, heartbeat, and completion requests."
+
+[service_config.personal_dev_native_builder_public_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Optional read-only raw Ed25519 public key for the native-builder agent. Absence keeps native mode fail-closed."
+
+[service_config.personal_dev_native_builder_public_key_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Release-plan binding for the exact 32-byte native-builder agent public key."
+
+[service_config.personal_dev_native_builder_agent_image]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Immutable trusted-release reference for the authority-minimal native-builder agent image."
+
+[service_config.personal_dev_native_builder_runtime_profile_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "SHA-256 of the exact reviewed GB10 dedicated Docker, KVM gVisor, network, and resource profile."
+
+[service_config.personal_dev_native_builder_protocol_version]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1
+description = "Exact signed native-builder protocol version accepted by management."
+
+[service_config.personal_dev_native_builder_freshness_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 60
+description = "Maximum age in seconds of the last exact signed agent inventory accepted by operational readiness."
+
+[service_config.personal_dev_native_builder_max_concurrency]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 2
+description = "Approved native GB10 grant concurrency; must match the protocol and host resource profile."
+
+[service_config.personal_dev_native_builder_poll_interval_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 1.0
+description = "Bounded coordinator interval for observing one durable native platform grant."
+
 [service_config.personal_dev_builder_image]
 used_by     = ["loom-service"]
 python_type = "str"

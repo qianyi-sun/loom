@@ -102,6 +102,61 @@ def _write_profile(tmp_path: Path, transform: Callable[[str], str]) -> Path:
     return path
 
 
+def _profile_schema(
+    text: str,
+    schema_version: int,
+    *,
+    include_web: bool,
+) -> str:
+    value = text.replace("schema_version = 3\n", f"schema_version = {schema_version}\n", 1)
+    value = value.replace("personal_dev_native_builder_enabled = false\n", "", 1)
+    value = value.replace(
+        'native_builder_public_secret = "loom-personal-dev-native-builder-public"\n',
+        "",
+        1,
+    )
+    value = re.sub(
+        r"\n\[native_builder\]\n.*?(?=\n\[network\]\n)",
+        "\n",
+        value,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if not include_web:
+        value = re.sub(
+            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
+            "\n",
+            value,
+            count=1,
+        )
+    return value
+
+
+def _prepared_native_profile(text: str, *, public_store_origin: str) -> str:
+    old = (
+        'prepared = false\n'
+        'agent_instance_id = ""\n'
+        'agent_key_id = ""\n'
+        'public_key_sha256 = ""\n'
+        'host_name = ""\n'
+        'runtime_profile_sha256 = ""\n'
+        'public_store_origin = ""\n'
+        'public_store_endpoint_cidrs = []\n'
+    )
+    new = (
+        'prepared = true\n'
+        'agent_instance_id = "10000000-0000-0000-0000-000000000001"\n'
+        'agent_key_id = "gb10-native-builder-v1"\n'
+        f'public_key_sha256 = "{"d" * 64}"\n'
+        'host_name = "gx10-01c7"\n'
+        f'runtime_profile_sha256 = "{"e" * 64}"\n'
+        f'public_store_origin = "{public_store_origin}"\n'
+        'public_store_endpoint_cidrs = ["207.35.188.227/32"]\n'
+    )
+    assert old in text
+    return text.replace(old, new, 1)
+
+
 def _with_ingress_controller_source_cidrs(text: str, value: object) -> str:
     entry = "ingress_controller_source_cidrs = " + json.dumps(value) + "\n"
     lines = [
@@ -129,7 +184,7 @@ def _with_kubernetes_api_endpoints(text: str, cidrs: object, port: object = 6443
 def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     profile = load_personal_dev_control_plane_profile(_PROFILE)
 
-    assert profile.schema_version == 2
+    assert profile.schema_version == 3
     assert profile.namespace == "loom-dev"
     assert profile.personal_namespace_prefix == "loom-dev-"
     assert profile.min_slots_default == 0
@@ -137,6 +192,7 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.executable_new_capacity_ceiling == 0
     assert profile.dev_instances_enabled is False
     assert profile.personal_dev_builder_enabled is False
+    assert profile.personal_dev_native_builder_enabled is False
     assert profile.activation_agent_replicas == 0
     assert [(item.pool_id, item.architecture) for item in profile.pools] == [
         ("gb10", "arm64"),
@@ -146,6 +202,9 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.identities.management_secret == "loom-personal-dev-management"
     assert profile.identities.activation_public_secret == ("loom-personal-dev-activation-public")
     assert profile.identities.activation_private_secret == ("loom-personal-dev-activation-agent")
+    assert profile.identities.native_builder_public_secret == (
+        "loom-personal-dev-native-builder-public"
+    )
     assert profile.identities.scanner_cache_pvc == ("loom-personal-dev-scanner-cache")
     assert profile.storage.lineage_render_input_sha256 == _LINEAGE_RENDER_INPUT_SHA256
     assert profile.storage.lineage_trusted_release_sha256 == _LINEAGE_TRUSTED_RELEASE_SHA256
@@ -156,6 +215,19 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
         "6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"
     )
     assert profile.builder.registry_prefix == "ghcr.io/qianyi-sun/loom-dev"
+    assert profile.native_builder.prepared is False
+    assert profile.native_builder.agent_instance_id == ""
+    assert profile.native_builder.agent_key_id == ""
+    assert profile.native_builder.public_key_sha256 == ""
+    assert profile.native_builder.host_name == ""
+    assert profile.native_builder.runtime_profile_sha256 == ""
+    assert profile.native_builder.public_store_origin == ""
+    assert profile.native_builder.public_store_endpoint_cidrs == ()
+    assert profile.native_builder.provider == "gb10-gvisor-docker-v1"
+    assert profile.native_builder.platform == "linux/arm64"
+    assert profile.native_builder.protocol_version == 1
+    assert profile.native_builder.freshness_seconds == 60
+    assert profile.native_builder.max_concurrency == 2
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
     assert profile.network.kubernetes_api_cidr != "0.0.0.0/0"
     assert profile.network.kubernetes_api_port == 443
@@ -179,17 +251,74 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     )
 
 
+def test_profile_rejects_out_of_range_native_public_store_port(
+    tmp_path: Path,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _prepared_native_profile(
+            text,
+            public_store_origin="https://objects.dev.yylx.world:99999",
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="public store origin is invalid"):
+        load_personal_dev_control_plane_profile(path)
+
+
+def test_prepared_profile_binds_exact_public_store_host_cidrs(tmp_path: Path) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _prepared_native_profile(
+            text,
+            public_store_origin="https://objects.dev.yylx.world",
+        ),
+    )
+
+    profile = load_personal_dev_control_plane_profile(path)
+
+    assert profile.native_builder is not None
+    assert profile.native_builder.public_store_endpoint_cidrs == (
+        "207.35.188.227/32",
+    )
+
+
+@pytest.mark.parametrize(
+    "cidrs",
+    [
+        [],
+        ["192.168.50.103/32"],
+        ["207.35.188.0/24"],
+        ["207.35.188.227/32", "207.35.188.227/32"],
+        ["208.67.222.222/32", "207.35.188.227/32"],
+    ],
+)
+def test_prepared_profile_rejects_relaxed_public_store_endpoint_cidrs(
+    tmp_path: Path,
+    cidrs: list[str],
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _prepared_native_profile(
+            text,
+            public_store_origin="https://objects.dev.yylx.world",
+        ).replace(
+            'public_store_endpoint_cidrs = ["207.35.188.227/32"]',
+            "public_store_endpoint_cidrs = " + json.dumps(cidrs),
+            1,
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="public store endpoint"):
+        load_personal_dev_control_plane_profile(path)
+
+
 def test_previous_profile_and_release_schemas_remain_loadable_for_rollback(
     tmp_path: Path,
 ) -> None:
     profile_path = _write_profile(
         tmp_path,
-        lambda text: re.sub(
-            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
-            "\n",
-            text.replace("schema_version = 2\n", "schema_version = 1\n", 1),
-            count=1,
-        ),
+        lambda text: _profile_schema(text, 1, include_web=False),
     )
     release_value = _release()
     release_value["schema_version"] = 2
@@ -216,13 +345,10 @@ def test_profile_rejects_web_resources_schema_mismatch(
     schema_version: int,
 ) -> None:
     def mismatch(text: str) -> str:
-        if schema_version == 1:
-            return text.replace("schema_version = 2\n", "schema_version = 1\n", 1)
-        return re.sub(
-            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
-            "\n",
+        return _profile_schema(
             text,
-            count=1,
+            schema_version,
+            include_web=schema_version == 1,
         )
 
     path = _write_profile(tmp_path, mismatch)
@@ -331,7 +457,7 @@ def test_profile_rejects_invalid_storage_lineage_digest(
     "transform",
     [
         lambda text: text + "unknown_key = true\n",
-        lambda text: text.replace("schema_version = 2\n", "", 1),
+        lambda text: text.replace("schema_version = 3\n", "", 1),
         lambda text: text.replace('namespace = "loom-dev"', 'namespace = "loom-dev-shared"'),
         lambda text: text.replace(
             'personal_namespace_prefix = "loom-dev-"',
