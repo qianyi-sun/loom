@@ -3700,6 +3700,51 @@ def test_schema_transition_predecessor_head_ignores_repository_bytecode(
     assert result.stdout == "selected_predecessor_head\n"
 
 
+def test_schema_transition_rehearsal_exports_explicit_postgres_identity(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    function = _fenced_shell_function(runbook, "start_rehearsal_postgres")
+    call_log = tmp_path / "docker-run-arguments.bin"
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        "rehearsal_network=rehearsal-network\n"
+        "rehearsal_postgres=rehearsal-postgres\n"
+        "postgres_image=postgres-image\n"
+        "docker() {\n"
+        '  test "$1" = run\n'
+        '  printf \'%s\\0\' "$@" > "$call_log"\n'
+        "}\n"
+        "wait_for_final_postgres() { :; }\n"
+        f"{function}\n"
+        "start_rehearsal_postgres\n"
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = call_log.read_bytes().split(b"\0")
+    assert arguments[0] == b"run"
+    assert arguments[-2:] == [b"postgres-image", b""]
+    environment = [
+        arguments[index + 1]
+        for index, argument in enumerate(arguments)
+        if argument == b"--env"
+    ]
+    assert len(environment) == 3
+    assert set(environment) == {
+        b"POSTGRES_HOST_AUTH_METHOD=trust",
+        b"POSTGRES_USER=postgres",
+        b"POSTGRES_DB=postgres",
+    }
+
+
 @pytest.mark.parametrize(
     ("function_name", "command_name"),
     (

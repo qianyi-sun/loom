@@ -311,7 +311,9 @@ wait_for_final_postgres() {
 start_rehearsal_postgres() {
   docker run --detach --network "$rehearsal_network" \
     --network-alias transition-postgres --name "$rehearsal_postgres" \
-    --env POSTGRES_HOST_AUTH_METHOD=trust "$postgres_image" >/dev/null
+    --env POSTGRES_HOST_AUTH_METHOD=trust \
+    --env POSTGRES_USER=postgres --env POSTGRES_DB=postgres \
+    "$postgres_image" >/dev/null
   wait_for_final_postgres "$rehearsal_postgres"
 }
 capture_docker_postgres_state() {
