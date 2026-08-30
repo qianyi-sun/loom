@@ -13,9 +13,18 @@ from types import SimpleNamespace
 import pytest
 
 import loom_service.personal_dev_builder as builder_module
+from loom.personal_dev_builder_runtime import (
+    CompositePersonalDevBuildExecutor,
+    KubectlPersonalDevBuildExecutor,
+    KubectlPersonalDevPlatformBuildExecutor,
+)
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
+from loom.personal_dev_native_builder_executor import (
+    NativeAgentPersonalDevPlatformBuildExecutor,
+)
 from loom_service.personal_dev_builder import build_personal_dev_builder_runtime
 from loom_service.personal_dev_candidate_gc import build_personal_dev_artifact_collector
+from tests.unit.test_personal_dev_builder import _registration
 
 _FILE_OWNER_UID = os.geteuid()
 _ROOT = Path(__file__).resolve().parents[2]
@@ -185,6 +194,81 @@ def test_builder_runtime_wires_one_exact_bounded_authority(tmp_path: Path) -> No
     assert runtime.manifest_config.runtime_class_name == "loom-personal-dev-builder"
     assert runtime.capabilities.max_artifact_bytes == 8 * 1024 * 1024
     assert runtime.exporter.registry_prefix == "registry.example/personal-dev"
+    assert isinstance(runtime.executor, KubectlPersonalDevBuildExecutor)
+
+
+def test_builder_runtime_native_mode_binds_each_architecture_to_exact_provider(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        personal_dev_native_builder_enabled=True,
+        personal_dev_native_builder_agent_instance_id=(
+            "10000000-0000-0000-0000-000000000001"
+        ),
+        personal_dev_native_builder_agent_key_id="gb10-native-builder-v1",
+        personal_dev_native_builder_agent_image=(
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+            + "e" * 64
+        ),
+        personal_dev_native_builder_runtime_profile_sha256="f" * 64,
+        personal_dev_native_builder_poll_interval_sec=1.0,
+    )
+
+    runtime = build_personal_dev_builder_runtime(
+        settings,  # type: ignore[arg-type]
+        minio_client=object(),
+        session_factory=lambda: None,  # type: ignore[arg-type]
+    )
+
+    assert runtime is not None
+    assert isinstance(runtime.executor, CompositePersonalDevBuildExecutor)
+    assert set(runtime.executor.platform_executors) == {
+        "linux/amd64",
+        "linux/arm64",
+    }
+    assert isinstance(
+        runtime.executor.platform_executors["linux/amd64"],
+        KubectlPersonalDevPlatformBuildExecutor,
+    )
+    assert isinstance(
+        runtime.executor.platform_executors["linux/arm64"],
+        NativeAgentPersonalDevPlatformBuildExecutor,
+    )
+    native = runtime.executor.platform_executors["linux/arm64"]
+    assert isinstance(native, NativeAgentPersonalDevPlatformBuildExecutor)
+    policy = native.policy_factory(_registration())
+    assert policy.agent_instance_id.hex == "10000000000000000000000000000001"
+    assert policy.agent_key_id == "gb10-native-builder-v1"
+    assert policy.agent_image.endswith("@sha256:" + "e" * 64)
+    assert policy.builder_image == settings.personal_dev_builder_image
+    assert policy.runtime_profile_sha256 == "f" * 64
+    assert json.loads(policy.contract_json)["platform"] == "linux/arm64"
+    assert policy.artifact_max_bytes == settings.personal_dev_builder_max_artifact_bytes
+    assert policy.active_deadline_seconds == 3600
+
+
+def test_builder_runtime_native_mode_requires_session_authority(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        personal_dev_native_builder_enabled=True,
+        personal_dev_native_builder_agent_instance_id=(
+            "10000000-0000-0000-0000-000000000001"
+        ),
+        personal_dev_native_builder_agent_key_id="gb10-native-builder-v1",
+        personal_dev_native_builder_agent_image=(
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+            + "e" * 64
+        ),
+        personal_dev_native_builder_runtime_profile_sha256="f" * 64,
+        personal_dev_native_builder_poll_interval_sec=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="requires a database session factory"):
+        build_personal_dev_builder_runtime(
+            settings,  # type: ignore[arg-type]
+            minio_client=object(),
+        )
 
 
 async def test_builder_run_loop_starts_one_lease_owner_per_global_slot(

@@ -262,6 +262,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             personal_dev_builder_runtime = build_personal_dev_builder_runtime(
                 settings,
                 minio_client=minio_client,
+                session_factory=session_factory,
             )
             personal_dev_artifact_collector = build_personal_dev_artifact_collector(
                 settings,
