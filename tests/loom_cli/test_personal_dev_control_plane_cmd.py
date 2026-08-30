@@ -1813,6 +1813,31 @@ def test_render_is_byte_deterministic_across_repeated_invocations(
     assert second == first
 
 
+def test_render_accepts_exact_open_proc_release_descriptor(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    descriptor = os.open(release_path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        result = dispatch(
+            _argv(Path(f"/proc/self/fd/{descriptor}"), release_digest),
+        )
+    finally:
+        os.close(descriptor)
+
+    captured = capsys.readouterr()
+    evidence = json.loads(captured.err)
+    documents = list(yaml.safe_load_all(captured.out))
+    assert result == 0
+    assert documents
+    assert len(documents) == evidence["resource_count"]
+    assert evidence["schema"] == "loom-personal-dev-control-plane-render-v1"
+    assert evidence["source_sha"] == _SOURCE_SHA
+    assert evidence["source_tree"] == _SOURCE_TREE
+    assert evidence["yaml_sha256"] == hashlib.sha256(captured.out.encode()).hexdigest()
+
+
 @pytest.mark.parametrize(
     "omitted",
     ["--file", "--trusted-release-file", "--trusted-release-sha256"],

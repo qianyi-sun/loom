@@ -50,6 +50,7 @@ _LABEL_KEY = re.compile(
 )
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _GIT_IDENTITY = re.compile(r"[0-9a-f]{40}")
+_PROC_SELF_FD = re.compile(r"/proc/self/fd/([1-9][0-9]*)")
 _STORAGE = re.compile(r"[1-9][0-9]*(?:Mi|Gi)")
 _CPU = re.compile(r"(?:[1-9][0-9]*m|[1-9][0-9]*)")
 _REGISTRY_PREFIX = re.compile(
@@ -1545,8 +1546,59 @@ def _duplicate_rejecting_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _read_trusted_release_descriptor(descriptor: int) -> tuple[bytes, os.stat_result]:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or not 0 < before.st_size <= MAX_TRUSTED_RELEASE_BYTES
+    ):
+        raise _invalid_release()
+    remaining = MAX_TRUSTED_RELEASE_BYTES + 1
+    offset = 0
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.pread(descriptor, min(64 * 1024, remaining), offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+        remaining -= len(chunk)
+    after = os.fstat(descriptor)
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_uid",
+        "st_gid",
+        "st_nlink",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    payload = b"".join(chunks)
+    if (
+        len(payload) != before.st_size
+        or len(payload) > MAX_TRUSTED_RELEASE_BYTES
+        or any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+    ):
+        raise _invalid_release()
+    return payload, before
+
+
 def _read_trusted_release(path: Path) -> bytes:
+    descriptor: int | None = None
     try:
+        inherited = _PROC_SELF_FD.fullmatch(str(path))
+        if inherited is not None:
+            inherited_descriptor = int(inherited.group(1))
+            if inherited_descriptor < 3:
+                raise _invalid_release()
+            descriptor = os.dup(inherited_descriptor)
+            payload, _ = _read_trusted_release_descriptor(descriptor)
+            return payload
         before_path = path.lstat()
         if (
             not stat.S_ISREG(before_path.st_mode)
@@ -1564,51 +1616,18 @@ def _read_trusted_release(path: Path) -> bytes:
             | getattr(os, "O_NONBLOCK", 0)
         )
         descriptor = os.open(path, flags)
-        try:
-            before = os.fstat(descriptor)
-            if (
-                (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)
-                or not stat.S_ISREG(before.st_mode)
-                or before.st_uid != os.geteuid()
-                or stat.S_IMODE(before.st_mode) != 0o600
-                or before.st_nlink != 1
-                or not 0 < before.st_size <= MAX_TRUSTED_RELEASE_BYTES
-            ):
-                raise _invalid_release()
-            remaining = MAX_TRUSTED_RELEASE_BYTES + 1
-            chunks: list[bytes] = []
-            while remaining:
-                chunk = os.read(descriptor, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            after = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
+        payload, before = _read_trusted_release_descriptor(descriptor)
+        if (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino):
+            raise _invalid_release()
         after_path = path.lstat()
     except PersonalDevTrustedReleaseError:
         raise
-    except OSError:
+    except (OSError, OverflowError):
         raise _invalid_release() from None
-    stable_fields = (
-        "st_dev",
-        "st_ino",
-        "st_mode",
-        "st_uid",
-        "st_gid",
-        "st_nlink",
-        "st_size",
-        "st_mtime_ns",
-        "st_ctime_ns",
-    )
-    payload = b"".join(chunks)
-    if (
-        len(payload) != before.st_size
-        or len(payload) > MAX_TRUSTED_RELEASE_BYTES
-        or any(getattr(before, field) != getattr(after, field) for field in stable_fields)
-        or any(getattr(before_path, field) != getattr(after_path, field) for field in stable_fields)
-    ):
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if _profile_file_identity(before_path) != _profile_file_identity(after_path):
         raise _invalid_release()
     return payload
 
