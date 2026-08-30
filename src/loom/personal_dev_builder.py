@@ -234,7 +234,9 @@ class PersonalDevBuildCoordinator:
             raise
         except _BuilderExecutionError as exc:
             logger.error(
-                "personal_dev_builder_execution_failed",
+                "personal_dev_builder_execution_failed phase=%s error_type=%s",
+                exc.phase,
+                type(exc.error).__name__,
                 extra={
                     "phase": exc.phase,
                     "error_type": type(exc.error).__name__,
