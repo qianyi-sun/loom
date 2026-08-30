@@ -1009,6 +1009,62 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
     ]
 
 
+def test_rootless_sidecar_native_tcp_launcher_enters_rootlesskit_before_child(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    recorded: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def execve(path: str, argv: list[str], environment: dict[str, str]) -> None:
+        recorded.append((path, argv, environment))
+
+    def accept_private_directory(path: Path, *, uid: int, gid: int) -> None:
+        assert path in {state / "home", tmp_path / "runtime"}
+        assert (uid, gid) == (1000, 1000)
+
+    launcher["_main_native_tcp_outer"].__globals__["_ensure_private_directory"] = (
+        accept_private_directory
+    )
+    with pytest.raises(RuntimeError, match="returned"):
+        launcher["_main_native_tcp_outer"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=1000,
+            gid=1000,
+            no_new_privs=0,
+            home=state / "home",
+            runtime_directory=tmp_path / "runtime",
+            execve=execve,
+        )
+
+    assert recorded == [
+        (
+            "/usr/bin/rootlesskit",
+            [
+                "/usr/bin/rootlesskit",
+                "/bin/setpriv",
+                "--nnp",
+                "/usr/local/bin/loom-personal-dev-buildkitd",
+                "--native-tcp-buildkit-child",
+            ],
+            {
+                "HOME": str(state / "home"),
+                "LOOM_PERSONAL_DEV_BUILDKIT_CHILD_MODE": "native-tcp-v1",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TMPDIR": "/tmp",
+                "USER": "user",
+                "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+            },
+        )
+    ]
+
+
 def test_rootless_sidecar_launcher_clears_setgid_inherited_by_created_directory(
     tmp_path: Path,
 ) -> None:
@@ -1165,6 +1221,47 @@ def test_rootless_sidecar_buildkit_child_requires_nnp_and_execs_fixed_daemon(
         )
 
 
+def test_rootless_sidecar_native_tcp_child_execs_only_fixed_daemon(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _sidecar_launcher()
+    recorded: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def execve(path: str, argv: list[str], environment: dict[str, str]) -> None:
+        recorded.append((path, argv, environment))
+
+    with pytest.raises(RuntimeError, match="returned"):
+        launcher["_main_native_tcp_buildkit_child"](
+            no_new_privs=1,
+            environment={
+                "HOME": "/var/lib/loom-buildkit/home",
+                "LOOM_PERSONAL_DEV_BUILDKIT_CHILD_MODE": "native-tcp-v1",
+            },
+            execve=execve,
+        )
+
+    assert recorded == [
+        (
+            "/usr/bin/buildkitd",
+            [
+                "/usr/bin/buildkitd",
+                "--addr=tcp://0.0.0.0:1234",
+                "--oci-worker-no-process-sandbox",
+                "--oci-worker-snapshotter=native",
+            ],
+            {"HOME": "/var/lib/loom-buildkit/home"},
+        )
+    ]
+    assert capsys.readouterr().out == "loom-buildkitd-native-child-preflight nnp=1\n"
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_main_native_tcp_buildkit_child"](
+            no_new_privs=0,
+            environment={},
+            execve=execve,
+        )
+
+
 def test_rootless_sidecar_launcher_dispatches_only_fixed_modes() -> None:
     launcher = _sidecar_launcher()
     calls: list[str] = []
@@ -1175,12 +1272,48 @@ def test_rootless_sidecar_launcher_dispatches_only_fixed_modes() -> None:
     def child() -> None:
         calls.append("child")
 
+    def native_outer() -> None:
+        calls.append("native-outer")
+
+    def native_child() -> None:
+        calls.append("native-child")
+
     launcher["_dispatch"]([], outer=outer, child=child)
     launcher["_dispatch"](["--buildkit-child"], outer=outer, child=child)
-    assert calls == ["outer", "child"]
+    launcher["_dispatch"](
+        ["--native-tcp-buildkit-child"],
+        outer=outer,
+        child=child,
+        native_outer=native_outer,
+        native_child=native_child,
+        environment={},
+    )
+    launcher["_dispatch"](
+        ["--native-tcp-buildkit-child"],
+        outer=outer,
+        child=child,
+        native_outer=native_outer,
+        native_child=native_child,
+        environment={"LOOM_PERSONAL_DEV_BUILDKIT_CHILD_MODE": "native-tcp-v1"},
+    )
+    assert calls == ["outer", "child", "native-outer", "native-child"]
 
-    with pytest.raises(RuntimeError, match="preflight"):
-        launcher["_dispatch"](["--unknown"], outer=outer, child=child)
+    for arguments in (
+        ["--unknown"],
+        ["--native-tcp-buildkit-child", "tcp://127.0.0.1:1234"],
+        ["--native-tcp-buildkit-child=tcp://127.0.0.1:1234"],
+    ):
+        with pytest.raises(RuntimeError, match="preflight"):
+            launcher["_dispatch"](arguments, outer=outer, child=child)
+
+    for arguments in ([], ["--buildkit-child"], ["--native-tcp-buildkit-child"]):
+        with pytest.raises(RuntimeError, match="preflight"):
+            launcher["_dispatch"](
+                arguments,
+                outer=outer,
+                child=child,
+                environment={"LOOM_PERSONAL_DEV_BUILDKIT_CHILD_MODE": "changed"},
+            )
 
 
 def test_rootless_sidecar_launcher_requires_gvisor_marker(tmp_path: Path) -> None:

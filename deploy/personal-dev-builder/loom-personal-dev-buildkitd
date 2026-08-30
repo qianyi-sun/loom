@@ -7,7 +7,7 @@ import ctypes
 import os
 import stat
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 _GVISOR_MARKER = Path("/proc/gvisor/kernel_is_gvisor")
@@ -23,6 +23,12 @@ _BUILDKITD_ARGV = [
     "--oci-worker-no-process-sandbox",
     "--oci-worker-snapshotter=native",
 ]
+_NATIVE_TCP_BUILDKITD_ARGV = [
+    _BUILDKITD,
+    "--addr=tcp://0.0.0.0:1234",
+    "--oci-worker-no-process-sandbox",
+    "--oci-worker-snapshotter=native",
+]
 _ROOTLESSKIT_ARGV = [
     _ROOTLESSKIT,
     "/bin/setpriv",
@@ -30,6 +36,15 @@ _ROOTLESSKIT_ARGV = [
     _LAUNCHER,
     "--buildkit-child",
 ]
+_NATIVE_TCP_ROOTLESSKIT_ARGV = [
+    _ROOTLESSKIT,
+    "/bin/setpriv",
+    "--nnp",
+    _LAUNCHER,
+    "--native-tcp-buildkit-child",
+]
+_CHILD_MODE_ENV = "LOOM_PERSONAL_DEV_BUILDKIT_CHILD_MODE"
+_NATIVE_TCP_CHILD_MODE = "native-tcp-v1"
 _PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _PR_GET_NO_NEW_PRIVS = 39
 
@@ -174,6 +189,8 @@ def _main(
     no_new_privs: int | None = None,
     home: Path = _HOME,
     runtime_directory: Path = _RUNTIME_DIRECTORY,
+    rootlesskit_argv: list[str] = _ROOTLESSKIT_ARGV,
+    child_mode: str | None = None,
     execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
 ) -> None:
     actual_uid = os.getuid() if uid is None else uid
@@ -203,9 +220,36 @@ def _main(
         "USER": "user",
         "XDG_RUNTIME_DIR": str(runtime_directory),
     }
+    if child_mode is not None:
+        environment[_CHILD_MODE_ENV] = child_mode
     executor = os.execve if execve is None else execve
-    executor(_ROOTLESSKIT, list(_ROOTLESSKIT_ARGV), environment)
+    executor(_ROOTLESSKIT, list(rootlesskit_argv), environment)
     raise RuntimeError("loom-buildkitd exec unexpectedly returned")
+
+
+def _main_native_tcp_outer(
+    *,
+    gvisor_marker: Path = _GVISOR_MARKER,
+    status_file: Path = _STATUS_FILE,
+    uid: int | None = None,
+    gid: int | None = None,
+    no_new_privs: int | None = None,
+    home: Path = _HOME,
+    runtime_directory: Path = _RUNTIME_DIRECTORY,
+    execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
+) -> None:
+    _main(
+        gvisor_marker=gvisor_marker,
+        status_file=status_file,
+        uid=uid,
+        gid=gid,
+        no_new_privs=no_new_privs,
+        home=home,
+        runtime_directory=runtime_directory,
+        rootlesskit_argv=_NATIVE_TCP_ROOTLESSKIT_ARGV,
+        child_mode=_NATIVE_TCP_CHILD_MODE,
+        execve=execve,
+    )
 
 
 def _main_buildkit_child(
@@ -226,16 +270,51 @@ def _main_buildkit_child(
     raise RuntimeError("loom-buildkitd exec unexpectedly returned")
 
 
+def _main_native_tcp_buildkit_child(
+    *,
+    no_new_privs: int | None = None,
+    environment: Mapping[str, str] | None = None,
+    execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
+) -> None:
+    actual_no_new_privs = (
+        _read_no_new_privs() if no_new_privs is None else no_new_privs
+    )
+    if actual_no_new_privs != 1:
+        raise _preflight_error()
+    print("loom-buildkitd-native-child-preflight nnp=1", flush=True)
+    child_environment = dict(os.environ if environment is None else environment)
+    child_environment.pop(_CHILD_MODE_ENV, None)
+    executor = os.execve if execve is None else execve
+    executor(_BUILDKITD, list(_NATIVE_TCP_BUILDKITD_ARGV), child_environment)
+    raise RuntimeError("loom-buildkitd exec unexpectedly returned")
+
+
 def _dispatch(
     arguments: list[str],
     *,
     outer: Callable[[], None] = _main,
     child: Callable[[], None] = _main_buildkit_child,
+    native_outer: Callable[[], None] = _main_native_tcp_outer,
+    native_child: Callable[[], None] = _main_native_tcp_buildkit_child,
+    environment: Mapping[str, str] | None = None,
 ) -> None:
+    actual_environment = os.environ if environment is None else environment
+    child_mode = actual_environment.get(_CHILD_MODE_ENV)
     if arguments == []:
+        if child_mode is not None:
+            raise _preflight_error()
         outer()
     elif arguments == ["--buildkit-child"]:
+        if child_mode is not None:
+            raise _preflight_error()
         child()
+    elif arguments == ["--native-tcp-buildkit-child"]:
+        if child_mode is None:
+            native_outer()
+        elif child_mode == _NATIVE_TCP_CHILD_MODE:
+            native_child()
+        else:
+            raise _preflight_error()
     else:
         raise _preflight_error()
 

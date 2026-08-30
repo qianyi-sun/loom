@@ -44,6 +44,9 @@ _DOCKERFILES = {
 }
 _BUILDCTL_PATH = Path("/usr/bin/buildctl")
 _BUILDKIT_ADDRESS = "unix:///var/run/loom-buildkit/buildkitd.sock"
+_NATIVE_BUILDKIT_ADDRESS_RE = re.compile(
+    r"tcp://buildkit-[0-9a-f]{12}:1234"
+)
 _CLIENT_GVISOR_MARKER = Path("/proc/gvisor/kernel_is_gvisor")
 _CLIENT_STATUS_FILE = Path("/proc/self/status")
 _PR_GET_NO_NEW_PRIVS = 39
@@ -51,6 +54,20 @@ _PR_GET_NO_NEW_PRIVS = 39
 
 class PersonalDevSandboxBuildError(RuntimeError):
     """The bounded sandbox could not produce its exact output contract."""
+
+
+def _select_buildkit_address(
+    *,
+    buildkit_address: str,
+    native_buildkit_address: str | None,
+) -> str:
+    if buildkit_address != _BUILDKIT_ADDRESS:
+        raise PersonalDevSandboxBuildError("buildctl endpoint is invalid")
+    if native_buildkit_address is None:
+        return _BUILDKIT_ADDRESS
+    if _NATIVE_BUILDKIT_ADDRESS_RE.fullmatch(native_buildkit_address) is None:
+        raise PersonalDevSandboxBuildError("buildctl endpoint is invalid")
+    return native_buildkit_address
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,7 +406,10 @@ def _build_images(
     buildctl_path: Path,
     buildkit_address: str,
 ) -> dict[str, tuple[Path, str]]:
-    if buildctl_path != _BUILDCTL_PATH or buildkit_address != _BUILDKIT_ADDRESS:
+    if buildctl_path != _BUILDCTL_PATH or (
+        buildkit_address != _BUILDKIT_ADDRESS
+        and _NATIVE_BUILDKIT_ADDRESS_RE.fullmatch(buildkit_address) is None
+    ):
         raise PersonalDevSandboxBuildError("buildctl endpoint is invalid")
     output_directory.mkdir(mode=0o700)
     outputs: dict[str, tuple[Path, str]] = {}
@@ -727,13 +747,18 @@ def main(argv: list[str] | None = None) -> int:
         default=_BUILDCTL_PATH,
     )
     build.add_argument("--buildkit-address", default=_BUILDKIT_ADDRESS)
+    build.add_argument("--native-buildkit-address")
     args = parser.parse_args(argv)
+    buildkit_address = _select_buildkit_address(
+        buildkit_address=args.buildkit_address,
+        native_buildkit_address=args.native_buildkit_address,
+    )
     run_personal_dev_sandbox_build(
         contract_file=args.contract_file,
         capability_directory=args.capability_directory,
         workspace=args.workspace,
         buildctl_path=args.buildctl_path,
-        buildkit_address=args.buildkit_address,
+        buildkit_address=buildkit_address,
     )
     return 0
 
