@@ -223,6 +223,13 @@ Docker daemon with:
 - no host PID, IPC, network or device namespace; no primary Docker socket; and
   no host filesystem mount other than the exact key, CA, and dedicated socket.
 
+The host profile reserves one fixed non-login agent UID and one distinct socket
+group GID. The private key is owned by that agent UID with mode `0400`; the
+dedicated daemon socket is owned by the socket group with mode `0660`; and the
+agent container runs as the same UID with only that supplemental group. The
+installer rejects pre-existing account/GID conflicts and the unit never runs the
+agent as root merely to make either file readable.
+
 The agent uses the dedicated Docker API to create exact resources labeled with
 grant ID, attempt ID, whole-attempt lease epoch, platform, agent instance,
 builder image, runtime profile, and contract digest. It never evaluates a
@@ -317,9 +324,11 @@ reserve.
 BuildKit state is per-attempt tmpfs, so candidate/base image caches disappear
 with the grant. The dedicated daemon persistently stores only trusted builder
 release images; the agent image remains in the controller's existing daemon.
-Convergence on each daemon retains the current and immediately previous
-applicable trusted release and removes only unreferenced older managed images
-after exact digest and zero-container checks.
+An explicit release-convergence command imports or pulls the exact trusted
+digests before activation. On each daemon it retains the current and immediately
+previous applicable trusted release and removes only older images from the exact
+Loom-managed repository after label, digest, and zero-container checks. It does
+not use a daemon-wide prune and never removes an unrelated image.
 
 ## End-to-end data flow
 
@@ -387,6 +396,12 @@ Operational render requires all of the following before owner apply is exposed:
 
 Shadow mode may render and inspect this contract while leaving both the native
 provider and agent inactive.
+
+Operational status obtains the durable agent row through a bounded read-only
+probe executed inside the management container. The probe emits canonical,
+secret-free JSON only; it cannot issue or mutate grants. This keeps database
+credentials inside management while allowing the existing external status
+observer to enforce freshness, identity, inventory, and zero-grant readiness.
 
 ## Rollout and rollback
 
