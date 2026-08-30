@@ -3498,6 +3498,64 @@ def test_backup_restore_runbook_fenced_bash_is_syntactically_valid() -> None:
     assert syntax.returncode == 0, syntax.stderr
 
 
+@pytest.mark.parametrize(
+    "runbook_path",
+    (
+        "docs/runbooks/personal-dev-backup-restore-evidence.md",
+        "docs/runbooks/personal-dev-schema-transition.md",
+    ),
+)
+def test_isolated_postgres_waits_for_final_pid1_before_readiness(
+    tmp_path: Path,
+    runbook_path: str,
+) -> None:
+    runbook = _read(runbook_path)
+    function = _fenced_shell_function(runbook, "wait_for_final_postgres")
+    call_log = tmp_path / "calls.txt"
+    program = (
+        "set -euo pipefail\n"
+        f"call_log={shlex.quote(str(call_log))}\n"
+        "pid1_checks=0\n"
+        "sleep() { :; }\n"
+        "docker() {\n"
+        "  test \"$1\" = exec || return 97\n"
+        "  case \"$*\" in\n"
+        "    *'read -r comm </proc/1/comm; test \"$comm\" = postgres'*)\n"
+        "      pid1_checks=$((pid1_checks + 1))\n"
+        "      if test \"$pid1_checks\" -eq 1; then\n"
+        "        printf 'bootstrap-pid1\\n' >> \"$call_log\"\n"
+        "        return 1\n"
+        "      fi\n"
+        "      printf 'final-pid1\\n' >> \"$call_log\"\n"
+        "      return 0\n"
+        "      ;;\n"
+        "    *pg_isready*)\n"
+        "      printf 'pg-isready\\n' >> \"$call_log\"\n"
+        "      test \"$pid1_checks\" -ge 2\n"
+        "      ;;\n"
+        "    *) return 98 ;;\n"
+        "  esac\n"
+        "}\n"
+        f"{function}\n"
+        "wait_for_final_postgres isolated-postgres\n"
+    )
+
+    result = subprocess.run(
+        ["bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "bootstrap-pid1",
+        "final-pid1",
+        "pg-isready",
+    ]
+
+
 def test_backup_restore_schema_head_is_bound_to_selected_source_and_graph(
     tmp_path: Path,
 ) -> None:
