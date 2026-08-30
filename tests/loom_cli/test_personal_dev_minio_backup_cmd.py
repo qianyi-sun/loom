@@ -222,6 +222,7 @@ class _RecordingTransport:
 def _capture_actions(
     *,
     payload: bytes = b"payload",
+    checksum: Mapping[str, str] | None = None,
     version: bytes | None = None,
     retention: PersonalDevMinioCommandResult | None = None,
     encryption: PersonalDevMinioCommandResult | None = None,
@@ -233,7 +234,10 @@ def _capture_actions(
     )
     listing = _json_line(_list_record(size=len(payload)))
     empty_listing = b""
-    stat = _json_line(_stat_record(size=len(payload)))
+    stat_record = _stat_record(size=len(payload))
+    if checksum is not None:
+        stat_record["checksum"] = dict(checksum)
+    stat = _json_line(stat_record)
     actions: list[_Run | _Stream] = [
         _Run(("ls", "--json", "local"), _result(bucket_output)),
     ]
@@ -347,6 +351,22 @@ def test_capture_uses_the_exact_read_only_order_and_publishes_canonical_authorit
     assert source_manifest_path.read_bytes() == manifest.canonical_bytes
     digest = hashlib.sha256(b"payload").hexdigest()
     assert (payload_root / digest).read_bytes() == b"payload"
+
+
+# Production break caught: live mc CRC32 stat records are rejected as CRC32C-only.
+def test_capture_accepts_exact_crc32_checksum_observation(tmp_path: Path) -> None:
+    actions = _capture_actions(checksum={"CRC32": "AAAAAA=="})
+    transport = _RecordingTransport(actions)
+    source_manifest_path, payload_root = _capture_paths(tmp_path)
+
+    manifest = capture_personal_dev_minio_backup(
+        transport=transport,
+        source_manifest_path=source_manifest_path,
+        payload_root=payload_root,
+    )
+
+    assert source_manifest_path.read_bytes() == manifest.canonical_bytes
+    assert not transport.actions
 
 
 @pytest.mark.parametrize(

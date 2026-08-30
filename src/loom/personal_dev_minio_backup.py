@@ -463,9 +463,9 @@ def _normalized_stat_metadata(value: object) -> tuple[str, str | None, Mapping[s
 
 
 def _validate_stat_checksum(value: object) -> None:
-    if not isinstance(value, dict) or set(value) != {"CRC32C"}:
+    if not isinstance(value, dict) or set(value) not in ({"CRC32"}, {"CRC32C"}):
         raise _invalid()
-    checksum = value["CRC32C"]
+    checksum = value["CRC32"] if "CRC32" in value else value["CRC32C"]
     if not isinstance(checksum, str):
         raise _invalid()
     encoded, separator, part_count = checksum.partition("-")
