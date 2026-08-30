@@ -2344,7 +2344,10 @@ def _management_env(
             secret,
             "dev-instance-database-admin-url",
         ),
-        _literal_env("LOOM_SVC_MINIO_ENDPOINT", "http://loom-dev-minio:9000"),
+        _literal_env(
+            "LOOM_SVC_MINIO_ENDPOINT",
+            "http://loom-dev-minio.loom-dev.svc:9000",
+        ),
         _literal_env("LOOM_SVC_MINIO_REGION", "us-east-1"),
         _secret_env("LOOM_SVC_MINIO_ACCESS_KEY", secret, "minio-access-key"),
         _secret_env("LOOM_SVC_MINIO_SECRET_KEY", secret, "minio-secret-key"),

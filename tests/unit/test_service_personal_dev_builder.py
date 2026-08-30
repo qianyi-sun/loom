@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import loom_service.personal_dev_builder as builder_module
+from loom.personal_dev_candidate import PersonalDevCandidateLimits
 from loom_service.personal_dev_builder import build_personal_dev_builder_runtime
 from loom_service.personal_dev_candidate_gc import build_personal_dev_artifact_collector
 
@@ -183,6 +185,59 @@ def test_builder_runtime_wires_one_exact_bounded_authority(tmp_path: Path) -> No
     assert runtime.manifest_config.runtime_class_name == "loom-personal-dev-builder"
     assert runtime.capabilities.max_artifact_bytes == 8 * 1024 * 1024
     assert runtime.exporter.registry_prefix == "registry.example/personal-dev"
+
+
+async def test_builder_run_loop_starts_one_lease_owner_per_global_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches configuring a global limit without starting concurrent workers."""
+    started: set[str] = set()
+    cancelled: set[str] = set()
+    first_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Coordinator:
+        def __init__(self, **kwargs: object) -> None:
+            self.builder_id = str(kwargs["builder_id"])
+
+        async def build_once(self, *, now: object) -> bool:
+            del now
+            started.add(self.builder_id)
+            first_started.set()
+            try:
+                await release.wait()
+            finally:
+                cancelled.add(self.builder_id)
+            return True
+
+    monkeypatch.setattr(builder_module, "PersonalDevBuildCoordinator", _Coordinator)
+    task = asyncio.create_task(
+        builder_module.personal_dev_builder_run_loop(
+            session_factory=object(),  # type: ignore[arg-type]
+            source=object(),  # type: ignore[arg-type]
+            executor=object(),  # type: ignore[arg-type]
+            limits=PersonalDevCandidateLimits(
+                global_active_builds=3,
+                per_owner_active_builds=1,
+            ),
+            builder_id="loom-service:test",
+            lease_seconds=4200,
+            registry_prefix="registry.example/personal-dev",
+            poll_interval_seconds=1.0,
+        )
+    )
+    try:
+        await first_started.wait()
+        await asyncio.sleep(0)
+        assert started == {
+            "loom-service:test:worker:0",
+            "loom-service:test:worker:1",
+            "loom-service:test:worker:2",
+        }
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert cancelled == started
 
 
 def test_builder_runtime_rejects_placeholder_safety_authority(tmp_path: Path) -> None:

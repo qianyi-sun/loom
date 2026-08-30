@@ -327,7 +327,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "f652f06b82f64590f6d9fef9299dee052cbb1a1de66d1739e6493467193a53a6"
+        "b88caf2d008c00d8a5250c872c934b37d1d87259dec412e7e8db82e939417ec7"
     )
 
     identities = {_identity(document) for document in documents}
@@ -728,6 +728,29 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     }
     assert "loom-worker" not in workload_names
     assert "loom-capacity-manager" not in workload_names
+
+
+def test_acceptance_builder_capabilities_use_cross_namespace_minio_identity(
+    tmp_path: Path,
+) -> None:
+    """Catches presigning a namespace-local hostname for sandbox Jobs."""
+    _profile, _release, _plan, _shadow, _rendered, documents = _acceptance_render(
+        tmp_path
+    )
+    management = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("Deployment", "loom-dev", "loom-personal-dev-management")
+    )
+    container = management["spec"]["template"]["spec"]["containers"][0]
+    environment = {
+        item["name"]: item["value"] for item in container["env"] if "value" in item
+    }
+
+    assert environment["LOOM_SVC_MINIO_ENDPOINT"] == (
+        "http://loom-dev-minio.loom-dev.svc:9000"
+    )
 
 
 def test_operational_render_is_durable_but_remains_zero_capacity(

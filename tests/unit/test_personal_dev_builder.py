@@ -333,7 +333,11 @@ async def test_builder_failure_logs_only_a_bounded_phase_and_error_type(
     events = [
         record
         for record in caplog.records
-        if record.getMessage() == "personal_dev_builder_execution_failed"
+        if record.getMessage()
+        == (
+            "personal_dev_builder_execution_failed "
+            f"phase={phase} error_type={error_type}"
+        )
     ]
     assert len(events) == 1
     assert events[0].phase == phase

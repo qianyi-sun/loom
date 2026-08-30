@@ -613,7 +613,7 @@ class SessionPersonalDevBuildAuthority:
         return await self._call("finish_build", **kwargs)
 
 
-async def personal_dev_builder_run_loop(
+async def _personal_dev_builder_worker_loop(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     source: PersonalDevBuildSource,
@@ -624,8 +624,6 @@ async def personal_dev_builder_run_loop(
     registry_prefix: str,
     poll_interval_seconds: float,
 ) -> None:
-    if poll_interval_seconds <= 0:
-        raise ValueError("personal-dev builder poll interval must be positive")
     coordinator = PersonalDevBuildCoordinator(
         authority=SessionPersonalDevBuildAuthority(session_factory, limits=limits),
         source=source,
@@ -647,6 +645,48 @@ async def personal_dev_builder_run_loop(
             progressed = False
         if not progressed:
             await asyncio.sleep(poll_interval_seconds)
+
+
+async def personal_dev_builder_run_loop(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    source: PersonalDevBuildSource,
+    executor: PersonalDevBuildExecutor,
+    limits: PersonalDevCandidateLimits,
+    builder_id: str,
+    lease_seconds: int,
+    registry_prefix: str,
+    poll_interval_seconds: float,
+) -> None:
+    """Run one independent lease owner for every configured global build slot."""
+    if poll_interval_seconds <= 0:
+        raise ValueError("personal-dev builder poll interval must be positive")
+    worker_ids = tuple(
+        f"{builder_id}:worker:{slot}" for slot in range(limits.global_active_builds)
+    )
+    workers = tuple(
+        asyncio.create_task(
+            _personal_dev_builder_worker_loop(
+                session_factory=session_factory,
+                source=source,
+                executor=executor,
+                limits=limits,
+                builder_id=worker_id,
+                lease_seconds=lease_seconds,
+                registry_prefix=registry_prefix,
+                poll_interval_seconds=poll_interval_seconds,
+            ),
+            name=f"loom-svc-personal-dev-builder-worker-{slot}",
+        )
+        for slot, worker_id in enumerate(worker_ids)
+    )
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 
 __all__ = [
