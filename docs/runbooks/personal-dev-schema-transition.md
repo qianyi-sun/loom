@@ -410,6 +410,14 @@ with the predecessor because the schema intentionally differs.
 
 ## 3. Prove live invariants and quiesce
 
+The exact predecessor checkout may predate trusted-release descriptor loading.
+Only its two status invocations therefore receive the original regular release
+pathname. Immediately before each invocation, the runbook proves that pathname
+is still the same owner-only inode pinned on descriptor 31 with the reviewed
+digest. The predecessor loader then independently enforces no-follow open,
+owner, mode, link count, size, stable metadata, digest, and canonical JSON.
+Target-source invocations continue to consume only the pinned descriptor.
+
 ```bash
 target_shadow="$evidence_dir/target-shadow.yaml"
 target_render_evidence="$evidence_dir/target-shadow.render.json"
@@ -591,6 +599,10 @@ print(heads[0])
 PY
 )"
 test "$predecessor_checkout_schema_head" = "$expected_predecessor_schema_head"
+assert_predecessor_release_compat_path() {
+  assert_open_owner_only_sha256 \
+    "$predecessor_release_source" 31 "$predecessor_release_sha256" 16777216
+}
 assert_transition_artifacts() {
   assert_exact_source_repository \
     "$repo" "$target_source_commit" "$target_source_tree" || return 1
@@ -675,12 +687,13 @@ assert_predecessor_recovery_interlocks() {
 
 assert_reviewed_kubeconfig
 predecessor_status="$evidence_dir/predecessor.status.json"
+assert_predecessor_release_compat_path
 PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/dev/null \
   PYTHONPATH="$predecessor_repo/src" "$predecessor_loom_cli" admin \
   personal-dev-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   --file "$predecessor_profile" \
-  --trusted-release-file "$predecessor_release" \
+  --trusted-release-file "$predecessor_release_source" \
   --trusted-release-sha256 "$predecessor_release_sha256" \
   > "$predecessor_status"
 chmod 0600 "$predecessor_status"
@@ -1003,12 +1016,13 @@ wait_for_predecessor_shadow() {
     --namespace loom-dev --timeout=300s || return
 }
 assert_predecessor_shadow_ready() {
+  assert_predecessor_release_compat_path || return
   PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX=/dev/null \
     PYTHONPATH="$predecessor_repo/src" "$predecessor_loom_cli" admin \
     personal-dev-control-plane status \
     --namespace loom-dev --kubeconfig "$kubeconfig" \
     --file "$predecessor_profile" \
-    --trusted-release-file "$predecessor_release" \
+    --trusted-release-file "$predecessor_release_source" \
     --trusted-release-sha256 "$predecessor_release_sha256" \
     > "$evidence_dir/rollback-predecessor.status.json" || return
   chmod 0600 "$evidence_dir/rollback-predecessor.status.json" || return

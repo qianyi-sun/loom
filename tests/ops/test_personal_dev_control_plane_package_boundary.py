@@ -4878,11 +4878,79 @@ def test_schema_transition_predecessor_capacity_uses_predecessor_cli(
     assert call_log.read_text(encoding="ascii").splitlines() == ["predecessor-loom"]
 
 
+def test_schema_transition_predecessor_cli_uses_guarded_regular_release_path() -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    guard = _fenced_shell_function(runbook, "assert_predecessor_release_compat_path")
+    assert (
+        "assert_open_owner_only_sha256 \\\n"
+        '    "$predecessor_release_source" 31 "$predecessor_release_sha256" '
+        "16777216"
+    ) in guard
+
+    live_start = runbook.index('predecessor_status="$evidence_dir/predecessor.status.json"')
+    live_end = runbook.index('chmod 0600 "$predecessor_status"', live_start)
+    live_status = runbook[live_start:live_end]
+    assert "assert_predecessor_release_compat_path\n" in live_status
+    assert '--trusted-release-file "$predecessor_release_source"' in live_status
+    assert '--trusted-release-file "$predecessor_release"' not in live_status
+
+    recovery_status = _fenced_shell_function(runbook, "assert_predecessor_shadow_ready")
+    assert "assert_predecessor_release_compat_path || return" in recovery_status
+    assert '--trusted-release-file "$predecessor_release_source"' in recovery_status
+    assert '--trusted-release-file "$predecessor_release"' not in recovery_status
+
+
+def test_schema_transition_predecessor_compat_path_rejects_pathname_replacement(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_owner_only_sha256",
+            "assert_pinned_owner_only_sha256",
+            "assert_open_owner_only_sha256",
+            "assert_predecessor_release_compat_path",
+        )
+    )
+    release = tmp_path / "predecessor-release.json"
+    replacement = tmp_path / "replacement.json"
+    payload = b'{"schema_version":3}\n'
+    digest = _write_owner_only_artifact(release, payload)
+    _write_owner_only_artifact(replacement, payload)
+    program = (
+        "set -uo pipefail\n"
+        f"predecessor_release_source={shlex.quote(str(release))}\n"
+        f"predecessor_release_sha256={digest}\n"
+        f"replacement={shlex.quote(str(replacement))}\n"
+        f"{functions}\n"
+        'exec 31< "$predecessor_release_source"\n'
+        'mv -f -- "$replacement" "$predecessor_release_source"\n'
+        "assert_predecessor_release_compat_path\n"
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+
+
 def test_schema_transition_predecessor_ready_uses_predecessor_cli(
     tmp_path: Path,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-schema-transition.md")
-    function = _fenced_shell_function(runbook, "assert_predecessor_shadow_ready")
+    functions = "\n".join(
+        _fenced_shell_function(runbook, name)
+        for name in (
+            "assert_predecessor_release_compat_path",
+            "assert_predecessor_shadow_ready",
+        )
+    )
     call_log = tmp_path / "calls.txt"
     target_cli = tmp_path / "target-loom"
     predecessor_cli = tmp_path / "predecessor-loom"
@@ -4917,11 +4985,21 @@ def test_schema_transition_predecessor_ready_uses_predecessor_cli(
         f"predecessor_repo={shlex.quote(str(predecessor_repo))}\n"
         f"loom_cli={shlex.quote(str(target_cli))}\n"
         f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
+        'record() { printf "%s\\n" "$1" >> '
+        f"{shlex.quote(str(call_log))}; }}\n"
+        "assert_open_owner_only_sha256() {\n"
+        "  record predecessor-release-path\n"
+        '  test "$1" = "$predecessor_release_source"\n'
+        '  test "$2" = 31\n'
+        '  test "$3" = "$predecessor_release_sha256"\n'
+        '  test "$4" = 16777216\n'
+        "}\n"
         "predecessor_profile=/unused/profile\n"
-        "predecessor_release=/unused/release\n"
+        "predecessor_release=/proc/self/fd/31\n"
+        "predecessor_release_source=/reviewed/predecessor-release.json\n"
         f"predecessor_release_sha256={'a' * 64}\n"
         "kubeconfig=/unused/kubeconfig\n"
-        f"{function}\n"
+        f"{functions}\n"
         "assert_predecessor_shadow_ready\n"
     )
 
@@ -4934,7 +5012,10 @@ def test_schema_transition_predecessor_ready_uses_predecessor_cli(
     )
 
     assert result.returncode == 0, result.stderr
-    assert call_log.read_text(encoding="ascii").splitlines() == ["predecessor-loom"]
+    assert call_log.read_text(encoding="ascii").splitlines() == [
+        "predecessor-release-path",
+        "predecessor-loom",
+    ]
 
 
 def test_schema_transition_pre_quiesce_failure_does_not_mutate_recovery(
