@@ -43,7 +43,7 @@ def _scanner() -> dict[str, Any]:
 
 def _release() -> dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -54,6 +54,9 @@ def _release() -> dict[str, Any]:
             ),
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
+            ),
+            "personal_dev_native_builder_agent": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
             ),
             "personal_dev_scanner_cache": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
@@ -191,6 +194,7 @@ def test_previous_profile_and_release_schemas_remain_loadable_for_rollback(
     release_value = _release()
     release_value["schema_version"] = 2
     del release_value["images"]["loom_web"]
+    del release_value["images"]["personal_dev_native_builder_agent"]
     release_path, release_sha256 = _write_release(tmp_path, release_value)
 
     profile = load_personal_dev_control_plane_profile(profile_path)
@@ -200,8 +204,10 @@ def test_previous_profile_and_release_schemas_remain_loadable_for_rollback(
     assert profile.resources.web is None
     assert release.schema_version == 2
     assert release.images.loom_web is None
+    assert release.images.personal_dev_native_builder_agent is None
     assert "web" not in profile.canonical_value()["resources"]
     assert "loom_web" not in release.canonical_value()["images"]
+    assert "personal_dev_native_builder_agent" not in release.canonical_value()["images"]
 
 
 @pytest.mark.parametrize("schema_version", [1, 2])
@@ -229,18 +235,26 @@ def test_profile_rejects_web_resources_schema_mismatch(
 
 
 @pytest.mark.parametrize(
-    ("schema_version", "include_web"),
-    [(2, True), (3, False)],
+    ("schema_version", "include_web", "include_native_agent"),
+    [
+        (2, True, False),
+        (3, False, False),
+        (3, True, True),
+        (4, True, False),
+    ],
 )
-def test_trusted_release_rejects_web_image_schema_mismatch(
+def test_trusted_release_rejects_image_schema_mismatch(
     tmp_path: Path,
     schema_version: int,
     include_web: bool,
+    include_native_agent: bool,
 ) -> None:
     release_value = _release()
     release_value["schema_version"] = schema_version
     if not include_web:
         del release_value["images"]["loom_web"]
+    if not include_native_agent:
+        del release_value["images"]["personal_dev_native_builder_agent"]
     path, digest = _write_release(tmp_path, release_value)
 
     with pytest.raises(PersonalDevTrustedReleaseError):
@@ -587,6 +601,9 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
     assert release.source_tree == "2" * 40
     assert release.images.loom_service == ("ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64)
     assert release.images.personal_dev_builder.endswith("4" * 64)
+    assert release.images.personal_dev_native_builder_agent == (
+        "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
+    )
     assert release.images.personal_dev_activation_agent.endswith("5" * 64)
     assert release.images.personal_dev_scanner_cache.endswith("a" * 64)
     assert release.images.postgres.endswith("6" * 64)
@@ -658,7 +675,31 @@ def test_trusted_release_rejects_unrepresentable_proc_descriptor(tmp_path: Path)
         (
             lambda value: {
                 **value,
+                "images": {
+                    key: item
+                    for key, item in value["images"].items()
+                    if key != "personal_dev_native_builder_agent"
+                },
+            },
+            None,
+        ),
+        (
+            lambda value: {
+                **value,
                 "images": {key: item for key, item in value["images"].items() if key != "minio"},
+            },
+            None,
+        ),
+        (
+            lambda value: {
+                **value,
+                "images": {
+                    **value["images"],
+                    "personal_dev_native_builder_agent": (
+                        "ghcr.io/other/loom-personal-dev-native-builder-agent@sha256:"
+                        + "c" * 64
+                    ),
+                },
             },
             None,
         ),

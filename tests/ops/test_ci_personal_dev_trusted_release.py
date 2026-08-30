@@ -48,6 +48,11 @@ _INTERNAL = {
         "image_name": "loom-personal-dev-activation-agent",
         "dockerfile": "deploy/Dockerfile.personal-dev-activation-agent",
     },
+    "personal-dev-native-builder-agent": {
+        "release_key": "personal_dev_native_builder_agent",
+        "image_name": "loom-personal-dev-native-builder-agent",
+        "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
+    },
     "personal-dev-scanner-cache": {
         "release_key": "personal_dev_scanner_cache",
         "image_name": "loom-personal-dev-scanner-cache",
@@ -297,7 +302,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "cache_identity_sha256": cache_identity_sha256,
     }
     assert release == {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "images": references,
@@ -312,7 +317,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "run_id": _RUN_ID,
         "run_attempt": _RUN_ATTEMPT,
     }
-    assert evidence["schema_version"] == 3
+    assert evidence["schema_version"] == 4
     assert set(evidence["internal_images"]) == set(_INTERNAL)
     assert set(evidence["external_images"]) == set(_EXTERNAL_REPOSITORIES)
     assert evidence["scanner"] == {
@@ -499,6 +504,44 @@ def test_assembly_requires_both_platforms_of_cache_image(
     target.unlink()
 
     with pytest.raises(TrustedReleaseError, match="exactly the expected files"):
+        _assemble_inputs(records, manifests, external)
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "missing-amd64",
+        "missing-arm64",
+        "mutable-subject",
+        "wrong-repository",
+        "source-mismatch",
+        "missing-scan-evidence",
+    ],
+)
+def test_assembly_rejects_incomplete_or_substituted_native_agent_evidence(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    records, manifests, external, _references = _write_inputs(tmp_path)
+    architecture = "amd64" if drift == "missing-amd64" else "arm64"
+    record_path = records / f"personal-dev-native-builder-agent-{architecture}.json"
+    if drift.startswith("missing-"):
+        record_path.unlink()
+    else:
+        record = json.loads(record_path.read_bytes())
+        if drift == "mutable-subject":
+            record["subject"]["name"] += ":dev"
+        elif drift == "wrong-repository":
+            record["subject"]["name"] = (
+                "ghcr.io/other/loom-personal-dev-native-builder-agent"
+            )
+        elif drift == "source-mismatch":
+            record["release"]["commit"] = "c" * 40
+        else:
+            del record["scan"]["report_sha256"]
+        record_path.write_bytes(_canonical(record) + b"\n")
+
+    with pytest.raises(TrustedReleaseError):
         _assemble_inputs(records, manifests, external)
 
 
@@ -740,7 +783,7 @@ def test_checked_in_external_indexes_are_exact_reviewed_multi_arch_pins() -> Non
     }
 
 
-def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
+def test_images_workflow_publishes_release_bound_scanner_cache_and_native_agent() -> None:
     workflow = yaml.safe_load((_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
     aggregate = jobs["personal-dev-trusted-release"]
@@ -762,7 +805,7 @@ def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
         for step in aggregate["steps"]
         if str(step.get("name", "")).startswith("Download exact ")
     ]
-    assert len(downloads) == 11
+    assert len(downloads) == 13
     script = "\n".join(str(step.get("run", "")) for step in aggregate["steps"])
     for component in _INTERNAL:
         for architecture in ("amd64", "arm64"):
@@ -773,7 +816,18 @@ def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
     assert script.count("gh attestation verify") == 1
     assert (
         "for component in service web personal-dev-builder "
-        "personal-dev-activation-agent personal-dev-scanner-cache" in script
+        "personal-dev-activation-agent personal-dev-native-builder-agent "
+        "personal-dev-scanner-cache" in script
+    )
+    assert "Read back nine immutable image indexes" in str(aggregate)
+    assert "Verify six protected Loom manifest attestations" in str(aggregate)
+    assert (
+        '."org.opencontainers.image.source" == "https://github.com/qianyi-sun/loom"'
+        in script
+    )
+    assert (
+        '."io.loom.personal-dev.native-builder.release-managed" == "true"'
+        in script
     )
     assert "personal-dev-scanner-cache-assets-run-${{ github.run_id }}" in str(aggregate)
     assert "docker create" in script

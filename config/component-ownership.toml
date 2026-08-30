@@ -268,6 +268,27 @@ runtime_policy = "conformance"
 rollout_role = "none"
 
 [[components]]
+id = "personal-dev-native-builder-agent"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.personal-dev-native-builder-agent"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.personal-dev-native-builder-agent",
+  "deploy/personal-dev-native-builder-agent-requirements.txt",
+  "src/loom/__init__.py",
+  "src/loom/personal_dev_native_builder_agent.py",
+  "src/loom/personal_dev_native_builder_protocol.py",
+  "src/loom_personal_dev_native_builder_agent/**",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-personal-dev-native-builder-agent"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "execution-actuator"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.execution-actuator"

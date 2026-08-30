@@ -31,6 +31,7 @@ REQUIRED_IMAGE_KEYS = {
     "loom_web",
     "personal_dev_builder",
     "personal_dev_activation_agent",
+    "personal_dev_native_builder_agent",
     "personal_dev_scanner_cache",
     "postgres",
     "minio",
@@ -520,6 +521,7 @@ class _ImagesInput(_StrictModel):
     loom_web: str | None = None
     personal_dev_builder: str
     personal_dev_activation_agent: str
+    personal_dev_native_builder_agent: str | None = None
     personal_dev_scanner_cache: str
     postgres: str
     minio: str
@@ -533,6 +535,9 @@ class _ImagesInput(_StrictModel):
             "personal_dev_builder": "ghcr.io/qianyi-sun/loom-personal-dev-builder",
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent"
+            ),
+            "personal_dev_native_builder_agent": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent"
             ),
             "personal_dev_scanner_cache": ("ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache"),
             "postgres": "docker.io/library/postgres",
@@ -601,7 +606,7 @@ class _TrustedScannerInput(_StrictModel):
 
 
 class _TrustedReleaseInput(_StrictModel):
-    schema_version: Literal[2, 3]
+    schema_version: Literal[2, 3, 4]
     source_sha: str
     source_tree: str
     images: _ImagesInput
@@ -609,9 +614,13 @@ class _TrustedReleaseInput(_StrictModel):
     release_evidence_sha256: str
 
     @model_validator(mode="after")
-    def _web_image_matches_schema(self) -> _TrustedReleaseInput:
-        if (self.schema_version == 3) != (self.images.loom_web is not None):
+    def _images_match_schema(self) -> _TrustedReleaseInput:
+        if (self.schema_version >= 3) != (self.images.loom_web is not None):
             raise ValueError("trusted web image does not match release schema")
+        if (self.schema_version == 4) != (
+            self.images.personal_dev_native_builder_agent is not None
+        ):
+            raise ValueError("trusted native builder image does not match release schema")
         return self
 
     @field_validator("source_sha", "source_tree")
@@ -1097,12 +1106,15 @@ class PersonalDevTrustedImages:
     postgres: str
     minio: str
     minio_client: str
+    personal_dev_native_builder_agent: str | None = None
 
 
 def _canonical_images(images: PersonalDevTrustedImages) -> dict[str, Any]:
     value = _dataclass_value(images)
     if images.loom_web is None:
         value.pop("loom_web")
+    if images.personal_dev_native_builder_agent is None:
+        value.pop("personal_dev_native_builder_agent")
     return value
 
 

@@ -1,0 +1,44 @@
+FROM python:3.11-slim@sha256:1042b61448fef4ba92d16a8c7eb4996d027568ce64792a7877fd88511e0af7c6 AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/personal-dev-native-builder-agent-requirements.txt /tmp/requirements.txt
+RUN PIP_ROOT_USER_ACTION=ignore python -m pip install \
+        --disable-pip-version-check \
+        --no-cache-dir \
+        --only-binary=:all: \
+        --require-hashes \
+        --requirement /tmp/requirements.txt \
+    && PIP_ROOT_USER_ACTION=ignore python -m pip uninstall --yes \
+        packaging pip setuptools wheel \
+    && rm /tmp/requirements.txt
+
+WORKDIR /opt/loom
+COPY --chown=0:0 src/loom/__init__.py ./loom/__init__.py
+COPY --chown=0:0 src/loom/personal_dev_native_builder_agent.py ./loom/personal_dev_native_builder_agent.py
+COPY --chown=0:0 src/loom/personal_dev_native_builder_protocol.py ./loom/personal_dev_native_builder_protocol.py
+COPY --chown=0:0 src/loom_personal_dev_native_builder_agent/__init__.py ./loom_personal_dev_native_builder_agent/__init__.py
+COPY --chown=0:0 src/loom_personal_dev_native_builder_agent/__main__.py ./loom_personal_dev_native_builder_agent/__main__.py
+
+RUN python -m compileall -q /opt/loom \
+    && chmod -R a-w /opt/loom
+
+FROM scratch
+
+ARG LOOM_BUILD_SHA=unknown
+COPY --from=runtime / /
+LABEL org.opencontainers.image.source="https://github.com/qianyi-sun/loom" \
+      org.opencontainers.image.revision="${LOOM_BUILD_SHA}" \
+      io.loom.personal-dev.native-builder.release-managed="true"
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin \
+    LANG=C.UTF-8 \
+    HOME=/tmp \
+    PYTHONPATH=/opt/loom \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/loom
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "loom_personal_dev_native_builder_agent"]
