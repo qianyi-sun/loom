@@ -607,6 +607,37 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
     assert release.canonical_bytes() == path.read_bytes()
 
 
+def test_trusted_release_repeatedly_loads_exact_open_proc_descriptor(
+    tmp_path: Path,
+) -> None:
+    path, digest = _write_release(tmp_path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        first = load_personal_dev_trusted_release(
+            Path(f"/proc/self/fd/{descriptor}"),
+            digest,
+        )
+        second = load_personal_dev_trusted_release(
+            Path(f"/proc/self/fd/{descriptor}"),
+            digest,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert first == second
+    assert first.source_sha == "1" * 40
+    assert first.source_tree == "2" * 40
+    assert first.canonical_bytes() == path.read_bytes()
+
+
+def test_trusted_release_rejects_unrepresentable_proc_descriptor(tmp_path: Path) -> None:
+    _, digest = _write_release(tmp_path)
+    unrepresentable = Path("/proc/self/fd/" + "9" * 100)
+
+    with pytest.raises(PersonalDevTrustedReleaseError, match="trusted release is invalid"):
+        load_personal_dev_trusted_release(unrepresentable, digest)
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_digest"),
     [
