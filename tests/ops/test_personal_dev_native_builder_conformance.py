@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -31,6 +33,9 @@ DENIAL_ID = "3" * 64
 FOREIGN_ID = "4" * 64
 PROVIDER_NETWORK_ID = "5" * 64
 DENIED_NETWORK_ID = "6" * 64
+_SYS_PIDFD_SEND_SIGNAL = 424
+_SYS_PIDFD_OPEN = 434
+_LIBC = ctypes.CDLL(None, use_errno=True)
 HOST_DENIAL_PROGRAM = """import socket,sys
 connection=socket.socket()
 connection.settimeout(2)
@@ -495,30 +500,68 @@ def test_subprocess_runner_kills_a_sigterm_resistant_descendant_after_its_leader
         f"pathlib.Path({str(marker)!r}).write_text(str(child.pid),encoding='ascii')\n"
         "time.sleep(10)"
     )
+    pidfds: list[int] = []
+
+    def retain_descendant_identity() -> None:
+        for _ in range(100):
+            if marker.exists():
+                pidfds.append(_pidfd_open(int(marker.read_text(encoding="ascii"))))
+                return
+            time.sleep(0.01)
+
+    retainer = threading.Thread(target=retain_descendant_identity)
+    retainer.start()
 
     with pytest.raises(ConformanceError, match="conformance failed"):
         SubprocessRunner().run((sys.executable, "-c", program))
 
-    grandchild = int(marker.read_text(encoding="ascii"))
+    retainer.join(timeout=2)
+    assert pidfds
+    raw_kill = os.kill
+
+    def reject_raw_signal(pid: int, signum: int) -> None:
+        if signum != 0:
+            raise AssertionError(f"raw PID signal attempted for {pid}")
+        raw_kill(pid, signum)
+
+    monkeypatch.setattr(os, "kill", reject_raw_signal)
+    pidfd = pidfds[0]
     try:
         for _ in range(100):
-            if not _process_exists(grandchild):
+            if not _pidfd_exists(pidfd):
                 break
             time.sleep(0.02)
-        assert not _process_exists(grandchild)
+        assert not _pidfd_exists(pidfd)
     finally:
         try:
-            os.kill(grandchild, signal.SIGKILL)
+            _pidfd_send_signal(pidfd, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        os.close(pidfd)
 
 
-def _process_exists(pid: int) -> bool:
+def _pidfd_open(pid: int) -> int:
+    return _linux_syscall(_SYS_PIDFD_OPEN, pid, 0)
+
+
+def _pidfd_exists(pidfd: int) -> bool:
     try:
-        os.kill(pid, 0)
+        _pidfd_send_signal(pidfd, 0)
     except ProcessLookupError:
         return False
     return True
+
+
+def _pidfd_send_signal(pidfd: int, signum: signal.Signals | int) -> None:
+    _linux_syscall(_SYS_PIDFD_SEND_SIGNAL, pidfd, int(signum), 0, 0)
+
+
+def _linux_syscall(number: int, *arguments: int) -> int:
+    result = _LIBC.syscall(number, *arguments)
+    if result == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return int(result)
 
 
 @pytest.mark.parametrize(
