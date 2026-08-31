@@ -47,6 +47,17 @@ That procedure verifies the exact public profile on OLDLAB Kubernetes agents
 proves rootless amd64/arm64 BuildKit execution without enabling the personal
 builder, lifecycle, task submission, or physical capacity.
 
+The native arm64 half has a distinct
+[GB10 runtime rollout](../../docs/runbooks/personal-dev-native-builder-runtime.md).
+It stages a dedicated Docker daemon and KVM gVisor runtime on `gx10-01c7`,
+retains only exact current/previous release images without daemon-wide prune,
+and starts the signed agent before native management activation. The follow-on
+[two-owner native acceptance](../../docs/runbooks/personal-dev-native-builder-acceptance.md)
+requires overlapping GB10 arm64 grants and OLDLAB amd64 Jobs, immutable
+multi-platform candidates, authenticated owner teardown, zero dynamic
+namespaces/grants, unavailable workers, and executable ceiling zero. Neither
+procedure submits a task or mutates Slurm.
+
 Both modes render the same release-bound scanner cache preparation. Trusted
 release schema 2 added the immutable `personal_dev_scanner_cache` image and
 binds it to the checked-in lock, scanner binary, both databases and metadata,

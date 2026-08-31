@@ -2216,6 +2216,18 @@ def test_concurrent_owner_zero_capacity_acceptance_runbook_has_exact_two_owner_w
     assert runbook.count("personal-dev-scanner-cache-init") >= 2
 
 
+def test_native_builder_provider_and_runbooks_are_indexed() -> None:
+    architecture = _read("docs/architecture/README.md")
+    runbooks = _read("docs/runbooks/README.md")
+    fleet = _read("deploy/dev-fleet/README.md")
+
+    assert "personal-dev-native-builder-provider.md" in architecture
+    assert "personal-dev-native-builder-runtime.md" in runbooks
+    assert "personal-dev-native-builder-acceptance.md" in runbooks
+    assert "personal-dev-native-builder-runtime.md" in fleet
+    assert "personal-dev-native-builder-acceptance.md" in fleet
+
+
 def test_concurrent_owner_denial_probe_canonicalizes_pretty_cli_status(
     tmp_path: Path,
 ) -> None:

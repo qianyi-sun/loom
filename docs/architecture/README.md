@@ -69,6 +69,10 @@ than mixed with current behavior.
   supported workload trust mode.
 - **[Environment naming](env-naming-convention.md)** — canonical environment
   identities and route prefixes.
+- **[Personal-development native builder provider](personal-dev-native-builder-provider.md)**
+  — signed GB10 pull grants, dedicated Docker/gVisor containment, native
+  arm64/amd64 composition, release/readiness gates, and zero-task-capacity
+  rollout boundaries.
 
 ## Data, storage, and shared results
 

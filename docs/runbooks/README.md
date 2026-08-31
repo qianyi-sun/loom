@@ -30,6 +30,13 @@ capacity workflow.
 - **[Personal-development builder runtime](personal-dev-builder-runtime.md)**
   — measured gVisor installation, sequential OLDLAB agent rollout,
   RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
+- **[Personal-development native builder runtime](personal-dev-native-builder-runtime.md)**
+  — protected GB10 dedicated-daemon/gVisor staging, exact image convergence,
+  agent activation, zero-capacity evidence, and byte-scoped rollback.
+- **[Personal-development native builder acceptance](personal-dev-native-builder-acceptance.md)**
+  — simultaneous native GB10 arm64 grants and OLDLAB amd64 Jobs for two owners,
+  immutable multi-platform publication, isolation, cleanup, and operational
+  restoration at executable ceiling zero.
 - **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
   — the approved #1280 sole-owner/two-environment lifecycle acceptance, exact
   zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
