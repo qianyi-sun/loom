@@ -374,7 +374,7 @@ def test_architecture_predicate_rejects_malformed_build_mode(build_mode: str) ->
     ("path", "replacement"),
     [
         (("scanner", "name"), "Other"),
-        (("scanner", "version"), "v0.70.1"),
+        (("scanner", "version"), "v0.74.1"),
         (("config_sha256",), "0" * 64),
         (("ignore_sha256",), "0" * 64),
     ],
@@ -517,7 +517,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
     ("path", "replacement"),
     [
         (("scanner", "name"), "Other"),
-        (("scanner", "version"), "v0.70.1"),
+        (("scanner", "version"), "v0.74.1"),
         (("config_sha256",), "0" * 64),
         (("ignore_sha256",), "0" * 64),
     ],

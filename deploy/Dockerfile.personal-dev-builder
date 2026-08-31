@@ -1,32 +1,40 @@
 # Trusted, credential-minimal BuildKit wrapper for personal development source.
 #
-# The base is the multi-architecture v0.33.0-rc1 rootless index. Updating it is a
-# reviewed trusted-fleet change; candidate source cannot select this image.
-FROM golang:1.25.7-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced AS rootlesskit-builder
+# BuildKit v0.33.0-rc1 is the first upstream image whose buildctl/buildkitd
+# embed x/crypto v0.55.0. Upstream RootlessKit still embeds a vulnerable
+# x/crypto, so rebuild the reviewed v3.1.0 source commit with only that module
+# raised to v0.55.0 and replace the base binary below.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.23@sha256:b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57 AS rootlesskit-builder
 
-RUN go mod download github.com/rootless-containers/rootlesskit/v3@v3.0.1 \
-    && module_dir="$(go env GOPATH)/pkg/mod/github.com/rootless-containers/rootlesskit/v3@v3.0.1" \
-    && cp -R "$module_dir" /rootlesskit \
-    && chmod -R u+w /rootlesskit
-WORKDIR /rootlesskit
-RUN go mod edit -require=golang.org/x/crypto@v0.55.0 \
-    && go mod download golang.org/x/crypto@v0.55.0 \
-    && CGO_ENABLED=0 go build -mod=mod -trimpath -buildvcs=false \
-      -ldflags='-s -w' -o /rootlesskit-fixed ./cmd/rootlesskit \
-    && test "$(go version -m /rootlesskit-fixed | awk '$2 == "golang.org/x/crypto" {print $3}')" = "v0.55.0" \
-    && /rootlesskit-fixed --version | grep -Fx 'rootlesskit version 3.0.1'
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src/rootlesskit
+ADD --checksum=sha256:51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8da9340a \
+    https://github.com/rootless-containers/rootlesskit/archive/62d2101fbbe4f79bc845a337c4e868d27ff602c9.tar.gz \
+    /tmp/rootlesskit.tar.gz
+RUN tar -xzf /tmp/rootlesskit.tar.gz --strip-components=1 \
+    && go mod edit -require=golang.org/x/crypto@v0.55.0 \
+    && go mod tidy \
+    && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+       go build -trimpath -ldflags='-s -w' -o /out/rootlesskit ./cmd/rootlesskit \
+    && go version -m /out/rootlesskit | grep -F 'golang.org/x/crypto' | grep -F 'v0.55.0' \
+    && (cd /out && sha256sum rootlesskit > rootlesskit.sha256)
 
 FROM moby/buildkit:v0.33.0-rc1-rootless@sha256:30fa7f6ebbbf482ba76d6a4ed63a7db0786dc43b81dd57fb62436a69d5ba84ab
 
 ARG TARGETARCH
 USER root
-COPY --from=rootlesskit-builder /rootlesskit-fixed /usr/bin/rootlesskit
+COPY --from=rootlesskit-builder /out/rootlesskit /usr/bin/rootlesskit
+COPY --from=rootlesskit-builder /out/rootlesskit.sha256 /usr/share/loom/rootlesskit.sha256
 COPY --chown=0:0 --chmod=0555 deploy/personal-dev-builder/loom-personal-dev-buildkitd /usr/local/bin/loom-personal-dev-buildkitd
 RUN apk add --no-cache ca-certificates python3 \
     && test -x /usr/bin/buildctl \
     && test -x /usr/bin/buildkitd \
     && test -x /usr/bin/rootlesskit \
-    && test "$(rootlesskit --version)" = "rootlesskit version 3.0.1" \
+    && test "$(buildctl --version | awk '{print $3}')" = "v0.33.0-rc1" \
+    && test "$(buildkitd --version | awk '{print $3}')" = "v0.33.0-rc1" \
+    && test "$(rootlesskit --version)" = "rootlesskit version 3.1.0" \
+    && (cd /usr/bin && sha256sum -c /usr/share/loom/rootlesskit.sha256) \
     && case "$TARGETARCH" in \
         amd64) qemu_path=/usr/bin/buildkit-qemu-aarch64 ;; \
         arm64) qemu_path=/usr/bin/buildkit-qemu-x86_64 ;; \

@@ -38,9 +38,9 @@ _PERL_BASE_COMPONENTS = (
     "family-orchestrator",
     "llm-gateway",
     "personal-dev-activation-agent",
+    "personal-dev-native-builder-agent",
     "personal-dev-scanner-cache",
     "pipeline-orchestrator",
-    "service",
     "worker",
 )
 _EMPTY_COMPONENTS = (
@@ -48,6 +48,7 @@ _EMPTY_COMPONENTS = (
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
+    "service",
     "staging-admin-browser-smoke",
     "web",
 )
@@ -348,10 +349,23 @@ def test_validator_accepts_observed_python_slim_perl_base_inventory(
     component: str,
 ) -> None:
     ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("service", ignore_file)
+    payload = _report("capacity-executor", ignore_file)
     payload["ArtifactName"] = f"/tmp/{component}-amd64.docker.tar"
 
     result = _run_validator(tmp_path, payload, component=component)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_validator_accepts_service_alpine_inventory_without_debian_exceptions(
+    tmp_path: Path,
+) -> None:
+    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
+    payload = _report("service", ignore_file)
+    payload["Metadata"]["OS"] = {"Family": "alpine", "Name": "3.23.5"}  # type: ignore[index]
+    payload["Results"][0]["Type"] = "alpine"  # type: ignore[index]
+
+    result = _run_validator(tmp_path, payload, component="service")
 
     assert result.returncode == 0, result.stderr
 

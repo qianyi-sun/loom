@@ -38,7 +38,8 @@ from loom.personal_dev_builder_runtime import (
 )
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
-    SkopeoBuildxPersonalDevRegistryPublisher,
+    EphemeralDockerManifestState,
+    SkopeoDockerManifestPersonalDevRegistryPublisher,
     TrivyPersonalDevImageScanner,
 )
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
@@ -529,15 +530,16 @@ def build_personal_dev_builder_runtime(
     registry_auth_file = _required_registry_auth_file(
         settings.personal_dev_builder_registry_auth_file
     )
+    docker_manifest_state = EphemeralDockerManifestState(registry_auth_file)
     publisher_runner = AsyncBoundedCommandRunner(
         environment={
-            "DOCKER_CONFIG": str(registry_auth_file.parent),
+            "DOCKER_CONFIG": str(docker_manifest_state.directory),
             "HOME": "/tmp",
             "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "TMPDIR": "/tmp",
         },
     )
-    publisher = SkopeoBuildxPersonalDevRegistryPublisher(
+    publisher = SkopeoDockerManifestPersonalDevRegistryPublisher(
         runner=publisher_runner,
         skopeo_executable=_required_executable(
             settings.personal_dev_builder_skopeo_path,
@@ -548,6 +550,7 @@ def build_personal_dev_builder_runtime(
             label="docker",
         ),
         registry_auth_file=registry_auth_file,
+        docker_manifest_state=docker_manifest_state,
     )
     capabilities = S3PersonalDevBuildCapabilityProvider(
         object_store=minio_client,
