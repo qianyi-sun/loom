@@ -34,6 +34,12 @@ from loom.personal_dev_minio_backup import (
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _GIT_IDENTITY = re.compile(r"[0-9a-f]{40}")
+_SHORT_DIGEST = re.compile(r"[0-9a-f]{12}")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+_OCI_REFERENCE = re.compile(
+    r"ghcr\.io/qianyi-sun/[a-z0-9][a-z0-9._/-]*@sha256:([0-9a-f]{64})"
+)
+_KUBERNETES_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
 _TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -446,12 +452,7 @@ class _AcceptanceStatusSha256s(_StrictModel):
         return _validated_nonempty_evidence_digest(value)
 
 
-class PersonalDevAcceptanceResultV2(_StrictModel):
-    """Canonical concurrent-owner zero-capacity acceptance result."""
-
-    schema_name: Literal["loom-personal-dev-zero-capacity-acceptance-result-v2"] = Field(
-        alias="schema"
-    )
+class _PersonalDevAcceptanceResultCommon(_StrictModel):
     acceptance_manifest_sha256: str
     acceptance_plan_sha256: str
     release_sha256: str
@@ -486,6 +487,229 @@ class PersonalDevAcceptanceResultV2(_StrictModel):
 
     def canonical_bytes(self) -> bytes:
         return _canonical_json(self.model_dump(mode="json", by_alias=True))
+
+
+class PersonalDevAcceptanceResultV2(_PersonalDevAcceptanceResultCommon):
+    """Canonical concurrent-owner zero-capacity acceptance result."""
+
+    schema_name: Literal["loom-personal-dev-zero-capacity-acceptance-result-v2"] = Field(
+        alias="schema"
+    )
+
+
+class _NativeAmd64Job(_StrictModel):
+    candidate: str
+    name: str
+    namespace: str
+    runtime_class: Literal["loom-personal-dev-builder"]
+    uid: str
+
+    @field_validator("candidate")
+    @classmethod
+    def _candidate_prefix(cls, value: str) -> str:
+        if _SHORT_DIGEST.fullmatch(value) is None:
+            raise ValueError("native amd64 candidate prefix is invalid")
+        return value
+
+    @field_validator("name", "namespace")
+    @classmethod
+    def _kubernetes_name(cls, value: str) -> str:
+        if _KUBERNETES_NAME.fullmatch(value) is None:
+            raise ValueError("native amd64 Kubernetes identity is invalid")
+        return value
+
+    @field_validator("uid")
+    @classmethod
+    def _uid(cls, value: str) -> str:
+        return _validated_uuid(value)
+
+
+class _NativeArm64Grant(_StrictModel):
+    candidate: str
+    grant_id: str
+    platform: Literal["linux/arm64"]
+    provider: Literal["gb10-gvisor-docker-v1"]
+    state: Literal["running"]
+
+    @field_validator("candidate")
+    @classmethod
+    def _candidate_prefix(cls, value: str) -> str:
+        if _SHORT_DIGEST.fullmatch(value) is None:
+            raise ValueError("native arm64 candidate prefix is invalid")
+        return value
+
+    @field_validator("grant_id")
+    @classmethod
+    def _grant_id(cls, value: str) -> str:
+        return _validated_uuid(value)
+
+
+class _NativeArm64Container(_StrictModel):
+    grant_id: str
+    id: str
+    image: str
+    platform: Literal["linux/arm64"]
+    role: Literal["buildkit", "client"]
+    runtime: Literal["runsc-personal-dev-native"]
+
+    @field_validator("grant_id")
+    @classmethod
+    def _grant_id(cls, value: str) -> str:
+        return _validated_uuid(value)
+
+    @field_validator("id")
+    @classmethod
+    def _container_id(cls, value: str) -> str:
+        if _CONTAINER_ID.fullmatch(value) is None:
+            raise ValueError("native container identity is invalid")
+        return value
+
+    @field_validator("image")
+    @classmethod
+    def _image_id(cls, value: str) -> str:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+            raise ValueError("native container image identity is invalid")
+        return value
+
+
+class _NativeOverlap(_StrictModel):
+    amd64_jobs: tuple[_NativeAmd64Job, _NativeAmd64Job]
+    arm64_grants: tuple[_NativeArm64Grant, _NativeArm64Grant]
+    arm64_containers: tuple[
+        _NativeArm64Container,
+        _NativeArm64Container,
+        _NativeArm64Container,
+        _NativeArm64Container,
+    ]
+
+    @field_validator("amd64_jobs", "arm64_grants", "arm64_containers", mode="before")
+    @classmethod
+    def _arrays_are_exact(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, list):
+            raise ValueError("native overlap arrays are invalid")
+        return tuple(value)
+
+
+class _NativeCompletion(_StrictModel):
+    buildkit_container_id: str
+    buildkit_running: Literal[True]
+    candidate_sha: str
+    client_container_id: str
+    client_exit_code: Literal[0]
+    client_oom_killed: Literal[False]
+    emulated: Literal[False]
+    fallback_used: Literal[False]
+    platform: Literal["linux/arm64"]
+    provider: Literal["gb10-gvisor-docker-v1"]
+    runtime_name: Literal["runsc-personal-dev-native"]
+
+    @field_validator("buildkit_container_id", "client_container_id")
+    @classmethod
+    def _container_id(cls, value: str) -> str:
+        if _CONTAINER_ID.fullmatch(value) is None:
+            raise ValueError("native completion container identity is invalid")
+        return value
+
+    @field_validator("candidate_sha")
+    @classmethod
+    def _candidate_digest(cls, value: str) -> str:
+        return _validated_digest(value)
+
+    @model_validator(mode="after")
+    def _sandboxes_are_distinct(self) -> _NativeCompletion:
+        if hmac.compare_digest(self.buildkit_container_id, self.client_container_id):
+            raise ValueError("native completion sandboxes are not distinct")
+        return self
+
+
+class _NativeIndex(_StrictModel):
+    candidate_sha: str
+    component: Literal["service", "web"]
+    manifest_sha256: str
+    platforms: tuple[Literal["linux/amd64"], Literal["linux/arm64"]]
+    reference: str
+
+    @field_validator("candidate_sha", "manifest_sha256")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_digest(value)
+
+    @field_validator("platforms", mode="before")
+    @classmethod
+    def _platforms_are_array(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, list):
+            raise ValueError("native index platforms are invalid")
+        return tuple(value)
+
+    @model_validator(mode="after")
+    def _reference_matches_manifest(self) -> _NativeIndex:
+        match = _OCI_REFERENCE.fullmatch(self.reference)
+        if match is None or not hmac.compare_digest(match.group(1), self.manifest_sha256):
+            raise ValueError("native index reference is invalid")
+        return self
+
+
+class _NativeEvidenceSha256s(_StrictModel):
+    after_slurm: str
+    before_slurm: str
+    candidate_publications: str
+    final_capacity: str
+    final_zero_grants: str
+    final_zero_namespaces: str
+    final_zero_tasks: str
+    final_zero_workers: str
+    native_runtime: str
+    simultaneous_containers: str
+    simultaneous_grants: str
+    simultaneous_jobs: str
+
+    @field_validator("*")
+    @classmethod
+    def _digest(cls, value: str) -> str:
+        return _validated_nonempty_evidence_digest(value)
+
+
+class _NativeZeroCapacity(_StrictModel):
+    active_native_grants: Literal[0]
+    dynamic_namespace_count: Literal[0]
+    executable_new_capacity_ceiling: Literal[0]
+    loom_slurm_jobs_after: Literal[0]
+    loom_slurm_jobs_before: Literal[0]
+    tasks_after: int = Field(ge=0)
+    tasks_before: int = Field(ge=0)
+    worker_available: Literal[False]
+    workers_after: int = Field(ge=0)
+    workers_before: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _database_counts_are_unchanged(self) -> _NativeZeroCapacity:
+        if self.tasks_after != self.tasks_before or self.workers_after != self.workers_before:
+            raise ValueError("native zero-capacity database boundary changed")
+        return self
+
+
+class _NativeAcceptanceEvidence(_StrictModel):
+    completions: tuple[_NativeCompletion, _NativeCompletion]
+    evidence_sha256s: _NativeEvidenceSha256s
+    indexes: tuple[_NativeIndex, _NativeIndex, _NativeIndex, _NativeIndex]
+    overlap: _NativeOverlap
+    zero_capacity: _NativeZeroCapacity
+
+    @field_validator("completions", "indexes", mode="before")
+    @classmethod
+    def _arrays_are_exact(cls, value: object) -> tuple[object, ...]:
+        if not isinstance(value, list):
+            raise ValueError("native acceptance arrays are invalid")
+        return tuple(value)
+
+
+class PersonalDevAcceptanceResultV3(_PersonalDevAcceptanceResultCommon):
+    """Canonical concurrent-owner native-platform acceptance result."""
+
+    schema_name: Literal["loom-personal-dev-zero-capacity-acceptance-result-v3"] = Field(
+        alias="schema"
+    )
+    native: _NativeAcceptanceEvidence
 
 
 def _canonical_json(value: object) -> bytes:
@@ -719,21 +943,102 @@ def _validate_denial_matrix(
             raise ValueError("cross-owner denial matrix is invalid")
 
 
+def _validate_native_acceptance_result(
+    plan: PersonalDevAcceptancePlan,
+    result: PersonalDevAcceptanceResultV3,
+) -> None:
+    native_plan = plan.native_builder
+    if (
+        plan.schema_version != 3
+        or native_plan is None
+        or native_plan.platform != "linux/arm64"
+        or native_plan.provider != "gb10-gvisor-docker-v1"
+        or native_plan.max_concurrency < 2
+        or plan.builder.runtime_class_name != "loom-personal-dev-builder"
+    ):
+        raise ValueError("native acceptance plan binding is invalid")
+
+    initial_candidates = tuple(owner.initial.candidate_sha[:12] for owner in result.owners)
+    accepted_candidates = tuple(owner.updated.candidate_sha for owner in result.owners)
+    overlap = result.native.overlap
+    if (
+        tuple(job.candidate for job in overlap.amd64_jobs) != initial_candidates
+        or tuple(grant.candidate for grant in overlap.arm64_grants) != initial_candidates
+        or len({job.uid for job in overlap.amd64_jobs}) != 2
+        or len({job.namespace for job in overlap.amd64_jobs}) != 2
+        or len({grant.grant_id for grant in overlap.arm64_grants}) != 2
+    ):
+        raise ValueError("native overlap candidate identity is invalid")
+
+    expected_container_order = tuple(
+        (grant.grant_id, role)
+        for grant in overlap.arm64_grants
+        for role in ("buildkit", "client")
+    )
+    observed_container_order = tuple(
+        (container.grant_id, container.role) for container in overlap.arm64_containers
+    )
+    if (
+        observed_container_order != expected_container_order
+        or len({container.id for container in overlap.arm64_containers}) != 4
+    ):
+        raise ValueError("native overlap container identity is invalid")
+
+    completions = result.native.completions
+    completion_container_ids = tuple(
+        container_id
+        for completion in completions
+        for container_id in (
+            completion.buildkit_container_id,
+            completion.client_container_id,
+        )
+    )
+    if (
+        tuple(completion.candidate_sha for completion in completions) != accepted_candidates
+        or len(set(completion_container_ids)) != 4
+        or not set(completion_container_ids).isdisjoint(
+            container.id for container in overlap.arm64_containers
+        )
+    ):
+        raise ValueError("native completion candidate identity is invalid")
+
+    expected_indexes = tuple(
+        (candidate, component)
+        for candidate in accepted_candidates
+        for component in ("service", "web")
+    )
+    observed_indexes = tuple(
+        (index.candidate_sha, index.component) for index in result.native.indexes
+    )
+    if observed_indexes != expected_indexes:
+        raise ValueError("native publication index identity is invalid")
+
+
 def load_personal_dev_acceptance_result(
     path: Path,
     expected_sha256: str,
     *,
     plan: PersonalDevAcceptancePlan,
     expected_acceptance_manifest_sha256: str,
-) -> PersonalDevAcceptanceResultV2:
+) -> PersonalDevAcceptanceResultV2 | PersonalDevAcceptanceResultV3:
     """Load strict canonical read-only evidence for the two-owner acceptance run."""
 
     payload, value = _load_json(path, expected_sha256)
     try:
         _validated_digest(expected_acceptance_manifest_sha256)
-        result = PersonalDevAcceptanceResultV2.model_validate(value)
+        schema_name = value.get("schema")
+        if schema_name == "loom-personal-dev-zero-capacity-acceptance-result-v2":
+            result: PersonalDevAcceptanceResultV2 | PersonalDevAcceptanceResultV3 = (
+                PersonalDevAcceptanceResultV2.model_validate(value)
+            )
+            expected_plan_schema = 2
+        elif schema_name == "loom-personal-dev-zero-capacity-acceptance-result-v3":
+            result = PersonalDevAcceptanceResultV3.model_validate(value)
+            expected_plan_schema = 3
+        else:
+            raise ValueError("acceptance result schema is invalid")
         if (
-            plan.schema_version != 2
+            plan.schema_version != expected_plan_schema
             or len(plan.acceptance_owners) != 2
             or not hmac.compare_digest(
                 result.acceptance_manifest_sha256,
@@ -798,6 +1103,9 @@ def load_personal_dev_acceptance_result(
             result.owners[1].updated.candidate_sha,
         ):
             raise ValueError("acceptance result owner candidates are not independent")
+
+        if isinstance(result, PersonalDevAcceptanceResultV3):
+            _validate_native_acceptance_result(plan, result)
 
         _validate_denial_matrix(plan, result.cross_owner_denials)
         expected_targets = (
@@ -1601,6 +1909,7 @@ def load_personal_dev_backup_restore_evidence(
 __all__ = [
     "PersonalDevAcceptanceEvidenceError",
     "PersonalDevAcceptanceResultV2",
+    "PersonalDevAcceptanceResultV3",
     "PersonalDevBackupRestoreEvidence",
     "build_personal_dev_backup_restore_evidence",
     "build_personal_dev_scanner_finding_policy",

@@ -198,6 +198,10 @@ def test_native_builder_acceptance_proves_concurrent_native_platforms_and_routes
     assert "application/vnd.oci.image.index.v1+json" in runbook
     assert "curl --fail" in normalized
     assert "probe_cross_owner_denial" in runbook
+    assert '[[ "$owner_0_candidate" =~ ^[0-9a-f]{64}$ ]]' in runbook
+    assert '[[ "$owner_1_candidate" =~ ^[0-9a-f]{64}$ ]]' in runbook
+    assert '[[ "$route_host" =~ ^[a-z0-9]' in runbook
+    assert "Run section 7 of the runtime runbook" in runbook
 
 
 def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_owner_api() -> None:
@@ -211,7 +215,10 @@ def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_o
     assert 'XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev destroy "$owner_0_name"' in normalized
     assert 'XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name"' in normalized
     assert "--format json" in normalized
-    assert 'cmp -s "$restored_operational_manifest" "$baseline_operational_manifest"' in runbook
+    assert 'cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"' in runbook
+    assert runbook.index('cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"') < (
+        runbook.index("verify-acceptance-result")
+    )
     assert "final-zero-grants.json" in runbook
     assert "final-zero-namespaces.json" in runbook
     assert "final-zero-workers.json" in runbook
@@ -220,6 +227,49 @@ def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_o
     assert '"manager_ceiling":0' in runbook
     assert '"worker_available":false' in runbook
     assert "executable-new-capacity ceiling remains exactly `0`" in runbook
+
+
+def test_native_builder_acceptance_orders_temporary_authority_before_durable_operations() -> None:
+    runbook = _read(ACCEPTANCE)
+
+    milestones = (
+        "agent-active-pre-management.json",
+        "render-acceptance",
+        "native-acceptance.server-side-apply.txt",
+        "signed-zero-grant-readiness",
+        "owner_0_deploy_pid=$!",
+        "owner_0_update_pid=$!",
+        "probe_cross_owner_denial \"$owner_1_xdg\" \"$owner_1_candidate\" \"$owner_0_xdg\" \"$owner_0_name\" 1 0 destroy",
+        "owner-1.final-destroyed.json",
+        "rollback.server-side-apply.txt",
+        "rollback-shadow.status.json",
+        'schema:"loom-personal-dev-zero-capacity-acceptance-result-v3"',
+        "verify-acceptance-result",
+        'operational_plan="$evidence_dir/native-operational-plan.json"',
+        "render-operational",
+        "native-operational.server-side-apply.txt",
+        "final-operational.status.json",
+    )
+    offsets = [runbook.index(milestone) for milestone in milestones]
+    assert offsets == sorted(offsets)
+    verification_offset = runbook.index("verify-acceptance-result")
+    assert "render-operational" not in runbook[:verification_offset]
+    assert "native-operational.server-side-apply.txt" not in runbook[:verification_offset]
+    assert runbook.count("jq -cS -j") >= 2
+    assert ".native == true" in runbook
+
+
+def test_native_builder_acceptance_canonicalizes_loader_inputs_without_newlines() -> None:
+    runbook = _read(ACCEPTANCE)
+
+    raw_status = runbook.index('rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"')
+    canonical_status = runbook.index(
+        'jq -cS -j . "$rollback_status_raw" > "$rollback_status"'
+    )
+    verification = runbook.index("verify-acceptance-result")
+    assert raw_status < canonical_status < verification
+    assert 'assert_canonical_json "$rollback_status"' in runbook
+    assert 'assert_canonical_json_line "$acceptance_verification"' in runbook
 
 
 def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() -> None:
@@ -234,7 +284,7 @@ def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() ->
     assert "dedicated image cache and system identities are retained" in _normalized(
         runtime
     ).casefold()
-    assert "restore the exact operational state" in _normalized(acceptance).casefold()
+    assert acceptance.index("verify-acceptance-result") < acceptance.index("render-operational")
     for runbook in (runtime, acceptance):
         assert "evidence-index.sha256" in runbook
         assert "sha256sum" in runbook

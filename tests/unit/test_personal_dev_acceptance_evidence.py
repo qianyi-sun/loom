@@ -1209,6 +1209,31 @@ def _result_plan(tmp_path: Path):  # type: ignore[no-untyped-def]
     return plan, v1_plan
 
 
+def _native_result_plan(tmp_path: Path):  # type: ignore[no-untyped-def]
+    plan, _v1_plan = _result_plan(tmp_path)
+    value = plan.canonical_value()
+    value["schema_version"] = 3
+    value["native_builder"] = {
+        "agent_instance_id": "00000000-0000-0000-0000-000000000501",
+        "agent_key_id": "gb10-native-builder-v1",
+        "freshness_seconds": 60,
+        "host_boot_id": "00000000-0000-0000-0000-000000000502",
+        "host_name": "gx10-01c7",
+        "max_concurrency": 2,
+        "platform": "linux/arm64",
+        "protocol_version": 1,
+        "provider": "gb10-gvisor-docker-v1",
+        "public_key_sha256": "1" * 64,
+        "public_store_endpoint_cidrs": ["8.8.8.8/32"],
+        "public_store_origin": "https://store.example.test",
+        "runtime_profile_sha256": "2" * 64,
+    }
+    plan_root = tmp_path / "native-result-plan"
+    plan_root.mkdir()
+    plan_path, plan_sha256 = _write_plan(plan_root, value)
+    return load_personal_dev_acceptance_plan(plan_path, plan_sha256)
+
+
 def _result_snapshot(
     plan,  # type: ignore[no-untyped-def]
     owner_index: int,
@@ -1357,6 +1382,330 @@ def _result_value(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
             "rollback_shadow": "8" * 64,
         },
     }
+
+
+def _native_result_value(plan) -> dict[str, object]:  # type: ignore[no-untyped-def]
+    value = _result_value(plan)
+    value["schema"] = "loom-personal-dev-zero-capacity-acceptance-result-v3"
+    initial_candidates = [
+        owner["initial"]["candidate_sha"] for owner in value["owners"]  # type: ignore[index,union-attr]
+    ]
+    accepted_candidates = [
+        owner["updated"]["candidate_sha"] for owner in value["owners"]  # type: ignore[index,union-attr]
+    ]
+    grant_ids = [
+        "00000000-0000-0000-0000-000000000601",
+        "00000000-0000-0000-0000-000000000602",
+    ]
+    indexes = []
+    for owner_index, candidate in enumerate(accepted_candidates):
+        for component_index, component in enumerate(("service", "web")):
+            digest = str(3 + owner_index * 2 + component_index) * 64
+            indexes.append(
+                {
+                    "candidate_sha": candidate,
+                    "component": component,
+                    "manifest_sha256": digest,
+                    "platforms": ["linux/amd64", "linux/arm64"],
+                    "reference": f"ghcr.io/qianyi-sun/loom-dev-{component}@sha256:{digest}",
+                }
+            )
+    value["native"] = {
+        "completions": [
+            {
+                "buildkit_container_id": "7" * 64,
+                "buildkit_running": True,
+                "candidate_sha": accepted_candidates[0],
+                "client_container_id": "8" * 64,
+                "client_exit_code": 0,
+                "client_oom_killed": False,
+                "emulated": False,
+                "fallback_used": False,
+                "platform": "linux/arm64",
+                "provider": "gb10-gvisor-docker-v1",
+                "runtime_name": "runsc-personal-dev-native",
+            },
+            {
+                "buildkit_container_id": "9" * 64,
+                "buildkit_running": True,
+                "candidate_sha": accepted_candidates[1],
+                "client_container_id": "a" * 64,
+                "client_exit_code": 0,
+                "client_oom_killed": False,
+                "emulated": False,
+                "fallback_used": False,
+                "platform": "linux/arm64",
+                "provider": "gb10-gvisor-docker-v1",
+                "runtime_name": "runsc-personal-dev-native",
+            },
+        ],
+        "evidence_sha256s": {
+            "after_slurm": "1" * 64,
+            "before_slurm": "2" * 64,
+            "candidate_publications": "3" * 64,
+            "final_capacity": "4" * 64,
+            "final_zero_grants": "5" * 64,
+            "final_zero_namespaces": "6" * 64,
+            "final_zero_tasks": "7" * 64,
+            "final_zero_workers": "8" * 64,
+            "native_runtime": "9" * 64,
+            "simultaneous_containers": "a" * 64,
+            "simultaneous_grants": "b" * 64,
+            "simultaneous_jobs": "c" * 64,
+        },
+        "indexes": indexes,
+        "overlap": {
+            "amd64_jobs": [
+                {
+                    "candidate": initial_candidates[0][:12],
+                    "name": "loom-build-owner-a-amd64",
+                    "namespace": "loom-build-owner-a",
+                    "runtime_class": "loom-personal-dev-builder",
+                    "uid": "00000000-0000-0000-0000-000000000701",
+                },
+                {
+                    "candidate": initial_candidates[1][:12],
+                    "name": "loom-build-owner-b-amd64",
+                    "namespace": "loom-build-owner-b",
+                    "runtime_class": "loom-personal-dev-builder",
+                    "uid": "00000000-0000-0000-0000-000000000702",
+                },
+            ],
+            "arm64_containers": [
+                {
+                    "grant_id": grant_ids[0],
+                    "id": "b" * 64,
+                    "image": "sha256:" + "c" * 64,
+                    "platform": "linux/arm64",
+                    "role": "buildkit",
+                    "runtime": "runsc-personal-dev-native",
+                },
+                {
+                    "grant_id": grant_ids[0],
+                    "id": "d" * 64,
+                    "image": "sha256:" + "e" * 64,
+                    "platform": "linux/arm64",
+                    "role": "client",
+                    "runtime": "runsc-personal-dev-native",
+                },
+                {
+                    "grant_id": grant_ids[1],
+                    "id": "f" * 64,
+                    "image": "sha256:" + "1" * 64,
+                    "platform": "linux/arm64",
+                    "role": "buildkit",
+                    "runtime": "runsc-personal-dev-native",
+                },
+                {
+                    "grant_id": grant_ids[1],
+                    "id": "2" * 64,
+                    "image": "sha256:" + "3" * 64,
+                    "platform": "linux/arm64",
+                    "role": "client",
+                    "runtime": "runsc-personal-dev-native",
+                },
+            ],
+            "arm64_grants": [
+                {
+                    "candidate": initial_candidates[0][:12],
+                    "grant_id": grant_ids[0],
+                    "platform": "linux/arm64",
+                    "provider": "gb10-gvisor-docker-v1",
+                    "state": "running",
+                },
+                {
+                    "candidate": initial_candidates[1][:12],
+                    "grant_id": grant_ids[1],
+                    "platform": "linux/arm64",
+                    "provider": "gb10-gvisor-docker-v1",
+                    "state": "running",
+                },
+            ],
+        },
+        "zero_capacity": {
+            "active_native_grants": 0,
+            "dynamic_namespace_count": 0,
+            "executable_new_capacity_ceiling": 0,
+            "loom_slurm_jobs_after": 0,
+            "loom_slurm_jobs_before": 0,
+            "tasks_after": 0,
+            "tasks_before": 0,
+            "worker_available": False,
+            "workers_after": 0,
+            "workers_before": 0,
+        },
+    }
+    return value
+
+
+def test_acceptance_result_v3_loads_strict_native_platform_evidence(
+    tmp_path: Path,
+) -> None:
+    plan = _native_result_plan(tmp_path)
+    value = _native_result_value(plan)
+    path = tmp_path / "native-acceptance-result.json"
+    sha256 = _write_owner_only(path, value)
+
+    result = load_personal_dev_acceptance_result(
+        path,
+        sha256,
+        plan=plan,
+        expected_acceptance_manifest_sha256="a" * 64,
+    )
+
+    assert result.schema_name == "loom-personal-dev-zero-capacity-acceptance-result-v3"
+    assert result.native is not None
+    assert len(result.native.overlap.amd64_jobs) == 2
+    assert len(result.native.overlap.arm64_grants) == 2
+    assert len(result.native.overlap.arm64_containers) == 4
+    assert len(result.native.completions) == 2
+    assert len(result.native.indexes) == 4
+
+
+def test_acceptance_result_v3_rejects_reused_overlap_container_identity(
+    tmp_path: Path,
+) -> None:
+    plan = _native_result_plan(tmp_path)
+    value = _native_result_value(plan)
+    native = value["native"]  # type: ignore[assignment]
+    native["completions"][0]["buildkit_container_id"] = (  # type: ignore[index]
+        native["overlap"]["arm64_containers"][0]["id"]  # type: ignore[index]
+    )
+    path = tmp_path / "native-acceptance-result.json"
+    sha256 = _write_owner_only(path, value)
+
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "job-count",
+        "job-candidate",
+        "job-runtime",
+        "grant-candidate",
+        "grant-duplicate",
+        "container-grant",
+        "container-role",
+        "completion-candidate",
+        "completion-emulated",
+        "completion-fallback",
+        "index-candidate",
+        "index-component",
+        "index-platform",
+        "index-digest",
+        "empty-evidence",
+        "active-grant",
+        "task-count-drift",
+    ],
+)
+def test_acceptance_result_v3_rejects_native_evidence_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    plan = _native_result_plan(tmp_path)
+    value = _native_result_value(plan)
+    native = value["native"]  # type: ignore[assignment]
+    overlap = native["overlap"]  # type: ignore[index]
+    if mutation == "job-count":
+        overlap["amd64_jobs"].pop()  # type: ignore[index]
+    elif mutation == "job-candidate":
+        overlap["amd64_jobs"][0]["candidate"] = "0" * 12  # type: ignore[index]
+    elif mutation == "job-runtime":
+        overlap["amd64_jobs"][0]["runtime_class"] = "runc"  # type: ignore[index]
+    elif mutation == "grant-candidate":
+        overlap["arm64_grants"][0]["candidate"] = "0" * 12  # type: ignore[index]
+    elif mutation == "grant-duplicate":
+        overlap["arm64_grants"][1]["grant_id"] = overlap["arm64_grants"][0][  # type: ignore[index]
+            "grant_id"
+        ]
+    elif mutation == "container-grant":
+        overlap["arm64_containers"][0]["grant_id"] = (  # type: ignore[index]
+            "00000000-0000-0000-0000-000000000699"
+        )
+    elif mutation == "container-role":
+        overlap["arm64_containers"][1]["role"] = "buildkit"  # type: ignore[index]
+    elif mutation == "completion-candidate":
+        native["completions"][0]["candidate_sha"] = "0" * 64  # type: ignore[index]
+    elif mutation == "completion-emulated":
+        native["completions"][0]["emulated"] = True  # type: ignore[index]
+    elif mutation == "completion-fallback":
+        native["completions"][0]["fallback_used"] = True  # type: ignore[index]
+    elif mutation == "index-candidate":
+        native["indexes"][0]["candidate_sha"] = "0" * 64  # type: ignore[index]
+    elif mutation == "index-component":
+        native["indexes"][1]["component"] = "service"  # type: ignore[index]
+    elif mutation == "index-platform":
+        native["indexes"][0]["platforms"] = ["linux/amd64", "linux/amd64"]  # type: ignore[index]
+    elif mutation == "index-digest":
+        native["indexes"][0]["manifest_sha256"] = "f" * 64  # type: ignore[index]
+    elif mutation == "empty-evidence":
+        native["evidence_sha256s"]["native_runtime"] = _EMPTY_SHA256  # type: ignore[index]
+    elif mutation == "active-grant":
+        native["zero_capacity"]["active_native_grants"] = 1  # type: ignore[index]
+    else:
+        native["zero_capacity"]["tasks_after"] = 1  # type: ignore[index]
+
+    path = tmp_path / "native-acceptance-result.json"
+    sha256 = _write_owner_only(path, value)
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            path,
+            sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+
+def test_acceptance_result_schema_cannot_cross_native_plan_boundary(tmp_path: Path) -> None:
+    plan, _v1_plan = _result_plan(tmp_path)
+    native_plan_root = tmp_path / "native-boundary"
+    native_plan_root.mkdir()
+    native_value = plan.canonical_value()
+    native_value["schema_version"] = 3
+    native_value["native_builder"] = {
+        "agent_instance_id": "00000000-0000-0000-0000-000000000501",
+        "agent_key_id": "gb10-native-builder-v1",
+        "freshness_seconds": 60,
+        "host_boot_id": "00000000-0000-0000-0000-000000000502",
+        "host_name": "gx10-01c7",
+        "max_concurrency": 2,
+        "platform": "linux/arm64",
+        "protocol_version": 1,
+        "provider": "gb10-gvisor-docker-v1",
+        "public_key_sha256": "1" * 64,
+        "public_store_endpoint_cidrs": ["8.8.8.8/32"],
+        "public_store_origin": "https://store.example.test",
+        "runtime_profile_sha256": "2" * 64,
+    }
+    native_path, native_sha256 = _write_plan(native_plan_root, native_value)
+    native_plan = load_personal_dev_acceptance_plan(native_path, native_sha256)
+
+    v2_path = tmp_path / "v2-result.json"
+    v2_sha256 = _write_owner_only(v2_path, _result_value(plan))
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            v2_path,
+            v2_sha256,
+            plan=native_plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
+
+    v3_path = tmp_path / "v3-result.json"
+    v3_sha256 = _write_owner_only(v3_path, _native_result_value(native_plan))
+    with pytest.raises(PersonalDevAcceptanceEvidenceError):
+        load_personal_dev_acceptance_result(
+            v3_path,
+            v3_sha256,
+            plan=plan,
+            expected_acceptance_manifest_sha256="a" * 64,
+        )
 
 
 def _load_result(tmp_path: Path, value: object, plan) -> PersonalDevAcceptanceResultV2:  # type: ignore[no-untyped-def]

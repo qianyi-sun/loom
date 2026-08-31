@@ -1,37 +1,30 @@
 # Personal-development native builder two-owner acceptance
 
-This runbook activates the release-bound native builder in the shared
-`loom-dev` management plane and proves two simultaneous personal deployments:
+This runbook proves a release-bound multi-person development environment with
 native OLDLAB `linux/amd64` Kubernetes Jobs and native GB10 `linux/arm64`
-grants. Each owner may deploy a different arbitrary local source tree,
-including committed, modified, and untracked files accepted by the source
-snapshot policy.
+grants. Two owners deploy and update different arbitrary local source trees,
+exercise all cross-owner denials, and clean up through authenticated Loom APIs.
+Candidate bytes run only under `runsc-personal-dev` or
+`runsc-personal-dev-native`; there is no QEMU or runc fallback.
 
-This is application-candidate acceptance, not task execution. It contains no
-task submission and no Slurm mutation. No personal worker becomes available,
-and the executable-new-capacity ceiling remains exactly `0`. There is no QEMU
-or runc fallback.
+This is application-candidate acceptance. It contains no task submission and
+no Slurm mutation. Personal workers remain unavailable and the
+executable-new-capacity ceiling remains exactly `0`.
+Every accepted control-plane status therefore contains the canonical fragments
+`"manager_ceiling":0` and `"worker_available":false`.
 
-Every accepted personal control-plane status contains the exact canonical
-fragments `"manager_ceiling":0` and `"worker_available":false`.
+The authority order is mandatory: activate the agent while native management
+is disabled; apply one expiring schema-3 acceptance plan; complete the full
+two-owner lifecycle; clean up and reapply the exact inert shadow; verify a
+canonical schema-v3 result; then derive and apply the schema-2 operational
+plan. No operational plan exists before verification. Secret values are never
+printed, stored in evidence, passed as command arguments, or copied into the
+repository.
 
-Complete the runtime runbook through agent activation first. Management apply
-must occur only after the agent service is observed active. Signed durable
-zero-grant readiness must occur after that apply and before either owner
-request. Cleanup uses only each owner's authenticated Loom API. Never delete a
-personal or build namespace directly.
+## 1. Bind immutable inputs and owner sessions
 
-Secret values are never printed, stored in evidence, passed as command
-arguments, or copied into the repository. The two owner sessions remain in
-separate existing mode-`0700` XDG roots outside the evidence directory.
-
-## 1. Bind the protected release, native plan, and evidence
-
-The profile is a separately reviewed owner-only schema-3 copy of the checked-in
-shadow profile with only `[native_builder]` prepared identity, public key,
-current public-store origin/CIDRs, and exact release bindings populated. The
-operational plan is canonical schema 2 and binds the same values. Both are
-immutable inputs to this window.
+Complete the native runtime runbook through agent activation first. Use one
+non-root shell. Every referenced input is an owner-only, reviewed file.
 
 ```bash
 set -euo pipefail
@@ -45,12 +38,8 @@ trusted_release='<absolute-owner-only-trusted-release.json>'
 trusted_release_sha256='<trusted-release-64-lowercase-hex>'
 profile='<absolute-owner-only-prepared-schema-3-profile.toml>'
 profile_sha256='<prepared-profile-64-lowercase-hex>'
-operational_plan='<absolute-owner-only-native-operational-plan.json>'
-operational_plan_sha256='<native-operational-plan-64-lowercase-hex>'
-baseline_operational_manifest='<absolute-byte-reviewed-native-operational-manifest>'
-baseline_operational_manifest_sha256='<native-operational-manifest-64-lowercase-hex>'
-previous_operational_manifest='<absolute-byte-reviewed-previous-operational-manifest>'
-previous_operational_manifest_sha256='<previous-operational-manifest-64-lowercase-hex>'
+acceptance_plan='<absolute-owner-only-native-acceptance-plan-v3.json>'
+acceptance_plan_sha256='<native-acceptance-plan-64-lowercase-hex>'
 rollback_shadow_manifest='<absolute-byte-reviewed-schema-4-shadow-manifest>'
 rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 runtime_evidence='<absolute-active-native-runtime-evidence-directory>'
@@ -63,11 +52,10 @@ gb10_target='<ssh-user>@gx10-01c7'
 slurm_observer='<read-only-slurm-observer-ssh-target>'
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
 loom_cli="$repository_root/.venv/bin/loom"
-
 trusted_launcher_profile='<absolute-owner-only-trusted-launcher-profile.json>'
 scanner_finding_policy='<absolute-owner-only-scanner-finding-policy.json>'
 backup_restore_evidence='<absolute-owner-only-backup-restore-evidence.json>'
-operational_evidence_args=(
+bound_evidence_args=(
   --source-root "$repository_root"
   --trusted-launcher-profile-file "$trusted_launcher_profile"
   --scanner-finding-policy-file "$scanner_finding_policy"
@@ -78,6 +66,8 @@ owner_0_xdg='<absolute-mode-0700-owner-0-xdg-config-root>'
 owner_1_xdg='<absolute-mode-0700-owner-1-xdg-config-root>'
 owner_0_source='<absolute-owner-0-source-root>'
 owner_1_source='<absolute-owner-1-source-root>'
+owner_0_update_source='<absolute-owner-0-updated-source-root>'
+owner_1_update_source='<absolute-owner-1-updated-source-root>'
 owner_0_name='<owner-0-personal-name>'
 owner_1_name='<owner-1-personal-name>'
 
@@ -87,125 +77,99 @@ test "$(git rev-parse --show-toplevel)" = "$repository_root"
 test "$(git rev-parse HEAD)" = "$merged_source_sha"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_cli"
-
-for path in "$trusted_release" "$profile" "$operational_plan" \
-  "$baseline_operational_manifest" "$previous_operational_manifest" \
+for path in "$trusted_release" "$profile" "$acceptance_plan" \
   "$rollback_shadow_manifest" "$reviewed_kubeconfig" \
   "$trusted_launcher_profile" "$scanner_finding_policy" \
   "$backup_restore_evidence"; do
-  test -f "$path"
-  test ! -L "$path"
+  test -f "$path" && test ! -L "$path"
   test "$(realpath -e "$path")" = "$path"
   test "$(stat -c %u "$path")" = "$(id -u)"
   test "$(stat -c %a "$path")" = 600
   test "$(stat -c %h "$path")" = 1
 done
-
-test "$(sha256sum "$trusted_release" | awk '{print $1}')" = \
-  "$trusted_release_sha256"
+test "$(sha256sum "$trusted_release" | awk '{print $1}')" = "$trusted_release_sha256"
 test "$(sha256sum "$profile" | awk '{print $1}')" = "$profile_sha256"
-test "$(sha256sum "$operational_plan" | awk '{print $1}')" = \
-  "$operational_plan_sha256"
-test "$(sha256sum "$baseline_operational_manifest" | awk '{print $1}')" = \
-  "$baseline_operational_manifest_sha256"
-test "$(sha256sum "$previous_operational_manifest" | awk '{print $1}')" = \
-  "$previous_operational_manifest_sha256"
-test "$(sha256sum "$rollback_shadow_manifest" | awk '{print $1}')" = \
-  "$rollback_shadow_sha256"
+test "$(sha256sum "$acceptance_plan" | awk '{print $1}')" = "$acceptance_plan_sha256"
+test "$(sha256sum "$rollback_shadow_manifest" | awk '{print $1}')" = "$rollback_shadow_sha256"
 test "$(jq -er .schema_version "$trusted_release")" = 4
-test "$(jq -er .schema_version "$operational_plan")" = 2
-test "$(jq -er .source.commit "$operational_plan")" = "$merged_source_sha"
-test "$(jq -er .release.trusted_release_sha256 "$operational_plan")" = \
-  "$trusted_release_sha256"
-test "$(jq -er .native_builder.runtime_profile_sha256 "$operational_plan")" = \
-  "$runtime_profile_sha256"
-test "$(jq -er .manager.executable_new_capacity_ceiling "$operational_plan")" = 0
+test "$(jq -er .schema_version "$acceptance_plan")" = 3
+test "$(jq -er .source.commit "$acceptance_plan")" = "$merged_source_sha"
+test "$(jq -er .release.trusted_release_sha256 "$acceptance_plan")" = "$trusted_release_sha256"
+test "$(jq -er .release.shadow_manifest_sha256 "$acceptance_plan")" = "$rollback_shadow_sha256"
+test "$(jq -er .native_builder.runtime_profile_sha256 "$acceptance_plan")" = "$runtime_profile_sha256"
+test "$(jq -er .native_builder.provider "$acceptance_plan")" = gb10-gvisor-docker-v1
+test "$(jq -er .native_builder.platform "$acceptance_plan")" = linux/arm64
+test "$(jq -er .native_builder.max_concurrency "$acceptance_plan")" = 2
+test "$(jq -er .manager.executable_new_capacity_ceiling "$acceptance_plan")" = 0
+test "$(jq -er '.acceptance_owners | length' "$acceptance_plan")" = 2
+now_epoch="$(date -u +%s)"
+test "$(date -u -d "$(jq -er .window.started_at "$acceptance_plan")" +%s)" -le "$now_epoch"
+test "$now_epoch" -lt "$(date -u -d "$(jq -er .window.expires_at "$acceptance_plan")" +%s)"
 
-test -d "$runtime_evidence"
-test ! -L "$runtime_evidence"
+test -d "$runtime_evidence" && test ! -L "$runtime_evidence"
 test "$(realpath -e "$runtime_evidence")" = "$runtime_evidence"
 test "$(stat -c %u "$runtime_evidence")" = "$(id -u)"
 test "$(stat -c %a "$runtime_evidence")" = 700
-test -f "$runtime_evidence/immutable-inputs.json"
-test ! -L "$runtime_evidence/immutable-inputs.json"
-test "$(stat -c %u "$runtime_evidence/immutable-inputs.json")" = "$(id -u)"
-test "$(stat -c %a "$runtime_evidence/immutable-inputs.json")" = 600
-test "$(stat -c %h "$runtime_evidence/immutable-inputs.json")" = 1
 jq -e --arg source "$merged_source_sha" --arg release "$trusted_release_sha256" \
   --arg profile "$runtime_profile_sha256" --arg prepared "$profile_sha256" \
   --arg archive "$archive_sha512" '
-    .source_sha == $source and .trusted_release_sha256 == $release and
-    .profile_sha256 == $profile and .prepared_profile_sha256 == $prepared and
-    .archive_sha512 == $archive
-  ' "$runtime_evidence/immutable-inputs.json" >/dev/null
+  .source_sha == $source and .trusted_release_sha256 == $release and
+  .profile_sha256 == $profile and .prepared_profile_sha256 == $prepared and
+  .archive_sha512 == $archive' "$runtime_evidence/immutable-inputs.json" >/dev/null
 
-test -d "$evidence_root"
-test ! -L "$evidence_root"
+test -d "$evidence_root" && test ! -L "$evidence_root"
 test "$(realpath -e "$evidence_root")" = "$evidence_root"
 test "$(stat -c %u "$evidence_root")" = "$(id -u)"
 test "$(stat -c %a "$evidence_root")" = 700
-case "$evidence_root/" in
-  "$repository_root"/*) exit 1 ;;
-esac
-case "$repository_root/" in
-  "$evidence_root"/*) exit 1 ;;
-esac
+case "$evidence_root/" in "$repository_root"/*) exit 1 ;; esac
 test ! -e "$evidence_dir"
 install -d -m 0700 "$evidence_dir"
 kubeconfig="$evidence_dir/kubeconfig"
 install -m 0600 "$reviewed_kubeconfig" "$kubeconfig"
 
 for path in "$owner_0_xdg" "$owner_1_xdg"; do
-  test -d "$path"
-  test ! -L "$path"
+  test -d "$path" && test ! -L "$path"
   test "$(realpath -e "$path")" = "$path"
   test "$(stat -c %u "$path")" = "$(id -u)"
   test "$(stat -c %a "$path")" = 700
 done
 test "$(realpath -e "$owner_0_xdg")" != "$(realpath -e "$owner_1_xdg")"
 for config in "$owner_0_xdg/loom/config.toml" "$owner_1_xdg/loom/config.toml"; do
-  test -f "$config"
-  test ! -L "$config"
-  test "$(realpath -e "$config")" = "$config"
-  test "$(stat -c %u "$config")" = "$(id -u)"
+  test -f "$config" && test ! -L "$config"
   test "$(stat -c %a "$config")" = 600
   test "$(stat -c %h "$config")" = 1
 done
 test "$(stat -c %d:%i "$owner_0_xdg/loom/config.toml")" != \
   "$(stat -c %d:%i "$owner_1_xdg/loom/config.toml")"
-for path in "$owner_0_source" "$owner_1_source"; do
-  test -d "$path"
-  test ! -L "$path"
+declare -A source_roots=()
+for path in "$owner_0_source" "$owner_1_source" \
+  "$owner_0_update_source" "$owner_1_update_source"; do
+  test -d "$path" && test ! -L "$path"
   test "$(realpath -e "$path")" = "$path"
   test "$(realpath -e "$path")" != "$repository_root"
+  source_roots["$(realpath -e "$path")"]=1
 done
-test "$(realpath -e "$owner_0_source")" != "$(realpath -e "$owner_1_source")"
+test "${#source_roots[@]}" -eq 4
 ```
 
-Use sources whose trusted Docker build paths take long enough to observe the
-overlap. The source trees must be different and must produce two different
-source archives/candidate hashes. Do not add artificial external dependencies
-or any task invocation.
+Use source trees whose trusted Docker builds take long enough to observe real
+overlap. Do not add artificial network dependencies or task invocations.
 
-## 2. Define read-only snapshots and record the initial boundary
+## 2. Define read-only boundaries and status interlocks
 
 ```bash
 postgres_pod="$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get pod \
   -l app=loom-dev-postgres -o json | jq -er '
-    [.items[] | select(.status.phase == "Running") | .metadata.name] |
-    if length == 1 then .[0] else error("postgres cardinality") end')"
-
+  [.items[] | select(.status.phase == "Running") | .metadata.name] |
+  if length == 1 then .[0] else error("postgres cardinality") end')"
 read_count() {
-  local sql="$1"
   kubectl --kubeconfig "$kubeconfig" --namespace loom-dev exec "$postgres_pod" \
     -c postgres -- /bin/sh -euc \
     'exec psql -AtX --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "$1"' \
-    sh "$sql"
+    sh "$1"
 }
-
 capture_counts() {
-  local output="$1"
-  local grants=null grant_table tasks workers
+  local output="$1" grants=null grant_table tasks workers
   grant_table="$(read_count "SELECT to_regclass('public.personal_dev_native_build_grants') IS NOT NULL")"
   if test "$grant_table" = t; then
     grants="$(read_count "SELECT count(*) FROM personal_dev_native_build_grants WHERE state IN ('queued','running')")"
@@ -217,41 +181,58 @@ capture_counts() {
     '{active_native_grants:$grants,tasks:$tasks,workers:$workers}' > "$output"
   chmod 0600 "$output"
 }
-
 capture_namespaces() {
   kubectl --kubeconfig "$kubeconfig" get namespaces -o json \
     | jq -cS '[.items[].metadata.name |
-      select(startswith("loom-dev-") or startswith("loom-build-"))] | sort' \
-    > "$1"
+      select(startswith("loom-dev-") or startswith("loom-build-"))] | sort' > "$1"
   chmod 0600 "$1"
 }
-
 capture_slurm() {
   local output="$1" queue="$1.queue"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- scontrol show nodes --json \
-    | jq -cS . > "$output"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- squeue --json \
-    | jq -cS . > "$queue"
+  ssh "${ssh_options[@]}" "$slurm_observer" -- scontrol show nodes --json | jq -cS . > "$output"
+  ssh "${ssh_options[@]}" "$slurm_observer" -- squeue --json | jq -cS . > "$queue"
   jq -cnS --slurpfile nodes "$output" --slurpfile jobs "$queue" \
     '{nodes:$nodes[0],queue:$jobs[0]}' > "$output.merged"
-  mv "$output.merged" "$output"
-  rm -f "$queue"
-  chmod 0600 "$output"
+  mv "$output.merged" "$output" && rm -f "$queue" && chmod 0600 "$output"
 }
-
 assert_no_loom_slurm_jobs() {
-  jq -e '[.queue.jobs[]? |
-    select(((.name // "") | ascii_downcase | startswith("loom")))] |
-    length == 0' "$1" >/dev/null
+  jq -e '[.queue.jobs[]? | select(((.name // "") | ascii_downcase |
+    startswith("loom")))] | length == 0' "$1" >/dev/null
+}
+assert_canonical_json() {
+  local source="$1" canonical
+  canonical="$(mktemp "$evidence_dir/canonical.XXXXXX")"
+  jq -cS -j . "$source" > "$canonical"
+  cmp -s "$source" "$canonical"
+  rm -f "$canonical"
+}
+assert_canonical_json_line() {
+  local source="$1" canonical
+  canonical="$(mktemp "$evidence_dir/canonical-line.XXXXXX")"
+  jq -cS . "$source" > "$canonical"
+  cmp -s "$source" "$canonical"
+  rm -f "$canonical"
+}
+acceptance_status() {
+  "$loom_cli" admin personal-dev-control-plane status-acceptance \
+    --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" \
+    --trusted-release-file "$trusted_release" \
+    --trusted-release-sha256 "$trusted_release_sha256" \
+    --acceptance-plan-file "$acceptance_plan" \
+    --acceptance-plan-sha256 "$acceptance_plan_sha256" \
+    "${bound_evidence_args[@]}" > "$1"
+  chmod 0600 "$1"
+  jq -e '.ready == true and .blockers == [] and .manager_ceiling == 0 and
+    .worker_available == false and any(.components[];
+      .name == "native-builder" and .observed == 1 and .ready == true)' "$1" >/dev/null
 }
 
 capture_counts "$evidence_dir/before-database-counts.json"
 capture_namespaces "$evidence_dir/before-namespaces.json"
 capture_slurm "$evidence_dir/before-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/before-slurm.json"
-"$loom_cli" admin capacity-control-plane status \
-  --namespace loom-dev --kubeconfig "$kubeconfig" \
-  > "$evidence_dir/before-capacity.status.json"
+"$loom_cli" admin capacity-control-plane status --namespace loom-dev \
+  --kubeconfig "$kubeconfig" > "$evidence_dir/before-capacity.status.json"
 chmod 0600 "$evidence_dir/before-capacity.status.json"
 jq -e '.active_native_grants == null or .active_native_grants == 0' \
   "$evidence_dir/before-database-counts.json" >/dev/null
@@ -260,11 +241,7 @@ jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
   "$evidence_dir/before-capacity.status.json" >/dev/null
 ```
 
-## 3. Prove agent-before-management ordering, render, and apply
-
-Capture the active host unit before any management mutation. An agent that is
-retrying against disabled native management is acceptable at this point; a
-missing, exited, wrong-image, or wrong-unit agent is not.
+## 3. Apply only the expiring schema-3 acceptance plane
 
 ```bash
 ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
@@ -280,434 +257,672 @@ jq -e 'length == 1 and .[0].activestate == "active" and
   .[0].fragmentpath == "/etc/systemd/system/loom-personal-dev-native-builder-agent.service"' \
   "$evidence_dir/agent-active-pre-management.json" >/dev/null
 
-rendered_operational="$evidence_dir/native-operational.rendered.yaml"
-rendered_operational_evidence="$evidence_dir/native-operational.render.json"
-"$loom_cli" admin personal-dev-control-plane render-operational \
-  --file "$profile" \
+shadow_recheck="$evidence_dir/preflight-shadow.yaml"
+"$loom_cli" admin personal-dev-control-plane render --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
-  --operational-plan-file "$operational_plan" \
-  --operational-plan-sha256 "$operational_plan_sha256" \
-  "${operational_evidence_args[@]}" \
-  > "$rendered_operational" 2> "$rendered_operational_evidence"
-chmod 0600 "$rendered_operational" "$rendered_operational_evidence"
-cmp -s "$rendered_operational" "$baseline_operational_manifest"
+  > "$shadow_recheck" 2> "$evidence_dir/preflight-shadow.render.json"
+chmod 0600 "$shadow_recheck" "$evidence_dir/preflight-shadow.render.json"
+cmp -s "$shadow_recheck" "$rollback_shadow_manifest"
 
-diff_status=0
+acceptance_manifest="$evidence_dir/native-acceptance.rendered.yaml"
+"$loom_cli" admin personal-dev-control-plane render-acceptance \
+  --file "$profile" --trusted-release-file "$trusted_release" \
+  --trusted-release-sha256 "$trusted_release_sha256" \
+  --acceptance-plan-file "$acceptance_plan" \
+  --acceptance-plan-sha256 "$acceptance_plan_sha256" \
+  "${bound_evidence_args[@]}" \
+  > "$acceptance_manifest" 2> "$evidence_dir/native-acceptance.render.json"
+chmod 0600 "$acceptance_manifest" "$evidence_dir/native-acceptance.render.json"
+acceptance_manifest_sha256="$(sha256sum "$acceptance_manifest" | awk '{print $1}')"
+acceptance_diff_rc=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
-  --field-manager=loom-personal-dev-control-plane \
-  -f "$baseline_operational_manifest" \
-  > "$evidence_dir/native-operational.server-side-diff.txt" 2>&1 || diff_status=$?
-test "$diff_status" -eq 0 || test "$diff_status" -eq 1
-chmod 0600 "$evidence_dir/native-operational.server-side-diff.txt"
-
+  --field-manager=loom-personal-dev-control-plane -f "$acceptance_manifest" \
+  > "$evidence_dir/native-acceptance.server-side-diff.txt" 2>&1 || acceptance_diff_rc=$?
+test "$acceptance_diff_rc" -eq 0 || test "$acceptance_diff_rc" -eq 1
+chmod 0600 "$evidence_dir/native-acceptance.server-side-diff.txt"
 capture_counts "$evidence_dir/pre-apply-database-counts.json"
 jq -e '.active_native_grants == null or .active_native_grants == 0' \
   "$evidence_dir/pre-apply-database-counts.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" apply --server-side \
-  --field-manager=loom-personal-dev-control-plane \
-  -f "$baseline_operational_manifest" \
-  > "$evidence_dir/native-operational.server-side-apply.txt"
-chmod 0600 "$evidence_dir/native-operational.server-side-apply.txt"
-
+  --field-manager=loom-personal-dev-control-plane -f "$acceptance_manifest" \
+  > "$evidence_dir/native-acceptance.server-side-apply.txt"
+chmod 0600 "$evidence_dir/native-acceptance.server-side-apply.txt"
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
-```
 
-Now require the agent's fresh signed durable row, exact identity/inventory,
-authenticated public-store probe, zero active grants, OLDLAB runtime,
-unavailable personal workers, and ceiling zero. This is the
-`signed-zero-grant-readiness` gate.
-
-```bash
 signed_readiness="$evidence_dir/signed-zero-grant-readiness.status.json"
 readiness_deadline=$((SECONDS + 180))
-while true; do
-  readiness_rc=0
-  "$loom_cli" admin personal-dev-control-plane status-operational \
-    --namespace loom-dev --kubeconfig "$kubeconfig" \
-    --file "$profile" \
-    --trusted-release-file "$trusted_release" \
-    --trusted-release-sha256 "$trusted_release_sha256" \
-    --operational-plan-file "$operational_plan" \
-    --operational-plan-sha256 "$operational_plan_sha256" \
-    "${operational_evidence_args[@]}" \
-    > "$signed_readiness" || readiness_rc=$?
-  if test "$readiness_rc" -eq 0 && jq -e '
-      .ready == true and .blockers == [] and
-      .manager_ceiling == 0 and .worker_available == false and
-      any(.components[]; .name == "native-builder" and
-        .observed == 1 and .ready == true)
-    ' "$signed_readiness" >/dev/null; then
-    break
-  fi
+until acceptance_status "$signed_readiness"; do
   test "$SECONDS" -lt "$readiness_deadline"
   sleep 2
 done
-chmod 0600 "$signed_readiness"
+capture_counts "$evidence_dir/signed-zero-grant-readiness.counts.json"
+jq -e '.active_native_grants == 0' \
+  "$evidence_dir/signed-zero-grant-readiness.counts.json" >/dev/null
+acceptance_status "$evidence_dir/pre-deploy.status.json"
 ```
 
-Pause here and run section 7 of the runtime runbook. That seals the host
-activation's after-state while grants and dynamic namespaces are still zero.
-Return to this section only after its evidence index is complete; do not start
-either owner early.
+Run section 7 of the runtime runbook now. It seals the host transaction while
+signed readiness is fresh, active grants are zero, and no dynamic namespace
+exists. Return here only after its evidence index is complete; do not start an
+owner request early.
 
-## 4. Verify two distinct owner credentials
+## 4. Authenticate two distinct owners
 
 ```bash
 owner_0_whoami="$evidence_dir/owner-0.whoami.json"
 owner_1_whoami="$evidence_dir/owner-1.whoami.json"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" auth whoami --format json \
-  | jq -cS . > "$owner_0_whoami"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" auth whoami --format json \
-  | jq -cS . > "$owner_1_whoami"
+XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" auth whoami --format json | jq -cS . > "$owner_0_whoami"
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" auth whoami --format json | jq -cS . > "$owner_1_whoami"
 chmod 0600 "$owner_0_whoami" "$owner_1_whoami"
-
 for whoami in "$owner_0_whoami" "$owner_1_whoami"; do
-  jq -e '.auth_kind == "bearer" and
-    .credential_type == "user_owned_api_token" and
+  jq -e '.auth_kind == "bearer" and .credential_type == "user_owned_api_token" and
     .principal_type == "team" and .role == null' "$whoami" >/dev/null
-  test "$(jq -er .server "$whoami")" = \
-    "$(jq -er .management_origin "$runtime_evidence/prepared-profile-binding.json")"
 done
 owner_0_principal="$(jq -cS '{user_id,team_id}' "$owner_0_whoami")"
 owner_1_principal="$(jq -cS '{user_id,team_id}' "$owner_1_whoami")"
 test "$owner_0_principal" != "$owner_1_principal"
+test "$owner_0_principal" = "$(jq -cS .acceptance_owners[0] "$acceptance_plan")"
+test "$owner_1_principal" = "$(jq -cS .acceptance_owners[1] "$acceptance_plan")"
 ```
 
-## 5. Launch both source-fresh deployments and capture overlap
+## 5. Run concurrent initial deploys and capture native overlap
 
-Start both owner commands before either wait. Both request `min_slots=0`; their
-application candidate builds must not create a Task or request a worker.
+Start both source-fresh requests before either wait. The overlap must contain
+two simultaneous amd64 Jobs and two simultaneous arm64 grants plus two
+BuildKit/client pairs.
 
 ```bash
-owner_0_log="$evidence_dir/owner-0.deploy.txt"
-owner_1_log="$evidence_dir/owner-1.deploy.txt"
 ( XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" service up \
     --environment "dev-$owner_0_name" --source-root "$owner_0_source" \
-    --min-slots 0 --max-slots 2 ) > "$owner_0_log" 2>&1 &
+    --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-0.deploy-v1.txt" 2>&1 &
 owner_0_deploy_pid=$!
 ( XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
     --environment "dev-$owner_1_name" --source-root "$owner_1_source" \
-    --min-slots 0 --max-slots 2 ) > "$owner_1_log" 2>&1 &
+    --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-1.deploy-v1.txt" 2>&1 &
 owner_1_deploy_pid=$!
-
-simultaneous_jobs="$evidence_dir/simultaneous-amd64-jobs.json"
-simultaneous_grants="$evidence_dir/simultaneous-arm64-grants.json"
-simultaneous_containers="$evidence_dir/simultaneous-arm64-containers.json"
+raw_jobs="$evidence_dir/simultaneous-amd64-jobs.raw.json"
+raw_grants="$evidence_dir/simultaneous-arm64-grants.raw.json"
+raw_containers="$evidence_dir/simultaneous-arm64-containers.raw.json"
 overlap_deadline=$((SECONDS + 600))
 while true; do
   jobs_before="$evidence_dir/jobs-before.tmp"
   jobs_after="$evidence_dir/jobs-after.tmp"
   kubectl --kubeconfig "$kubeconfig" get jobs --all-namespaces \
-    -l loom.dev/platform=amd64 -o json \
-    | jq -cS '[.items[] | select(.status.active == 1) |
-        {candidate:.metadata.labels["loom.dev/candidate"],
-         name:.metadata.name,namespace:.metadata.namespace,
-         runtime_class:.spec.template.spec.runtimeClassName,
-         uid:.metadata.uid}] | sort_by(.uid)' > "$jobs_before"
-  if jq -e 'length == 2 and all(.[]; .runtime_class == "loom-personal-dev-builder")' \
-      "$jobs_before" >/dev/null; then
+    -l loom.dev/platform=amd64 -o json | jq -cS '[.items[] |
+    select(.status.active == 1) | {candidate:.metadata.labels["loom.dev/candidate"],
+    name:.metadata.name,namespace:.metadata.namespace,
+    runtime_class:.spec.template.spec.runtimeClassName,uid:.metadata.uid}] |
+    sort_by(.candidate)' > "$jobs_before"
+  if jq -e 'length == 2 and all(.[];
+      .runtime_class == "loom-personal-dev-builder")' "$jobs_before" >/dev/null; then
     read_count "SELECT coalesce(jsonb_agg(jsonb_build_object(
-      'candidate',left(c.candidate_sha,12),'grant_id',g.id,
-      'platform',g.platform,'provider',g.provider,'state',g.state)
-      ORDER BY g.id)::text,'[]')
-      FROM personal_dev_native_build_grants g
-      JOIN personal_dev_candidates c ON c.id=g.candidate_id
-      WHERE g.state='running'" | jq -cS . > "$simultaneous_grants"
+      'candidate',left(c.candidate_sha,12),'grant_id',g.id,'platform',g.platform,
+      'provider',g.provider,'state',g.state) ORDER BY left(c.candidate_sha,12))::text,'[]')
+      FROM personal_dev_native_build_grants g JOIN personal_dev_candidates c
+      ON c.id=g.candidate_id WHERE g.state='running'" | jq -cS . > "$raw_grants"
     kubectl --kubeconfig "$kubeconfig" get jobs --all-namespaces \
-      -l loom.dev/platform=amd64 -o json \
-      | jq -cS '[.items[] | select(.status.active == 1) |
-          {candidate:.metadata.labels["loom.dev/candidate"],
-           name:.metadata.name,namespace:.metadata.namespace,
-           runtime_class:.spec.template.spec.runtimeClassName,
-           uid:.metadata.uid}] | sort_by(.uid)' > "$jobs_after"
-    if jq -e 'length == 2 and all(.[];
-        .platform == "linux/arm64" and
+      -l loom.dev/platform=amd64 -o json | jq -cS '[.items[] |
+      select(.status.active == 1) | {candidate:.metadata.labels["loom.dev/candidate"],
+      name:.metadata.name,namespace:.metadata.namespace,
+      runtime_class:.spec.template.spec.runtimeClassName,uid:.metadata.uid}] |
+      sort_by(.candidate)' > "$jobs_after"
+    if jq -e 'length == 2 and all(.[]; .platform == "linux/arm64" and
         .provider == "gb10-gvisor-docker-v1" and .state == "running")' \
-        "$simultaneous_grants" >/dev/null && cmp -s "$jobs_before" "$jobs_after"; then
-      mv "$jobs_after" "$simultaneous_jobs"
-      rm -f "$jobs_before"
+        "$raw_grants" >/dev/null && cmp -s "$jobs_before" "$jobs_after"; then
+      mv "$jobs_after" "$raw_jobs" && rm -f "$jobs_before"
       break
     fi
   fi
-  rm -f "$jobs_before" "$jobs_after" "$simultaneous_grants"
+  rm -f "$jobs_before" "$jobs_after" "$raw_grants"
   test "$SECONDS" -lt "$overlap_deadline"
   sleep 1
 done
-
 ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
   endpoint=unix:///run/loom-personal-dev-builder/docker.sock
   ids="$(docker -H "$endpoint" ps -q --filter label=loom.personal-dev-native-builder.managed=true)"
   test "$(printf "%s\n" "$ids" | sed "/^$/d" | wc -l)" = 4
   docker -H "$endpoint" inspect $ids
-' | jq -cS '[.[] | {
-    id:.Id,image:.Image,runtime:.HostConfig.Runtime,
-    role:.Config.Labels["loom.personal-dev-native-builder.role"],
-    grant:.Config.Labels["loom.personal-dev-native-builder.grant-id"],
-    platform:.Config.Labels["loom.personal-dev-native-builder.platform"]}] |
-  sort_by(.grant,.role)' > "$simultaneous_containers"
-jq -e 'length == 4 and
-  ([.[] | select(.role == "buildkit")] | length == 2) and
-  ([.[] | select(.role == "client")] | length == 2) and
-  all(.[]; .runtime == "runsc-personal-dev-native" and
-    .platform == "linux/arm64") and
-  ([.[].grant] | unique | length == 2)' "$simultaneous_containers" >/dev/null
-chmod 0600 "$simultaneous_jobs" "$simultaneous_grants" \
-  "$simultaneous_containers"
-
-owner_0_rc=0
-owner_1_rc=0
+' | jq -cS '[.[] | {grant_id:.Config.Labels["loom.personal-dev-native-builder.grant-id"],
+  id:.Id,image:.Image,platform:.Config.Labels["loom.personal-dev-native-builder.platform"],
+  role:.Config.Labels["loom.personal-dev-native-builder.role"],
+  runtime:.HostConfig.Runtime}] | sort_by(.grant_id,.role)' > "$raw_containers"
+jq -e 'length == 4 and ([.[]|select(.role=="buildkit")]|length==2) and
+  ([.[]|select(.role=="client")]|length==2) and all(.[];
+  .runtime=="runsc-personal-dev-native" and .platform=="linux/arm64") and
+  ([.[].grant_id]|unique|length==2)' "$raw_containers" >/dev/null
+chmod 0600 "$raw_jobs" "$raw_grants" "$raw_containers"
+owner_0_rc=0; owner_1_rc=0
 wait "$owner_0_deploy_pid" || owner_0_rc=$?
 wait "$owner_1_deploy_pid" || owner_1_rc=$?
-test "$owner_0_rc" -eq 0
-test "$owner_1_rc" -eq 0
-chmod 0600 "$owner_0_log" "$owner_1_log"
+test "$owner_0_rc" -eq 0 && test "$owner_1_rc" -eq 0
+chmod 0600 "$evidence_dir/owner-0.deploy-v1.txt" "$evidence_dir/owner-1.deploy-v1.txt"
+
+owner_0_initial="$evidence_dir/owner-0.initial.json"
+owner_1_initial="$evidence_dir/owner-1.initial.json"
+XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_initial"
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_initial"
+chmod 0600 "$owner_0_initial" "$owner_1_initial"
+for status in "$owner_0_initial" "$owner_1_initial"; do
+  jq -e '.status=="ready" and .application_status=="ready" and
+    .capacity_prepared==true and .min_slots==0 and .max_slots==2 and
+    .worker_available==false' "$status" >/dev/null
+done
+owner_0_initial_candidate="$(jq -er .candidate_sha "$owner_0_initial")"
+owner_1_initial_candidate="$(jq -er .candidate_sha "$owner_1_initial")"
+test "$owner_0_initial_candidate" != "$owner_1_initial_candidate"
+simultaneous_jobs="$evidence_dir/simultaneous-amd64-jobs.json"
+simultaneous_grants="$evidence_dir/simultaneous-arm64-grants.json"
+simultaneous_containers="$evidence_dir/simultaneous-arm64-containers.json"
+jq -cS --arg owner0 "${owner_0_initial_candidate:0:12}" \
+  --arg owner1 "${owner_1_initial_candidate:0:12}" '
+  [$owner0,$owner1] as $order | [$order[] as $candidate | .[] |
+  select(.candidate==$candidate)]' "$raw_jobs" > "$simultaneous_jobs"
+jq -cS --arg owner0 "${owner_0_initial_candidate:0:12}" \
+  --arg owner1 "${owner_1_initial_candidate:0:12}" '
+  [$owner0,$owner1] as $order | [$order[] as $candidate | .[] |
+  select(.candidate==$candidate)]' "$raw_grants" > "$simultaneous_grants"
+jq -cS --slurpfile grants "$simultaneous_grants" '
+  [$grants[0][] as $grant | ("buildkit","client") as $role | .[] |
+  select(.grant_id==$grant.grant_id and .role==$role)]' \
+  "$raw_containers" > "$simultaneous_containers"
+jq -e 'length==2' "$simultaneous_jobs" >/dev/null
+jq -e 'length==2' "$simultaneous_grants" >/dev/null
+jq -e 'length==4 and ([.[].id]|unique|length==4)' "$simultaneous_containers" >/dev/null
+chmod 0600 "$simultaneous_jobs" "$simultaneous_grants" "$simultaneous_containers"
+acceptance_status "$evidence_dir/after-initial.status.json"
 ```
 
-The overlap evidence must show two simultaneous amd64 Jobs and two
-simultaneous arm64 grants, plus four distinct GB10 containers split into two
-BuildKit/client pairs.
-
-## 6. Prove native completion and immutable multi-platform publication
+## 6. Update both owners and prove native publication
 
 ```bash
-owner_0_status="$evidence_dir/owner-0.status.json"
-owner_1_status="$evidence_dir/owner-1.status.json"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev status "$owner_0_name" \
-  --format json | jq -cS . > "$owner_0_status"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" \
-  --format json | jq -cS . > "$owner_1_status"
-chmod 0600 "$owner_0_status" "$owner_1_status"
-for status in "$owner_0_status" "$owner_1_status"; do
-  jq -e '.status == "ready" and .application_status == "ready" and
-    .min_slots == 0 and .worker_available == false' "$status" >/dev/null
-done
-owner_0_candidate="$(jq -er .candidate_sha "$owner_0_status")"
-owner_1_candidate="$(jq -er .candidate_sha "$owner_1_status")"
+( XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" service up \
+    --environment "dev-$owner_0_name" --source-root "$owner_0_update_source" \
+    --min-slots 0 --max-slots 3 ) > "$evidence_dir/owner-0.deploy-v2.txt" 2>&1 &
+owner_0_update_pid=$!
+( XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
+    --environment "dev-$owner_1_name" --source-root "$owner_1_update_source" \
+    --min-slots 0 --max-slots 4 ) > "$evidence_dir/owner-1.deploy-v2.txt" 2>&1 &
+owner_1_update_pid=$!
+owner_0_update_rc=0; owner_1_update_rc=0
+wait "$owner_0_update_pid" || owner_0_update_rc=$?
+wait "$owner_1_update_pid" || owner_1_update_rc=$?
+test "$owner_0_update_rc" -eq 0 && test "$owner_1_update_rc" -eq 0
+chmod 0600 "$evidence_dir/owner-0.deploy-v2.txt" "$evidence_dir/owner-1.deploy-v2.txt"
+owner_0_updated="$evidence_dir/owner-0.updated.json"
+owner_1_updated="$evidence_dir/owner-1.updated.json"
+XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_updated"
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_updated"
+chmod 0600 "$owner_0_updated" "$owner_1_updated"
+jq -e '.status=="ready" and .min_slots==0 and .max_slots==3 and .worker_available==false' "$owner_0_updated" >/dev/null
+jq -e '.status=="ready" and .min_slots==0 and .max_slots==4 and .worker_available==false' "$owner_1_updated" >/dev/null
+owner_0_candidate="$(jq -er .candidate_sha "$owner_0_updated")"
+owner_1_candidate="$(jq -er .candidate_sha "$owner_1_updated")"
 [[ "$owner_0_candidate" =~ ^[0-9a-f]{64}$ ]]
 [[ "$owner_1_candidate" =~ ^[0-9a-f]{64}$ ]]
+test "$owner_0_candidate" != "$owner_0_initial_candidate"
+test "$owner_1_candidate" != "$owner_1_initial_candidate"
 test "$owner_0_candidate" != "$owner_1_candidate"
+acceptance_status "$evidence_dir/after-updates.status.json"
 
-publication_query="SELECT jsonb_build_object(
-  'archive_sha256',archive_sha256,'candidate_sha',candidate_sha,
-  'image_manifest_digest',image_manifest_digest,
-  'publication',publication_json)::text
-  FROM personal_dev_candidates
-  WHERE candidate_sha IN ('$owner_0_candidate','$owner_1_candidate')
-  ORDER BY candidate_sha"
-read_count "$publication_query" | jq -cS . \
-  > "$evidence_dir/candidate-publications.jsonl"
-test "$(wc -l < "$evidence_dir/candidate-publications.jsonl")" = 2
-test "$(jq -r .archive_sha256 "$evidence_dir/candidate-publications.jsonl" | sort -u | wc -l)" = 2
+candidate_publications="$evidence_dir/candidate-publications.jsonl"
+native_runtime="$evidence_dir/native-runtime-evidence.jsonl"
+: > "$candidate_publications"; : > "$native_runtime"
+for candidate in "$owner_0_candidate" "$owner_1_candidate"; do
+  read_count "SELECT jsonb_build_object('archive_sha256',archive_sha256,
+    'candidate_sha',candidate_sha,'image_manifest_digest',image_manifest_digest,
+    'publication',publication_json)::text FROM personal_dev_candidates
+    WHERE candidate_sha='$candidate'" | jq -cS . >> "$candidate_publications"
+  read_count "SELECT jsonb_build_object('candidate_sha',c.candidate_sha,
+    'evidence',g.runtime_evidence_json)::text FROM personal_dev_native_build_grants g
+    JOIN personal_dev_candidates c ON c.id=g.candidate_id
+    WHERE c.candidate_sha='$candidate' AND g.state='succeeded'" | jq -cS '
+    {buildkit_container_id:.evidence.buildkit_container_id,
+     buildkit_running:.evidence.buildkit_running,candidate_sha:.candidate_sha,
+     client_container_id:.evidence.client_container_id,
+     client_exit_code:.evidence.client_exit_code,
+     client_oom_killed:.evidence.client_oom_killed,emulated:false,
+     fallback_used:false,platform:.evidence.platform,provider:.evidence.provider,
+     runtime_name:.evidence.runtime_name}' >> "$native_runtime"
+done
+chmod 0600 "$candidate_publications" "$native_runtime"
+test "$(wc -l < "$candidate_publications")" = 2
+test "$(wc -l < "$native_runtime")" = 2
+test "$(jq -r .archive_sha256 "$candidate_publications" | sort -u | wc -l)" = 2
+jq -e '.platform=="linux/arm64" and .provider=="gb10-gvisor-docker-v1" and
+  .runtime_name=="runsc-personal-dev-native" and
+  .client_container_id!=.buildkit_container_id and .client_exit_code==0 and
+  .client_oom_killed==false and .buildkit_running==true and
+  .emulated==false and .fallback_used==false' "$native_runtime" >/dev/null
+test "$(jq -s '[.[]|.buildkit_container_id,.client_container_id]|unique|length' "$native_runtime")" = 4
+test "$(jq -s --slurpfile overlap "$simultaneous_containers" '
+  ([.[]|.buildkit_container_id,.client_container_id]-[$overlap[0][].id])|length' \
+  "$native_runtime")" = 4
 
-runtime_query="SELECT jsonb_build_object(
-  'candidate_sha',c.candidate_sha,'evidence',g.runtime_evidence_json)::text
-  FROM personal_dev_native_build_grants g
-  JOIN personal_dev_candidates c ON c.id=g.candidate_id
-  WHERE c.candidate_sha IN ('$owner_0_candidate','$owner_1_candidate')
-    AND g.state='succeeded'
-  ORDER BY c.candidate_sha"
-read_count "$runtime_query" | jq -cS . \
-  > "$evidence_dir/native-runtime-evidence.jsonl"
-test "$(wc -l < "$evidence_dir/native-runtime-evidence.jsonl")" = 2
-jq -e '.evidence.platform == "linux/arm64" and
-  .evidence.provider == "gb10-gvisor-docker-v1" and
-  .evidence.runtime_name == "runsc-personal-dev-native" and
-  .evidence.client_container_id != .evidence.buildkit_container_id and
-  .evidence.client_exit_code == 0 and
-  .evidence.client_oom_killed == false and
-  .evidence.buildkit_running == true' \
-  "$evidence_dir/native-runtime-evidence.jsonl" >/dev/null
-
-index_list="$evidence_dir/candidate-indexes.txt"
-jq -r '.publication.images[] |
-  .index as $index | .platforms as $platforms |
-  select(($platforms|keys|sort) == ["linux/amd64","linux/arm64"]) | $index' \
-  "$evidence_dir/candidate-publications.jsonl" | sort -u > "$index_list"
-test "$(wc -l < "$index_list")" = 4
-while IFS= read -r index; do
-  [[ "$index" =~ @sha256:[0-9a-f]{64}$ ]]
-  inspect="$evidence_dir/index-$(printf '%s' "$index" | sha256sum | awk '{print $1}').json"
-  docker buildx imagetools inspect --raw "$index" | jq -cS . > "$inspect"
-  jq -e '.mediaType == "application/vnd.oci.image.index.v1+json" and
-    ([.manifests[].platform | (.os + "/" + .architecture)] | sort) ==
+native_indexes="$evidence_dir/native-indexes.jsonl"
+: > "$native_indexes"
+for candidate in "$owner_0_candidate" "$owner_1_candidate"; do
+  for component in service web; do
+    reference="$(jq -er --arg candidate "$candidate" --arg component "$component" '
+      select(.candidate_sha==$candidate)|.publication.images[$component].index' \
+      "$candidate_publications")"
+    [[ "$reference" =~ ^ghcr\.io/qianyi-sun/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+    inspect="$evidence_dir/index-$(printf '%s' "$reference" | sha256sum | awk '{print $1}').json"
+    docker buildx imagetools inspect --raw "$reference" > "$inspect"
+    chmod 0600 "$inspect"
+    manifest_sha256="$(sha256sum "$inspect" | awk '{print $1}')"
+    test "$reference" = "${reference%@sha256:*}@sha256:$manifest_sha256"
+    jq -e '.mediaType=="application/vnd.oci.image.index.v1+json" and
+      ([.manifests[].platform|(.os+"/"+.architecture)]|sort)==
       ["linux/amd64","linux/arm64"]' "$inspect" >/dev/null
-  chmod 0600 "$inspect"
-done < "$index_list"
-chmod 0600 "$evidence_dir/candidate-publications.jsonl" \
-  "$evidence_dir/native-runtime-evidence.jsonl" "$index_list"
+    jq -cS -n --arg candidate_sha "$candidate" --arg component "$component" \
+      --arg manifest_sha256 "$manifest_sha256" --arg reference "$reference" '
+      {candidate_sha:$candidate_sha,component:$component,
+       manifest_sha256:$manifest_sha256,
+       platforms:["linux/amd64","linux/arm64"],reference:$reference}' \
+      >> "$native_indexes"
+  done
+done
+chmod 0600 "$native_indexes"
+test "$(wc -l < "$native_indexes")" = 4
 ```
 
-The OLDLAB evidence is the two captured Job specs with RuntimeClass
-`loom-personal-dev-builder`, whose checked runtime handler is
-`runsc-personal-dev`; the GB10 evidence is the two signed grant completions with
-runtime `runsc-personal-dev-native`. Together with the four immutable indexes,
-this proves native multi-platform publication.
+The OLDLAB Job specs bind RuntimeClass `loom-personal-dev-builder`; the signed
+GB10 completions bind `runsc-personal-dev-native`. `docker buildx imagetools
+inspect --raw` preserves the exact digest-bearing index bytes.
 
-## 7. Prove owner isolation and route behavior
+## 7. Prove routes and all six cross-owner denials
 
 ```bash
-for field in identity.namespace identity.database identity.task_bucket \
-  identity.trajectories_bucket identity.artifacts_bucket identity.route_host \
-  subject_id subject_incarnation; do
-  test "$(jq -er ".$field" "$owner_0_status")" != \
-    "$(jq -er ".$field" "$owner_1_status")"
+for field in subject_id subject_incarnation identity.environment identity.namespace \
+  identity.database identity.task_bucket identity.trajectories_bucket \
+  identity.artifacts_bucket identity.route_host identity.worker_control_plane_host \
+  identity.worker_gateway_host identity.route_path identity.worker_pool; do
+  test "$(jq -er ".$field" "$owner_0_updated")" != "$(jq -er ".$field" "$owner_1_updated")"
 done
-
-probe_cross_owner_denial() {
-  local actor_xdg="$1" target_name="$2" output="$3"
-  local rc=0
-  XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" dev status "$target_name" \
-    --expected-hidden-denial > "$output.stdout" 2> "$output.stderr" || rc=$?
-  test "$rc" -eq 1
-  test ! -s "$output.stdout"
-  chmod 0600 "$output.stdout" "$output.stderr"
-}
-probe_cross_owner_denial "$owner_0_xdg" "$owner_1_name" \
-  "$evidence_dir/owner-0-to-owner-1"
-probe_cross_owner_denial "$owner_1_xdg" "$owner_0_name" \
-  "$evidence_dir/owner-1-to-owner-0"
-
-for status in "$owner_0_status" "$owner_1_status"; do
+for status in "$owner_0_updated" "$owner_1_updated"; do
   route_host="$(jq -er .identity.route_host "$status")"
   [[ "$route_host" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ ]]
   route_output="$evidence_dir/route-$route_host.json"
   curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
     --connect-timeout 10 --max-time 30 "https://$route_host/api/v1/health" \
     | jq -cS . > "$route_output"
-  jq -e '.status == "ok"' "$route_output" >/dev/null
+  jq -e '.status=="ok"' "$route_output" >/dev/null
   chmod 0600 "$route_output"
 done
+
+denials_jsonl="$evidence_dir/cross-owner-denials.jsonl"
+: > "$denials_jsonl"; chmod 0600 "$denials_jsonl"
+probe_cross_owner_denial() {
+  local actor_xdg="$1" actor_candidate="$2" target_xdg="$3" target_name="$4"
+  local actor_index="$5" target_index="$6" operation="$7"
+  local prefix="$evidence_dir/denial-$actor_index-$target_index-$operation"
+  local before="$prefix.before.json" after="$prefix.after.json"
+  local stdout="$prefix.stdout" stderr="$prefix.stderr" expected="$prefix.expected"
+  local expected_receipt target_epoch rc=0
+  XDG_CONFIG_HOME="$target_xdg" "$loom_cli" dev status "$target_name" --format json | jq -cS . > "$before"
+  target_epoch="$(jq -er '.operation_epoch|select(type=="number" and .>0)' "$before")"
+  case "$operation" in
+    read)
+      expected_receipt='{"error_code":"resource_hidden","http_method":"GET","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_read"}'
+      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" dev status "$target_name" \
+        --format json --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
+    update)
+      expected_receipt='{"error_code":"resource_hidden","http_method":"PUT","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_update"}'
+      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" service up \
+        --environment "dev-$target_name" --candidate "$actor_candidate" \
+        --expected-operation-epoch 1 --min-slots 0 --quiet \
+        --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
+    destroy)
+      expected_receipt='{"error_code":"resource_hidden","http_method":"DELETE","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_destroy"}'
+      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" dev destroy "$target_name" \
+        --format json --expected-operation-epoch "$target_epoch" \
+        --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
+    *) return 2 ;;
+  esac
+  test "$rc" -eq 1 && test ! -s "$stdout"
+  printf '%s\n' "$expected_receipt" > "$expected"
+  cmp -s "$stderr" "$expected" && rm -f "$expected"
+  XDG_CONFIG_HOME="$target_xdg" "$loom_cli" dev status "$target_name" --format json | jq -cS . > "$after"
+  cmp -s "$before" "$after"; chmod 0600 "$before" "$after" "$stdout" "$stderr"
+  jq -cS -n \
+    --arg actor_team_id "$(jq -r ".acceptance_owners[$actor_index].team_id" "$acceptance_plan")" \
+    --arg actor_user_id "$(jq -r ".acceptance_owners[$actor_index].user_id" "$acceptance_plan")" \
+    --arg operation "$operation" --arg stderr_sha256 "$(sha256sum "$stderr"|awk '{print $1}')" \
+    --arg stdout_sha256 "$(sha256sum "$stdout"|awk '{print $1}')" \
+    --arg target_after_sha256 "$(sha256sum "$after"|awk '{print $1}')" \
+    --arg target_before_sha256 "$(sha256sum "$before"|awk '{print $1}')" \
+    --arg target_environment "$target_name" \
+    --arg target_team_id "$(jq -r ".acceptance_owners[$target_index].team_id" "$acceptance_plan")" \
+    --arg target_user_id "$(jq -r ".acceptance_owners[$target_index].user_id" "$acceptance_plan")" '
+    {actor_team_id:$actor_team_id,actor_user_id:$actor_user_id,exit_code:1,
+     operation:$operation,stderr_sha256:$stderr_sha256,stdout_sha256:$stdout_sha256,
+     target_after_sha256:$target_after_sha256,target_before_sha256:$target_before_sha256,
+     target_environment:$target_environment,target_team_id:$target_team_id,
+     target_user_id:$target_user_id}' >> "$denials_jsonl"
+}
+probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 read
+probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 update
+probe_cross_owner_denial "$owner_0_xdg" "$owner_0_candidate" "$owner_1_xdg" "$owner_1_name" 0 1 destroy
+probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 read
+probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 update
+probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 destroy
+test "$(wc -l < "$denials_jsonl")" = 6
+acceptance_status "$evidence_dir/after-denials.status.json"
 ```
 
-## 8. Authenticated owner cleanup and final zero-residue proof
+## 8. Complete authenticated owner cleanup
 
-Only the owning authenticated API sessions retire their resources.
+Owner 0 deletes normally. Owner 1 proves retained-data deletion, same-subject
+redeploy with a new incarnation, and final normal deletion.
 
 ```bash
+owner_0_destroyed="$evidence_dir/owner-0.destroyed.json"
+owner_1_destroyed="$evidence_dir/owner-1.destroyed.json"
+owner_1_redeployed="$evidence_dir/owner-1.redeployed.json"
+owner_1_final_destroyed="$evidence_dir/owner-1.final-destroyed.json"
+retained_subject_id="$(jq -er .subject_id "$owner_1_updated")"
+retained_incarnation="$(jq -er .subject_incarnation "$owner_1_updated")"
 XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev destroy "$owner_0_name" \
-  --format json | jq -cS . > "$evidence_dir/owner-0.destroyed.json"
+  --format json | jq -cS . > "$owner_0_destroyed"
 XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name" \
-  --format json | jq -cS . > "$evidence_dir/owner-1.destroyed.json"
-chmod 0600 "$evidence_dir"/owner-*.destroyed.json
-jq -e '.status == "deleted"' "$evidence_dir/owner-0.destroyed.json" >/dev/null
-jq -e '.status == "deleted"' "$evidence_dir/owner-1.destroyed.json" >/dev/null
+  --keep-data --format json | jq -cS . > "$owner_1_destroyed"
+chmod 0600 "$owner_0_destroyed" "$owner_1_destroyed"
+jq -e '.status=="deleted" and .keep_data==false' "$owner_0_destroyed" >/dev/null
+jq -e '.status=="deleted" and .keep_data==true' "$owner_1_destroyed" >/dev/null
+owner_1_redeploy_epoch="$(jq -er '.operation_epoch|select(type=="number" and .>0)' "$owner_1_destroyed")"
+acceptance_status "$evidence_dir/after-destroy.status.json"
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
+  --environment "dev-$owner_1_name" --source-root "$owner_1_update_source" \
+  --expected-operation-epoch "$owner_1_redeploy_epoch" --min-slots 0 --max-slots 2 \
+  > "$evidence_dir/owner-1.redeploy.txt" 2>&1
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_redeployed"
+chmod 0600 "$evidence_dir/owner-1.redeploy.txt" "$owner_1_redeployed"
+jq -e --arg subject "$retained_subject_id" --arg incarnation "$retained_incarnation" '
+  .status=="ready" and .subject_id==$subject and .subject_incarnation!=$incarnation and
+  .deployment_generation==1 and .worker_available==false and .min_slots==0 and
+  .max_slots==2' "$owner_1_redeployed" >/dev/null
+acceptance_status "$evidence_dir/after-redeploy.status.json"
+XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name" \
+  --format json | jq -cS . > "$owner_1_final_destroyed"
+chmod 0600 "$owner_1_final_destroyed"
+jq -e '.status=="deleted" and .keep_data==false' "$owner_1_final_destroyed" >/dev/null
 
 cleanup_deadline=$((SECONDS + 300))
 while true; do
   capture_counts "$evidence_dir/final-zero-grants.json"
   capture_namespaces "$evidence_dir/final-zero-namespaces.json"
-  if jq -e '.active_native_grants == 0' \
-      "$evidence_dir/final-zero-grants.json" >/dev/null &&
-    jq -e '. == []' "$evidence_dir/final-zero-namespaces.json" >/dev/null; then
-    break
-  fi
-  test "$SECONDS" -lt "$cleanup_deadline"
-  sleep 2
+  if jq -e '.active_native_grants==0' "$evidence_dir/final-zero-grants.json" >/dev/null &&
+    jq -e '.==[]' "$evidence_dir/final-zero-namespaces.json" >/dev/null; then break; fi
+  test "$SECONDS" -lt "$cleanup_deadline"; sleep 2
 done
-
-jq -cS '{tasks}' "$evidence_dir/final-zero-grants.json" \
-  > "$evidence_dir/final-zero-tasks.json"
-jq -cS '{workers}' "$evidence_dir/final-zero-grants.json" \
-  > "$evidence_dir/final-zero-workers.json"
+jq -cS '{tasks}' "$evidence_dir/final-zero-grants.json" > "$evidence_dir/final-zero-tasks.json"
+jq -cS '{workers}' "$evidence_dir/final-zero-grants.json" > "$evidence_dir/final-zero-workers.json"
 jq -e --slurpfile before "$evidence_dir/before-database-counts.json" '
-  .tasks == $before[0].tasks and .workers == $before[0].workers and
-  .active_native_grants == 0' "$evidence_dir/final-zero-grants.json" >/dev/null
-
+  .tasks==$before[0].tasks and .workers==$before[0].workers and
+  .active_native_grants==0' "$evidence_dir/final-zero-grants.json" >/dev/null
 capture_slurm "$evidence_dir/after-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/after-slurm.json"
-"$loom_cli" admin capacity-control-plane status \
-  --namespace loom-dev --kubeconfig "$kubeconfig" \
-  > "$evidence_dir/final-capacity.status.json"
-jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
+"$loom_cli" admin capacity-control-plane status --namespace loom-dev \
+  --kubeconfig "$kubeconfig" > "$evidence_dir/final-capacity.status.json"
+jq -e '.=={executable_new_capacity_ceiling:0,status:"ready"}' \
   "$evidence_dir/final-capacity.status.json" >/dev/null
-chmod 0600 "$evidence_dir/final-zero-"*.json \
-  "$evidence_dir/final-capacity.status.json"
+chmod 0600 "$evidence_dir/final-zero-"*.json "$evidence_dir/final-capacity.status.json"
+acceptance_status "$evidence_dir/pre-rollback.status.json"
 ```
 
-## 9. Restore the exact operational state and seal evidence
-
-Successful acceptance keeps the reviewed native operational management plane,
-but with no owner/build namespace and no active grant. Re-render it from the
-same exact inputs, require byte identity, require an empty server-side diff,
-and run status again. This restores the exact operational state rather than
-leaving an acceptance-specific manifest.
+## 9. Reapply and verify the exact inert shadow
 
 ```bash
-restored_operational_manifest="$evidence_dir/restored-operational.yaml"
-restored_operational_evidence="$evidence_dir/restored-operational.render.json"
-"$loom_cli" admin personal-dev-control-plane render-operational \
-  --file "$profile" \
+shadow_recheck_after="$evidence_dir/shadow-recheck-after.yaml"
+"$loom_cli" admin personal-dev-control-plane render --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
-  --operational-plan-file "$operational_plan" \
-  --operational-plan-sha256 "$operational_plan_sha256" \
-  "${operational_evidence_args[@]}" \
-  > "$restored_operational_manifest" 2> "$restored_operational_evidence"
-chmod 0600 "$restored_operational_manifest" "$restored_operational_evidence"
-cmp -s "$restored_operational_manifest" "$baseline_operational_manifest"
-
+  > "$shadow_recheck_after" 2> "$evidence_dir/shadow-recheck-after.render.json"
+chmod 0600 "$shadow_recheck_after" "$evidence_dir/shadow-recheck-after.render.json"
+cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"
+rollback_diff_rc=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
-  --field-manager=loom-personal-dev-control-plane \
-  -f "$baseline_operational_manifest" \
-  > "$evidence_dir/final-operational.diff.txt" 2>&1 || final_diff_rc=$?
-test "${final_diff_rc:-0}" -eq 0
-test ! -s "$evidence_dir/final-operational.diff.txt"
+  --field-manager=loom-personal-dev-control-plane -f "$rollback_shadow_manifest" \
+  > "$evidence_dir/rollback.server-side-diff.txt" 2>&1 || rollback_diff_rc=$?
+test "$rollback_diff_rc" -eq 0 || test "$rollback_diff_rc" -eq 1
+chmod 0600 "$evidence_dir/rollback.server-side-diff.txt"
+kubectl --kubeconfig "$kubeconfig" apply --server-side \
+  --field-manager=loom-personal-dev-control-plane -f "$rollback_shadow_manifest" \
+  > "$evidence_dir/rollback.server-side-apply.txt"
+chmod 0600 "$evidence_dir/rollback.server-side-apply.txt"
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-management --timeout=300s
+rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"
+rollback_status="$evidence_dir/rollback-shadow.status.json"
+"$loom_cli" admin personal-dev-control-plane status --namespace loom-dev \
+  --kubeconfig "$kubeconfig" --file "$profile" \
+  --trusted-release-file "$trusted_release" \
+  --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status_raw"
+jq -cS -j . "$rollback_status_raw" > "$rollback_status"
+rm -f "$rollback_status_raw"
+chmod 0600 "$rollback_status"; assert_canonical_json "$rollback_status"
+jq -e '.schema=="loom-personal-dev-control-plane-status-v1" and .mode=="shadow" and
+  .ready==true and .blockers==[] and .manager_ceiling==0 and
+  .worker_available==false and all(.components[];.ready==true)' "$rollback_status" >/dev/null
+rollback_shadow_status_sha256="$(sha256sum "$rollback_status" | awk '{print $1}')"
+capture_counts "$evidence_dir/inert-database-counts.json"
+capture_namespaces "$evidence_dir/inert-namespaces.json"
+jq -e '.active_native_grants==0' "$evidence_dir/inert-database-counts.json" >/dev/null
+jq -e '.==[]' "$evidence_dir/inert-namespaces.json" >/dev/null
+```
 
+## 10. Seal and verify canonical schema-v3 evidence
+
+`jq -cS -j` is mandatory: canonical JSON has no trailing newline.
+
+```bash
+project_snapshot() {
+  jq -cS -j '{application_status,candidate_sha,capacity_prepared,capacity_status,
+    deployment_generation,identity:{environment:.identity.environment,
+    namespace:.identity.namespace,database:.identity.database,
+    task_bucket:.identity.task_bucket,trajectories_bucket:.identity.trajectories_bucket,
+    artifacts_bucket:.identity.artifacts_bucket,route_host:.identity.route_host,
+    worker_control_plane_host:.identity.worker_control_plane_host,
+    worker_gateway_host:.identity.worker_gateway_host,route_path:.identity.route_path,
+    worker_pool:.identity.worker_pool},keep_data,max_slots,min_slots,name,
+    operation_epoch,owner_team_id,owner_user_id,status,subject_id,
+    subject_incarnation,worker_available}' "$1" > "$2"
+  chmod 0600 "$2"; assert_canonical_json "$2"
+}
+owner_0_initial_selected="$evidence_dir/owner-0.initial.selected.json"
+owner_0_updated_selected="$evidence_dir/owner-0.updated.selected.json"
+owner_0_destroyed_selected="$evidence_dir/owner-0.destroyed.selected.json"
+owner_1_initial_selected="$evidence_dir/owner-1.initial.selected.json"
+owner_1_updated_selected="$evidence_dir/owner-1.updated.selected.json"
+owner_1_destroyed_selected="$evidence_dir/owner-1.destroyed.selected.json"
+owner_1_redeployed_selected="$evidence_dir/owner-1.redeployed.selected.json"
+owner_1_final_destroyed_selected="$evidence_dir/owner-1.final-destroyed.selected.json"
+project_snapshot "$owner_0_initial" "$owner_0_initial_selected"
+project_snapshot "$owner_0_updated" "$owner_0_updated_selected"
+project_snapshot "$owner_0_destroyed" "$owner_0_destroyed_selected"
+project_snapshot "$owner_1_initial" "$owner_1_initial_selected"
+project_snapshot "$owner_1_updated" "$owner_1_updated_selected"
+project_snapshot "$owner_1_destroyed" "$owner_1_destroyed_selected"
+project_snapshot "$owner_1_redeployed" "$owner_1_redeployed_selected"
+project_snapshot "$owner_1_final_destroyed" "$owner_1_final_destroyed_selected"
+
+native_zero_capacity="$evidence_dir/native-zero-capacity.json"
+jq -cS -j -n \
+  --argjson tasks_before "$(jq -er .tasks "$evidence_dir/before-database-counts.json")" \
+  --argjson tasks_after "$(jq -er .tasks "$evidence_dir/final-zero-grants.json")" \
+  --argjson workers_before "$(jq -er .workers "$evidence_dir/before-database-counts.json")" \
+  --argjson workers_after "$(jq -er .workers "$evidence_dir/final-zero-grants.json")" '
+  {active_native_grants:0,dynamic_namespace_count:0,
+  executable_new_capacity_ceiling:0,loom_slurm_jobs_after:0,
+  loom_slurm_jobs_before:0,tasks_after:$tasks_after,tasks_before:$tasks_before,
+  worker_available:false,workers_after:$workers_after,workers_before:$workers_before}' \
+  > "$native_zero_capacity"
+chmod 0600 "$native_zero_capacity"
+
+acceptance_result="$evidence_dir/acceptance-result-v3.json"
+jq -cS -j -n \
+  --arg acceptance_manifest_sha256 "$acceptance_manifest_sha256" \
+  --arg acceptance_plan_sha256 "$acceptance_plan_sha256" \
+  --arg after_denials "$(sha256sum "$evidence_dir/after-denials.status.json"|awk '{print $1}')" \
+  --arg after_destroy "$(sha256sum "$evidence_dir/after-destroy.status.json"|awk '{print $1}')" \
+  --arg after_initial "$(sha256sum "$evidence_dir/after-initial.status.json"|awk '{print $1}')" \
+  --arg after_redeploy "$(sha256sum "$evidence_dir/after-redeploy.status.json"|awk '{print $1}')" \
+  --arg after_updates "$(sha256sum "$evidence_dir/after-updates.status.json"|awk '{print $1}')" \
+  --arg pre_deploy "$(sha256sum "$evidence_dir/pre-deploy.status.json"|awk '{print $1}')" \
+  --arg pre_rollback "$(sha256sum "$evidence_dir/pre-rollback.status.json"|awk '{print $1}')" \
+  --arg release_sha256 "$trusted_release_sha256" \
+  --arg rollback_shadow "$rollback_shadow_status_sha256" \
+  --arg shadow_manifest_sha256 "$rollback_shadow_sha256" \
+  --arg after_slurm "$(sha256sum "$evidence_dir/after-slurm.json"|awk '{print $1}')" \
+  --arg before_slurm "$(sha256sum "$evidence_dir/before-slurm.json"|awk '{print $1}')" \
+  --arg candidate_publications "$(sha256sum "$candidate_publications"|awk '{print $1}')" \
+  --arg final_capacity "$(sha256sum "$evidence_dir/final-capacity.status.json"|awk '{print $1}')" \
+  --arg final_zero_grants "$(sha256sum "$evidence_dir/final-zero-grants.json"|awk '{print $1}')" \
+  --arg final_zero_namespaces "$(sha256sum "$evidence_dir/final-zero-namespaces.json"|awk '{print $1}')" \
+  --arg final_zero_tasks "$(sha256sum "$evidence_dir/final-zero-tasks.json"|awk '{print $1}')" \
+  --arg final_zero_workers "$(sha256sum "$evidence_dir/final-zero-workers.json"|awk '{print $1}')" \
+  --arg native_runtime_sha256 "$(sha256sum "$native_runtime"|awk '{print $1}')" \
+  --arg simultaneous_containers "$(sha256sum "$simultaneous_containers"|awk '{print $1}')" \
+  --arg simultaneous_grants "$(sha256sum "$simultaneous_grants"|awk '{print $1}')" \
+  --arg simultaneous_jobs "$(sha256sum "$simultaneous_jobs"|awk '{print $1}')" \
+  --slurpfile denials "$denials_jsonl" --slurpfile completions "$native_runtime" \
+  --slurpfile indexes "$native_indexes" --slurpfile containers "$simultaneous_containers" \
+  --slurpfile grants "$simultaneous_grants" --slurpfile jobs "$simultaneous_jobs" \
+  --slurpfile o0d "$owner_0_destroyed_selected" --slurpfile o0i "$owner_0_initial_selected" \
+  --slurpfile o0u "$owner_0_updated_selected" --slurpfile o1d "$owner_1_destroyed_selected" \
+  --slurpfile o1f "$owner_1_final_destroyed_selected" --slurpfile o1i "$owner_1_initial_selected" \
+  --slurpfile o1r "$owner_1_redeployed_selected" --slurpfile o1u "$owner_1_updated_selected" \
+  --slurpfile zero "$native_zero_capacity" '
+  {acceptance_manifest_sha256:$acceptance_manifest_sha256,
+  acceptance_plan_sha256:$acceptance_plan_sha256,cross_owner_denials:$denials,
+  native:{completions:$completions,evidence_sha256s:{after_slurm:$after_slurm,
+  before_slurm:$before_slurm,candidate_publications:$candidate_publications,
+  final_capacity:$final_capacity,final_zero_grants:$final_zero_grants,
+  final_zero_namespaces:$final_zero_namespaces,final_zero_tasks:$final_zero_tasks,
+  final_zero_workers:$final_zero_workers,native_runtime:$native_runtime_sha256,
+  simultaneous_containers:$simultaneous_containers,
+  simultaneous_grants:$simultaneous_grants,simultaneous_jobs:$simultaneous_jobs},
+  indexes:$indexes,overlap:{amd64_jobs:$jobs[0],arm64_containers:$containers[0],
+  arm64_grants:$grants[0]},zero_capacity:$zero[0]},
+  owners:[{destroyed:$o0d[0],final_destroyed:null,initial:$o0i[0],
+  redeployed:null,updated:$o0u[0]},{destroyed:$o1d[0],final_destroyed:$o1f[0],
+  initial:$o1i[0],redeployed:$o1r[0],updated:$o1u[0]}],
+  release_sha256:$release_sha256,
+  schema:"loom-personal-dev-zero-capacity-acceptance-result-v3",
+  shadow_manifest_sha256:$shadow_manifest_sha256,
+  status_sha256s:{after_denials:$after_denials,after_destroy:$after_destroy,
+  after_initial:$after_initial,after_redeploy:$after_redeploy,
+  after_updates:$after_updates,pre_deploy:$pre_deploy,
+  pre_rollback:$pre_rollback,rollback_shadow:$rollback_shadow}}' > "$acceptance_result"
+chmod 0600 "$acceptance_result"; assert_canonical_json "$acceptance_result"
+acceptance_result_sha256="$(sha256sum "$acceptance_result"|awk '{print $1}')"
+acceptance_verification="$evidence_dir/acceptance-result-verification.json"
+"$loom_cli" admin personal-dev-control-plane verify-acceptance-result \
+  --acceptance-plan-file "$acceptance_plan" \
+  --acceptance-plan-sha256 "$acceptance_plan_sha256" \
+  --acceptance-result-file "$acceptance_result" \
+  --acceptance-result-sha256 "$acceptance_result_sha256" \
+  --acceptance-manifest-sha256 "$acceptance_manifest_sha256" \
+  --rollback-shadow-manifest-file "$rollback_shadow_manifest" \
+  --rollback-shadow-status-file "$rollback_status" > "$acceptance_verification"
+chmod 0600 "$acceptance_verification"
+assert_canonical_json_line "$acceptance_verification"
+jq -e --arg result "$acceptance_result_sha256" --arg rollback "$rollback_shadow_status_sha256" '
+  .schema=="loom-personal-dev-zero-capacity-acceptance-verification-v1" and
+  .verified==true and .native == true and .owner_count==2 and
+  .cross_owner_denial_count==6 and .acceptance_result_sha256==$result and
+  .rollback_shadow_status_sha256==$rollback' "$acceptance_verification" >/dev/null
+```
+
+## 11. Derive and apply durable operational authority
+
+Only the verified result may authorize this plan. Rendering is the strict
+load/validation gate; review the server-side diff before apply.
+
+```bash
+operational_plan="$evidence_dir/native-operational-plan.json"
+approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+jq -cS -j --arg acceptance_result_sha256 "$acceptance_result_sha256" \
+  --arg approved_at "$approved_at" \
+  --arg rollback_evidence_sha256 "$rollback_shadow_status_sha256" '
+  del(.acceptance_owners,.window)|.schema_version=2|
+  .approval={acceptance_result_sha256:$acceptance_result_sha256,
+  approved_at:$approved_at,rollback_evidence_sha256:$rollback_evidence_sha256}' \
+  "$acceptance_plan" > "$operational_plan"
+chmod 0600 "$operational_plan"; assert_canonical_json "$operational_plan"
+operational_plan_sha256="$(sha256sum "$operational_plan"|awk '{print $1}')"
+test "$(jq -er .schema_version "$operational_plan")" = 2
+test "$(jq -er .approval.acceptance_result_sha256 "$operational_plan")" = "$acceptance_result_sha256"
+test "$(jq -er .approval.rollback_evidence_sha256 "$operational_plan")" = "$rollback_shadow_status_sha256"
+operational_manifest="$evidence_dir/native-operational.rendered.yaml"
+"$loom_cli" admin personal-dev-control-plane render-operational \
+  --file "$profile" --trusted-release-file "$trusted_release" \
+  --trusted-release-sha256 "$trusted_release_sha256" \
+  --operational-plan-file "$operational_plan" \
+  --operational-plan-sha256 "$operational_plan_sha256" \
+  "${bound_evidence_args[@]}" > "$operational_manifest" \
+  2> "$evidence_dir/native-operational.render.json"
+chmod 0600 "$operational_manifest" "$evidence_dir/native-operational.render.json"
+operational_diff_rc=0
+kubectl --kubeconfig "$kubeconfig" diff --server-side \
+  --field-manager=loom-personal-dev-control-plane -f "$operational_manifest" \
+  > "$evidence_dir/native-operational.server-side-diff.txt" 2>&1 || operational_diff_rc=$?
+test "$operational_diff_rc" -eq 0 || test "$operational_diff_rc" -eq 1
+chmod 0600 "$evidence_dir/native-operational.server-side-diff.txt"
+capture_counts "$evidence_dir/pre-operational-apply.counts.json"
+jq -e '.active_native_grants==0' "$evidence_dir/pre-operational-apply.counts.json" >/dev/null
+kubectl --kubeconfig "$kubeconfig" apply --server-side \
+  --field-manager=loom-personal-dev-control-plane -f "$operational_manifest" \
+  > "$evidence_dir/native-operational.server-side-apply.txt"
+chmod 0600 "$evidence_dir/native-operational.server-side-apply.txt"
+kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
+  deployment/loom-personal-dev-management --timeout=300s
 "$loom_cli" admin personal-dev-control-plane status-operational \
-  --namespace loom-dev --kubeconfig "$kubeconfig" \
-  --file "$profile" \
+  --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --operational-plan-file "$operational_plan" \
   --operational-plan-sha256 "$operational_plan_sha256" \
-  "${operational_evidence_args[@]}" \
-  > "$evidence_dir/final-operational.status.json"
-jq -e '.ready == true and .blockers == [] and
-  .manager_ceiling == 0 and .worker_available == false and
-  any(.components[]; .name == "native-builder" and
-    .observed == 1 and .ready == true)' \
-  "$evidence_dir/final-operational.status.json" >/dev/null
+  "${bound_evidence_args[@]}" > "$evidence_dir/final-operational.status.json"
+chmod 0600 "$evidence_dir/final-operational.status.json"
+jq -e '.ready==true and .blockers==[] and .manager_ceiling==0 and
+  .worker_available==false and any(.components[];.name=="native-builder" and
+  .observed==1 and .ready==true)' "$evidence_dir/final-operational.status.json" >/dev/null
+capture_counts "$evidence_dir/final-operational.counts.json"
+capture_namespaces "$evidence_dir/final-operational.namespaces.json"
+capture_slurm "$evidence_dir/final-operational.slurm.json"
+jq -e --slurpfile before "$evidence_dir/before-database-counts.json" '
+  .active_native_grants==0 and .tasks==$before[0].tasks and
+  .workers==$before[0].workers' "$evidence_dir/final-operational.counts.json" >/dev/null
+jq -e '.==[]' "$evidence_dir/final-operational.namespaces.json" >/dev/null
+assert_no_loom_slurm_jobs "$evidence_dir/final-operational.slurm.json"
+```
 
-jq -cnS \
-  --arg owner_0_candidate "$owner_0_candidate" \
-  --arg owner_1_candidate "$owner_1_candidate" \
-  --arg operational_plan "$operational_plan_sha256" \
-  --arg profile "$profile_sha256" \
-  --arg release "$trusted_release_sha256" \
-  '{manager_ceiling:0,operational_plan_sha256:$operational_plan,
-    owner_candidates:[$owner_0_candidate,$owner_1_candidate],
-    profile_sha256:$profile,status:"passed",
-    trusted_release_sha256:$release,worker_available:false}' \
-  > "$evidence_dir/acceptance-result.json"
-chmod 0600 "$evidence_dir/acceptance-result.json"
+This restores the exact operational state only after acceptance is proven.
 
+## 12. Seal sanitized evidence
+
+```bash
 (
   cd "$evidence_dir"
   find . -maxdepth 1 -type f ! -name kubeconfig \
-    ! -name evidence-index.sha256 -printf '%P\n' \
-    | LC_ALL=C sort \
+    ! -name evidence-index.sha256 -printf '%P\n' | LC_ALL=C sort \
     | while IFS= read -r file; do sha256sum "$file"; done \
     > evidence-index.sha256
   chmod 0600 evidence-index.sha256
 )
 ```
 
-Secret values are never part of the evidence index. Completion requires two
-distinct candidate/source-archive hashes, two native amd64 Jobs overlapping two
-native arm64 grants, two complete immutable OCI indexes per candidate, isolated
-routes, authenticated cleanup, zero active grants, zero personal/build
-namespaces, unchanged Task/Worker and Slurm snapshots, workers unavailable,
-and the exact operational render at ceiling zero.
+Secret values are never part of `evidence-index.sha256`.
 
 ## Failure rollback
 
-Before any owner request, a failed management activation may reapply
-`$previous_operational_manifest` only after its exact SHA-256 is rechecked. If
-schema compatibility is uncertain, use `$rollback_shadow_manifest` instead.
-After an owner request, first complete authenticated owner cleanup and prove
-zero active grants/namespaces; only then reapply the previous operational or
-shadow manifest. Follow the runtime runbook to stop the agent before the
-dedicated daemon. Never improvise a namespace, grant, container, image, Slurm,
-Task, Worker, or capacity mutation.
+Before an owner request, reapply only the exact reviewed shadow and record
+shadow status. After an owner request, first wait for any started CLI process,
+then clean up through each owner's authenticated `loom dev destroy`, prove zero
+grants and namespaces, and reapply the exact shadow. Never derive an operational
+plan after failed acceptance or verification. Follow the runtime runbook to
+stop the agent before the dedicated daemon. Never improvise a namespace, grant,
+container, image, Slurm, Task, Worker, or capacity mutation.

@@ -415,12 +415,42 @@ observer to enforce freshness, identity, inventory, and zero-grant readiness.
    including native arm64 repository build steps, capability separation,
    network denials, cgroup limits, and cleanup.
 5. Install the agent key and exact release-bound unit, start the agent, and
-   require fresh signed readiness with zero grants.
-6. Render and apply a new zero-capacity personal operational plan.
+   observe it active while native management remains disabled.
+6. Render and apply a time-bounded schema-3 acceptance plan. Require fresh
+   signed readiness with zero grants before either owner request.
 7. Run two concurrent owners, requiring two simultaneous arm64 grants and two
    simultaneous native amd64 Jobs, exact multi-platform publications, owner
-   isolation, routes, and authenticated API teardown.
-8. Return to the exact approved operational zero-capacity state.
+   lifecycle and isolation, routes, and authenticated API teardown.
+8. Reapply and verify the exact inert shadow. Only in that inert state, seal a
+   strict schema-v3 native acceptance result binding the owner lifecycle,
+   cross-owner denials, overlapping platform evidence, signed native
+   completions, immutable OCI indexes, zero-capacity boundaries, and shadow
+   rollback.
+9. Derive a schema-2 operational plan whose approval binds that verified result
+   and rollback status, then render and apply the durable zero-capacity plane.
+10. Require exact operational status with zero grants, no dynamic namespace,
+    unavailable workers, and executable-new-capacity ceiling zero.
+
+The acceptance and operational authorities are intentionally separate. A
+durable operational plan may not be invented before the acceptance result it
+claims to approve. Pre-acceptance management is therefore governed only by the
+expiring schema-3 acceptance plan. The schema-v3 result is canonical,
+owner-only evidence and is accepted only by a strict read-only verifier. The
+verifier preserves the complete schema-v2 lifecycle checks and additionally
+requires:
+
+- exactly two native amd64 Jobs using RuntimeClass
+  `loom-personal-dev-builder` and two running arm64 grants using provider
+  `gb10-gvisor-docker-v1` during one stable overlap;
+- exactly two BuildKit/client container pairs using
+  `runsc-personal-dev-native`, with distinct container and grant identities;
+- native arm64 completion evidence for both accepted candidates, no emulation
+  and no fallback;
+- exactly two immutable `service`/`web` OCI indexes per accepted candidate,
+  each containing only `linux/amd64` and `linux/arm64`, with its reference
+  digest equal to the SHA-256 of the captured raw index; and
+- unchanged Task and Worker counts, zero Loom Slurm jobs, zero final grants and
+  dynamic namespaces, unavailable workers, and ceiling zero.
 
 Rollback disables native-provider claim first, waits for or cancels exact
 grants, stops/removes only labeled agent resources, stops the agent and
@@ -463,6 +493,8 @@ Protected host verification must additionally prove:
 - per-container and aggregate cgroup ceilings;
 - agent restart resume and central cancellation;
 - two-owner concurrency; and
+- canonical schema-v3 native acceptance evidence, strict verification, inert
+  rollback before approval, and post-acceptance operational derivation; and
 - zero Slurm mutations, zero Loom task submissions, worker unavailability, and
   executable-new-capacity ceiling zero throughout acceptance.
 

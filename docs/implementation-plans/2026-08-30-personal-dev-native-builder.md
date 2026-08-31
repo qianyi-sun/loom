@@ -710,3 +710,110 @@
 - [ ] **Step 9: Mark the project goal complete only from final evidence**
 
   Completion requires: both owners passed, native arm64 and amd64 identities passed, no live owner resources after teardown, zero grants/namespaces, workers unavailable, executable ceiling zero, protected CI/release trusted, and no unresolved review finding.
+
+### Task 13: Remove the native acceptance/operational authority cycle
+
+**Files:**
+- Modify: `src/loom/personal_dev_acceptance_evidence.py`
+- Modify: `src/loom_cli/personal_dev_control_plane_cmd.py`
+- Modify: `docs/runbooks/personal-dev-native-builder-acceptance.md`
+- Modify: `docs/architecture/personal-dev-native-builder-provider.md`
+- Test: `tests/unit/test_personal_dev_acceptance_evidence.py`
+- Test: `tests/loom_cli/test_personal_dev_control_plane_cmd.py`
+- Test: `tests/ops/test_personal_dev_native_builder_runbooks.py`
+
+**Interfaces:**
+- Consumes: schema-3 `PersonalDevAcceptancePlan`, its exact rendered manifest,
+  exact inert rollback manifest/status, two canonical owner lifecycles, and
+  native platform evidence captured by the acceptance runbook.
+- Produces: `PersonalDevAcceptanceResultV3`, returned by
+  `load_personal_dev_acceptance_result(...)` for schema-v3 plans, and the
+  existing `verify-acceptance-result` command's canonical verification record
+  with `native=true`.
+- Preserves: schema-v2 result loading and verification without changing its
+  canonical bytes or validation semantics.
+
+- [ ] **Step 1: Write the failing evidence-loader tests**
+
+  Add a canonical schema-v3 fixture to
+  `tests/unit/test_personal_dev_acceptance_evidence.py`. Require the complete
+  schema-v2 owner lifecycle and six denial receipts plus a `native` object with
+  two amd64 Jobs, two arm64 grants, four arm64 containers, two native
+  completions, four service/web OCI indexes, exact evidence-file digests, and
+  the zero-capacity boundary. Assert that the loader accepts it for a schema-3
+  plan and rejects every count, candidate, grant, runtime, provider, platform,
+  index, emulation/fallback, or zero-capacity mismatch. Run the new positive
+  test and confirm it fails because schema-v3 results are not implemented.
+
+- [ ] **Step 2: Implement strict schema-v3 evidence loading**
+
+  Add frozen strict Pydantic models for the native overlap, completion, index,
+  evidence-digest, and zero-capacity records. Discriminate the result schema in
+  `load_personal_dev_acceptance_result(...)`, retain the shared owner/denial
+  validation, and add candidate/grant/container/index correlation against the
+  exact schema-3 plan and accepted owner candidates. Do not add a compatibility
+  path that lets schema-v2 evidence satisfy a native plan.
+
+- [ ] **Step 3: Verify red-to-green evidence behavior**
+
+  Run:
+
+  ```bash
+  uv run pytest -q tests/unit/test_personal_dev_acceptance_evidence.py -k 'result_v3 or result_v2'
+  ```
+
+  Expected: all v2 compatibility and new v3 strictness cases pass.
+
+- [ ] **Step 4: Write the failing CLI and runbook ordering tests**
+
+  Require `verify-acceptance-result` to report `native:true` for schema-v3 and
+  `native:false` for schema-v2. Require the native runbook ordering to be:
+  agent active, schema-3 acceptance apply, signed zero-grant readiness, owner
+  lifecycle, authenticated cleanup, exact shadow apply/status, canonical v3
+  verification, schema-2 operational render/apply, final operational status.
+  Explicitly reject operational render/apply before acceptance verification.
+
+- [ ] **Step 5: Implement the CLI record and corrected runbook**
+
+  Keep the CLI verification read-only. Rewrite the native runbook to bind an
+  expiring schema-3 acceptance plan and exact acceptance manifest first. After
+  cleanup, reapply the exact shadow and build a no-newline canonical v3 result
+  with `jq -cS -j`; verify it; then derive a no-newline canonical schema-2
+  operational plan by removing `acceptance_owners` and `window`, adding the
+  verified result and rollback-status digests plus canonical `approved_at`, and
+  load/render it before apply. Preserve owner-only mode `0600`, exact SHA-256
+  binding, server-side diff review, zero-capacity gates, and failure rollback.
+
+- [ ] **Step 6: Run focused and policy verification**
+
+  ```bash
+  uv run pytest -q \
+    tests/unit/test_personal_dev_acceptance_evidence.py \
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/ops/test_personal_dev_native_builder_runbooks.py
+  uv run ruff check \
+    src/loom/personal_dev_acceptance_evidence.py \
+    src/loom_cli/personal_dev_control_plane_cmd.py \
+    tests/unit/test_personal_dev_acceptance_evidence.py \
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/ops/test_personal_dev_native_builder_runbooks.py
+  uv run mypy \
+    src/loom/personal_dev_acceptance_evidence.py \
+    src/loom_cli/personal_dev_control_plane_cmd.py
+  ```
+
+- [ ] **Step 7: Commit and rerun protected admission**
+
+  ```bash
+  git add \
+    docs/architecture/personal-dev-native-builder-provider.md \
+    docs/implementation-plans/2026-08-30-personal-dev-native-builder.md \
+    docs/runbooks/personal-dev-native-builder-acceptance.md \
+    src/loom/personal_dev_acceptance_evidence.py \
+    src/loom_cli/personal_dev_control_plane_cmd.py \
+    tests/unit/test_personal_dev_acceptance_evidence.py \
+    tests/loom_cli/test_personal_dev_control_plane_cmd.py \
+    tests/ops/test_personal_dev_native_builder_runbooks.py
+  git commit -m "fix(personal-dev): order native acceptance before operations"
+  git push origin feat/personal-dev-native-builder
+  ```

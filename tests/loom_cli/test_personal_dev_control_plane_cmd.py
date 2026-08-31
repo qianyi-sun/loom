@@ -44,6 +44,8 @@ from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
 from loom_cli.personal_dev_minio_backup_cmd import PersonalDevMinioCommandResult
 from tests.unit.test_personal_dev_acceptance_evidence import (
+    _native_result_plan,
+    _native_result_value,
     _result_plan,
     _result_value,
     _rollback_shadow_manifest_payload,
@@ -790,9 +792,15 @@ def _rewrite_acceptance_result_rollback_digest(
 
 def _acceptance_result_files(
     tmp_path: Path,
+    *,
+    native: bool = False,
 ) -> tuple[Path, str, Path, str, Path, Path, str]:
-    plan, _v1_plan = _result_plan(tmp_path)
-    plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
+    if native:
+        plan = _native_result_plan(tmp_path)
+        plan_path = tmp_path / "native-result-plan" / "acceptance-plan.json"
+    else:
+        plan, _v1_plan = _result_plan(tmp_path)
+        plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
     rollback_input_sha256 = "1" * 64
     rollback_manifest_path = tmp_path / "rollback-shadow.yaml"
     rollback_manifest_payload = _rollback_shadow_manifest_payload(
@@ -812,7 +820,7 @@ def _acceptance_result_files(
     rollback_value["release_sha256"] = plan.release.trusted_release_sha256
     rollback_path = tmp_path / "rollback-shadow.status.json"
     rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
-    result_value = _result_value(plan)
+    result_value = _native_result_value(plan) if native else _result_value(plan)
     result_value["status_sha256s"]["rollback_shadow"] = rollback_sha256
     result_path = tmp_path / "acceptance-result.json"
     result_sha256 = _write_canonical_owner_only(result_path, result_value)
@@ -827,9 +835,11 @@ def _acceptance_result_files(
     )
 
 
+@pytest.mark.parametrize("native", [False, True])
 def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    native: bool,
 ) -> None:
     (
         plan_path,
@@ -839,7 +849,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         rollback_manifest_path,
         rollback_path,
         rollback_sha256,
-    ) = _acceptance_result_files(tmp_path)
+    ) = _acceptance_result_files(tmp_path, native=native)
     plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
 
     rc = dispatch(
@@ -873,6 +883,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         "acceptance_plan_sha256": plan_sha256,
         "acceptance_result_sha256": result_sha256,
         "cross_owner_denial_count": 6,
+        "native": native,
         "owner_count": 2,
         "release_sha256": plan.release.trusted_release_sha256,
         "rollback_shadow_status_sha256": rollback_sha256,
