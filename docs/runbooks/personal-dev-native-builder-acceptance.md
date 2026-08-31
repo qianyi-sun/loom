@@ -34,6 +34,7 @@ test "$(id -u)" != 0
 
 repository_root="$(pwd -P)"
 merged_source_sha='<merged-40-lowercase-hex>'
+merged_source_tree="$(git rev-parse 'HEAD^{tree}')"
 trusted_release='<absolute-owner-only-trusted-release.json>'
 trusted_release_sha256='<trusted-release-64-lowercase-hex>'
 profile='<absolute-owner-only-prepared-schema-3-profile.toml>'
@@ -45,6 +46,8 @@ rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 runtime_evidence='<absolute-active-native-runtime-evidence-directory>'
 runtime_profile_sha256='c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d'
 archive_sha512='dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7'
+native_runtime_authority='/usr/local/libexec/loom-personal-dev-native-runtime-authority'
+native_runtime_request_schema='loom.personal-dev-native-runtime-authority.request.v1'
 
 reviewed_kubeconfig='<absolute-owner-only-mode-0600-kubeconfig>'
 evidence_root='<absolute-existing-owner-only-evidence-root-outside-repository>'
@@ -114,6 +117,11 @@ evidence_dir="$evidence_root/${timestamp}-native-two-owner-$merged_source_sha"
 test "$(git rev-parse --show-toplevel)" = "$repository_root"
 test "$(git rev-parse HEAD)" = "$merged_source_sha"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
+native_runtime_common="$(jq -cnS \
+  --arg schema "$native_runtime_request_schema" \
+  --arg source_sha "$merged_source_sha" \
+  --arg source_tree_sha "$merged_source_tree" \
+  '{schema:$schema,source_sha:$source_sha,source_tree_sha:$source_tree_sha}')"
 test -x "$loom_python"
 verify_loom_cli_source
 for path in "$trusted_release" "$profile" "$acceptance_plan" \
@@ -283,17 +291,21 @@ jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
 ## 3. Apply only the expiring schema-3 acceptance plane
 
 ```bash
-ssh_run "$gb10_target" sudo /bin/sh -euc '
-  jq -cnS \
-    --arg activestate "$(systemctl show loom-personal-dev-native-builder-agent.service --property=ActiveState --value)" \
-    --arg fragmentpath "$(systemctl show loom-personal-dev-native-builder-agent.service --property=FragmentPath --value)" \
-    --arg substate "$(systemctl show loom-personal-dev-native-builder-agent.service --property=SubState --value)" \
-    "[{activestate:\$activestate,fragmentpath:\$fragmentpath,substate:\$substate}]"
-' | jq -cS . > "$evidence_dir/agent-active-pre-management.json"
+observe_agent_header="$(jq -cS \
+  --arg action observe-agent \
+  --arg request_id "acceptance-${merged_source_sha:0:12}-agent" \
+  '. + {action:$action,request_id:$request_id}' \
+  <<< "$native_runtime_common")"
+printf '%s\n' "$observe_agent_header" \
+  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
+  | jq -cS . > "$evidence_dir/agent-active-pre-management.json"
 chmod 0600 "$evidence_dir/agent-active-pre-management.json"
-jq -e 'length == 1 and .[0].activestate == "active" and
-  .[0].substate == "running" and
-  .[0].fragmentpath == "/etc/systemd/system/loom-personal-dev-native-builder-agent.service"' \
+jq -e '.action == "observe-agent" and .status == "ok" and
+  .evidence == {active_state:"active",
+    fragment_path:"/etc/systemd/system/loom-personal-dev-native-builder-agent.service",
+    sub_state:"running"} and
+  (.receipts|keys) == ["agent-active-evidence"] and
+  all(.receipts[];test("^[0-9a-f]{64}$"))' \
   "$evidence_dir/agent-active-pre-management.json" >/dev/null
 
 shadow_recheck="$evidence_dir/preflight-shadow.yaml"
@@ -418,20 +430,29 @@ while true; do
   test "$SECONDS" -lt "$overlap_deadline"
   sleep 1
 done
-ssh_run "$gb10_target" sudo /bin/sh -euc '
-  endpoint=unix:///run/loom-personal-dev-builder/docker.sock
-  ids="$(docker -H "$endpoint" ps -q --filter label=loom.personal-dev-native-builder.managed=true)"
-  test "$(printf "%s\n" "$ids" | sed "/^$/d" | wc -l)" = 4
-  docker -H "$endpoint" inspect $ids
-' | jq -cS '[.[] | {grant_id:.Config.Labels["loom.personal-dev-native-builder.grant-id"],
-  id:.Id,image:.Image,platform:.Config.Labels["loom.personal-dev-native-builder.platform"],
-  role:.Config.Labels["loom.personal-dev-native-builder.role"],
-  runtime:.HostConfig.Runtime}] | sort_by(.grant_id,.role)' > "$raw_containers"
+observe_container_fields="$(jq -cS '{grant_ids:[.[].grant_id]|sort}' \
+  "$raw_grants")"
+observe_container_header="$(jq -cS \
+  --arg action observe-containers \
+  --arg request_id "acceptance-${merged_source_sha:0:12}-containers" \
+  --argjson fields "$observe_container_fields" \
+  '. + $fields + {action:$action,request_id:$request_id}' \
+  <<< "$native_runtime_common")"
+container_authority_evidence="$evidence_dir/native-runtime-observe-containers.json"
+printf '%s\n' "$observe_container_header" \
+  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
+  | jq -cS . > "$container_authority_evidence"
+jq -e '.action == "observe-containers" and .status == "ok" and
+  (.receipts|keys) == ["container-evidence"] and
+  all(.receipts[];test("^[0-9a-f]{64}$")) and
+  (.evidence|length) == 4' "$container_authority_evidence" >/dev/null
+jq -cS .evidence "$container_authority_evidence" > "$raw_containers"
 jq -e 'length == 4 and ([.[]|select(.role=="buildkit")]|length==2) and
   ([.[]|select(.role=="client")]|length==2) and all(.[];
   .runtime=="runsc-personal-dev-native" and .platform=="linux/arm64") and
   ([.[].grant_id]|unique|length==2)' "$raw_containers" >/dev/null
 chmod 0600 "$raw_jobs" "$raw_grants" "$raw_containers"
+chmod 0600 "$container_authority_evidence"
 owner_0_rc=0; owner_1_rc=0
 wait "$owner_0_deploy_pid" || owner_0_rc=$?
 wait "$owner_1_deploy_pid" || owner_1_rc=$?

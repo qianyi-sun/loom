@@ -91,6 +91,20 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "tests/ops/test_staging_rollout_",
 )
 
+PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT = {
+    "deploy/personal-dev-native-builder/loom-personal-dev-native-runtime-authority.sudoers",
+    "deploy/personal-dev-native-builder/runtime-profile-v1.json",
+    "docs/runbooks/personal-dev-native-builder-acceptance.md",
+    "docs/runbooks/personal-dev-native-builder-runtime.md",
+    "scripts/ops/converge_personal_dev_native_builder_release.py",
+    "scripts/ops/install_personal_dev_native_builder_runtime.py",
+    "scripts/ops/personal_dev_native_builder_conformance.sh",
+    "scripts/ops/personal_dev_native_runtime_authority.py",
+    "scripts/ops/staging_rollout_sealed_source.py",
+    "tests/ops/test_personal_dev_native_builder_runbooks.py",
+    "tests/ops/test_personal_dev_native_runtime_authority.py",
+}
+
 
 @dataclass(frozen=True)
 class ValidationPlan:
@@ -171,6 +185,10 @@ def _is_protected_staging_rollout_path(path: str) -> bool:
     )
 
 
+def _is_protected_personal_dev_native_authority_path(path: str) -> bool:
+    return path in PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -195,9 +213,7 @@ def plan_validations(
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
-    selected = {
-        name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")
-    }
+    selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
     def select(name: str, reason: str) -> None:
@@ -226,6 +242,10 @@ def plan_validations(
     if any(_is_protected_staging_rollout_path(path) for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "protected-staging-rollout")
+
+    if any(_is_protected_personal_dev_native_authority_path(path) for path in paths):
+        for name in HEAVY_CHECKS:
+            select(name, "protected-personal-dev-native-authority")
 
     integration_exact = {
         ".github/workflows/ci.yml",
@@ -344,6 +364,7 @@ def plan_validations(
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
             or _is_protected_staging_rollout_path(path)
+            or _is_protected_personal_dev_native_authority_path(path)
         )
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
