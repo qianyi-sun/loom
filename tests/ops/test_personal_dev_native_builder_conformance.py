@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import pairwise
+from pathlib import Path
 
 import pytest
 import scripts.ops.personal_dev_native_builder_conformance as conformance
@@ -86,7 +88,7 @@ class RecordingDockerRunner:
     platform: str = "linux/arm64"
     managed_containers_after: str = ""
     managed_networks_after: str = ""
-    invalid_create_id: bool = False
+    invalid_create_name: str | None = None
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -127,6 +129,8 @@ class RecordingDockerRunner:
         if call[-2:] == ("network", "create"):
             raise AssertionError("network create must have its fixed arguments")
         if "network" in call and "create" in call:
+            if self.invalid_create_name == call[-1]:
+                return CommandResult(0, "not-an-object-id\n")
             identifier = (
                 PROVIDER_NETWORK_ID
                 if call[-1] == "loom-native-conformance"
@@ -146,8 +150,9 @@ class RecordingDockerRunner:
                 "loom-native-conformance-denial-target": DENIAL_ID,
                 "loom-native-conformance-foreign-client": FOREIGN_ID,
             }
-            identifier = names[call[call.index("--name") + 1]]
-            if self.invalid_create_id:
+            name = call[call.index("--name") + 1]
+            identifier = names[name]
+            if self.invalid_create_name == name:
                 return CommandResult(0, "not-an-object-id\n")
             self.created.append(identifier)
             return CommandResult(0, identifier + "\n")
@@ -352,9 +357,26 @@ def test_subprocess_runner_times_out_and_reaps_its_process_group(monkeypatch: py
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
-def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(signum: signal.Signals) -> None:
+def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, signum: signal.Signals
+) -> None:
     """Catches SIGINT/SIGTERM bypassing root cleanup while the command group keeps running."""
-    program = f"import os,signal,time;os.kill(os.getppid(),{signum.value});time.sleep(10)"
+    ready = tmp_path / "handler-ready"
+    original_forward = conformance._forward_signals
+
+    def forward_after_handler(process: object) -> dict[int, object]:
+        handlers = original_forward(process)  # type: ignore[arg-type]
+        ready.write_text("ready", encoding="ascii")
+        return handlers
+
+    monkeypatch.setattr(conformance, "_forward_signals", forward_after_handler)
+    program = (
+        "import os,signal,time\n"
+        f"ready={str(ready)!r}\n"
+        "while not os.path.exists(ready): time.sleep(.01)\n"
+        f"os.kill(os.getppid(),{signum.value})\n"
+        "time.sleep(10)"
+    )
     started = time.monotonic()
 
     with pytest.raises(ConformanceError, match="conformance failed"):
@@ -404,13 +426,14 @@ def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(failure_
         PROVIDER_NETWORK_ID: NATIVE_ENDPOINT,
         DENIED_NETWORK_ID: NATIVE_ENDPOINT,
     }
-    assert all(call[:3] == ("docker", "-H", endpoint_for[call[-1]]) for call in cleanup)
-    assert all(
-        call[3:5] == ("network", "rm")
-        if call[-1] in {PROVIDER_NETWORK_ID, DENIED_NETWORK_ID}
-        else call[3:5] == ("rm", "-f")
-        for call in cleanup
-    )
+    assert cleanup == [
+        (
+            "docker", "-H", endpoint_for[identifier], "network", "rm", identifier
+        )
+        if identifier in {PROVIDER_NETWORK_ID, DENIED_NETWORK_ID}
+        else ("docker", "-H", endpoint_for[identifier], "rm", "-f", identifier)
+        for identifier in reversed(runner.created)
+    ]
 
 
 def test_cleanup_failure_is_not_hidden_by_primary_failure() -> None:
@@ -431,14 +454,71 @@ def test_rejects_a_client_id_that_is_not_a_separate_kvm_sandbox() -> None:
         run_conformance(_inputs(), runner)
 
 
-def test_rejects_invalid_returned_object_ids_before_ownership_is_recorded() -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "loom-native-conformance",
+        "loom-native-conformance-denied",
+        "loom-native-conformance-buildkit",
+        "loom-native-conformance-client",
+        "loom-native-conformance-denial-target",
+        "loom-native-conformance-foreign-client",
+    ],
+)
+def test_rejects_invalid_returned_ids_at_every_create_boundary(name: str) -> None:
     """Catches treating arbitrary Docker output as an owned object eligible for deletion."""
-    runner = RecordingDockerRunner(invalid_create_id=True)
+    runner = RecordingDockerRunner(invalid_create_name=name)
 
     with pytest.raises(ConformanceError, match="conformance failed"):
         run_conformance(_inputs(), runner)
 
-    assert runner.created == [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID]
+    expected = {
+        "loom-native-conformance": [],
+        "loom-native-conformance-denied": [PROVIDER_NETWORK_ID],
+        "loom-native-conformance-buildkit": [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID],
+        "loom-native-conformance-client": [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID, BUILDKIT_ID, FOREIGN_ID, DENIAL_ID],
+        "loom-native-conformance-denial-target": [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID, BUILDKIT_ID, FOREIGN_ID],
+        "loom-native-conformance-foreign-client": [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID, BUILDKIT_ID],
+    }
+    assert runner.created == expected[name]
+
+
+def test_subprocess_runner_kills_a_sigterm_resistant_descendant_after_its_leader_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Catches returning after the leader exits while its SIGTERM-resistant process-group child survives."""
+    marker = tmp_path / "grandchild-pid"
+    monkeypatch.setattr(conformance, "_COMMAND_TIMEOUT_SECONDS", 0.2)
+    program = (
+        "import pathlib,signal,subprocess,sys,time\n"
+        "child=subprocess.Popen([sys.executable,'-c',\"import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)\"])\n"
+        f"pathlib.Path({str(marker)!r}).write_text(str(child.pid),encoding='ascii')\n"
+        "time.sleep(10)"
+    )
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        SubprocessRunner().run((sys.executable, "-c", program))
+
+    grandchild = int(marker.read_text(encoding="ascii"))
+    try:
+        for _ in range(100):
+            if not _process_exists(grandchild):
+                break
+            time.sleep(0.02)
+        assert not _process_exists(grandchild)
+    finally:
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 @pytest.mark.parametrize(

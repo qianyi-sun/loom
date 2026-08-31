@@ -236,17 +236,37 @@ def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
     _close_process_pipes(process)
     try:
         process.wait(timeout=2)
-        return
     except subprocess.TimeoutExpired:
-        pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as exc:
+            raise ConformanceError("conformance failed") from exc
+    if _process_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _settle_process_group(process.pid)
+
+
+def _process_group_exists(process_group: int) -> bool:
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process_group, 0)
     except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired as exc:
-        raise ConformanceError("conformance failed") from exc
+        return False
+    return True
+
+
+def _settle_process_group(process_group: int) -> None:
+    for _ in range(100):
+        if not _process_group_exists(process_group):
+            return
+        time.sleep(0.01)
+    raise ConformanceError("conformance failed")
 
 
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
