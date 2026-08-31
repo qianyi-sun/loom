@@ -114,6 +114,14 @@ class _SourceAsset:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _CreatedObject:
+    path: Path
+    device: int
+    inode: int
+    file_type: int
+
+
 def _identity(metadata: os.stat_result) -> tuple[int, ...]:
     return (
         metadata.st_dev,
@@ -476,25 +484,95 @@ def _fsync_parent(path: Path) -> None:
         os.close(descriptor)
 
 
-def _ensure_directory(path: Path, mode: int, created: list[Path]) -> bool:
+def _created_object(path: Path, metadata: os.stat_result) -> _CreatedObject:
+    return _CreatedObject(
+        path=path,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        file_type=stat.S_IFMT(metadata.st_mode),
+    )
+
+
+def _remove_created_object(created: _CreatedObject) -> bool:
+    parent_descriptor: int | None = None
+    try:
+        parent_descriptor = os.open(
+            created.path.parent,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | os.O_DIRECTORY
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        current = os.stat(
+            created.path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            current.st_dev != created.device
+            or current.st_ino != created.inode
+            or stat.S_IFMT(current.st_mode) != created.file_type
+        ):
+            return False
+        if created.file_type == stat.S_IFDIR:
+            os.rmdir(created.path.name, dir_fd=parent_descriptor)
+        elif created.file_type == stat.S_IFREG:
+            os.unlink(created.path.name, dir_fd=parent_descriptor)
+        else:
+            return False
+        os.fsync(parent_descriptor)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+
+
+def _ensure_directory(path: Path, mode: int, created: list[_CreatedObject]) -> bool:
     try:
         os.lstat(path)
     except FileNotFoundError:
         _safe_directory(path.parent)
+        descriptor: int | None = None
         try:
             os.mkdir(path, 0o700)
-            created.append(path)
-            os.chown(path, ROOT_UID, ROOT_GID)
-            os.chmod(path, mode)
+            lexical = os.lstat(path)
+            owned = _created_object(path, lexical)
+            created.append(owned)
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | os.O_DIRECTORY
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            opened = os.fstat(descriptor)
+            if (
+                owned.file_type != stat.S_IFDIR
+                or (opened.st_dev, opened.st_ino) != (owned.device, owned.inode)
+                or not stat.S_ISDIR(opened.st_mode)
+            ):
+                raise BootstrapError("publication_failed")
+            os.fchown(descriptor, ROOT_UID, ROOT_GID)
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
             _fsync_parent(path)
+        except BootstrapError:
+            raise
         except OSError as exc:
             raise BootstrapError("publication_failed") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         return True
     _safe_directory(path, exact_mode=mode)
     return False
 
 
-def _ensure_parents(path: Path, created: list[Path]) -> None:
+def _ensure_parents(path: Path, created: list[_CreatedObject]) -> None:
     missing: list[Path] = []
     current = path
     while True:
@@ -607,15 +685,14 @@ def _install_file(
     path: Path,
     payload: bytes,
     mode: int,
-    created_files: list[Path],
-    created_directories: list[Path],
+    created: list[_CreatedObject],
 ) -> bool:
-    _ensure_parents(path.parent, created_directories)
+    _ensure_parents(path.parent, created)
     if _existing_file(path, payload, mode):
         return False
     temporary = path.parent / f".{path.name}.new-{os.getpid()}"
     descriptor: int | None = None
-    temporary_created = False
+    temporary_created: _CreatedObject | None = None
     published = False
     try:
         descriptor = os.open(
@@ -627,7 +704,7 @@ def _install_file(
             | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
-        temporary_created = True
+        temporary_created = _created_object(temporary, os.fstat(descriptor))
         _write_all(descriptor, payload)
         os.fchown(descriptor, ROOT_UID, ROOT_GID)
         os.fchmod(descriptor, mode)
@@ -636,7 +713,14 @@ def _install_file(
         descriptor = None
         _rename_noreplace(temporary, path)
         published = True
-        created_files.append(path)
+        created.append(
+            _CreatedObject(
+                path=path,
+                device=temporary_created.device,
+                inode=temporary_created.inode,
+                file_type=temporary_created.file_type,
+            )
+        )
         _fsync_parent(path)
         return True
     except FileExistsError as exc:
@@ -648,20 +732,18 @@ def _install_file(
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        if temporary_created and not published:
-            try:
-                os.unlink(temporary)
-                _fsync_parent(temporary)
-            except FileNotFoundError:
-                pass
+        if temporary_created is not None and not published:
+            _remove_created_object(temporary_created)
 
 
-def _validate_sudoers_payload(payload: bytes) -> None:
+def _stage_sudoers_payload(
+    payload: bytes,
+    created: list[_CreatedObject],
+) -> tuple[Path, _CreatedObject]:
     runtime_root = _host_path(Path("/run"))
     _safe_directory(runtime_root)
     staged = runtime_root / f".loom-native-authority-sudoers.validate-{os.getpid()}"
     descriptor: int | None = None
-    staged_created = False
     try:
         descriptor = os.open(
             staged,
@@ -672,7 +754,8 @@ def _validate_sudoers_payload(payload: bytes) -> None:
             | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
-        staged_created = True
+        staged_created = _created_object(staged, os.fstat(descriptor))
+        created.append(staged_created)
         _write_all(descriptor, payload)
         os.fchown(descriptor, ROOT_UID, ROOT_GID)
         os.fchmod(descriptor, 0o440)
@@ -686,6 +769,7 @@ def _validate_sudoers_payload(payload: bytes) -> None:
         )
         if result.returncode != 0:
             raise BootstrapError("sudoers_invalid")
+        return staged, staged_created
     except BootstrapError:
         raise
     except OSError as exc:
@@ -693,14 +777,6 @@ def _validate_sudoers_payload(payload: bytes) -> None:
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        if staged_created:
-            try:
-                os.unlink(staged)
-                _fsync_parent(staged)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                raise BootstrapError("sudoers_invalid") from exc
 
 
 def _validate_installed_sudoers(path: Path) -> None:
@@ -716,6 +792,8 @@ def _validate_installed_policy(
     launcher_asset: _SourceAsset,
     policy_path: Path,
     assets: Sequence[_SourceAsset],
+    *,
+    sudoers_path: Path,
 ) -> None:
     launcher_path = _host_path(launcher_asset.installed_path)
     installed_payload = _read_installed_file(launcher_path, launcher_asset.mode)
@@ -725,7 +803,12 @@ def _validate_installed_policy(
     try:
         module = _load_bytes(module_name, launcher_path, installed_payload)
         specifications = {
-            asset.name: module.AssetSpec(_host_path(asset.installed_path), asset.mode)
+            asset.name: module.AssetSpec(
+                sudoers_path
+                if asset.name == "sudoers"
+                else _host_path(asset.installed_path),
+                asset.mode,
+            )
             for asset in assets
         }
         module.load_policy(
@@ -740,19 +823,10 @@ def _validate_installed_policy(
         sys.modules.pop(module_name, None)
 
 
-def _rollback(created_files: Sequence[Path], created_directories: Sequence[Path]) -> None:
+def _rollback(created: Sequence[_CreatedObject]) -> None:
     failed = False
-    for path in reversed(created_files):
-        try:
-            os.unlink(path)
-            _fsync_parent(path)
-        except OSError:
-            failed = True
-    for path in reversed(created_directories):
-        try:
-            os.rmdir(path)
-            _fsync_parent(path)
-        except OSError:
+    for owned in reversed(created):
+        if not _remove_created_object(owned):
             failed = True
     if failed:
         raise BootstrapError("rollback_failed")
@@ -824,11 +898,13 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
         except BaseException as exc:
             raise BootstrapError("source_inventory_invalid") from exc
 
-    _validate_sudoers_payload(sudoers_asset.payload)
-    created_files: list[Path] = []
-    created_directories: list[Path] = []
+    created: list[_CreatedObject] = []
     changed = False
     try:
+        staged_sudoers, staged_sudoers_created = _stage_sudoers_payload(
+            sudoers_asset.payload,
+            created,
+        )
         for asset in assets:
             if asset.name == "sudoers":
                 continue
@@ -837,8 +913,7 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
                     _host_path(asset.installed_path),
                     asset.payload,
                     asset.mode,
-                    created_files,
-                    created_directories,
+                    created,
                 )
                 or changed
             )
@@ -848,8 +923,7 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
                 policy_path,
                 policy_payload,
                 0o444,
-                created_files,
-                created_directories,
+                created,
             )
             or changed
         )
@@ -858,37 +932,44 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
             raise BootstrapError("installed_drift")
         for logical in (broker.STATE_ROOT, broker.EPHEMERAL_SECRET_ROOT):
             path = _host_path(logical)
-            _ensure_parents(path.parent, created_directories)
-            changed = _ensure_directory(path, 0o700, created_directories) or changed
+            _ensure_parents(path.parent, created)
+            changed = _ensure_directory(path, 0o700, created) or changed
         lock_path = _host_path(broker.LOCK_PATH)
         changed = (
             _install_file(
                 lock_path,
                 b"",
                 0o600,
-                created_files,
-                created_directories,
+                created,
             )
             or changed
         )
         sudoers_path = _host_path(sudoers_asset.installed_path)
+        _ensure_parents(sudoers_path.parent, created)
+        _validate_installed_policy(
+            launcher_asset,
+            policy_path,
+            assets,
+            sudoers_path=staged_sudoers,
+        )
+        if not _remove_created_object(staged_sudoers_created):
+            raise BootstrapError("sudoers_invalid")
+        created.remove(staged_sudoers_created)
         changed = (
             _install_file(
                 sudoers_path,
                 sudoers_asset.payload,
                 sudoers_asset.mode,
-                created_files,
-                created_directories,
+                created,
             )
             or changed
         )
-        _validate_installed_policy(launcher_asset, policy_path, assets)
         _validate_installed_sudoers(sudoers_path)
     except BaseException as exc:
         try:
-            _rollback(created_files, created_directories)
+            _rollback(created)
         except BootstrapError as rollback_error:
-            raise rollback_error from exc
+            exc.add_note(f"cleanup:{rollback_error.code}")
         if isinstance(exc, BootstrapError):
             raise
         raise BootstrapError("publication_failed") from exc

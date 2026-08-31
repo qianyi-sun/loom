@@ -386,6 +386,120 @@ def test_bootstrap_never_overwrites_installed_drift(
     ).exists()
 
 
+def test_source_capture_rejects_identity_change_between_lstat_and_open(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    source = module.SOURCE_ROOT / (
+        "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py"
+    )
+    replacement = source.with_name("launcher-replacement")
+    original_open = module.os.open
+    original_validate = module._validate_sealed_source
+    armed = False
+    attacked = False
+
+    def validate_then_arm(*args: object, **kwargs: object) -> None:
+        nonlocal armed
+        original_validate(*args, **kwargs)
+        armed = True
+
+    def replace_before_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attacked
+        if armed and not attacked and dir_fd is None and Path(path) == source:
+            attacked = True
+            replacement.write_bytes(source.read_bytes())
+            replacement.chmod(0o644)
+            os.replace(replacement, source)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module, "_validate_sealed_source", validate_then_arm)
+    monkeypatch.setattr(module.os, "open", replace_before_open)
+
+    before = _tree_snapshot(host_root)
+    with pytest.raises(module.BootstrapError, match="source_asset_invalid"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert attacked is True
+    assert _tree_snapshot(host_root) == before
+
+
+def test_destination_publication_race_preserves_the_concurrent_file(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    destination = _installed(
+        host_root,
+        "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+    )
+    original_rename = module._rename_noreplace
+    racer = b"concurrent root publication\n"
+    attacked = False
+
+    def publish_racer(source: Path, target: Path) -> None:
+        nonlocal attacked
+        if not attacked and target == destination:
+            attacked = True
+            target.write_bytes(racer)
+            target.chmod(0o555)
+        original_rename(source, target)
+
+    monkeypatch.setattr(module, "_rename_noreplace", publish_racer)
+
+    with pytest.raises(module.BootstrapError, match="installed_drift"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert attacked is True
+    assert destination.read_bytes() == racer
+    assert not _installed(
+        host_root,
+        "/etc/sudoers.d/loom-personal-dev-native-builder-runtime-authority",
+    ).exists()
+
+
+@pytest.mark.parametrize("boundary", ("file", "parent"))
+def test_fsync_failure_rolls_back_the_real_transaction(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    temporary = _installed(
+        host_root,
+        "/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority"
+        f".new-{os.getpid()}",
+    )
+    parent = temporary.parent
+    original_fsync = module.os.fsync
+    attacked = False
+
+    def fail_boundary(descriptor: int) -> None:
+        nonlocal attacked
+        descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        target = temporary if boundary == "file" else parent
+        if not attacked and descriptor_path == target:
+            attacked = True
+            raise OSError("injected durability failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", fail_boundary)
+
+    before = _tree_snapshot(host_root)
+    with pytest.raises(module.BootstrapError, match="publication_failed"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert attacked is True
+    assert _tree_snapshot(host_root) == before
+
+
 @pytest.mark.parametrize("collision", ("staged-sudoers", "launcher-temporary"))
 def test_bootstrap_never_removes_a_preexisting_temporary_name_collision(
     authority_install: tuple[ModuleType, Path, str, str],
@@ -410,6 +524,126 @@ def test_bootstrap_never_removes_a_preexisting_temporary_name_collision(
         module.bootstrap(source_sha, source_tree)
 
     assert existing.read_bytes() == b"preexisting root data\n"
+
+
+def test_temporary_cleanup_preserves_a_replacement_raced_in_after_creation(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    temporary = _installed(
+        host_root,
+        "/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority"
+        f".new-{os.getpid()}",
+    )
+    displaced = host_root / "displaced-attempt-temporary"
+    racer = b"replacement temporary\n"
+    original_fsync = module.os.fsync
+    attacked = False
+
+    def replace_temporary(descriptor: int) -> None:
+        nonlocal attacked
+        descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        if not attacked and descriptor_path == temporary:
+            attacked = True
+            os.rename(temporary, displaced)
+            temporary.write_bytes(racer)
+            temporary.chmod(0o600)
+            raise OSError("injected write durability failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(module.os, "fsync", replace_temporary)
+
+    with pytest.raises(module.BootstrapError, match="publication_failed"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert attacked is True
+    assert temporary.read_bytes() == racer
+
+
+def test_rollback_preserves_an_installed_file_replacement(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    launcher = _installed(
+        host_root,
+        "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+    )
+    displaced = host_root / "displaced-attempt-launcher"
+    racer = b"replacement installed file\n"
+
+    def replace_then_fail(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        os.rename(launcher, displaced)
+        launcher.write_bytes(racer)
+        launcher.chmod(0o555)
+        raise module.BootstrapError("installed_validation_failed")
+
+    monkeypatch.setattr(module, "_validate_installed_policy", replace_then_fail)
+
+    with pytest.raises(module.BootstrapError, match="installed_validation_failed"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert launcher.read_bytes() == racer
+
+
+def test_rollback_preserves_a_created_directory_replacement(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    state_root = _installed(
+        host_root,
+        "/var/lib/loom/personal-dev-native-builder-runtime-authority",
+    )
+    displaced = host_root / "displaced-attempt-state-root"
+
+    def replace_then_fail(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        os.rename(state_root, displaced)
+        state_root.mkdir(mode=0o700)
+        raise module.BootstrapError("installed_validation_failed")
+
+    monkeypatch.setattr(module, "_validate_installed_policy", replace_then_fail)
+
+    with pytest.raises(module.BootstrapError, match="installed_validation_failed"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert state_root.is_dir()
+    assert state_root.stat().st_ino != displaced.stat().st_ino
+
+
+def test_installed_policy_is_validated_against_staged_sudoers_before_publication(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    sudoers = _installed(
+        host_root,
+        "/etc/sudoers.d/loom-personal-dev-native-builder-runtime-authority",
+    )
+    original_validate = module._validate_installed_policy
+    observed = False
+
+    def validate_before_publication(*args: object, **kwargs: object) -> None:
+        nonlocal observed
+        staged = kwargs["sudoers_path"]
+        assert isinstance(staged, Path)
+        assert not sudoers.exists()
+        assert staged != sudoers
+        assert staged.read_bytes() == SUDOERS
+        assert stat.S_IMODE(staged.stat().st_mode) == 0o440
+        observed = True
+        original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_validate_installed_policy", validate_before_publication)
+
+    receipt = module.bootstrap(source_sha, source_tree)
+
+    assert observed is True
+    assert receipt["status"] == "ok"
+    assert sudoers.read_bytes() == SUDOERS
 
 
 def test_failed_installed_sudoers_validation_rolls_back_every_created_object(
