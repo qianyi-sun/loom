@@ -183,7 +183,9 @@ active with a fifteen-second interval. A no-work pass performs five GitHub read
 requests (the trusted branch plus four bounded workflow inventories), keeping
 the steady-state budget at approximately 1,200 requests per hour while still
 leaving half of the 30-second freshness window for normal API and service
-latency.
+latency. A transient malformed or count-inconsistent active-run inventory is
+re-read at most three times within that pass; the scan bound still fails
+immediately, and persistent inconsistency fails closed without routing work.
 
 Store the App's unencrypted PEM private key at
 `/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem`, owned by root

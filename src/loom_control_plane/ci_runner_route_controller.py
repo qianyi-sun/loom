@@ -49,6 +49,7 @@ MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20
 MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
+ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS = 3
 PUBLISHER_RETRY_SECONDS = 15
 ROUTE_DECISION_RETENTION_DAYS = 7
 OLDLAB_REQUEST_MAX_AGE_SECONDS = 30
@@ -229,26 +230,29 @@ class GitHubRouteAPI:
         return cast(list[dict[str, object]], payload)
 
     def active_workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, object]]:
-        payload = self._request(
-            "GET",
+        path = (
             f"/actions/workflows/{workflow_id}/runs?status=in_progress&per_page="
-            f"{MAX_ACTIVE_RUNS_PER_WORKFLOW}",
+            f"{MAX_ACTIVE_RUNS_PER_WORKFLOW}"
         )
-        runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
-        total_count = payload.get("total_count") if isinstance(payload, dict) else None
-        if (
-            not isinstance(runs, list)
-            or isinstance(total_count, bool)
-            or not isinstance(total_count, int)
-            or total_count < 0
-            or any(not isinstance(item, dict) for item in runs)
-        ):
-            raise RouteControllerError("GitHub active workflow inventory is malformed")
-        if total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW:
-            raise RouteControllerError("active workflow inventory exceeds the scan bound")
-        if total_count != len(runs):
-            raise RouteControllerError("GitHub active workflow inventory is malformed")
-        return cast(list[dict[str, object]], runs)
+        for _attempt in range(ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS):
+            payload = self._request("GET", path)
+            runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+            total_count = payload.get("total_count") if isinstance(payload, dict) else None
+            if (
+                not isinstance(runs, list)
+                or isinstance(total_count, bool)
+                or not isinstance(total_count, int)
+                or total_count < 0
+                or any(not isinstance(item, dict) for item in runs)
+            ):
+                continue
+            if total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW:
+                raise RouteControllerError("active workflow inventory exceeds the scan bound")
+            if total_count == len(runs):
+                return cast(list[dict[str, object]], runs)
+        raise RouteControllerError(
+            "GitHub active workflow inventory remained malformed after bounded retries"
+        )
 
     def route_artifact(
         self, *, workflow_id: int, workflow_run_id: int, run_attempt: int

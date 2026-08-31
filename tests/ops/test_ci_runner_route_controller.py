@@ -892,6 +892,49 @@ def test_github_active_run_inventory_overflow_fails_closed(
         api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0])
 
 
+def test_github_active_run_inventory_recovers_from_transient_count_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    payloads = iter(
+        [
+            {"total_count": 2, "workflow_runs": [{"id": 30_000}]},
+            {"total_count": 1, "workflow_runs": [{"id": 30_000}]},
+        ]
+    )
+    requests = 0
+
+    def request(*_args: object, **_kwargs: object) -> object:
+        nonlocal requests
+        requests += 1
+        return next(payloads)
+
+    monkeypatch.setattr(api, "_request", request)
+
+    assert api.active_workflow_runs(
+        leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
+    ) == [{"id": 30_000}]
+    assert requests == 2
+
+
+def test_github_active_run_inventory_persistent_malformed_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    requests = 0
+
+    def request(*_args: object, **_kwargs: object) -> object:
+        nonlocal requests
+        requests += 1
+        return {"total_count": 1, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    with pytest.raises(routes.RouteControllerError, match="bounded retries"):
+        api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0])
+    assert requests == routes.ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS
+
+
 def test_terminal_jobs_release_exact_leases(tmp_path: Path) -> None:
     request = _request(job_count=3)
     controller, api, broker = _controller(tmp_path, request)
