@@ -22,9 +22,12 @@ runner class.
 
 The root-owned controller publishes the complete route CheckRun directly with
 a dedicated GitHub App. The App is installed only on `qianyi-sun/loom`, has
-only metadata-read and Checks-write repository permissions, subscribes to no
-events, and has no webhook. The controller mints a repository-scoped,
-permission-reduced installation token from a systemd credential and verifies
+Actions-read, Contents-read, Pull-requests-read, metadata-read, and Checks-write
+repository permissions, subscribes to no events, and has no webhook. The
+controller mints one repository-scoped installation token with exactly those
+permissions from a systemd credential and uses it for both trusted reads and
+CheckRun publication. It never loads a user token, so operator API activity
+cannot consume the controller's rate-limit bucket. The controller also verifies
 the returned CheckRun's exact App ID. Route delivery therefore does not wait in
 a GitHub-hosted workflow queue.
 
@@ -191,10 +194,11 @@ Store the App's unencrypted PEM private key at
 `/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem`, owned by root
 with mode `0600`. systemd exposes it only as the
 `route-publisher-app-private-key` credential. Do not place the key, a minted
-installation token, or the existing read token in `candidate.env`, command-line
-output, the SQLite database, GitHub artifacts, or repository secrets. Rotate by
-installing a second App key, validating a direct CheckRun and readback, then
-revoking the old key. The checked-in hosted publisher remains only as a
+installation token, or a user token in `candidate.env`, command-line output,
+the SQLite database, GitHub artifacts, or repository secrets. The route unit
+must not load the pool's `github-token` credential. Rotate by installing a
+second App key, validating both an App-owned trusted read and direct CheckRun,
+then revoking the old key. The checked-in hosted publisher remains only as a
 pre-activation rollback path for the older installed controller; the current
 unit neither dispatches it nor waits for hosted runner capacity.
 
@@ -209,9 +213,10 @@ Activation is one bounded transition:
    units/timers, both controller wrappers/modules, and the old HMAC credential.
 3. Install the exact merged runtime, its lock-derived isolated Python
    environment, the split units, and the App private-key credential; add the
-   runtime, App, and installation IDs to `candidate.env`; prove the service
-   interpreter reports the locked PyJWT and cryptography versions, then run
-   `systemd-analyze verify` and `daemon-reload` before starting anything.
+   runtime, App, and installation IDs to `candidate.env`; prove the route unit
+   has no user-token credential, prove the service interpreter reports the
+   locked PyJWT and cryptography versions, then run `systemd-analyze verify`
+   and `daemon-reload` before starting anything.
 4. Start only the route service once. Require schema-3 readback, the exact
    runtime/App/generation identities, zero generation lag/blob drift, and one
    direct App-owned CheckRun that arrives before the pinned action deadline.
