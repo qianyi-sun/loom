@@ -24,32 +24,47 @@ controllers.
 ```bash
 CANDIDATE_ROOT=/opt/loom-staging-runner/candidates/REVIEWED_GIT_SHA/repo
 ROLLOUT_KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig
-SUPERVISOR_KUBECONFIG=/var/lib/loom-staging-rollout/external-supervisor.kubeconfig
+STATE_ROOT=/var/lib/loom-staging-rollout
 SUPERVISOR_USER=loom-rollout
-SUPERVISOR_GROUP=sharedwork
-SUPERVISOR_UID=995
-SUPERVISOR_GID=2007
-SUPERVISOR_XDG_RUNTIME_DIR=/run/user/995
-EVIDENCE_ROOT=/var/lib/loom-staging-rollout/evidence/task-image-builder-phase1
+SUPERVISOR_UID="$(id -u "$SUPERVISOR_USER")"
+SUPERVISOR_GID="$(id -g "$SUPERVISOR_USER")"
+SUPERVISOR_GROUP="$(id -gn "$SUPERVISOR_USER")"
+test "$SUPERVISOR_GROUP" = loom-rollout
+SUPERVISOR_XDG_RUNTIME_DIR="/run/user/$SUPERVISOR_UID"
+SUPERVISOR_KUBECONFIG="$STATE_ROOT/external-supervisor.kubeconfig"
+EVIDENCE_ROOT="$STATE_ROOT/evidence/task-image-builder-phase1"
 CAPACITY_PROFILE="$CANDIDATE_ROOT/deploy/dev-fleet/capacity-control-plane.toml"
 MANAGER_IMAGE=REGISTRY/loom-capacity-manager@sha256:IMMUTABLE_DIGEST
 AUTHORITY_INCARNATION=REVIEWED_NON_NIL_UUID
+
+as_supervisor() {
+  sudo -u "$SUPERVISOR_USER" env -i \
+    HOME="$STATE_ROOT" USER="$SUPERVISOR_USER" LOGNAME="$SUPERVISOR_USER" \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$SUPERVISOR_XDG_RUNTIME_DIR/bus" \
+    "$@"
+}
 ```
 
-On each controller, confirm that `loom-rollout` resolves to exactly UID 995 and
-primary GID 2007 before using the runtime commands below. The parent rollout
-directory remains root-owned but group-traversable only; its rollout kubeconfig
-stays root-readable. The final supervisor kubeconfig is owner-readable only by
-`loom-rollout`.
+On each controller, resolve the account identity at runtime. The installed
+authority owns the protected state root itself: it must already be exactly a
+non-symlink directory owned by `loom-rollout:loom-rollout` with mode `0700`.
+Do not run `install`, `chown`, or `chmod` on that state root. Only create the
+dedicated evidence child directory after the protected-root assertion passes.
 
 ```bash
 getent passwd "$SUPERVISOR_USER"
-test "$(id -u "$SUPERVISOR_USER")" = "$SUPERVISOR_UID"
-test "$(id -g "$SUPERVISOR_USER")" = "$SUPERVISOR_GID"
-sudo install -d -o root -g "$SUPERVISOR_GROUP" -m 0710 \
-  /var/lib/loom-staging-rollout
+test -n "$SUPERVISOR_UID"
+test -n "$SUPERVISOR_GID"
+test "$SUPERVISOR_GROUP" = loom-rollout
+test ! -L "$STATE_ROOT"
+test "$(stat -c '%F:%U:%G:%a' "$STATE_ROOT")" = \
+  "directory:$SUPERVISOR_USER:$SUPERVISOR_GROUP:700"
 sudo install -d -o "$SUPERVISOR_USER" -g "$SUPERVISOR_GROUP" -m 0700 \
   "$EVIDENCE_ROOT"
+test "$(stat -c '%F:%U:%G:%a' "$EVIDENCE_ROOT")" = \
+  "directory:$SUPERVISOR_USER:$SUPERVISOR_GROUP:700"
 ```
 
 The only storage floor for an active builder is
@@ -140,22 +155,21 @@ sudo env KUBECONFIG="$ROLLOUT_KUBECONFIG" \
   "$SUPERVISOR_KUBECONFIG"
 sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$SUPERVISOR_KUBECONFIG"
 sudo chmod 0600 "$SUPERVISOR_KUBECONFIG"
-sudo stat -c '%a %U:%G %n' /var/lib/loom-staging-rollout "$SUPERVISOR_KUBECONFIG"
-sudo -u "$SUPERVISOR_USER" env \
-  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+test ! -L "$SUPERVISOR_KUBECONFIG"
+test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
+  "regular file:$SUPERVISOR_USER:$SUPERVISOR_GROUP:600"
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-sudo -u "$SUPERVISOR_USER" env \
-  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
 
-Accept only `710 root:sharedwork` for the parent directory,
-`600 loom-rollout:sharedwork` for the final file, the exact ConfigMap read, and
-`no` for `pods/exec`. The runtime readbacks run without `KUBECONFIG` in their
-environment and never open `/var/lib/loom-staging-rollout/kubeconfig`. Repeat
-the same commands on `gx10-01c7` and `TRT-EAI-OLDLAB-1`.
+Accept only `directory:loom-rollout:loom-rollout:700` for the protected parent,
+`regular file:loom-rollout:loom-rollout:600` for the final file, the exact
+ConfigMap read, and `no` for `pods/exec`. `as_supervisor` starts from an empty
+environment, so these runtime readbacks have no ambient `KUBECONFIG` and never
+open `$ROLLOUT_KUBECONFIG`. Repeat the same commands on `gx10-01c7` and
+`TRT-EAI-OLDLAB-1`.
 
 ### 3. Apply the active Phase 1 profile and prove empty-queue reconciliation
 
@@ -181,36 +195,87 @@ loom-staging-rollout --env staging logs "$ROLL_OUT_REQUEST_ID" \
 
 After `status` reports the protected attempt complete, run the next block
 locally on the named controller. It starts each existing oneshot exactly once,
-then retains that invocation's journal JSON. `systemctl show` must report
-`Result=success` and `ExecMainStatus=0`; each timer must be `enabled` and
-`active`. The trial result is a JSON list with no queued slots or `scale_up`;
-the builder result is a JSON object with a zero queue and no submitted or
-cancelled builder IDs. A ConfigMap/signature failure is an acceptance failure,
-not a reason to retry through exec.
+then retains only that invocation's journal JSON. Capture a journal cursor
+immediately before every start and query only after that cursor: this prevents
+a lifecycle line, or an earlier invocation, from being mistaken for the
+supervisor result. `systemctl show` must report `Result=success` and
+`ExecMainStatus=0`; each timer must be `enabled` and `active`. Each unit's
+installed argument vector must name the reachable dedicated kubeconfig both for
+its database client and ConfigMap witness reader. The trial result is a JSON
+list with no queued slots or `scale_up`; the builder result is a JSON object
+with a zero queue and no submitted or cancelled builder IDs. A
+ConfigMap/signature failure is an acceptance failure, not a reason to retry
+through exec.
+
+```bash
+journal_cursor() {
+  as_supervisor journalctl --user --lines=0 --show-cursor --no-pager \
+    | sed -n 's/^-- cursor: //p'
+}
+
+capture_one_json_result() {
+  UNIT="$1"
+  START_CURSOR="$2"
+  RESULT_KIND="$3"
+  JOURNAL_PATH="$EVIDENCE_ROOT/$UNIT.journal.jsonl"
+  RESULT_PATH="$EVIDENCE_ROOT/$UNIT.json"
+
+  test -n "$START_CURSOR"
+  as_supervisor journalctl --user --unit="$UNIT" \
+    "--after-cursor=$START_CURSOR" --output=json --no-pager >"$JOURNAL_PATH"
+  jq -s -e --arg kind "$RESULT_KIND" '
+    [ .[]
+      | .MESSAGE?
+      | select(type == "string")
+      | (try fromjson catch empty)
+      | select(
+          if $kind == "trial" then
+            type == "array" and all(.[]; type == "object"
+              and (.queued_slots | type == "number")
+              and (.action | type == "string"))
+          elif $kind == "builder" then
+            type == "object"
+              and (.queued_materializations | type == "number")
+              and (.submitted_job_ids | type == "array")
+              and (.cancelled_job_ids | type == "array")
+          else error("unknown supervisor result kind")
+          end
+        )
+    ] as $results
+    | if ($results | length) == 1 then $results[0]
+      else error("expected exactly one acceptable JSON result after start cursor")
+      end
+  ' "$JOURNAL_PATH" >"$RESULT_PATH"
+}
+```
 
 On `gx10-01c7`:
 
 ```bash
 for UNIT in loom-autoscaler-gb10-staging.service loom-task-image-builder-gb10-staging.service; do
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user start "$UNIT"
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user show "$UNIT" --property=Result --property=ExecMainStatus
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    sh -c 'systemctl --user cat "$1" > "$2"' sh \
+  case "$UNIT" in
+    loom-autoscaler-*) RESULT_KIND=trial ;;
+    loom-task-image-builder-*) RESULT_KIND=builder ;;
+    *) exit 2 ;;
+  esac
+  START_CURSOR="$(journal_cursor)"
+  test -n "$START_CURSOR"
+  as_supervisor systemctl --user start "$UNIT"
+  as_supervisor systemctl --user show "$UNIT" \
+    --property=Result --property=ExecMainStatus
+  as_supervisor sh -c 'systemctl --user cat "$1" > "$2"' sh \
     "$UNIT" "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
   rg -F -- '--global-execution-witness-config-map loom-global-execution-witness-v1' \
     "$EVIDENCE_ROOT/$UNIT.unit"
   rg -F -- '--global-execution-witness-kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
     "$EVIDENCE_ROOT/$UNIT.unit"
   ! rg -F -- '--global-execution-manager-export' "$EVIDENCE_ROOT/$UNIT.unit"
   ! rg -F -- '/var/lib/loom-staging-rollout/kubeconfig' "$EVIDENCE_ROOT/$UNIT.unit"
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    sh -c 'journalctl --user --unit="$1" --output=cat --lines=1 > "$2"' sh \
-    "$UNIT" "$EVIDENCE_ROOT/$UNIT.json"
+  capture_one_json_result "$UNIT" "$START_CURSOR" "$RESULT_KIND"
 done
-sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  systemctl --user show loom-autoscaler-gb10-staging.timer \
+as_supervisor systemctl --user show loom-autoscaler-gb10-staging.timer \
   loom-task-image-builder-gb10-staging.timer \
   --property=UnitFileState --property=ActiveState
 jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
@@ -223,25 +288,29 @@ On `TRT-EAI-OLDLAB-1`:
 
 ```bash
 for UNIT in loom-autoscaler-oldlab-staging.service loom-task-image-builder-oldlab-staging.service; do
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user start "$UNIT"
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user show "$UNIT" --property=Result --property=ExecMainStatus
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    sh -c 'systemctl --user cat "$1" > "$2"' sh \
+  case "$UNIT" in
+    loom-autoscaler-*) RESULT_KIND=trial ;;
+    loom-task-image-builder-*) RESULT_KIND=builder ;;
+    *) exit 2 ;;
+  esac
+  START_CURSOR="$(journal_cursor)"
+  test -n "$START_CURSOR"
+  as_supervisor systemctl --user start "$UNIT"
+  as_supervisor systemctl --user show "$UNIT" \
+    --property=Result --property=ExecMainStatus
+  as_supervisor sh -c 'systemctl --user cat "$1" > "$2"' sh \
     "$UNIT" "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
   rg -F -- '--global-execution-witness-config-map loom-global-execution-witness-v1' \
     "$EVIDENCE_ROOT/$UNIT.unit"
   rg -F -- '--global-execution-witness-kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
     "$EVIDENCE_ROOT/$UNIT.unit"
   ! rg -F -- '--global-execution-manager-export' "$EVIDENCE_ROOT/$UNIT.unit"
   ! rg -F -- '/var/lib/loom-staging-rollout/kubeconfig' "$EVIDENCE_ROOT/$UNIT.unit"
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    sh -c 'journalctl --user --unit="$1" --output=cat --lines=1 > "$2"' sh \
-    "$UNIT" "$EVIDENCE_ROOT/$UNIT.json"
+  capture_one_json_result "$UNIT" "$START_CURSOR" "$RESULT_KIND"
 done
-sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  systemctl --user show loom-autoscaler-oldlab-staging.timer \
+as_supervisor systemctl --user show loom-autoscaler-oldlab-staging.timer \
   loom-task-image-builder-oldlab-staging.timer \
   --property=UnitFileState --property=ActiveState
 jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
@@ -333,9 +402,7 @@ kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   delete rolebinding "$TRANSITION_WITNESS_EXEC_ROLEBINDING"
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   delete role "$TRANSITION_WITNESS_EXEC_ROLE"
-sudo -u "$SUPERVISOR_USER" env \
-  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
 
@@ -359,10 +426,13 @@ construct an ad hoc profile, credential, RBAC rule, or exec fallback.
 1. Close scale-up first on both controllers. Stop all four timers and active
    oneshots as `loom-rollout`; do not start another reconciliation while rollback
    is in progress.
-2. If the staging profile or units must be restored, use a reviewed rollback
-   commit through a new `loom-staging-rollout --env staging start` request. Do
-   not use `loom admin environment-state apply` or write user-systemd units
-   directly.
+2. If the staging profile or units must be restored, first merge a protected
+   rollback PR that restores the recorded prior branch-controlled bytes to the
+   installed authority's pinned `refs/heads/dev` branch. The PR must pass CI
+   and review. Record its exact merged release SHA, verify that preflight and
+   dry-run bind to it, then use a new `loom-staging-rollout --env staging start`
+   request. `start` accepts no ref or SHA argument; do not use `loom admin
+   environment-state apply` or write user-systemd units directly.
 3. Restore only the captured immutable capacity manifest, dedicated
    supervisor-kubeconfig artifact, and, where separately reviewed and required,
    the exact transition RBAC artifact. A witness failure remains fail-closed;
@@ -377,8 +447,7 @@ for UNIT in loom-autoscaler-gb10-staging.timer \
   loom-task-image-builder-gb10-staging.timer \
   loom-autoscaler-gb10-staging.service \
   loom-task-image-builder-gb10-staging.service; do
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user stop "$UNIT"
+  as_supervisor systemctl --user stop "$UNIT"
 done
 ```
 
@@ -389,45 +458,76 @@ for UNIT in loom-autoscaler-oldlab-staging.timer \
   loom-task-image-builder-oldlab-staging.timer \
   loom-autoscaler-oldlab-staging.service \
   loom-task-image-builder-oldlab-staging.service; do
-  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-    systemctl --user stop "$UNIT"
+  as_supervisor systemctl --user stop "$UNIT"
 done
 ```
 
-From the protected staging rollout host, apply the reviewed rollback release,
-then restore only the two recorded non-staging artifacts:
+From the protected staging rollout host, merge the protected rollback PR before
+this block. It restores the recorded prior branch-controlled bytes, has passed
+CI and review, and is merged to the installed authority's pinned `dev` branch.
+Set `ROLLBACK_RELEASE_SHA` to that exact merge SHA; a raw captured profile is
+evidence only and cannot be selected directly by the rollout CLI. Capture and
+bind each broker response before the real start. Only after the real response
+is bound to that same SHA may the separately captured non-branch artifacts be
+restored.
 
 ```bash
+ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA
 PREVIOUS_REVIEWED_CAPACITY_MANIFEST=/secure/rollback/REVIEWED_CAPACITY_MANIFEST.yaml
 PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG=/secure/rollback/REVIEWED_EXTERNAL_SUPERVISOR.kubeconfig
 
-loom-staging-rollout --env staging preflight
+assert_response_sha() {
+  jq -e --arg sha "$ROLLBACK_RELEASE_SHA" '
+    if has("candidate_sha") then .candidate_sha == $sha
+    elif has("resolved_sha") then .resolved_sha == $sha
+    else error("response has no candidate identity")
+    end
+  ' "$1"
+}
+
+PREFLIGHT_RESPONSE="$(loom-staging-rollout --env staging preflight)"
+printf '%s\n' "$PREFLIGHT_RESPONSE" \
+  | tee "$EVIDENCE_ROOT/staging-rollback-preflight.json"
+assert_response_sha "$EVIDENCE_ROOT/staging-rollback-preflight.json"
+ROLLBACK_DRY_RUN_RESPONSE="$(loom-staging-rollout --env staging start --dry-run)"
+printf '%s\n' "$ROLLBACK_DRY_RUN_RESPONSE" \
+  | tee "$EVIDENCE_ROOT/staging-rollback-dry-run.json"
+assert_response_sha "$EVIDENCE_ROOT/staging-rollback-dry-run.json"
 ROLLBACK_START_RESPONSE="$(loom-staging-rollout --env staging start)"
 printf '%s\n' "$ROLLBACK_START_RESPONSE" \
   | tee "$EVIDENCE_ROOT/staging-rollback-start.json"
+assert_response_sha "$EVIDENCE_ROOT/staging-rollback-start.json"
 ROLLBACK_REQUEST_ID="$(printf '%s\n' "$ROLLBACK_START_RESPONSE" | jq -er '.request_id')"
-loom-staging-rollout --env staging status "$ROLLBACK_REQUEST_ID" \
+ROLLBACK_STATUS_RESPONSE="$(loom-staging-rollout --env staging status "$ROLLBACK_REQUEST_ID")"
+printf '%s\n' "$ROLLBACK_STATUS_RESPONSE" \
   | tee "$EVIDENCE_ROOT/staging-rollback-status.json"
+assert_response_sha "$EVIDENCE_ROOT/staging-rollback-status.json"
 
+# Apply this captured manifest only to the controller that owns its recorded
+# cluster artifact, after that controller's brokered rollback attempt completes.
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   apply -f "$PREVIOUS_REVIEWED_CAPACITY_MANIFEST"
+# On each applicable external-supervisor controller, restore the separately
+# captured credential and prove the exact reachable dedicated authority.
 sudo install -o "$SUPERVISOR_USER" -g "$SUPERVISOR_GROUP" -m 0600 \
   "$PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" "$SUPERVISOR_KUBECONFIG"
-sudo stat -c '%a %U:%G %n' /var/lib/loom-staging-rollout "$SUPERVISOR_KUBECONFIG"
-sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+test ! -L "$SUPERVISOR_KUBECONFIG"
+test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
+  "regular file:$SUPERVISOR_USER:$SUPERVISOR_GROUP:600"
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
-  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
 
 Define `PREVIOUS_REVIEWED_CAPACITY_MANIFEST` and
 `PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG` only from the captured immutable,
-review-approved rollback record. The final readback must remain
-`710 root:sharedwork`, `600 loom-rollout:sharedwork`, ConfigMap `get` success,
-and `pods/exec` `no`. Then run the step 3 controller-local status/log/JSON
-readbacks; only their successful empty-queue results permit timers to be
+review-approved rollback record. Perform the credential restore/readback on
+each applicable controller; it must remain
+`regular file:loom-rollout:loom-rollout:600`, with ConfigMap `get` success and
+`pods/exec` `no`. Then run the step 3 controller-local status/unit/journal JSON
+readbacks on both controllers. They prove all four units use the dedicated
+credential and only their successful empty-queue results permit timers to be
 re-enabled by the protected staging rollout.
 
 ## Disabled Phase 2 prerequisites: inputs, staging, and read-only preflight

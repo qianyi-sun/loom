@@ -124,9 +124,12 @@ back to exec.
 Staging profile and supervisor activation is a protected, broker-owned rollout:
 `loom-staging-rollout --env staging start` creates the required rollout
 envelope and converges both controllers. Direct `loom admin environment-state
-apply` is not a valid staging mutation path. Rollback first closes supervisor
-scale-up, then uses only recorded immutable prior profile, credential, manifest,
-and RBAC artifacts; it never restores exec automatically.
+apply` is not a valid staging mutation path. A rollback first restores the
+recorded branch-controlled bytes through a reviewed, CI-passing PR merged to
+the installed authority's pinned `dev` branch, then binds preflight, dry-run,
+and real-start responses to that merged release SHA. Only after that brokered
+release may it restore separately captured non-branch credential, manifest, or
+RBAC artifacts; it never restores exec automatically.
 
 ## Hard local-storage admission
 
