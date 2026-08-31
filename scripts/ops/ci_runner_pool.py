@@ -84,6 +84,7 @@ GUEST_BASE_IMAGES = (
     "docker/buildx-bin:0.37.0-rc1",
     "docker:29.7.2-cli",
     "edoburu/pgbouncer:latest",
+    "golang:1.26.4-alpine",
     "envoyproxy/envoy:v1.30-latest",
     "golang:1.23-alpine",
     "golang:1.25.7-alpine",
