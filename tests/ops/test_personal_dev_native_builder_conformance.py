@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import signal
+import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 
 import pytest
+import scripts.ops.personal_dev_native_builder_conformance as conformance
 from scripts.ops.personal_dev_native_builder_conformance import (
     CommandResult,
     ConformanceError,
     ConformanceInputs,
+    SubprocessRunner,
     run_conformance,
 )
 
@@ -23,6 +29,51 @@ DENIAL_ID = "3" * 64
 FOREIGN_ID = "4" * 64
 PROVIDER_NETWORK_ID = "5" * 64
 DENIED_NETWORK_ID = "6" * 64
+HOST_DENIAL_PROGRAM = """import socket,sys
+connection=socket.socket()
+connection.settimeout(2)
+try:
+    connection.connect((sys.argv[1],1234))
+except OSError:
+    raise SystemExit(0)
+finally:
+    connection.close()
+raise SystemExit(1)
+"""
+FOREIGN_DENIAL_PROGRAM = """import socket,sys
+try:
+    connection=socket.create_connection((sys.argv[1],1234),timeout=2)
+except OSError:
+    raise SystemExit(0)
+connection.close()
+raise SystemExit(1)
+"""
+CLIENT_PROGRAM = """import platform,socket,sys,urllib.error,urllib.request
+if not __import__('os').path.exists('/proc/gvisor/kernel_is_gvisor'):
+    raise SystemExit(1)
+if platform.machine() != 'aarch64':
+    raise SystemExit(1)
+try:
+    response=urllib.request.urlopen(sys.argv[1],timeout=10)
+except urllib.error.HTTPError as error:
+    if not 400 <= error.code < 500:
+        raise
+    error.close()
+else:
+    response.close()
+for target in (('192.168.50.103',6443),('172.28.1.10',1234)):
+    connection=socket.socket()
+    connection.settimeout(2)
+    try:
+        connection.connect(target)
+    except OSError:
+        pass
+    else:
+        raise SystemExit(1)
+    finally:
+        connection.close()
+__import__('os').execvp('buildctl',('buildctl','--addr','tcp://buildkit-0123456789ab:1234','debug','workers'))
+"""
 
 
 @dataclass
@@ -32,6 +83,10 @@ class RecordingDockerRunner:
     fail_at: int | None = None
     fail_cleanup: bool = False
     duplicate_client_id: bool = False
+    platform: str = "linux/arm64"
+    managed_containers_after: str = ""
+    managed_networks_after: str = ""
+    invalid_create_id: bool = False
 
     def __post_init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -65,6 +120,10 @@ class RecordingDockerRunner:
                 return CommandResult(1, stderr="primary failed")
         if is_preexisting_check:
             return CommandResult(1)
+        if call[3:5] == ("ps", "-aq"):
+            return CommandResult(0, self.managed_containers_after)
+        if call[3:6] == ("network", "ls", "-q"):
+            return CommandResult(0, self.managed_networks_after)
         if call[-2:] == ("network", "create"):
             raise AssertionError("network create must have its fixed arguments")
         if "network" in call and "create" in call:
@@ -88,6 +147,8 @@ class RecordingDockerRunner:
                 "loom-native-conformance-foreign-client": FOREIGN_ID,
             }
             identifier = names[call[call.index("--name") + 1]]
+            if self.invalid_create_id:
+                return CommandResult(0, "not-an-object-id\n")
             self.created.append(identifier)
             return CommandResult(0, identifier + "\n")
         if "logs" in call:
@@ -102,6 +163,7 @@ class RecordingDockerRunner:
                 "{{.State.ExitCode}}": "0\n",
                 "{{.HostConfig.Runtime}}": "runsc-personal-dev-native\n",
                 "{{.Architecture}}": "arm64\n",
+                "{{.Os}}/{{.Architecture}}": self.platform + "\n",
                 "{{.HostConfig.CgroupParent}}": "loom-personal-dev-builder.slice\n",
                 "{{.HostConfig.NanoCpus}}": (
                     "3000000000\n"
@@ -168,8 +230,9 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
         if "loom-native-conformance-buildkit" in call and "create" in call
     )
     assert buildkit == (
-        "docker", "-H", NATIVE_ENDPOINT, "create", "--name", "loom-native-conformance-buildkit",
+        "docker", "-H", NATIVE_ENDPOINT, "create", "--platform", "linux/arm64", "--name", "loom-native-conformance-buildkit",
         "--runtime", "runsc-personal-dev-native", "--network", "loom-native-conformance",
+        "--label", MANAGED_LABEL,
         "--network-alias", "buildkit-0123456789ab", "--hostname", "buildkit-0123456789ab",
         "--read-only", "--user", "1000:1000", "--cgroup-parent", "loom-personal-dev-builder.slice",
         "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--security-opt",
@@ -183,42 +246,121 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
     client = next(
         call for call in runner.calls if "loom-native-conformance-client" in call and "create" in call
     )
-    assert client[:26] == (
-        "docker", "-H", NATIVE_ENDPOINT, "create", "--name", "loom-native-conformance-client",
-        "--runtime", "runsc-personal-dev-native", "--network", "loom-native-conformance", "--read-only",
+    assert client[:30] == (
+        "docker", "-H", NATIVE_ENDPOINT, "create", "--platform", "linux/arm64", "--name", "loom-native-conformance-client",
+        "--runtime", "runsc-personal-dev-native", "--network", "loom-native-conformance", "--label", MANAGED_LABEL,
+        "--read-only",
         "--user", "1000:1000", "--cap-drop", "ALL", "--cgroup-parent",
         "loom-personal-dev-builder.slice", "--security-opt", "no-new-privileges:true", "--security-opt",
         "seccomp=default", "--cpus", "1", "--memory", "17179869184", "--memory-swap",
     )
-    assert client[26:36] == (
+    assert client[30:40] == (
         "17179869184", "--pids-limit", "1024", "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=1073741824,mode=1777", "--tmpfs",
         "/workspace:rw,nosuid,nodev,size=2147483648,mode=0700,uid=1000,gid=1000",
         "--entrypoint", "/usr/bin/python3", BUILDER,
     )
-    assert client[36] == "-c"
-    assert "kernel_is_gvisor" in client[37]
-    assert "aarch64" in client[37]
-    assert "192.168.50.103" in client[37]
-    assert "172.28.1.10" in client[37]
-    assert "buildkit-0123456789ab" in client[37]
-    assert client[38:] == (PUBLIC_HTTPS,)
+    assert client[40] == "-c"
+    assert client[41] == CLIENT_PROGRAM
+    assert client[42:] == (PUBLIC_HTTPS,)
     foreign = next(
         call
         for call in runner.calls
         if "loom-native-conformance-foreign-client" in call and "create" in call
     )
-    assert foreign[:18] == (
-        "docker", "-H", PRIMARY_ENDPOINT, "create", "--name", "loom-native-conformance-foreign-client",
-        "--network", "bridge", "--read-only", "--cap-drop", "ALL", "--security-opt",
+    assert foreign[:22] == (
+        "docker", "-H", PRIMARY_ENDPOINT, "create", "--platform", "linux/arm64", "--name", "loom-native-conformance-foreign-client",
+        "--network", "bridge", "--label", MANAGED_LABEL, "--read-only", "--cap-drop", "ALL", "--security-opt",
         "no-new-privileges:true", "--cpus", "1", "--memory", "268435456", "--memory-swap",
     )
-    assert foreign[18:] == (
+    assert foreign[22:] == (
         "268435456", "--pids-limit", "64", "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=16777216,mode=0700", "--entrypoint", "python", AGENT,
-        "-c", foreign[-2], "172.28.0.2",
+        "-c", FOREIGN_DENIAL_PROGRAM, "172.28.0.2",
     )
-    assert "socket.create_connection" in foreign[-2]
+    assert (
+        "/usr/bin/python3", "-c", HOST_DENIAL_PROGRAM, "172.28.0.2"
+    ) in runner.calls
+
+
+def test_verifies_both_platforms_labels_every_container_and_readies_denial_server() -> None:
+    """Catches starting an unverified image, vacuous managed counts, or a dead denial target."""
+    runner = RecordingDockerRunner()
+
+    run_conformance(_inputs(), runner)
+
+    first_start = next(index for index, call in enumerate(runner.calls) if "start" in call)
+    platforms = [call for call in runner.calls if call[3:5] == ("image", "inspect")]
+    assert platforms == [
+        ("docker", "-H", NATIVE_ENDPOINT, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", BUILDER),
+        ("docker", "-H", PRIMARY_ENDPOINT, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", AGENT),
+    ]
+    assert all(runner.calls.index(call) < first_start for call in platforms)
+    creates = [call for call in runner.calls if "create" in call and "--name" in call]
+    assert all(("--platform", "linux/arm64") in pairwise(call) for call in creates)
+    assert all(("--label", MANAGED_LABEL) in pairwise(call) for call in creates)
+    assert (
+        "docker", "-H", NATIVE_ENDPOINT, "exec", DENIAL_ID, "/usr/bin/python3", "-c",
+        "import socket\nconnection=socket.create_connection(('127.0.0.1',1234),timeout=2)\nconnection.close()\n",
+    ) in runner.calls
+
+
+@pytest.mark.parametrize("platform", ["linux/amd64", "windows/arm64"])
+def test_rejects_any_non_arm64_image_before_container_creation(platform: str) -> None:
+    """Catches QEMU/binfmt execution of an image that is not native linux/arm64."""
+    runner = RecordingDockerRunner(platform=platform)
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        run_conformance(_inputs(), runner)
+
+    assert all("create" not in call for call in runner.calls)
+
+
+@pytest.mark.parametrize("field", ["managed_containers_after", "managed_networks_after"])
+def test_refuses_nonempty_post_cleanup_managed_counts(field: str) -> None:
+    """Catches a passing receipt when labelled conformance objects survive cleanup."""
+    runner = (
+        RecordingDockerRunner(managed_containers_after="survivor\n")
+        if field == "managed_containers_after"
+        else RecordingDockerRunner(managed_networks_after="survivor\n")
+    )
+
+    with pytest.raises(ConformanceError, match="cleanup failed"):
+        run_conformance(_inputs(), runner)
+
+
+def test_subprocess_runner_caps_streamed_output_before_a_child_can_finish() -> None:
+    """Catches unbounded communicate buffering of hostile command output in root memory."""
+    program = "import sys,time;sys.stdout.write('x'*70000);sys.stdout.flush();time.sleep(10)"
+    started = time.monotonic()
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        SubprocessRunner().run((sys.executable, "-c", program))
+
+    assert time.monotonic() - started < 2
+
+
+def test_subprocess_runner_times_out_and_reaps_its_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a deadline that leaves a root-started child process running after the call returns."""
+    monkeypatch.setattr(conformance, "_COMMAND_TIMEOUT_SECONDS", 0.05)
+    started = time.monotonic()
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        SubprocessRunner().run((sys.executable, "-c", "import time;time.sleep(10)"))
+
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(signum: signal.Signals) -> None:
+    """Catches SIGINT/SIGTERM bypassing root cleanup while the command group keeps running."""
+    program = f"import os,signal,time;os.kill(os.getppid(),{signum.value});time.sleep(10)"
+    started = time.monotonic()
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        SubprocessRunner().run((sys.executable, "-c", program))
+
+    assert time.monotonic() - started < 2
 
 
 def test_refuses_existing_exact_name_before_first_create() -> None:
@@ -243,7 +385,7 @@ def test_refuses_existing_exact_name_before_first_create() -> None:
     assert all("create" not in call for call in existing.calls)
 
 
-@pytest.mark.parametrize("failure_number", range(1, 28))
+@pytest.mark.parametrize("failure_number", range(1, 32))
 def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(failure_number: int) -> None:
     """Catches leaked sandboxes or broad cleanup when a create, start, or probe fails."""
     runner = RecordingDockerRunner(fail_at=failure_number)
@@ -254,11 +396,26 @@ def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(failure_
     cleanup = [call for call in runner.calls if "rm" in call]
     assert [call[-1] for call in cleanup] == list(reversed(runner.created))
     assert all(call[-1] in set(runner.created) for call in cleanup)
+    endpoint_for = {
+        BUILDKIT_ID: NATIVE_ENDPOINT,
+        CLIENT_ID: NATIVE_ENDPOINT,
+        DENIAL_ID: NATIVE_ENDPOINT,
+        FOREIGN_ID: PRIMARY_ENDPOINT,
+        PROVIDER_NETWORK_ID: NATIVE_ENDPOINT,
+        DENIED_NETWORK_ID: NATIVE_ENDPOINT,
+    }
+    assert all(call[:3] == ("docker", "-H", endpoint_for[call[-1]]) for call in cleanup)
+    assert all(
+        call[3:5] == ("network", "rm")
+        if call[-1] in {PROVIDER_NETWORK_ID, DENIED_NETWORK_ID}
+        else call[3:5] == ("rm", "-f")
+        for call in cleanup
+    )
 
 
 def test_cleanup_failure_is_not_hidden_by_primary_failure() -> None:
     """Catches cleanup errors being swallowed after a failed conformance operation."""
-    runner = RecordingDockerRunner(fail_at=3, fail_cleanup=True)
+    runner = RecordingDockerRunner(fail_at=5, fail_cleanup=True)
 
     with pytest.raises(ConformanceError, match="cleanup failed") as raised:
         run_conformance(_inputs(), runner)
@@ -272,6 +429,16 @@ def test_rejects_a_client_id_that_is_not_a_separate_kvm_sandbox() -> None:
 
     with pytest.raises(ConformanceError, match="conformance failed"):
         run_conformance(_inputs(), runner)
+
+
+def test_rejects_invalid_returned_object_ids_before_ownership_is_recorded() -> None:
+    """Catches treating arbitrary Docker output as an owned object eligible for deletion."""
+    runner = RecordingDockerRunner(invalid_create_id=True)
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        run_conformance(_inputs(), runner)
+
+    assert runner.created == [PROVIDER_NETWORK_ID, DENIED_NETWORK_ID]
 
 
 @pytest.mark.parametrize(

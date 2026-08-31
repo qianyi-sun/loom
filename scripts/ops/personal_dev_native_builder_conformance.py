@@ -5,12 +5,14 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import selectors
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
 _NATIVE_ENDPOINT = "unix:///run/loom-personal-dev-builder/docker.sock"
@@ -32,6 +34,10 @@ _BUILDKIT_NAME = "loom-native-conformance-buildkit"
 _CLIENT_NAME = "loom-native-conformance-client"
 _DENIAL_NAME = "loom-native-conformance-denial-target"
 _FOREIGN_CLIENT_NAME = "loom-native-conformance-foreign-client"
+_DENIAL_READY_PROGRAM = """import socket
+connection=socket.create_connection(('127.0.0.1',1234),timeout=2)
+connection.close()
+"""
 
 _HOST_DENIAL_PROGRAM = """import socket,sys
 connection=socket.socket()
@@ -131,42 +137,105 @@ class SubprocessRunner:
     ) -> CommandResult:
         if not argv or any(not isinstance(value, str) or not value for value in argv):
             raise ConformanceError("conformance failed")
-        process: subprocess.Popen[str] | None = None
+        process: subprocess.Popen[bytes] | None = None
+        previous_handlers: dict[int, object] = {}
         try:
             process = subprocess.Popen(
                 list(argv),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 env=_ROOT_ENV if env is None else env,
                 start_new_session=True,
             )
-            stdout, stderr = process.communicate(timeout=_COMMAND_TIMEOUT_SECONDS)
+            if threading.current_thread() is threading.main_thread():
+                previous_handlers = _forward_signals(process)
+            stdout, stderr = _drain_bounded(process)
         except BaseException as exc:
             if process is not None:
                 _terminate_and_reap(process)
-            if isinstance(exc, subprocess.TimeoutExpired):
+            if isinstance(exc, (subprocess.TimeoutExpired, _CommandOutputError, _CommandSignal)):
                 raise ConformanceError("conformance failed") from exc
             raise
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, cast(signal.Handlers, handler))
         if (
-            len(stdout.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
-            or len(stderr.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
+            len(stdout) > _MAX_COMMAND_OUTPUT
+            or len(stderr) > _MAX_COMMAND_OUTPUT
         ):
             raise ConformanceError("conformance failed")
-        result = CommandResult(process.returncode, stdout, stderr)
+        result = CommandResult(
+            process.returncode,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
         if check and result.returncode != 0:
             raise ConformanceError("conformance failed")
         return result
 
 
-def _terminate_and_reap(process: subprocess.Popen[str]) -> None:
+class _CommandOutputError(RuntimeError):
+    pass
+
+
+class _CommandSignal(BaseException):
+    pass
+
+
+def _forward_signals(process: subprocess.Popen[bytes]) -> dict[int, object]:
+    previous: dict[int, object] = {}
+
+    def forward(signum: int, _frame: object) -> None:
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+        raise _CommandSignal()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, forward)
+    return previous
+
+
+def _drain_bounded(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    if process.stdout is None or process.stderr is None:
+        raise ConformanceError("conformance failed")
+    chunks: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + _COMMAND_TIMEOUT_SECONDS
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, _COMMAND_TIMEOUT_SECONDS)
+            for key, _ in selector.select(remaining):
+                stream = key.fileobj
+                descriptor = stream if isinstance(stream, int) else stream.fileno()
+                chunk = os.read(descriptor, 8192)
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+                output = chunks[key.data]
+                if len(output) + len(chunk) > _MAX_COMMAND_OUTPUT:
+                    raise _CommandOutputError()
+                output.extend(chunk)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(process.args, _COMMAND_TIMEOUT_SECONDS)
+    process.wait(timeout=remaining)
+    return bytes(chunks["stdout"]), bytes(chunks["stderr"])
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    _close_process_pipes(process)
     try:
-        process.communicate(timeout=2)
+        process.wait(timeout=2)
         return
     except subprocess.TimeoutExpired:
         pass
@@ -175,9 +244,15 @@ def _terminate_and_reap(process: subprocess.Popen[str]) -> None:
     except ProcessLookupError:
         pass
     try:
-        process.communicate(timeout=2)
+        process.wait(timeout=2)
     except subprocess.TimeoutExpired as exc:
         raise ConformanceError("conformance failed") from exc
+
+
+def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
 
 
 def _image(value: object, repository: str) -> bool:
@@ -240,6 +315,14 @@ def _expect(runner: Runner, argv: tuple[str, ...], expected: str) -> None:
         raise ConformanceError("conformance failed")
 
 
+def _expect_platform(runner: Runner, endpoint: str, image: str) -> None:
+    _expect(
+        runner,
+        _docker(endpoint, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image),
+        "linux/arm64",
+    )
+
+
 def _assert_absent(runner: Runner, endpoint: str, kind: str, name: str) -> None:
     result = _run(runner, _docker(endpoint, kind, "inspect", name), allow_failure=True)
     if result.returncode == 0:
@@ -285,6 +368,8 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             (_PRIMARY_ENDPOINT, "container", _FOREIGN_CLIENT_NAME),
         ):
             _assert_absent(runner, endpoint, kind, name)
+        _expect_platform(runner, _NATIVE_ENDPOINT, inputs.builder_image)
+        _expect_platform(runner, _PRIMARY_ENDPOINT, inputs.agent_image)
 
         provider_network_id = _object_id(
             _run(
@@ -329,12 +414,16 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 _docker(
                     _NATIVE_ENDPOINT,
                     "create",
+                    "--platform",
+                    "linux/arm64",
                     "--name",
                     _BUILDKIT_NAME,
                     "--runtime",
                     "runsc-personal-dev-native",
                     "--network",
                     _NETWORK_NAME,
+                    "--label",
+                    _MANAGED_LABEL,
                     "--network-alias",
                     "buildkit-0123456789ab",
                     "--hostname",
@@ -415,10 +504,14 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 _docker(
                     _PRIMARY_ENDPOINT,
                     "create",
+                    "--platform",
+                    "linux/arm64",
                     "--name",
                     _FOREIGN_CLIENT_NAME,
                     "--network",
                     "bridge",
+                    "--label",
+                    _MANAGED_LABEL,
                     "--read-only",
                     "--cap-drop",
                     "ALL",
@@ -457,6 +550,8 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 _docker(
                     _NATIVE_ENDPOINT,
                     "create",
+                    "--platform",
+                    "linux/arm64",
                     "--name",
                     _DENIAL_NAME,
                     "--runtime",
@@ -465,6 +560,8 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                     _DENIED_NETWORK_NAME,
                     "--ip",
                     "172.28.1.10",
+                    "--label",
+                    _MANAGED_LABEL,
                     "--read-only",
                     "--user",
                     "1000:1000",
@@ -497,6 +594,25 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         )
         created.append((_NATIVE_ENDPOINT, "container", denial_id))
         _run(runner, _docker(_NATIVE_ENDPOINT, "start", denial_id))
+        for attempt in range(60):
+            ready = _run(
+                runner,
+                _docker(
+                    _NATIVE_ENDPOINT,
+                    "exec",
+                    denial_id,
+                    "/usr/bin/python3",
+                    "-c",
+                    _DENIAL_READY_PROGRAM,
+                ),
+                allow_failure=True,
+            )
+            if ready.returncode == 0:
+                break
+            if attempt == 59:
+                raise ConformanceError("conformance failed")
+            if isinstance(runner, SubprocessRunner):
+                time.sleep(1)
 
         client_id = _object_id(
             _run(
@@ -504,12 +620,16 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 _docker(
                     _NATIVE_ENDPOINT,
                     "create",
+                    "--platform",
+                    "linux/arm64",
                     "--name",
                     _CLIENT_NAME,
                     "--runtime",
                     "runsc-personal-dev-native",
                     "--network",
                     _NETWORK_NAME,
+                    "--label",
+                    _MANAGED_LABEL,
                     "--read-only",
                     "--user",
                     "1000:1000",
@@ -560,11 +680,6 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             runner,
             _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Runtime}}", client_id),
             "runsc-personal-dev-native",
-        )
-        _expect(
-            runner,
-            _docker(_NATIVE_ENDPOINT, "image", "inspect", "--format", "{{.Architecture}}", inputs.builder_image),
-            "arm64",
         )
         for identifier, expected in ((buildkit_id, "3000000000"), (client_id, "1000000000")):
             _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.CgroupParent}}", identifier), "loom-personal-dev-builder.slice")
