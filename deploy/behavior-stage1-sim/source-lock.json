@@ -91,7 +91,7 @@
   ],
   "vla_python": {
     "accepted_freeze_sha256": "sha256:6e7fb76ad0ec0a96bcb1d4afc6d7c976ba37d94cb7430f9f028d60a4e3e0712c",
-    "lock_sha256": "sha256:c2d563d90fd0cd3ee084240993641ed110b63677a43dfc0462a9c05459bfd546",
+    "lock_sha256": "sha256:520192b3362781bdf50f6be0229a21fc30fc252af5eb5261dc251de8faacdacf",
     "python_version": "3.11.13"
   }
 }
