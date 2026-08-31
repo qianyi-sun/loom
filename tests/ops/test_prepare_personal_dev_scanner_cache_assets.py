@@ -203,7 +203,7 @@ def _case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Case:
     trivy_sha256 = hashlib.sha256(_TRIVY).hexdigest()
     value["binary_sha256"] = {
         "linux/amd64": trivy_sha256,
-        "linux/arm64": "1" * 64,
+        "linux/arm64": trivy_sha256,
     }
     value["database"] = {"image": database_ref, "layer_sha256": database_layer}
     value["java_database"] = {
@@ -309,7 +309,7 @@ def test_materializer_publishes_exact_verified_inventory(
         },
         "lock_sha256": hashlib.sha256(case.lock.read_bytes()).hexdigest(),
         "schema_version": 1,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     assert (case.output / "scanner-cache-evidence.json").read_bytes() == (
         _canonical(evidence) + b"\n"

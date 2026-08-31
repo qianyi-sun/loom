@@ -76,7 +76,7 @@ def _settings(tmp_path: Path, **overrides):
         "java_database_metadata_sha256": java_database_metadata_sha256,
         "java_database_sha256": java_database_sha256,
         "lock_sha256": "1" * 64,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     cache_identity_sha256 = hashlib.sha256(
         b"loom-personal-dev-scanner-cache-v1\0"

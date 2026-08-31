@@ -33,8 +33,8 @@ nor changes physical capacity.
   digests. Protected image CI records the extracted files and publishes the
   cache image as part of the exact personal-development trusted release.
 - The service image's Trivy stage is
-  `aquasec/trivy@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e`,
-  whose AMD64 and ARM64 members report exactly version `0.70.0`. Release
+  `aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`,
+  whose AMD64 and ARM64 members report exactly version `0.74.0`. Release
   assembly rejects a different runtime version before it records the binary
   hash.
 - The management service never mounts the PVC root. It mounts only the exact
@@ -112,8 +112,8 @@ no trailing newline. It contains exactly:
 ```json
 {
   "binary_sha256": {
-    "linux/amd64": "379d59f24a4a828c55de5f0b91b6805cc35d13580180b658820e648611256166",
-    "linux/arm64": "5bf6066f08c972e0575660eaeb87b4f1bac0e527076dcbf88184bc9baa353f65"
+    "linux/amd64": "d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791",
+    "linux/arm64": "fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358"
   },
   "database": {
     "image": "ghcr.io/aquasecurity/trivy-db@sha256:01edd081af12fd613776b0db66ac23ce62c9d25802d8ee57671394c10ca3530b",
@@ -124,7 +124,7 @@ no trailing newline. It contains exactly:
     "layer_sha256": "bcc9ee0a8aa79524502cf892eda69e2180b54a3c7bd54c874b564201d2bdfc10"
   },
   "schema_version": 1,
-  "trivy_version": "v0.70.0"
+  "trivy_version": "v0.74.0"
 }
 ```
 
@@ -132,7 +132,7 @@ The loader rejects tags, unexpected repositories, zero or malformed digests,
 unknown fields, a noncanonical payload, and a Trivy version different from the
 pinned installer policy. CI reads both OCI manifests by digest and requires one
 expected database layer with the recorded digest and media type. It then runs
-the pinned Trivy 0.70.0 binary with `--download-db-only` and
+the pinned Trivy 0.74.0 binary with `--download-db-only` and
 `--download-java-db-only`, passing only the two digest references as explicit
 repositories. The download occurs once per workflow, and its exact output is a
 short-lived workflow artifact consumed by both cache-image platform builds.
@@ -150,14 +150,14 @@ The personal trusted-release schema advances to version 2. Its image set adds
   "java_database_metadata_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
   "java_database_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
   "lock_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
-  "trivy_version": "v0.70.0"
+  "trivy_version": "v0.74.0"
 }
 ```
 
 Protected CI computes these values from the published cache image and the
 AMD64 member of the published service image. It requires the extracted AMD64
 and ARM64 service binaries to equal the lock's hashes, which were independently
-derived from the pinned Trivy 0.70.0 release archives. It also rejects
+derived from the pinned Trivy 0.74.0 release archives. It also rejects
 disagreement between the AMD64 and ARM64 cache-image database files. The cache
 identity is the SHA-256 of this framed canonical payload:
 

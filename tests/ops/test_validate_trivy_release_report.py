@@ -165,7 +165,7 @@ def _report(
         "SchemaVersion": 2,
         "ArtifactName": artifact_name,
         "ArtifactType": "container_image",
-        "Trivy": {"Version": "0.70.0"},
+        "Trivy": {"Version": "0.74.0"},
         "Metadata": {
             "OS": {"Family": os_family, "Name": os_name},
             "ImageConfig": {"architecture": architecture, "os": "linux"},

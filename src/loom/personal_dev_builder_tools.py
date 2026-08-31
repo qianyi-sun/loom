@@ -326,7 +326,7 @@ def _attempt_tag(registration: CandidateRegistration, *, suffix: str) -> str:
 
 
 @dataclass(slots=True)
-class SkopeoBuildxPersonalDevRegistryPublisher:
+class SkopeoDockerManifestPersonalDevRegistryPublisher:
     """Import verified OCI archives and join exact native digests."""
 
     runner: BoundedCommandRunner
@@ -410,24 +410,33 @@ class SkopeoBuildxPersonalDevRegistryPublisher:
         await self.runner.run(
             [
                 self.docker_executable,
-                "buildx",
-                "imagetools",
+                "manifest",
                 "create",
-                "--tag",
                 target,
                 *(f"{repository}@{digests[platform]}" for platform in PERSONAL_DEV_PLATFORMS),
             ],
             timeout_seconds=self.registry_timeout_seconds,
             max_output_bytes=1024 * 1024,
         )
-        raw = await self.runner.run(
+        await self.runner.run(
             [
                 self.docker_executable,
-                "buildx",
-                "imagetools",
-                "inspect",
-                "--raw",
+                "manifest",
+                "push",
+                "--purge",
                 target,
+            ],
+            timeout_seconds=self.registry_timeout_seconds,
+            max_output_bytes=1024 * 1024,
+        )
+        raw = await self.runner.run(
+            [
+                self.skopeo_executable,
+                "inspect",
+                "--authfile",
+                str(self.registry_auth_file),
+                "--raw",
+                f"docker://{target}",
             ],
             timeout_seconds=self.registry_timeout_seconds,
             max_output_bytes=4 * 1024 * 1024,
@@ -507,7 +516,7 @@ __all__ = [
     "AsyncBoundedCommandRunner",
     "BoundedCommandRunner",
     "ExternalToolError",
-    "SkopeoBuildxPersonalDevRegistryPublisher",
+    "SkopeoDockerManifestPersonalDevRegistryPublisher",
     "SkopeoPersonalDevRegistryArtifactCollector",
     "TrivyPersonalDevImageScanner",
 ]

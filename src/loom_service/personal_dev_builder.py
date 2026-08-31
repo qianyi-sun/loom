@@ -38,7 +38,7 @@ from loom.personal_dev_builder_runtime import (
 )
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
-    SkopeoBuildxPersonalDevRegistryPublisher,
+    SkopeoDockerManifestPersonalDevRegistryPublisher,
     TrivyPersonalDevImageScanner,
 )
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
@@ -537,7 +537,7 @@ def build_personal_dev_builder_runtime(
             "TMPDIR": "/tmp",
         },
     )
-    publisher = SkopeoBuildxPersonalDevRegistryPublisher(
+    publisher = SkopeoDockerManifestPersonalDevRegistryPublisher(
         runner=publisher_runner,
         skopeo_executable=_required_executable(
             settings.personal_dev_builder_skopeo_path,
