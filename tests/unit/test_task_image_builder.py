@@ -166,6 +166,59 @@ async def test_builder_evicts_managed_images_at_startup_and_after_claim(
     assert evictions == [settings, settings]
 
 
+async def test_builder_refreshes_storage_admission_after_an_empty_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admissions = iter((_cleanup_result(), _cleanup_result(free_bytes=19 * 1024**3)))
+    events: list[str] = []
+    claim_requests = 0
+
+    class _IdleThenForbiddenControlPlane:
+        def __init__(self, **_kwargs: Any) -> None:
+            events.append("client")
+
+        async def claim_task_image_materialization(self, **_kwargs: Any) -> None:
+            nonlocal claim_requests
+            claim_requests += 1
+            if claim_requests > 1:
+                raise AssertionError("builder requested a second claim after idle storage changed")
+            events.append("claim")
+            return None
+
+    def prepare_storage(_settings: object) -> ManagedImageCleanupResult:
+        events.append("admission")
+        return next(admissions)
+
+    async def idle_sleep(_seconds: float) -> None:
+        events.append("sleep")
+
+    monkeypatch.setattr(
+        task_image_builder,
+        "HttpControlPlaneClient",
+        _IdleThenForbiddenControlPlane,
+    )
+    monkeypatch.setattr(
+        task_image_builder,
+        "evict_stale_managed_images_from_env",
+        prepare_storage,
+    )
+    monkeypatch.setattr(task_image_builder.asyncio, "sleep", idle_sleep)
+
+    with pytest.raises(task_image_builder.TaskImageBuilderFatalError, match="storage admission"):
+        await task_image_builder.run_builder(  # type: ignore[arg-type]
+            SimpleNamespace(
+                control_plane_url="http://cp:8080",
+                token=_Secret(),
+                docker_api_timeout_sec=30,
+                task_image_builder_idle_exit_seconds=None,
+                claim_poll_interval_sec=1,
+            )
+        )
+
+    assert events[:2] == ["admission", "client"]
+    assert claim_requests == 1
+
+
 @pytest.mark.parametrize(
     "cleanup_result",
     [

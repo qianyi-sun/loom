@@ -431,6 +431,7 @@ async def run_builder(
             if idle_limit is not None and now() - idle_since >= idle_limit:
                 return
             await asyncio.sleep(settings.claim_poll_interval_sec)
+            await _prepare_builder_storage(settings)
             continue
         idle_since = now()
         try:

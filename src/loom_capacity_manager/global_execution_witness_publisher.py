@@ -31,7 +31,7 @@ _POOLS = ("gb10", "oldlab")
 _WITNESS_TTL = timedelta(seconds=30)
 _MAX_EXPORT_BYTES = 64 * 1024
 _MAX_CA_BYTES = 64 * 1024
-_MAX_RESPONSE_BYTES = 1024
+_MAX_RESPONSE_BYTES = 256 * 1024
 _MAX_TOKEN_BYTES = 16 * 1024
 _KEY_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}")
 
