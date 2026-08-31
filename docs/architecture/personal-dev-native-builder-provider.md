@@ -196,8 +196,9 @@ The secret response contains:
 
 The service creates remote capabilities with a separate S3 client that signs
 against `LOOM_SVC_MINIO_PUBLIC_ENDPOINT`. Native-provider startup requires a
-non-userinfo HTTPS origin. The internal MinIO client remains authoritative for
-intake, HEAD verification, export, and GC.
+non-userinfo HTTPS origin on the managed external port 443 and a hostname
+distinct from the management Ingress. The internal MinIO client remains
+authoritative for intake, HEAD verification, export, and GC.
 
 Heartbeat reports the exact grant and whole-attempt lease. The response is
 `continue=true` only while all central predicates still hold. The agent begins
@@ -395,7 +396,14 @@ Operational render requires all of the following before owner apply is exposed:
   personal-environment acceptance.
 
 Shadow mode may render and inspect this contract while leaving both the native
-provider and agent inactive.
+provider and agent inactive. Once the native profile is prepared, the render
+owns the public hostname's TLS Ingress and points it at a selectorless Service
+with no automatically managed endpoints. Acceptance and operational renders
+switch that same Ingress to MinIO's S3 port 9000 and add the ingress traffic
+rule required by the installed network topology. They never expose the MinIO
+console on port 9001. Reapplying the prepared shadow switches the backend to
+the selectorless Service and removes the public MinIO traffic rule, so rollback
+does not depend on an out-of-band Ingress deletion.
 
 Operational status obtains the durable agent row through a bounded read-only
 probe executed inside the management container. The probe emits canonical,

@@ -326,7 +326,7 @@ class _NativeBuilderInput(_StrictModel):
             or parsed.fragment
             or self.public_store_origin.endswith("/")
             or _DNS_SUBDOMAIN.fullmatch(parsed.hostname) is None
-            or (port is not None and not 1 <= port <= 65535)
+            or port not in {None, 443}
         ):
             raise ValueError("native builder public store origin is invalid")
         if (
@@ -632,6 +632,13 @@ class _ProfileInput(_StrictModel):
             self.identities.native_builder_public_secret is not None
         ):
             raise ValueError("personal-dev native builder does not match profile schema")
+        if (
+            self.native_builder is not None
+            and self.native_builder.prepared
+            and urlsplit(self.native_builder.public_store_origin).hostname
+            == urlsplit(self.network.public_origin).hostname
+        ):
+            raise ValueError("native builder public store host conflicts with management")
         observed = {item.pool_id: item.architecture for item in self.pools}
         if len(observed) != len(self.pools) or observed != REQUIRED_POOLS:
             raise ValueError("personal-dev pools must be exactly OLDLAB and GB10")
@@ -915,7 +922,7 @@ class _AcceptanceNativeBuilderInput(_StrictModel):
             or parsed.fragment
             or value.endswith("/")
             or _DNS_SUBDOMAIN.fullmatch(parsed.hostname) is None
-            or (port is not None and not 1 <= port <= 65535)
+            or port not in {None, 443}
         ):
             raise ValueError("acceptance native builder public store is invalid")
         return value

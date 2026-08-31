@@ -2916,6 +2916,7 @@ def _public_services_and_ingress(
     profile: PersonalDevControlPlaneProfile,
     *,
     include_web: bool,
+    plan: PersonalDevEnabledPlan | None,
 ) -> tuple[dict[str, Any], ...]:
     management_service = _service(
         context,
@@ -2993,7 +2994,87 @@ def _public_services_and_ingress(
             ],
         },
     }
-    return tuple(item for item in (management_service, web_service, ingress) if item is not None)
+    native_builder = profile.native_builder
+    object_store_service: dict[str, Any] | None = None
+    object_store_ingress: dict[str, Any] | None = None
+    if native_builder is not None and native_builder.prepared:
+        object_store_service = {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": _metadata(
+                context,
+                "loom-personal-dev-object-store-disabled",
+                namespace="loom-dev",
+            ),
+            "spec": {
+                "ports": [{"name": "s3", "port": 9000, "targetPort": 9000}],
+            },
+        }
+        object_store_host = urlsplit(native_builder.public_store_origin).hostname
+        assert object_store_host is not None
+        object_store_backend = (
+            "loom-dev-minio"
+            if plan is not None
+            else "loom-personal-dev-object-store-disabled"
+        )
+        object_store_ingress = {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": _metadata(
+                context,
+                "loom-personal-dev-object-store",
+                namespace="loom-dev",
+                annotations={
+                    "cert-manager.io/cluster-issuer": (
+                        profile.network.ingress_cluster_issuer
+                    ),
+                    "nginx.ingress.kubernetes.io/proxy-body-size": "0",
+                    "nginx.ingress.kubernetes.io/proxy-buffering": "off",
+                    "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
+                    "nginx.ingress.kubernetes.io/proxy-request-buffering": "off",
+                    "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+                },
+            ),
+            "spec": {
+                "ingressClassName": profile.network.ingress_class_name,
+                "tls": [
+                    {
+                        "hosts": [object_store_host],
+                        "secretName": "loom-personal-dev-object-store-tls",
+                    }
+                ],
+                "rules": [
+                    {
+                        "host": object_store_host,
+                        "http": {
+                            "paths": [
+                                {
+                                    "path": "/",
+                                    "pathType": "Prefix",
+                                    "backend": {
+                                        "service": {
+                                            "name": object_store_backend,
+                                            "port": {"number": 9000},
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+        }
+    return tuple(
+        item
+        for item in (
+            management_service,
+            web_service,
+            ingress,
+            object_store_service,
+            object_store_ingress,
+        )
+        if item is not None
+    )
 
 
 def _activation_deployment(
@@ -3267,7 +3348,12 @@ def _network_policies(
                         },
                     ],
                     "ports": [{"protocol": "TCP", "port": 9000}],
-                }
+                },
+                *(
+                    [{"ports": [{"protocol": "TCP", "port": 9000}]}]
+                    if plan is not None
+                    else []
+                ),
             ],
         },
     )
@@ -3443,7 +3529,12 @@ def _render_documents(
         _migration(context, profile, release),
         _management_deployment(context, profile, release, plan),
         *([_web_deployment(context, profile, release)] if include_web else []),
-        *_public_services_and_ingress(context, profile, include_web=include_web),
+        *_public_services_and_ingress(
+            context,
+            profile,
+            include_web=include_web,
+            plan=plan,
+        ),
         _activation_deployment(context, profile, release, plan),
         *_network_policies(
             context,
