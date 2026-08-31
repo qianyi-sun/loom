@@ -343,7 +343,7 @@ ARM64 and runs as UID/GID 65532.
 
 Release publication preserves source-accurate, immutable evidence. Each native
 archive is rebuilt from the protected release commit inside the hosted
-`publish` job and is checked by Trivy v0.70.0 using image scanning, OS and
+`publish` job and is checked by Trivy v0.74.0 using image scanning, OS and
 library vulnerabilities, a `20m0s` timeout, `CRITICAL` severity, exit code 1,
 unfixed findings included, the vulnerability scanner only, and no cache. A
 repository helper writes the fixed config and reviewed ignore file outside the
@@ -358,7 +358,7 @@ required PostgreSQL 17.4 rehearsal dependencies. Every entry includes exact
 Debian PURL scopes, its review statement, and 2026-09-12 UTC expiration in the
 signed predicate. Policy
 generation fails closed at that boundary. A repository-owned installer accepts
-only the architecture-specific v0.70.0 release archive whose repository-pinned
+only the architecture-specific v0.74.0 release archive whose repository-pinned
 SHA-256 matches; no policy-forbidden third-party action is required. The signed
 predicate binds the scanner identity, release URL and architecture archive
 digest, complete policy-file identities, explicit exception metadata, and scan

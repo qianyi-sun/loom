@@ -58,14 +58,14 @@ def _release(
     arm_archive: bytes | None = None,
 ) -> installer.TrivyRelease:
     return installer.TrivyRelease(
-        version="v0.70.0",
+        version="v0.74.0",
         archives={
             "amd64": installer.TrivyArchive(
-                filename="trivy_0.70.0_Linux-64bit.tar.gz",
+                filename="trivy_0.74.0_Linux-64bit.tar.gz",
                 sha256=hashlib.sha256(archive).hexdigest(),
             ),
             "arm64": installer.TrivyArchive(
-                filename="trivy_0.70.0_Linux-ARM64.tar.gz",
+                filename="trivy_0.74.0_Linux-ARM64.tar.gz",
                 sha256=(
                     hashlib.sha256(arm_archive).hexdigest()
                     if arm_archive is not None
@@ -94,8 +94,8 @@ def test_installer_verifies_archive_and_extracts_only_trivy(tmp_path: Path) -> N
 
     assert requested == [
         (
-            "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/"
-            "trivy_0.70.0_Linux-64bit.tar.gz",
+            "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/"
+            "trivy_0.74.0_Linux-64bit.tar.gz",
             60,
         )
     ]
@@ -129,8 +129,8 @@ def test_installer_can_prepare_an_explicit_cross_architecture_binary(
     executable = installer.install_trivy(tmp_path, architecture="arm64")
 
     assert requested == [
-        "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/"
-        "trivy_0.70.0_Linux-ARM64.tar.gz"
+        "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/"
+        "trivy_0.74.0_Linux-ARM64.tar.gz"
     ]
     assert executable.read_bytes() == b"arm64-trivy"
 

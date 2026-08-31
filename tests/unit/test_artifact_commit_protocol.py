@@ -68,7 +68,7 @@ async def test_multipart_replay_readback_and_marker_order() -> None:
         part_number=1,
         content_length=len(payload),
         content_sha256=_digest(payload),
-        body=_chunks(payload[:4], payload[4:]),
+        body=_chunks(payload[:4], b"", payload[4:], b""),
         auth=auth,
     )
     assert (

@@ -293,21 +293,31 @@ def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> Non
     assert allow["spec"]["policyTypes"] == ["Egress"]
     assert "ingress" not in allow["spec"]
     expected = {
-        ("kube-system", "k8s-app", "kube-dns", 53, "UDP"),
-        ("kube-system", "k8s-app", "kube-dns", 53, "TCP"),
-        ("loom", "app", "loom-llm-gateway", 9100, "TCP"),
+        ("kube-system", "k8s-app", ("coredns", "kube-dns"), 53, "UDP"),
+        ("kube-system", "k8s-app", ("coredns", "kube-dns"), 53, "TCP"),
+        ("loom", "app", ("loom-llm-gateway",), 9100, "TCP"),
     }
-    actual: set[tuple[str, str, str, int, str]] = set()
+    actual: set[tuple[str, str, tuple[str, ...], int, str]] = set()
     for rule in allow["spec"]["egress"]:
         assert len(rule["to"]) == 1
         peer = rule["to"][0]
         assert "ipBlock" not in peer
         namespace = peer["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"]
-        pod_labels = peer["podSelector"]["matchLabels"]
-        assert len(pod_labels) == 1
-        label_name, label_value = next(iter(pod_labels.items()))
+        pod_selector = peer["podSelector"]
+        if "matchLabels" in pod_selector:
+            pod_labels = pod_selector["matchLabels"]
+            assert len(pod_labels) == 1
+            label_name, label_value = next(iter(pod_labels.items()))
+            label_values = (label_value,)
+        else:
+            expressions = pod_selector["matchExpressions"]
+            assert len(expressions) == 1
+            expression = expressions[0]
+            assert expression["operator"] == "In"
+            label_name = expression["key"]
+            label_values = tuple(sorted(expression["values"]))
         for port in rule["ports"]:
-            actual.add((namespace, label_name, label_value, port["port"], port["protocol"]))
+            actual.add((namespace, label_name, label_values, port["port"], port["protocol"]))
     assert actual == expected
 
 

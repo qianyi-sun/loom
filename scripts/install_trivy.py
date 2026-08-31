@@ -57,12 +57,12 @@ TRIVY_RELEASE = TrivyRelease(
     version=TRIVY_VERSION,
     archives={
         "amd64": TrivyArchive(
-            filename="trivy_0.70.0_Linux-64bit.tar.gz",
-            sha256="8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9",
+            filename="trivy_0.74.0_Linux-64bit.tar.gz",
+            sha256="2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
         ),
         "arm64": TrivyArchive(
-            filename="trivy_0.70.0_Linux-ARM64.tar.gz",
-            sha256="2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d",
+            filename="trivy_0.74.0_Linux-ARM64.tar.gz",
+            sha256="b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5",
         ),
     },
 )

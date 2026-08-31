@@ -24,9 +24,9 @@ _AMD64_DIGEST = "e" * 64
 _ARM64_DIGEST = "f" * 64
 _CANDIDATE_HEAD = "1" * 40
 _CANDIDATE_TREE = "2" * 40
-_TRIVY_RELEASE = "https://github.com/aquasecurity/trivy/releases/download/v0.70.0"
-_TRIVY_AMD64 = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
-_TRIVY_ARM64 = "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
+_TRIVY_RELEASE = "https://github.com/aquasecurity/trivy/releases/download/v0.74.0"
+_TRIVY_AMD64 = "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+_TRIVY_ARM64 = "b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5"
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
 _PERL_PURLS = [
     "pkg:deb/debian/libperl5.36",
@@ -193,7 +193,7 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
     assert external["scan"] == {
         "scanner": {
             "name": "Trivy",
-            "version": "v0.70.0",
+            "version": "v0.74.0",
             "release": _TRIVY_RELEASE,
             "archives": {"linux/amd64": _TRIVY_AMD64},
         },
@@ -374,7 +374,7 @@ def test_architecture_predicate_rejects_malformed_build_mode(build_mode: str) ->
     ("path", "replacement"),
     [
         (("scanner", "name"), "Other"),
-        (("scanner", "version"), "v0.70.1"),
+        (("scanner", "version"), "v0.74.1"),
         (("config_sha256",), "0" * 64),
         (("ignore_sha256",), "0" * 64),
     ],
@@ -457,7 +457,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
     assert external["scan"] == {
         "scanner": {
             "name": "Trivy",
-            "version": "v0.70.0",
+            "version": "v0.74.0",
             "release": _TRIVY_RELEASE,
             "archives": {
                 "linux/amd64": _TRIVY_AMD64,
@@ -517,7 +517,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
     ("path", "replacement"),
     [
         (("scanner", "name"), "Other"),
-        (("scanner", "version"), "v0.70.1"),
+        (("scanner", "version"), "v0.74.1"),
         (("config_sha256",), "0" * 64),
         (("ignore_sha256",), "0" * 64),
     ],

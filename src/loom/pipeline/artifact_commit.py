@@ -872,7 +872,9 @@ class ArtifactCommitService:
         async def verified_body() -> AsyncIterator[bytes]:
             nonlocal observed
             async for chunk in body:
-                if not chunk or len(chunk) > MAX_APPLICATION_BUFFER_BYTES:
+                if not chunk:
+                    continue
+                if len(chunk) > MAX_APPLICATION_BUFFER_BYTES:
                     raise ArtifactCommitError("stream_chunk_invalid")
                 observed += len(chunk)
                 if observed > content_length:

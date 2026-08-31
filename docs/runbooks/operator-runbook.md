@@ -345,8 +345,8 @@ authorized target has all of the following read back from its own APIs:
 - the pinned actuator image digest has release provenance and scan evidence;
 - the referenced database Secret exists through the environment's secret
   authority, not through a checked-in Secret;
-- the named sandbox `RuntimeClass` has passed #1551 hostile-workload
-  acceptance; an ordinary-Pod fallback is forbidden;
+- the default managed runtime or an explicitly configured optional
+  `RuntimeClass` has passed a bounded non-root Pod smoke;
 - target capacity, NetworkPolicy, registry access, quotas, and cleanup alarms
   have passed their own gates.
 

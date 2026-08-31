@@ -175,6 +175,26 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "deploy/terraform/nebius/stack/main.tf",
+        "scripts/check_nebius_iac.py",
+        "tests/ops/test_nebius_iac.py",
+    ],
+)
+def test_nebius_iac_change_uses_owned_validation_route(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.integration is True
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == {"integration"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "deploy/environments/staging.multinode.cluster.toml",
         "scripts/ops/deploy_staging_k3s.sh",
         ".github/workflows/release-promotion-gate.yml",

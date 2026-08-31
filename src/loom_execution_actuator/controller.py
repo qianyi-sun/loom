@@ -19,6 +19,7 @@ from loom_control_plane.service_execution import (
     acknowledge_execution_command,
     claim_execution_commands,
     defer_execution_command,
+    finalize_committed_service_execution,
     mark_execution_output_unavailable,
     record_kubernetes_observation,
 )
@@ -160,6 +161,12 @@ class ExecutionActuator:
                 payload=observation.event_payload(),
                 observed_at=now,
             )
+            if observation.normalized_state == NormalizedJobState.SUCCEEDED:
+                await finalize_committed_service_execution(
+                    session,
+                    lease_id=lease.id,
+                    observed_at=now,
+                )
             await session.commit()
 
     async def _close_output_before_delete(
@@ -330,7 +337,14 @@ class ExecutionActuator:
                 observation = await self._get(lease)
                 if observation is None:
                     raise ActuatorContractError("expected Kubernetes Job is missing")
-                await self._persist_observation(lease, observation, now=now)
+                if command.command_type == "start" and lease.desired_state == "finalize":
+                    # Output commit may durably queue start and finalize before
+                    # the actuator's next poll. The later finalize command owns
+                    # terminal projection; acknowledge the superseded start
+                    # intent without letting it revoke that command's generation.
+                    self._validate_observation(lease, observation)
+                else:
+                    await self._persist_observation(lease, observation, now=now)
             else:
                 raise ActuatorContractError("unsupported execution command")
             await self._ack(

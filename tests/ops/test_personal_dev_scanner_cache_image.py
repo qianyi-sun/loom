@@ -56,8 +56,8 @@ def test_scanner_cache_image_is_minimal_nonroot_and_immutable() -> None:
 
 def test_service_image_uses_the_same_pinned_trivy_version_as_scanner_policy() -> None:
     assert _SERVICE_DOCKERFILE.read_text(encoding="utf-8").splitlines()[0] == (
-        "FROM aquasec/trivy@sha256:"
-        "be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e AS trivy"
+        "FROM aquasec/trivy:0.74.0@sha256:"
+        "62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 AS trivy"
     )
 
 

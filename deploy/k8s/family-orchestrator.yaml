@@ -74,6 +74,16 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED
+          value: 'False'
+        - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT
+          value: development
+        - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_INTERVAL_SEC
+          value: '2.0'
+        - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_MAX_DEADLINE_SEC
+          value: '7200'
+        - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID
+          value: nebius-cpu
         - name: LOOM_CP_SIGNED_URL_EXPIRY_SEC
           value: '3600'
         - name: LOOM_CP_SKILL_EVOLVER_DEFAULT_MODEL

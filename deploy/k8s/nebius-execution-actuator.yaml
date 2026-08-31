@@ -76,8 +76,10 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
           podSelector:
-            matchLabels:
-              k8s-app: kube-dns
+            matchExpressions:
+              - key: k8s-app
+                operator: In
+                values: [kube-dns, coredns]
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
@@ -139,8 +141,10 @@ spec:
               value: nebius-eu-north1-staging
             - name: LOOM_EXECUTION_ACTUATOR_NAMESPACE
               value: loom-nebius-staging
-            - name: LOOM_EXECUTION_ACTUATOR_RUNTIME_CLASS_NAME
-              value: loom-sandbox
+            - name: LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR
+              value: '{"loom.nebius/node-role":"execution"}'
+            - name: LOOM_EXECUTION_ACTUATOR_TOLERATIONS
+              value: '[{"key":"loom.nebius/execution","operator":"Equal","value":"true","effect":"NoSchedule"}]'
             - name: LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL
               value: http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution
           ports:
@@ -174,6 +178,8 @@ spec:
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/name: loom-execution-actuator
+      nodeSelector:
+        loom.nebius/node-role: system
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

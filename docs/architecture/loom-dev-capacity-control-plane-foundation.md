@@ -253,7 +253,7 @@ Docker archive from the protected release commit, scans that source-fresh
 archive, and only then loads and pushes it. PR candidate archives may be
 retained for untrusted CI evidence, but the publisher never downloads, loads,
 scans as release, attests, or publishes them. Both untrusted validation and the
-trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
+trusted release scan use pinned Trivy v0.74.0 with scan type `image`, OS and
 library vulnerability types, a `20m0s` timeout, `CRITICAL` severity, exit code
 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
 The trusted scan selects fixed config and a reviewed ignore file generated
@@ -268,7 +268,7 @@ for required PostgreSQL 17.4 rehearsal dependencies. Each exception carries
 exact Debian PURL scopes and a review statement and expires at 2026-09-12 UTC;
 policy generation fails closed at that boundary.
 A repository-owned installer accepts only the architecture-
-specific v0.70.0 release archive whose repository-pinned SHA-256 matches,
+specific v0.74.0 release archive whose repository-pinned SHA-256 matches,
 avoiding any third-party action forbidden by repository policy. The publisher
 captures the one digest emitted by the push and uses the immutable subject only
 for registry validation, SLSA v1 attestation, and strict verification; it never

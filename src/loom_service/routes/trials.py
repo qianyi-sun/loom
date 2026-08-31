@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
-from loom.db.schema import LlmCall, Task, Team, Trial, TrialResourceUsage, User
+from loom.db.schema import Artifact, LlmCall, Task, Team, Trial, TrialResourceUsage, User
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
@@ -534,6 +534,69 @@ def _find_projected_artifact(
     return None
 
 
+def _service_execution_file_key(artifact: Artifact, file_item: dict[str, Any]) -> str | None:
+    provenance = artifact.provenance if isinstance(artifact.provenance, dict) else {}
+    lease_id = provenance.get("lease_id")
+    generation = provenance.get("generation")
+    relative_path = file_item.get("relative_path")
+    if (
+        artifact.control_producer_kind != "service_execution"
+        or not isinstance(lease_id, str)
+        or not lease_id
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+        or not isinstance(relative_path, str)
+        or not relative_path
+    ):
+        return None
+    return (
+        f"service-executions/{artifact.team_id}/{lease_id}/{generation}/output/"
+        f"artifacts/{artifact.id}/{relative_path}"
+    )
+
+
+def _projected_service_execution_artifacts(
+    request: Request,
+    *,
+    trial_id: UUID,
+    artifacts: Sequence[Artifact],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+        files = storage.get("files")
+        if not isinstance(files, list):
+            continue
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+            key = _service_execution_file_key(artifact, file_item)
+            if key is None:
+                continue
+            raw_size = file_item.get("size_bytes")
+            size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
+            out.append(
+                {
+                    "key": key,
+                    "size": max(size, 0),
+                    "sha256": file_item.get("sha256"),
+                    "media_type": file_item.get("media_type") or "application/octet-stream",
+                    "share_status": artifact.share_status,
+                    "blocked_reason": artifact.blocked_reason,
+                    "step_name": artifact.name,
+                    "download_url": str(
+                        public_url_for(
+                            request,
+                            "download_artifact",
+                            trial_id=str(trial_id),
+                        ).include_query_params(key=key)
+                    ),
+                }
+            )
+    return out
+
+
 @router.get("/trials/{trial_id}")
 async def get_trial(
     request: Request,
@@ -596,6 +659,19 @@ async def get_trial(
     base["result"] = trial.result
     base["price_snapshots"] = await price_snapshots_for_trials(s, [trial.id])
     trajectory_index = trial.trajectory_index or {}
+    service_execution_artifacts = list(
+        (
+            await s.execute(
+                select(Artifact).where(
+                    Artifact.trial_id == trial.id,
+                    Artifact.team_id == trial.team_id,
+                    Artifact.control_producer_kind == "service_execution",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     # The worker's TrajectoryWriter writes events.jsonl under
     # `<trajectories_bucket>/<team_id>/<trial_id>/events.jsonl`;
     # finalize.py writes ATIF to the same bucket at `atif.json`.
@@ -621,6 +697,10 @@ async def get_trial(
         request,
         trajectory_index=trajectory_index,
         trial_id=trial.id,
+    ) + _projected_service_execution_artifacts(
+        request,
+        trial_id=trial.id,
+        artifacts=service_execution_artifacts,
     )
     debug_evidence = build_trial_debug_evidence(
         request,
@@ -787,16 +867,53 @@ async def download_artifact(
     require_team_or_admin(ctx, trial.team_id)
 
     artifact = _find_projected_artifact(trial.trajectory_index, key)
-    if artifact is None:
-        raise HTTPException(status_code=404, detail="artifact not found")
+    if artifact is not None:
+        return stream_object_response(
+            client=request.app.state.minio_client,
+            bucket=_artifact_bucket(artifact, settings.artifacts_bucket),
+            key=key,
+            filename=_artifact_filename(key),
+            artifact_kind="artifact",
+        )
 
-    return stream_object_response(
-        client=request.app.state.minio_client,
-        bucket=_artifact_bucket(artifact, settings.artifacts_bucket),
-        key=key,
-        filename=_artifact_filename(key),
-        artifact_kind="artifact",
+    service_artifacts = list(
+        (
+            await s.execute(
+                select(Artifact).where(
+                    Artifact.trial_id == trial.id,
+                    Artifact.team_id == trial.team_id,
+                    Artifact.control_producer_kind == "service_execution",
+                )
+            )
+        )
+        .scalars()
+        .all()
     )
+    for service_artifact in service_artifacts:
+        storage = (
+            service_artifact.storage if isinstance(service_artifact.storage, dict) else {}
+        )
+        files = storage.get("files")
+        if not isinstance(files, list):
+            continue
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+            if _service_execution_file_key(service_artifact, file_item) != key:
+                continue
+            media_type = file_item.get("media_type")
+            return stream_object_response(
+                client=request.app.state.minio_client,
+                bucket=settings.artifacts_bucket,
+                key=key,
+                filename=_artifact_filename(key),
+                artifact_kind="service_execution_artifact",
+                media_type=(
+                    media_type if isinstance(media_type, str) else "application/octet-stream"
+                ),
+            )
+
+    raise HTTPException(status_code=404, detail="artifact not found")
 
 
 class _SubmitReq(BaseModel):

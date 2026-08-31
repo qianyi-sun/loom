@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    Artifact,
     Batch,
     Benchmark,
     LlmCall,
@@ -206,6 +207,7 @@ async def trials_setup(
         with sl() as s:
             s.execute(delete(TrialEvent))
             s.execute(delete(LlmCall))
+            s.execute(delete(Artifact))
             s.execute(delete(Trial))
             s.execute(delete(Worker))
             s.execute(delete(Batch))
@@ -1303,6 +1305,91 @@ async def test_artifact_download_proxies_via_service_without_presigned_redirect(
     assert r.status_code == 200
     assert "location" not in r.headers
     assert r.content == b"hello artifact"
+
+
+async def test_service_execution_artifacts_are_listed_and_downloadable(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    trial_id = trial_ids[0]
+    artifact_id = uuid4()
+    lease_id = uuid4()
+    relative_path = "model-output.txt"
+    artifact_key = (
+        f"service-executions/{team_id}/{lease_id}/1/output/"
+        f"artifacts/{artifact_id}/{relative_path}"
+    )
+    app.state.minio_client = MagicMock()
+    app.state.minio_client.get_object.return_value = {
+        "Body": BytesIO(b"NEBIUS_SMOKE_OK\n"),
+    }
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Artifact).values(
+                id=artifact_id,
+                artifact_type="loom.execution-runtime-evidence.v1",
+                name="runtime_evidence",
+                team_id=team_id,
+                trial_id=trial_id,
+                producer_kind=None,
+                control_producer_kind="service_execution",
+                control_producer_id=lease_id,
+                content_hash="sha256:" + "1" * 64,
+                storage={
+                    "files": [
+                        {
+                            "relative_path": relative_path,
+                            "size_bytes": 16,
+                            "sha256": "sha256:" + "2" * 64,
+                            "media_type": "text/plain",
+                        }
+                    ]
+                },
+                visibility="team",
+                share_status="pending_scan",
+                safety_state="verified_internal",
+                access_class="team_runtime",
+                provenance={"lease_id": str(lease_id), "generation": 1},
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        detail = await ac.get(
+            f"/api/v1/trials/{trial_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        downloaded = await ac.get(
+            f"/api/v1/trials/{trial_id}/artifacts/download",
+            params={"key": artifact_key},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["artifacts"] == [
+        {
+            "key": artifact_key,
+            "size": 16,
+            "sha256": "sha256:" + "2" * 64,
+            "media_type": "text/plain",
+            "share_status": "pending_scan",
+            "blocked_reason": None,
+            "step_name": "runtime_evidence",
+            "download_url": detail.json()["artifacts"][0]["download_url"],
+        }
+    ]
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"NEBIUS_SMOKE_OK\n"
+    app.state.minio_client.get_object.assert_called_once_with(
+        Bucket=app.state.settings.artifacts_bucket,
+        Key=artifact_key,
+    )
 
 
 async def test_artifact_download_cross_team_forbidden(

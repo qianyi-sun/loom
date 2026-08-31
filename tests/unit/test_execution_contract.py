@@ -34,7 +34,7 @@ def _requirements(**updates: object) -> WorkloadRequirementsV1:
         "cpu_millis": 2_000,
         "memory_mib": 8_192,
         "ephemeral_storage_mib": 20_480,
-        "isolation_level": "sandboxed_runtime",
+        "isolation_level": "shared_kernel",
         "network_access": "gateway_only",
         "image_materialization": "immutable_oci",
         "image_ref": "registry.example/loom/task@sha256:" + "a" * 64,
@@ -70,6 +70,7 @@ def test_provider_binding_lives_on_regional_execution_target() -> None:
         target_id="nebius-eu-north1-production",
         logical_pool_id="nebius-cpu",
         execution_class_id="linux-amd64-cpu-pod-v1",
+        cluster_scope_id="nebius-eu-north1-shared",
         environment="production",
         provider="nebius",
         region="eu-north1",
@@ -123,11 +124,12 @@ def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> Non
         )
 
 
-def test_topology_requires_environment_isolation_and_two_production_regions() -> None:
+def test_topology_requires_three_environment_bindings_on_one_cluster() -> None:
     base = {
         "schema_version": "loom.execution-target.v1",
         "logical_pool_id": "nebius-cpu",
         "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "cluster_scope_id": "nebius-eu-north1-shared",
         "provider": "nebius",
         "region": "eu-north1",
         "failure_domain": "north",
@@ -156,24 +158,16 @@ def test_topology_requires_environment_isolation_and_two_production_regions() ->
             "targets": [
                 target("nebius-dev", "development"),
                 target("nebius-staging", "staging"),
-                target("nebius-prod-north", "production"),
-                target(
-                    "nebius-prod-west",
-                    "production",
-                    region="eu-west1",
-                    failure_domain="west",
-                    health_role="secondary",
-                ),
+                target("nebius-prod", "production"),
             ],
         }
     )
-    assert len(topology.targets) == 4
+    assert len(topology.targets) == 3
+    assert {target.cluster_scope_id for target in topology.targets} == {"nebius-eu-north1-shared"}
 
     invalid = topology.model_dump()
-    invalid["targets"] = [
-        row for row in invalid["targets"] if row["target_id"] != "nebius-prod-west"
-    ]
-    with pytest.raises(ValidationError, match="at least 4 items"):
+    invalid["targets"][2]["cluster_scope_id"] = "nebius-eu-west1-secondary"
+    with pytest.raises(ValidationError, match="same physical cluster scope"):
         ExecutionTopologyV1.model_validate(invalid)
 
 
@@ -184,11 +178,8 @@ def test_unknown_capability_fields_fail_closed() -> None:
         WorkloadRequirementsV1.model_validate(values)
 
 
-def test_shared_kernel_execution_class_is_never_valid_for_service_work() -> None:
-    values = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump()
-    values["isolation_level"] = "shared_kernel"
-    with pytest.raises(ValidationError, match="shared-kernel Pods"):
-        ExecutionClassV1.model_validate(values)
+def test_nebius_class_uses_standard_shared_kernel_pods() -> None:
+    assert NEBIUS_CPU_EXECUTION_CLASS_V1.isolation_level == "shared_kernel"
 
 
 @pytest.mark.parametrize(
@@ -197,7 +188,7 @@ def test_shared_kernel_execution_class_is_never_valid_for_service_work() -> None
         ({"operating_system": "windows"}, "operating_system_unsupported"),
         ({"cpu_architecture": "arm64"}, "cpu_architecture_unsupported"),
         ({"gpu_vendor": "nvidia", "gpu_count": 1}, "gpu_unsupported"),
-        ({"isolation_level": "dedicated_ephemeral_node"}, "isolation_level_unsupported"),
+        ({"isolation_level": "sandboxed_runtime"}, "isolation_level_unsupported"),
         ({"network_access": "unrestricted_public"}, "network_access_unsupported"),
         (
             {"image_materialization": "mutable_oci", "image_ref": "ubuntu:latest"},

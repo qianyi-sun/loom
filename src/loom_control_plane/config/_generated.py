@@ -43,6 +43,11 @@ class ControlPlaneSettings(BaseSettings):
     minio_endpoint: str = "http://loom-minio:9000"
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    service_execution_scheduler_enabled: bool = False
+    service_execution_scheduler_environment: str = "development"
+    service_execution_scheduler_interval_sec: float = 2.0
+    service_execution_scheduler_max_deadline_sec: int = 7200
+    service_execution_scheduler_pool_id: str = "nebius-cpu"
     signed_url_expiry_sec: int = 3600
     skill_evolver_default_model: str = "anthropic/claude-sonnet-4-6"
     slurm_worker_controller_allowed_nodes: str = ""

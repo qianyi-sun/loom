@@ -8,8 +8,9 @@ import json
 import os
 import re
 import stat
+import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
@@ -49,6 +50,32 @@ class ExternalToolError(RuntimeError):
     def __init__(self, message: str, *, registry_object_absent: bool = False) -> None:
         super().__init__(message)
         self.registry_object_absent = registry_object_absent
+
+
+@dataclass(slots=True)
+class EphemeralDockerManifestState:
+    """Keep Docker's writable manifest cache beside a read-only auth symlink."""
+
+    registry_auth_file: Path
+    directory: Path = field(init=False)
+    _owner: tempfile.TemporaryDirectory[str] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not self.registry_auth_file.is_absolute()
+            or self.registry_auth_file.name != "config.json"
+        ):
+            raise ValueError("personal-dev registry authentication file is invalid")
+        owner = tempfile.TemporaryDirectory(prefix="loom-personal-dev-docker-")
+        directory = Path(owner.name)
+        try:
+            directory.chmod(0o700)
+            (directory / "config.json").symlink_to(self.registry_auth_file)
+        except OSError:
+            owner.cleanup()
+            raise RuntimeError("personal-dev Docker manifest state is unavailable") from None
+        self._owner = owner
+        self.directory = directory
 
 
 async def _read_bounded(
@@ -326,13 +353,14 @@ def _attempt_tag(registration: CandidateRegistration, *, suffix: str) -> str:
 
 
 @dataclass(slots=True)
-class SkopeoBuildxPersonalDevRegistryPublisher:
+class SkopeoDockerManifestPersonalDevRegistryPublisher:
     """Import verified OCI archives and join exact native digests."""
 
     runner: BoundedCommandRunner
     skopeo_executable: str
     docker_executable: str
     registry_auth_file: Path
+    docker_manifest_state: EphemeralDockerManifestState
     copy_timeout_seconds: float = 1800.0
     registry_timeout_seconds: float = 300.0
 
@@ -344,6 +372,8 @@ class SkopeoBuildxPersonalDevRegistryPublisher:
             or self.registry_auth_file.name != "config.json"
         ):
             raise ValueError("personal-dev registry authentication file is invalid")
+        if self.docker_manifest_state.registry_auth_file != self.registry_auth_file:
+            raise ValueError("personal-dev Docker manifest authority changed")
         if self.copy_timeout_seconds <= 0 or self.registry_timeout_seconds <= 0:
             raise ValueError("personal-dev registry publisher timeouts are invalid")
 
@@ -410,24 +440,33 @@ class SkopeoBuildxPersonalDevRegistryPublisher:
         await self.runner.run(
             [
                 self.docker_executable,
-                "buildx",
-                "imagetools",
+                "manifest",
                 "create",
-                "--tag",
                 target,
                 *(f"{repository}@{digests[platform]}" for platform in PERSONAL_DEV_PLATFORMS),
             ],
             timeout_seconds=self.registry_timeout_seconds,
             max_output_bytes=1024 * 1024,
         )
-        raw = await self.runner.run(
+        await self.runner.run(
             [
                 self.docker_executable,
-                "buildx",
-                "imagetools",
-                "inspect",
-                "--raw",
+                "manifest",
+                "push",
+                "--purge",
                 target,
+            ],
+            timeout_seconds=self.registry_timeout_seconds,
+            max_output_bytes=1024 * 1024,
+        )
+        raw = await self.runner.run(
+            [
+                self.skopeo_executable,
+                "inspect",
+                "--authfile",
+                str(self.registry_auth_file),
+                "--raw",
+                f"docker://{target}",
             ],
             timeout_seconds=self.registry_timeout_seconds,
             max_output_bytes=4 * 1024 * 1024,
@@ -506,8 +545,9 @@ class SkopeoPersonalDevRegistryArtifactCollector:
 __all__ = [
     "AsyncBoundedCommandRunner",
     "BoundedCommandRunner",
+    "EphemeralDockerManifestState",
     "ExternalToolError",
-    "SkopeoBuildxPersonalDevRegistryPublisher",
+    "SkopeoDockerManifestPersonalDevRegistryPublisher",
     "SkopeoPersonalDevRegistryArtifactCollector",
     "TrivyPersonalDevImageScanner",
 ]
