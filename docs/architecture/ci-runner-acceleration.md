@@ -69,18 +69,18 @@ Work classes have explicit slot ceilings and resource shapes. The router may
 prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
 the pool is draining, or health cannot be proven. Only a route request first
-observed within 30 seconds of its GitHub artifact creation may consume oldlab
+observed within 90 seconds of its GitHub artifact creation may consume oldlab
 capacity. The controller discovers requests from the bounded inventories of the
 four active routed workflows and then performs an exact artifact-name lookup
 for each run. It does not walk repository-wide artifact history or rely on a
 global artifact cursor, so unrelated artifact bursts and one failed delivery
 cannot block newer workflows.
 
-Route reconciliation has its own fifteen-second systemd timer and state-only
+Route reconciliation has its own thirty-second systemd timer and state-only
 service. It is not a second `ExecStart` behind runner-pool reconciliation and
 does not share the pool's QEMU, Docker, cache, or 300-second service deadline.
 Pool builds, guest cleanup, GitHub JIT registration, and drain work therefore
-cannot consume the route request's 30-second freshness window.
+cannot consume the route request's 90-second freshness window.
 
 If the root-owned controller or GitHub App remains unavailable, the pinned
 route action freezes the run onto the workflow's exact GitHub-hosted label after
@@ -230,7 +230,7 @@ Activation is one bounded transition:
 4. Start only the route service once. Require schema-3 readback, the exact
    runtime/App/generation identities, zero generation lag/blob drift, and one
    direct App-owned CheckRun that arrives before the pinned action deadline.
-5. Enable the fifteen-second route timer and the existing pool timer. Exercise
+5. Enable the thirty-second route timer and the existing pool timer. Exercise
    one fresh normal, image, cluster-smoke, and staging-smoke route; verify the
    actual disposable runner identity and terminal lease release for every
    oldlab job.
