@@ -1786,9 +1786,51 @@ def test_personal_management_shadow_embedded_identity_tools_execute(
     runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
     programs = re.findall(r"<<'PY'\n(.*?)\nPY\n", runbook, flags=re.DOTALL)
 
-    assert len(programs) == 2
+    assert len(programs) == 3
     for program in programs:
         compile(program, "personal-dev-management-plane-shadow.md", "exec")
+
+    checked_profile = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+    prepared_profile = tmp_path / "prepared-profile.toml"
+    prepared_profile.write_text(
+        checked_profile.read_text(encoding="utf-8").replace(
+            """\
+[native_builder]
+prepared = false
+agent_instance_id = ""
+agent_key_id = ""
+public_key_sha256 = ""
+host_name = ""
+runtime_profile_sha256 = ""
+public_store_origin = ""
+public_store_endpoint_cidrs = []
+""",
+            """\
+[native_builder]
+prepared = true
+agent_instance_id = "11111111-1111-4111-8111-111111111111"
+agent_key_id = "gb10-native-builder-test-v1"
+public_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+host_name = "gx10-01c7"
+runtime_profile_sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+public_store_origin = "https://objects.dev.yylx.world"
+public_store_endpoint_cidrs = ["207.35.188.227/32"]
+""",
+        ),
+        encoding="utf-8",
+    )
+    for profile, expected_count in (
+        (checked_profile, "38\n"),
+        (prepared_profile, "40\n"),
+    ):
+        count = subprocess.run(
+            [sys.executable, "-", str(profile)],
+            input=programs[0],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert count.stdout == expected_count
 
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(
@@ -1814,7 +1856,7 @@ metadata:
     )
     rendered = subprocess.run(
         [sys.executable, "-", str(manifest)],
-        input=programs[0],
+        input=programs[1],
         text=True,
         capture_output=True,
         check=True,
@@ -1906,7 +1948,7 @@ metadata:
     )
     live = subprocess.run(
         [sys.executable, "-", str(namespaced), str(cluster)],
-        input=programs[1],
+        input=programs[2],
         text=True,
         capture_output=True,
         check=True,
@@ -3140,6 +3182,18 @@ def test_multi_owner_runbooks_bind_web_release_render_and_rollout() -> None:
         assert ".resource_count == 38" in runbook
         assert runbook.count("deployment/loom-personal-dev-web --timeout=300s") >= 2
         assert runbook.count("assert_web_api_route_contract") >= 3
+
+
+def test_shadow_runbook_binds_resource_count_to_the_validated_profile() -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+
+    assert "load_personal_dev_control_plane_profile" in runbook
+    assert "expected_shadow_resource_count" in runbook
+    assert "profile.native_builder is not None and profile.native_builder.prepared" in runbook
+    assert '--argjson resource_count "$expected_shadow_resource_count"' in runbook
+    assert ".resource_count == $resource_count" in runbook
+    assert ".resource_count == 38" not in runbook
+    assert '"namespaced-resources","observed":36' in runbook
 
 
 @pytest.mark.parametrize(

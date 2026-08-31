@@ -92,6 +92,24 @@ test "$(stat -c %s "$kubeconfig")" -le 1048576
 profile_sha256="$(sha256sum "$profile" | awk '{print $1}')"
 kubeconfig_sha256="$(sha256sum "$kubeconfig" | awk '{print $1}')"
 kubeconfig_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$kubeconfig")"
+expected_shadow_resource_count="$(
+  uv run --no-sync python - "$profile" <<'PY'
+import sys
+from pathlib import Path
+
+from loom.personal_dev_control_plane_config import (
+    load_personal_dev_control_plane_profile,
+)
+
+profile = load_personal_dev_control_plane_profile(Path(sys.argv[1]))
+prepared_native_builder = (
+    profile.native_builder is not None and profile.native_builder.prepared
+)
+print(40 if prepared_native_builder else 38)
+PY
+)"
+test "$expected_shadow_resource_count" = 38 || \
+  test "$expected_shadow_resource_count" = 40
 
 assert_reviewed_kubeconfig() {
   test -f "$kubeconfig" && test ! -L "$kubeconfig"
@@ -469,9 +487,10 @@ assert_forward_storage_lineage_contract() {
 jq -e \
   --arg release "$trusted_release_sha256" \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
+  --argjson resource_count "$expected_shadow_resource_count" \
   '.schema == "loom-personal-dev-control-plane-render-v1" and
    .mode == "shadow" and
-   .resource_count == 38 and
+   .resource_count == $resource_count and
    .release_sha256 == $release and
    .yaml_sha256 == $yaml and
    (.input_sha256 | test("^[0-9a-f]{64}$")) and
@@ -675,10 +694,18 @@ sha256sum "$status_evidence" > "$status_evidence.sha256"
 chmod 0600 "$status_evidence.sha256"
 ```
 
-The successful canonical shape is:
+The successful canonical shape without a prepared native builder is:
 
 ```json
 {"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":34,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
+```
+
+A prepared native-builder profile adds the inert object-store Service and its
+TLS Ingress, so its successful canonical shape differs only in the namespaced
+resource count:
+
+```json
+{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":36,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"personal-workers","observed":0,"ready":true},{"name":"runtime-class","observed":1,"ready":true},{"name":"web","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1","worker_available":false}
 ```
 
 The namespaced observed count may include retained successful migration
