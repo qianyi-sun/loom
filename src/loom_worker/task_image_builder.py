@@ -35,7 +35,10 @@ from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
 from loom_worker.task_sidecars import build_task_sidecar_images
-from loom_worker.trial_cache import evict_stale_managed_images_from_env
+from loom_worker.trial_cache import (
+    ManagedImageCleanupResult,
+    evict_stale_managed_images_from_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,22 @@ class TaskImagePublicationError(TaskImageBuildError):
         self.registry_images = dict(registry_images)
 
 
+def _require_storage_admission(result: ManagedImageCleanupResult) -> None:
+    if not result.probe_available:
+        raise TaskImageBuilderFatalError(
+            "task image builder storage admission failed: free-space probe unavailable"
+        )
+    if result.free_bytes < result.required_free_bytes:
+        raise TaskImageBuilderFatalError(
+            "task image builder storage admission failed: free space is below the required floor"
+        )
+
+
+async def _prepare_builder_storage(settings: WorkerSettings) -> None:
+    result = await asyncio.to_thread(evict_stale_managed_images_from_env, settings)
+    _require_storage_admission(result)
+
+
 def _build_worker_object_store(settings: WorkerSettings):  # type: ignore[no-untyped-def]
     from loom_worker.main_loop import _build_worker_object_store as build
 
@@ -142,9 +161,7 @@ async def verify_local_image_architecture(
         try:
             attrs = getattr(client.images.get(tag), "attrs", {})
             observed = str(attrs.get("Architecture", "")).lower()
-            normalized = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "arm64"}.get(
-                observed
-            )
+            normalized = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "arm64"}.get(observed)
             if normalized != expected_cpu_arch:
                 raise TaskImageBuildError(
                     f"built image {tag!r} architecture mismatch "
@@ -333,6 +350,7 @@ async def process_task_image_claim(
     )
     registry_images: dict[str, str] = {}
     try:
+
         async def record_publication(component: str, registry_image: str) -> bool:
             return await control_plane.record_task_image_publication(
                 materialization_id=claim.id,
@@ -362,9 +380,7 @@ async def process_task_image_claim(
         raise
     except Exception as exc:
         partial_registry_images = (
-            exc.registry_images
-            if isinstance(exc, TaskImagePublicationError)
-            else registry_images
+            exc.registry_images if isinstance(exc, TaskImagePublicationError) else registry_images
         )
         reported = await control_plane.fail_task_image_materialization(
             materialization_id=claim.id,
@@ -396,8 +412,8 @@ async def run_builder(
     *,
     now: Callable[[], float] = time.monotonic,
 ) -> None:
+    await _prepare_builder_storage(settings)
     native_arch = host_cpu_arch()
-    await asyncio.to_thread(evict_stale_managed_images_from_env, settings)
     builder_id = f"{socket.gethostname()}:{os.getpid()}"[:128]
     control_plane = HttpControlPlaneClient(
         base_url=str(settings.control_plane_url),
@@ -427,13 +443,17 @@ async def run_builder(
         except TaskImageLeaseLostError:
             logger.warning("task image lease lost id=%s", claim.id)
         finally:
-            await asyncio.to_thread(evict_stale_managed_images_from_env, settings)
+            await _prepare_builder_storage(settings)
 
 
 def main() -> None:
     settings = WorkerSettings()
     logging.basicConfig(level=getattr(logging, settings.log_level.upper()))
-    asyncio.run(run_builder(settings))
+    try:
+        asyncio.run(run_builder(settings))
+    except TaskImageBuilderFatalError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

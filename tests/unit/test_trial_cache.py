@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
-from docker.errors import ImageNotFound
+from docker.errors import APIError, ImageNotFound
 
 from loom_worker import trial_cache
 
@@ -732,6 +732,8 @@ def test_evict_stale_managed_images_covers_all_managed_kinds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = MagicMock()
+    client.containers.list.return_value = []
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
     settings = _StubSettings(trial_cache_ttl_hours=24)
     settings.task_image_local_ttl_hours = 48
     settings.task_image_min_free_gb = 20
@@ -760,7 +762,7 @@ def test_evict_stale_managed_images_covers_all_managed_kinds(
     )
     monkeypatch.setattr(trial_cache.shutil, "disk_usage", lambda _path: next(disk_samples))
 
-    trial_cache.evict_stale_managed_images(client, settings)
+    result = trial_cache.evict_stale_managed_images(client, settings)
 
     assert [call.kwargs["filters"] for call in client.images.prune.call_args_list] == [
         {
@@ -783,12 +785,144 @@ def test_evict_stale_managed_images_covers_all_managed_kinds(
         "base-old",
         "sidecar-middle",
     ]
+    assert result == trial_cache.ManagedImageCleanupResult(
+        docker_root="/var/lib/docker",
+        free_bytes=25 * 1024**3,
+        required_free_bytes=20 * 1024**3,
+        probe_available=True,
+        error_count=0,
+    )
+
+
+def test_cleanup_removes_only_stopped_labelled_containers_without_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def image(labels: dict[str, str]) -> SimpleNamespace:
+        return SimpleNamespace(labels=labels, attrs={"Config": {"Labels": labels}})
+
+    def container(
+        container_id: str,
+        *,
+        status: str,
+        labels: dict[str, str],
+        image_labels: dict[str, str],
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=container_id,
+            status=status,
+            labels=labels,
+            image=image(image_labels),
+            attrs={"State": {"Status": status}, "Config": {"Labels": labels}},
+            remove=MagicMock(),
+        )
+
+    container_owned = container(
+        "container-owned",
+        status="exited",
+        labels={"loom.task-image": "true"},
+        image_labels={},
+    )
+    image_owned = container(
+        "image-owned",
+        status="dead",
+        labels={},
+        image_labels={"loom.task-sidecar": "true"},
+    )
+    unlabelled = container(
+        "unlabelled",
+        status="exited",
+        labels={},
+        image_labels={},
+    )
+    running = container(
+        "running",
+        status="running",
+        labels={"loom.trial-cache": "true"},
+        image_labels={"loom.task-image": "true"},
+    )
+    client = MagicMock()
+    client.containers.list.return_value = [
+        container_owned,
+        image_owned,
+        unlabelled,
+        running,
+    ]
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
+    monkeypatch.setattr(
+        trial_cache.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=25 * 1024**3),
+    )
+
+    result = trial_cache.evict_stale_managed_images(
+        client,
+        _StubSettings(trial_cache_min_free_gb=20),  # type: ignore[arg-type]
+    )
+
+    container_owned.remove.assert_called_once_with(v=False, force=False)
+    image_owned.remove.assert_called_once_with(v=False, force=False)
+    unlabelled.remove.assert_not_called()
+    running.remove.assert_not_called()
+    assert not client.volumes.mock_calls
+    assert result.probe_available is True
+    assert result.error_count == 0
+
+
+def test_cleanup_returns_failed_probe_and_counts_cleanup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = SimpleNamespace(
+        id="managed-stopped",
+        status="exited",
+        labels={"loom.task-image": "true"},
+        image=SimpleNamespace(labels={}),
+        attrs={},
+        remove=MagicMock(side_effect=APIError("container is busy")),
+    )
+    client = MagicMock()
+    client.containers.list.return_value = [failed]
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
+    monkeypatch.setattr(
+        trial_cache.shutil,
+        "disk_usage",
+        MagicMock(side_effect=OSError("probe unavailable")),
+    )
+
+    result = trial_cache.evict_stale_managed_images(
+        client,
+        _StubSettings(trial_cache_min_free_gb=20),  # type: ignore[arg-type]
+    )
+
+    assert result == trial_cache.ManagedImageCleanupResult(
+        docker_root="/var/lib/docker",
+        free_bytes=0,
+        required_free_bytes=20 * 1024**3,
+        probe_available=False,
+        error_count=2,
+    )
+
+
+def test_cleanup_counts_invalid_docker_root_separately_from_prune_errors() -> None:
+    client = MagicMock()
+    client.containers.list.return_value = []
+    client.images.prune.side_effect = [APIError("prune failed"), None, None]
+    client.info.return_value = {"DockerRootDir": "relative/docker"}
+
+    result = trial_cache.evict_stale_managed_images(
+        client,
+        _StubSettings(trial_cache_min_free_gb=20),  # type: ignore[arg-type]
+    )
+
+    assert result.probe_available is False
+    assert result.error_count == 2
 
 
 def test_managed_image_eviction_from_env_closes_docker_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = MagicMock()
+    client.containers.list.return_value = []
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
     settings = _StubSettings(trial_cache_ttl_hours=24)
     settings.task_image_local_ttl_hours = 48
     settings.task_image_min_free_gb = 20
@@ -799,7 +933,8 @@ def test_managed_image_eviction_from_env_closes_docker_client(
         lambda _path: SimpleNamespace(free=25 * 1024**3),
     )
 
-    trial_cache.evict_stale_managed_images_from_env(settings)
+    result = trial_cache.evict_stale_managed_images_from_env(settings)
 
     assert client.images.prune.call_count == 3
     client.close.assert_called_once_with()
+    assert result.probe_available is True

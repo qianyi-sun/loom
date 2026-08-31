@@ -11,6 +11,7 @@ import pytest
 
 from loom_worker import task_image_builder
 from loom_worker.control_plane_client import TaskImageBuildClaim
+from loom_worker.trial_cache import ManagedImageCleanupResult
 
 
 def _claim(*, cpu_arch: str = "arm64") -> TaskImageBuildClaim:
@@ -64,6 +65,21 @@ class _Secret:
         return "builder-token"
 
 
+def _cleanup_result(
+    *,
+    free_bytes: int = 25 * 1024**3,
+    required_free_bytes: int = 20 * 1024**3,
+    probe_available: bool = True,
+) -> ManagedImageCleanupResult:
+    return ManagedImageCleanupResult(
+        docker_root="/var/lib/docker",
+        free_bytes=free_bytes,
+        required_free_bytes=required_free_bytes,
+        probe_available=probe_available,
+        error_count=0,
+    )
+
+
 async def test_builder_uses_dedicated_idle_exit_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -82,6 +98,11 @@ async def test_builder_uses_dedicated_idle_exit_setting(
 
     clock = iter((0.0, 0.0, 121.0))
     monkeypatch.setattr(task_image_builder, "HttpControlPlaneClient", _IdleControlPlane)
+    monkeypatch.setattr(
+        task_image_builder,
+        "evict_stale_managed_images_from_env",
+        lambda _settings: _cleanup_result(),
+    )
 
     async def no_sleep(_seconds: float) -> None:
         return None
@@ -126,7 +147,7 @@ async def test_builder_evicts_managed_images_at_startup_and_after_claim(
     monkeypatch.setattr(
         task_image_builder,
         "evict_stale_managed_images_from_env",
-        lambda settings: evictions.append(settings),
+        lambda settings: (evictions.append(settings), _cleanup_result())[1],
         raising=False,
     )
 
@@ -143,6 +164,48 @@ async def test_builder_evicts_managed_images_at_startup_and_after_claim(
     )
 
     assert evictions == [settings, settings]
+
+
+@pytest.mark.parametrize(
+    "cleanup_result",
+    [
+        _cleanup_result(probe_available=False),
+        _cleanup_result(free_bytes=19 * 1024**3),
+    ],
+)
+async def test_builder_rejects_storage_before_client_construction_or_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_result: ManagedImageCleanupResult,
+) -> None:
+    client_constructed = False
+
+    class _ForbiddenControlPlane:
+        def __init__(self, **_kwargs: Any) -> None:
+            nonlocal client_constructed
+            client_constructed = True
+
+    monkeypatch.setattr(task_image_builder, "HttpControlPlaneClient", _ForbiddenControlPlane)
+    monkeypatch.setattr(
+        task_image_builder,
+        "evict_stale_managed_images_from_env",
+        lambda _settings: cleanup_result,
+    )
+
+    with pytest.raises(
+        task_image_builder.TaskImageBuilderFatalError,
+        match="storage admission",
+    ):
+        await task_image_builder.run_builder(  # type: ignore[arg-type]
+            SimpleNamespace(
+                control_plane_url="http://cp:8080",
+                token=_Secret(),
+                docker_api_timeout_sec=30,
+                task_image_builder_idle_exit_seconds=0,
+                claim_poll_interval_sec=1,
+            ),
+        )
+
+    assert client_constructed is False
 
 
 async def test_materialization_rejects_non_native_builder_architecture(
@@ -425,9 +488,7 @@ async def test_process_claim_reports_partial_registry_publication(
     control_plane = _FakeControlPlane()
     published = {"task": "registry.example/task@sha256:" + "e" * 64}
 
-    async def materialize(
-        _claim: Any, _settings: Any, **_kwargs: Any
-    ) -> dict[str, str]:
+    async def materialize(_claim: Any, _settings: Any, **_kwargs: Any) -> dict[str, str]:
         raise task_image_builder.TaskImagePublicationError(
             "sidecar publication failed",
             registry_images=published,
@@ -461,9 +522,7 @@ async def test_process_claim_preserves_publication_evidence_when_completion_fail
 
     control_plane = _CompletionFailsControlPlane()
 
-    async def materialize(
-        _claim: Any, _settings: Any, **_kwargs: Any
-    ) -> dict[str, str]:
+    async def materialize(_claim: Any, _settings: Any, **_kwargs: Any) -> dict[str, str]:
         return published
 
     monkeypatch.setattr(
@@ -487,9 +546,7 @@ async def test_build_timeout_reports_failure_and_terminates_builder_allocation(
 ) -> None:
     control_plane = _FakeControlPlane()
 
-    async def materialize(
-        _claim: Any, _settings: Any, **_kwargs: Any
-    ) -> dict[str, str]:
+    async def materialize(_claim: Any, _settings: Any, **_kwargs: Any) -> dict[str, str]:
         raise task_image_builder.TaskImageBuildTimeoutError("build timed out")
 
     monkeypatch.setattr(
