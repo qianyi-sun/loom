@@ -57,7 +57,6 @@ _PERL_BASE_COMPONENTS = (
     "personal-dev-native-builder-agent",
     "personal-dev-scanner-cache",
     "pipeline-orchestrator",
-    "service",
     "worker",
 )
 _EMPTY_COMPONENTS = (
@@ -65,6 +64,7 @@ _EMPTY_COMPONENTS = (
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
+    "service",
     "staging-admin-browser-smoke",
     "web",
 )
