@@ -2120,6 +2120,31 @@ async def test_gateway_dispatch_is_rejected_immediately_after_generation_revocat
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
             lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            ctx = AuthContext(
+                token_hash=b"",
+                type="step_session",
+                scopes=["llm:call"],
+                team_id=lease.team_id,
+                expires_at=now + timedelta(minutes=10),
+                trial_id=trial_id,
+                step_id="agent",
+                provider_connection_id=None,
+                provider_connection_id_bound=True,
+                step_jwt_id=uuid4(),
+                service_execution_lease_id=lease.id,
+                service_execution_generation=1,
+                service_execution_role="attempt",
+                service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
+                service_execution_candidate_sha="1" * 40,
+                service_execution_task_revision_sha256="sha256:" + "2" * 64,
+                service_execution_command_identity_sha256="sha256:" + "3" * 64,
+            )
+            # The broker can mint the Pod's step token as soon as the Actuator
+            # has observed its identity, while the lease is still `creating`.
+            # Dispatch must accept that same live authority during cold start.
+            lease.observed_state = "creating"
+            await session.flush()
+            await authorize_trial_execution_dispatch(session, ctx)
             await record_execution_event(
                 session,
                 lease_id=lease.id,
@@ -2131,25 +2156,6 @@ async def test_gateway_dispatch_is_rejected_immediately_after_generation_revocat
             )
             await session.commit()
 
-        ctx = AuthContext(
-            token_hash=b"",
-            type="step_session",
-            scopes=["llm:call"],
-            team_id=lease.team_id,
-            expires_at=now + timedelta(minutes=10),
-            trial_id=trial_id,
-            step_id="agent",
-            provider_connection_id=None,
-            provider_connection_id_bound=True,
-            step_jwt_id=uuid4(),
-            service_execution_lease_id=lease.id,
-            service_execution_generation=1,
-            service_execution_role="attempt",
-            service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
-            service_execution_candidate_sha="1" * 40,
-            service_execution_task_revision_sha256="sha256:" + "2" * 64,
-            service_execution_command_identity_sha256="sha256:" + "3" * 64,
-        )
         async with sessions() as session:
             await authorize_trial_execution_dispatch(session, ctx)
             for changed in (
