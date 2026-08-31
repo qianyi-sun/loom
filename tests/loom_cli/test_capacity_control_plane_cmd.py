@@ -38,7 +38,11 @@ def test_admin_render_writes_only_the_exact_manifest(
 
     captured = capsys.readouterr()
     documents = [document for document in yaml.safe_load_all(captured.out) if document]
-    namespace = next(document for document in documents if document["kind"] == "Namespace")
+    namespace = next(
+        document
+        for document in documents
+        if document["kind"] == "Namespace" and document["metadata"]["name"] == "loom-dev"
+    )
     manager = next(
         document
         for document in documents

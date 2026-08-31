@@ -240,7 +240,11 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
 
     assert completed.returncode == 0, completed.stderr
     documents = [document for document in yaml.safe_load_all(completed.stdout) if document]
-    namespace = next(document for document in documents if document["kind"] == "Namespace")
+    namespace = next(
+        document
+        for document in documents
+        if document["kind"] == "Namespace" and document["metadata"]["name"] == "loom-dev"
+    )
     postgres_service = next(
         document
         for document in documents
