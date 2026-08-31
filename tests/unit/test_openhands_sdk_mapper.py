@@ -58,6 +58,29 @@ def test_mapper_preserves_action_reasoning_and_think_tool() -> None:
     assert events[3]["reasoning_content"] == "hidden reasoning"
 
 
+def test_mapper_does_not_backfill_reasoning_content_from_thought() -> None:
+    native = [
+        {
+            "event_type": "ActionEvent",
+            "tool_call_id": "call-1",
+            "tool_name": "terminal",
+            "reasoning_content": None,
+            "thought": [{"text": "Let me look at the rest of the file."}],
+            "tool_call": {
+                "function": {
+                    "arguments": '{"command": "pwd"}',
+                }
+            },
+        },
+    ]
+    trajectory = OpenHandsSdkTrajectoryMapper.project_trajectory(
+        json.dumps(native).encode(),
+    )
+    event = trajectory["events"][0]
+    assert event["reasoning_content"] is None
+    assert event["thought"] == "Let me look at the rest of the file."
+
+
 def test_mapper_parses_analysis_and_plan_from_thought() -> None:
     native = [
         {

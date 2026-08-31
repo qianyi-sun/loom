@@ -63,9 +63,6 @@ def _reasoning_from_action(event: dict[str, Any]) -> str | None:
     reasoning = _optional_str(event.get("reasoning_content"))
     if reasoning:
         return reasoning
-    thought = _text_from_thought(event.get("thought"))
-    if thought:
-        return thought
     tool_name = _optional_str(event.get("tool_name"))
     if tool_name == "think":
         tool_call = event.get("tool_call")
