@@ -9,6 +9,7 @@ import pytest
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
     _normalize_autoscaler_policy,
+    _normalize_task_image_builder_policy,
     apply_external_slurm_autoscaler_supervisors,
     diff_environment_state,
     diff_external_slurm_autoscaler_supervisors,
@@ -84,6 +85,31 @@ def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fiel
         "slurm_qos": "loom-staging-normal",
         "slurm_reservation": "loom-staging-min",
     }
+
+
+@pytest.mark.parametrize("seconds", [0, 3601, True])
+def test_task_image_builder_policy_bounds_failure_backoff(seconds: object) -> None:
+    base = {
+        "pool_name": "task-image-builder-gb10",
+        "slurm_cluster_id": "gb10",
+        "cpu_arch": "arm64",
+        "allowed_nodes": ["trt-gb10-2"],
+        "env_file": "/shared/builder.env",
+        "env_template_file": "/shared/worker.env",
+        "builder_token_file": "/shared/builder-token",
+        "repo_dir": "/shared/repo",
+        "registry_docker_config_dir": "/shared/docker",
+        "partition": "gb10",
+        "time_limit": "04:00:00",
+        "requested_cpus": 19,
+        "requested_memory_mib": 110000,
+        "max_jobs": 1,
+        "pending_job_cap": 1,
+        "failure_backoff_seconds": seconds,
+    }
+
+    with pytest.raises(EnvironmentStateProfileError, match="failure_backoff_seconds"):
+        _normalize_task_image_builder_policy(base, environment="staging", index=0)
 
 
 def _write_profile(path: Path, *, host1_intent: str = "active") -> None:

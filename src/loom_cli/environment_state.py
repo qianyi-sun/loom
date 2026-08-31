@@ -551,6 +551,7 @@ def _normalize_task_image_builder_policy(
         "exclusive": True,
         "requested_concurrency": 1,
         "idle_exit_after_seconds": 120,
+        "failure_backoff_seconds": 300,
         "sbatch_path": "sbatch",
         "squeue_path": "squeue",
         "sacct_path": "sacct",
@@ -621,6 +622,7 @@ def _normalize_task_image_builder_policy(
         "max_jobs",
         "pending_job_cap",
         "idle_exit_after_seconds",
+        "failure_backoff_seconds",
     ):
         value = payload[name]
         if type(value) is not int or value <= 0:
@@ -636,6 +638,10 @@ def _normalize_task_image_builder_policy(
     if payload["pending_job_cap"] > payload["max_jobs"]:
         raise EnvironmentStateProfileError(
             f"{field}.pending_job_cap must not exceed max_jobs",
+        )
+    if payload["failure_backoff_seconds"] > 3600:
+        raise EnvironmentStateProfileError(
+            f"{field}.failure_backoff_seconds must not exceed 3600",
         )
     timeout = payload["command_timeout_seconds"]
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:

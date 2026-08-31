@@ -37,6 +37,7 @@ def test_staging_activates_both_provisioned_native_builders() -> None:
         assert row["exclusive"] is True
         assert row["requested_concurrency"] == 1
         assert row["max_jobs"] > 0
+        assert row["failure_backoff_seconds"] == 300
         assert "builder_token_not_provisioned" not in row["activation_blockers"]
         assert "registry_push_credentials_not_provisioned" not in row["activation_blockers"]
         assert "registry_retention_not_provisioned" not in row["activation_blockers"]
