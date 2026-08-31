@@ -1,4 +1,3 @@
-#!/usr/bin/python3 -I
 """Fixed root authority for the inert personal native-builder runtime."""
 
 from __future__ import annotations
@@ -15,19 +14,16 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, NoReturn, Protocol, cast
 
-if __name__ == "__main__" and __package__ in {None, ""}:
-    sys.dont_write_bytecode = True
-    sys.path.insert(
-        0,
-        "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority",
-    )
+from scripts.ops.personal_dev_native_builder_runtime_authority_launcher import (
+    LIBRARY_ROOT,
+)
 
 if TYPE_CHECKING:
     from scripts.ops.converge_personal_dev_native_builder_release import (
@@ -133,18 +129,8 @@ def _load_application_modules() -> None:
     _APPLICATION_MODULES_LOADED = True
 
 
-if __name__ != "__main__":
-    _load_application_modules()
+_load_application_modules()
 
-LIBEXEC_PATH = Path(
-    "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
-)
-LIBRARY_ROOT = Path(
-    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority"
-)
-POLICY_PATH = Path(
-    "/etc/loom/personal-dev-native-builder-runtime-authority.json"
-)
 STATE_ROOT = Path(
     "/var/lib/loom/personal-dev-native-builder-runtime-authority"
 )
@@ -160,8 +146,6 @@ _POLICY_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-policy.v1"
 _RECEIPT_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-receipt.v1"
 _EXPECTED_HOST = "gx10-01c7"
 _EXPECTED_ARCHITECTURE = "aarch64"
-_MAX_POLICY_BYTES = 64 * 1024
-_MAX_ASSET_BYTES = 8 * 1024 * 1024
 _MAX_RECEIPT_BYTES = 64 * 1024
 _MAX_STATE_BYTES = 64 * 1024
 _MAX_ARCHIVE_BYTES = 1024**3
@@ -187,32 +171,6 @@ _INSTALLED_PROFILE_PATH = (
     / "runtime-profile-v1.json"
 )
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
-_ROOT_ENVIRONMENT = {
-    "LANG": "C",
-    "LC_ALL": "C",
-    "PATH": "/usr/bin:/bin",
-    "PYTHONDONTWRITEBYTECODE": "1",
-}
-_UNSAFE_ENVIRONMENT_NAMES = frozenset(
-    {
-        "BASH_ENV",
-        "CDPATH",
-        "ENV",
-        "IFS",
-        "PYTHONHOME",
-        "PYTHONPATH",
-    }
-)
-_UNSAFE_ENVIRONMENT_PREFIXES = (
-    "DOCKER_",
-    "GIT_",
-    "LD_",
-    "NFTABLES_",
-    "PYTHON",
-    "SYSTEMD_",
-)
-
-
 class AuthorityError(RuntimeError):
     """The fixed authority contract could not be satisfied."""
 
@@ -440,72 +398,6 @@ class BoundedSubprocessRunner:
         return result
 
 
-@dataclass(frozen=True, slots=True)
-class AssetSpec:
-    path: Path
-    mode: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.path, Path)
-            or not self.path.is_absolute()
-            or ".." in self.path.parts
-            or not 0 <= self.mode <= 0o7777
-        ):
-            raise AuthorityError("asset_spec_invalid")
-
-
-_PYTHON_ASSETS = {
-    "protocol": "personal_dev_native_builder_runtime_authority_protocol.py",
-    "installer": "install_personal_dev_native_builder_runtime.py",
-    "runtime_profile_helper": "personal_dev_native_builder_runtime_profile.py",
-    "converger": "converge_personal_dev_native_builder_release.py",
-    "conformance": "personal_dev_native_builder_conformance.py",
-}
-_RUNTIME_ASSETS = {
-    "runtime_asset_agent_service_template": (
-        "loom-personal-dev-native-builder-agent.service.in"
-    ),
-    "runtime_asset_dockerd_config": "dockerd.json",
-    "runtime_asset_dockerd_service": "loom-personal-dev-builder-dockerd.service",
-    "runtime_asset_nftables": "provider-network.nft",
-    "runtime_asset_profile": "runtime-profile-v1.json",
-    "runtime_asset_runsc_config": "runsc.toml",
-    "runtime_asset_slice_unit": "loom-personal-dev-builder.slice",
-    "runtime_asset_sysusers": "loom-personal-dev-native-builder.sysusers",
-}
-ASSET_SPECS: Mapping[str, AssetSpec] = MappingProxyType(
-    {
-        "broker": AssetSpec(LIBEXEC_PATH, 0o555),
-        **{
-            name: AssetSpec(LIBRARY_ROOT / "scripts" / "ops" / filename, 0o444)
-            for name, filename in _PYTHON_ASSETS.items()
-        },
-        **{
-            name: AssetSpec(
-                LIBRARY_ROOT / "deploy" / "personal-dev-native-builder" / filename,
-                0o444,
-            )
-            for name, filename in _RUNTIME_ASSETS.items()
-        },
-        "sudoers": AssetSpec(
-            Path(
-                "/etc/sudoers.d/"
-                "loom-personal-dev-native-builder-runtime-authority"
-            ),
-            0o440,
-        ),
-        "tmpfiles": AssetSpec(
-            Path(
-                "/usr/lib/tmpfiles.d/"
-                "loom-personal-dev-native-builder-runtime-authority.conf"
-            ),
-            0o444,
-        ),
-    }
-)
-
-
 def _validated_hex(value: object, expression: re.Pattern[str]) -> str:
     if not isinstance(value, str) or expression.fullmatch(value) is None:
         raise AuthorityError("policy_invalid")
@@ -688,78 +580,6 @@ def _open_directory_no_follow(
             os.close(directory)
 
 
-def _open_readonly_no_follow(
-    path: Path,
-    *,
-    expected_uid: int,
-    expected_gid: int,
-) -> int:
-    if not isinstance(path, Path) or path == Path("/"):
-        raise OSError("unsafe path")
-    directory = _open_directory_no_follow(
-        path.parent,
-        expected_uid=expected_uid,
-        expected_gid=expected_gid,
-    )
-    try:
-        return os.open(
-            path.name,
-            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=directory,
-        )
-    finally:
-        os.close(directory)
-
-
-def _read_safe_file(
-    path: Path,
-    *,
-    maximum: int,
-    expected_uid: int,
-    expected_gid: int,
-    expected_mode: int,
-    error: str,
-) -> bytes:
-    descriptor: int | None = None
-    try:
-        descriptor = _open_readonly_no_follow(
-            path,
-            expected_uid=expected_uid,
-            expected_gid=expected_gid,
-        )
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_uid != expected_uid
-            or before.st_gid != expected_gid
-            or stat.S_IMODE(before.st_mode) != expected_mode
-            or not 0 < before.st_size <= maximum
-        ):
-            raise AuthorityError(error)
-        chunks: list[bytes] = []
-        remaining = before.st_size
-        while remaining:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                raise AuthorityError(error)
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(descriptor, 1):
-            raise AuthorityError(error)
-        after = os.fstat(descriptor)
-        if _file_identity(before) != _file_identity(after):
-            raise AuthorityError(error)
-        return b"".join(chunks)
-    except AuthorityError:
-        raise
-    except OSError as exc:
-        raise AuthorityError(error) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-
-
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for name, value in pairs:
@@ -772,87 +592,6 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def _reject_constant(value: str) -> NoReturn:
     del value
     raise AuthorityError("policy_invalid")
-
-
-def load_policy(
-    *,
-    policy_path: Path = POLICY_PATH,
-    asset_specs: Mapping[str, AssetSpec] = ASSET_SPECS,
-    expected_uid: int = 0,
-    expected_gid: int = 0,
-) -> AuthorityPolicy:
-    """Load the fixed policy and verify every path selected by compiled code."""
-    payload = _read_safe_file(
-        policy_path,
-        maximum=_MAX_POLICY_BYTES,
-        expected_uid=expected_uid,
-        expected_gid=expected_gid,
-        expected_mode=0o444,
-        error="policy_invalid",
-    )
-    try:
-        loaded = json.loads(
-            payload.decode("ascii"),
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise AuthorityError("policy_invalid") from exc
-    if not isinstance(loaded, dict):
-        raise AuthorityError("policy_invalid")
-    policy = AuthorityPolicy.from_mapping(loaded)
-    if payload != encode_policy(policy) or set(policy.asset_sha256) != set(asset_specs):
-        raise AuthorityError("policy_invalid")
-    for name, spec in asset_specs.items():
-        asset = _read_safe_file(
-            spec.path,
-            maximum=_MAX_ASSET_BYTES,
-            expected_uid=expected_uid,
-            expected_gid=expected_gid,
-            expected_mode=spec.mode,
-            error="asset_invalid",
-        )
-        if hashlib.sha256(asset).hexdigest() != policy.asset_sha256[name]:
-            raise AuthorityError("asset_invalid")
-    profile_digest = policy.asset_sha256.get("runtime_asset_profile")
-    if profile_digest is not None and profile_digest != policy.runtime_profile_sha256:
-        raise AuthorityError("policy_invalid")
-    return policy
-
-
-def verify_invocation(
-    *,
-    argv: Sequence[str],
-    environ: Mapping[str, str],
-    uid_triplet: tuple[int, int, int],
-    gid_triplet: tuple[int, int, int],
-    operator_uid: int,
-    operator_gid: int,
-) -> None:
-    """Verify the exact no-argument sudo identity before reading a request."""
-    unsafe = any(
-        name in _UNSAFE_ENVIRONMENT_NAMES
-        or any(name.startswith(prefix) for prefix in _UNSAFE_ENVIRONMENT_PREFIXES)
-        for name in environ
-    )
-    if unsafe:
-        raise AuthorityError("environment_invalid")
-    if (
-        list(argv) != [str(LIBEXEC_PATH)]
-        or uid_triplet != (0, 0, 0)
-        or gid_triplet != (0, 0, 0)
-        or environ.get("SUDO_USER") != "qianyi"
-        or environ.get("SUDO_UID") != str(operator_uid)
-        or environ.get("SUDO_GID") != str(operator_gid)
-        or environ.get("SUDO_COMMAND") != str(LIBEXEC_PATH)
-    ):
-        raise AuthorityError("invocation_invalid")
-
-
-def sanitize_environment(environ: MutableMapping[str, str]) -> None:
-    """Replace inherited values before any child boundary can observe them."""
-    environ.clear()
-    environ.update(_ROOT_ENVIRONMENT)
 
 
 @contextmanager
@@ -900,7 +639,7 @@ class HostStatus:
     agent_active: bool
     nft_present: bool
     managed_containers: int
-    managed_networks: int
+    managed_networks: int | None
 
 
 class SystemHostAdapter:
@@ -998,7 +737,7 @@ class SystemHostAdapter:
             raise AuthorityError("managed_objects_invalid")
         return descriptor
 
-    def _offline_inventory(self) -> tuple[int, int]:
+    def _offline_container_count(self) -> int:
         try:
             docker_descriptor = _open_directory_no_follow(
                 _DOCKER_DATA_ROOT,
@@ -1006,105 +745,48 @@ class SystemHostAdapter:
                 expected_gid=self.expected_gid,
             )
         except FileNotFoundError:
-            return 0, 0
+            return 0
         except OSError as exc:
             raise AuthorityError("managed_objects_invalid") from exc
         container_ids: set[str] = set()
         containers_descriptor: int | None = None
         try:
-            containers_descriptor = self._open_inventory_directory(
-                docker_descriptor,
-                "containers",
-            )
-        except FileNotFoundError:
-            pass
-        except (AuthorityError, OSError) as exc:
-            os.close(docker_descriptor)
-            raise AuthorityError("managed_objects_invalid") from exc
-        else:
             try:
-                entries = tuple(os.listdir(containers_descriptor))
-            except OSError as exc:
-                os.close(containers_descriptor)
-                os.close(docker_descriptor)
+                containers_descriptor = self._open_inventory_directory(
+                    docker_descriptor,
+                    "containers",
+                )
+            except FileNotFoundError:
+                return 0
+            except (AuthorityError, OSError) as exc:
                 raise AuthorityError("managed_objects_invalid") from exc
-            for entry in entries:
-                try:
-                    metadata = os.stat(
-                        entry,
-                        dir_fd=containers_descriptor,
-                        follow_symlinks=False,
-                    )
-                except OSError as exc:
-                    os.close(containers_descriptor)
-                    os.close(docker_descriptor)
-                    raise AuthorityError("managed_objects_invalid") from exc
-                if (
-                    _HEX_64.fullmatch(entry) is None
-                    or not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != self.expected_uid
-                    or metadata.st_gid != self.expected_gid
-                ):
-                    os.close(containers_descriptor)
-                    os.close(docker_descriptor)
-                    raise AuthorityError("managed_objects_invalid")
-                container_ids.add(entry)
-            os.close(containers_descriptor)
-
-        network_ids: set[str] = set()
-        network_descriptor: int | None = None
-        files_descriptor: int | None = None
-        descriptor: int | None = None
-        try:
-            network_descriptor = self._open_inventory_directory(
-                docker_descriptor,
-                "network",
-            )
-            files_descriptor = self._open_inventory_directory(
-                network_descriptor,
-                "files",
-            )
-            descriptor = os.open(
-                "local-kv.db",
-                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=files_descriptor,
-            )
-        except FileNotFoundError:
-            pass
-        except (AuthorityError, OSError) as exc:
-            raise AuthorityError("managed_objects_invalid") from exc
-        else:
             try:
-                metadata = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_nlink != 1
-                    or metadata.st_uid != self.expected_uid
-                    or metadata.st_gid != self.expected_gid
-                    or metadata.st_size > 64 * 1024 * 1024
-                ):
-                    raise AuthorityError("managed_objects_invalid")
-                payload = bytearray()
-                while len(payload) < metadata.st_size:
-                    chunk = os.read(descriptor, min(64 * 1024, metadata.st_size - len(payload)))
-                    if not chunk:
+                try:
+                    entries = tuple(os.listdir(containers_descriptor))
+                except OSError as exc:
+                    raise AuthorityError("managed_objects_invalid") from exc
+                for entry in entries:
+                    try:
+                        metadata = os.stat(
+                            entry,
+                            dir_fd=containers_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise AuthorityError("managed_objects_invalid") from exc
+                    if (
+                        _HEX_64.fullmatch(entry) is None
+                        or not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != self.expected_uid
+                        or metadata.st_gid != self.expected_gid
+                    ):
                         raise AuthorityError("managed_objects_invalid")
-                    payload.extend(chunk)
-                marker = re.compile(
-                    rb"docker/network/v1\.0/network/([0-9a-f]{64})/"
-                )
-                network_ids.update(
-                    match.group(1).decode("ascii") for match in marker.finditer(payload)
-                )
+                    container_ids.add(entry)
             finally:
-                os.close(descriptor)
+                os.close(containers_descriptor)
+            return len(container_ids)
         finally:
-            if files_descriptor is not None:
-                os.close(files_descriptor)
-            if network_descriptor is not None:
-                os.close(network_descriptor)
             os.close(docker_descriptor)
-        return len(container_ids), len(network_ids)
 
     def status(self) -> HostStatus:
         dockerd_active = self._service_active(_DOCKERD_UNIT)
@@ -1112,9 +794,10 @@ class SystemHostAdapter:
         nft_present = self._nft_present()
         if dockerd_active:
             containers = self._managed_count("container")
-            networks = self._managed_count("network")
+            networks: int | None = self._managed_count("network")
         else:
-            containers, networks = self._offline_inventory()
+            containers = self._offline_container_count()
+            networks = None
         host = os.uname()
         return HostStatus(
             host_name=host.nodename,
@@ -1134,8 +817,7 @@ class SystemHostAdapter:
             observed.dockerd_active
             or observed.agent_active
             or observed.nft_present
-            or (require_empty
-            and (observed.managed_containers or observed.managed_networks))
+            or (require_empty and observed.managed_containers)
         ):
             raise AuthorityError("host_state_invalid")
         return observed
@@ -1173,7 +855,7 @@ class SystemHostAdapter:
             raise AuthorityError("host_mutation_failed")
 
     def start_dockerd(self) -> None:
-        if any(self._offline_inventory()):
+        if self._offline_container_count():
             raise AuthorityError("managed_objects_invalid")
         self._service("start", _DOCKERD_UNIT, active=True)
         try:
@@ -2138,8 +1820,17 @@ class RuntimeAuthority:
             or type(status_value.nft_present) is not bool
             or type(status_value.managed_containers) is not int
             or status_value.managed_containers < 0
-            or type(status_value.managed_networks) is not int
-            or status_value.managed_networks < 0
+            or (
+                status_value.dockerd_active
+                and (
+                    type(status_value.managed_networks) is not int
+                    or status_value.managed_networks < 0
+                )
+            )
+            or (
+                not status_value.dockerd_active
+                and status_value.managed_networks is not None
+            )
         ):
             raise AuthorityError("host_identity_invalid")
         return status_value
@@ -2482,11 +2173,15 @@ class RuntimeAuthority:
             phases=frozenset({"prepared", "staged", "active"}),
         )
         initial_host = self._host_status()
-        if initial_host.managed_containers or initial_host.managed_networks:
+        if initial_host.managed_containers or (
+            initial_host.dockerd_active and initial_host.managed_networks
+        ):
             raise AuthorityError("managed_objects_present")
         mutating = False
         try:
             mutating = True
+            if not initial_host.dockerd_active:
+                self.host.start_dockerd()
             self.host.stop_agent()
             self.host.stop_dockerd()
             self.host.delete_nft()
@@ -2637,21 +2332,15 @@ def _build_runtime(
     )
 
 
-def _serve() -> None:
+def serve_validated(policy_value: Mapping[str, object]) -> None:
+    """Serve once after the minimal launcher validates every installed asset."""
     import pwd
 
+    try:
+        policy = AuthorityPolicy.from_mapping(policy_value)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise AuthorityError("policy_invalid") from exc
     operator = pwd.getpwnam("qianyi")
-    verify_invocation(
-        argv=sys.argv,
-        environ=os.environ,
-        uid_triplet=os.getresuid(),
-        gid_triplet=os.getresgid(),
-        operator_uid=operator.pw_uid,
-        operator_gid=operator.pw_gid,
-    )
-    sanitize_environment(os.environ)
-    policy = load_policy()
-    _load_application_modules()
     with authority_lock():
         request = parse_request(cast(BinaryIO, sys.stdin.buffer))
         runtime = _build_runtime(
@@ -2664,29 +2353,11 @@ def _serve() -> None:
         sys.stdout.buffer.flush()
 
 
-def main() -> None:
-    """Serve one no-argument request and emit only a stable public result."""
-    try:
-        _serve()
-    except BaseException:
-        sys.stderr.write("error:authority_failed\n")
-        raise SystemExit(1) from None
-
-
-if __name__ == "__main__":
-    main()
-
-
 __all__ = [
-    "ASSET_SPECS",
     "EPHEMERAL_SECRET_ROOT",
-    "LIBEXEC_PATH",
-    "LIBRARY_ROOT",
     "LOCK_PATH",
-    "POLICY_PATH",
     "STATE_PATH",
     "STATE_ROOT",
-    "AssetSpec",
     "AuthorityError",
     "AuthorityPolicy",
     "HostStatus",
@@ -2695,8 +2366,5 @@ __all__ = [
     "authority_lock",
     "encode_policy",
     "encode_receipt",
-    "load_policy",
-    "main",
-    "sanitize_environment",
-    "verify_invocation",
+    "serve_validated",
 ]

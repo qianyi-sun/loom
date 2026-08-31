@@ -7,7 +7,6 @@ import json
 import os
 import signal
 import stat
-import struct
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -17,6 +16,7 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 import scripts.ops.personal_dev_native_builder_runtime_authority as authority_module
+import scripts.ops.personal_dev_native_builder_runtime_authority_launcher as launcher_module
 from scripts.ops.converge_personal_dev_native_builder_release import (
     NativeBuilderReleaseConfig,
 )
@@ -25,15 +25,10 @@ from scripts.ops.personal_dev_native_builder_conformance import (
     ConformanceInputs,
 )
 from scripts.ops.personal_dev_native_builder_runtime_authority import (
-    ASSET_SPECS,
     EPHEMERAL_SECRET_ROOT,
-    LIBEXEC_PATH,
-    LIBRARY_ROOT,
     LOCK_PATH,
-    POLICY_PATH,
     STATE_PATH,
     STATE_ROOT,
-    AssetSpec,
     AuthorityError,
     AuthorityPolicy,
     EphemeralSecretFiles,
@@ -47,6 +42,14 @@ from scripts.ops.personal_dev_native_builder_runtime_authority import (
     encode_policy,
     encode_receipt,
     encode_state,
+)
+from scripts.ops.personal_dev_native_builder_runtime_authority_launcher import (
+    ASSET_SPECS,
+    LIBEXEC_PATH,
+    LIBRARY_ROOT,
+    POLICY_PATH,
+    AssetSpec,
+    LauncherError,
     load_policy,
     sanitize_environment,
     verify_invocation,
@@ -60,121 +63,6 @@ SOURCE_SHA = "1" * 40
 SOURCE_TREE = "2" * 40
 PROFILE_SHA256 = "3" * 64
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
-
-
-def _fnv1a_64(payload: bytes) -> int:
-    value = 14_695_981_039_346_656_037
-    for byte in payload:
-        value ^= byte
-        value = (value * 1_099_511_628_211) & 0xFFFF_FFFF_FFFF_FFFF
-    return value
-
-
-def _bbolt_leaf_page(
-    page_id: int,
-    entries: list[tuple[int, bytes, bytes]],
-    *,
-    page_size: int,
-) -> bytes:
-    page = bytearray(page_size)
-    struct.pack_into("<QHHI", page, 0, page_id, 0x02, len(entries), 0)
-    data_offset = 16 + (16 * len(entries))
-    for index, (flags, key, value) in enumerate(sorted(entries, key=lambda item: item[1])):
-        element_offset = 16 + (16 * index)
-        struct.pack_into(
-            "<IIII",
-            page,
-            element_offset,
-            flags,
-            data_offset - element_offset,
-            len(key),
-            len(value),
-        )
-        page[data_offset : data_offset + len(key)] = key
-        data_offset += len(key)
-        page[data_offset : data_offset + len(value)] = value
-        data_offset += len(value)
-    assert data_offset <= page_size
-    return bytes(page)
-
-
-def _bbolt_meta_page(
-    page_id: int,
-    *,
-    page_size: int,
-    root_page: int,
-    high_water_page: int,
-    transaction_id: int,
-) -> bytes:
-    page = bytearray(page_size)
-    struct.pack_into("<QHHI", page, 0, page_id, 0x04, 0, 0)
-    metadata = struct.pack(
-        "<IIIIQQQQQ",
-        0xED0CDAED,
-        2,
-        page_size,
-        0,
-        root_page,
-        0,
-        2,
-        high_water_page,
-        transaction_id,
-    )
-    page[16 : 16 + len(metadata)] = metadata
-    struct.pack_into("<Q", page, 16 + len(metadata), _fnv1a_64(metadata))
-    return bytes(page)
-
-
-def _bbolt_libnetwork_fixture(
-    records: list[tuple[str, str]],
-    *,
-    stale_network_id: str | None = None,
-) -> bytes:
-    page_size = 4096
-    network_prefix = b"docker/network/v1.0/network/"
-    network_entries: list[tuple[int, bytes, bytes]] = []
-    for index, (network_id, name) in enumerate(records, start=1):
-        key = network_prefix + network_id.encode("ascii") + b"/"
-        document = json.dumps(
-            {
-                "id": network_id,
-                "name": name,
-                "networkType": "null" if name == "none" else name,
-                "scope": "local",
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("ascii")
-        network_entries.append((0, key, struct.pack("<Q", index) + document))
-
-    pages = [
-        _bbolt_meta_page(
-            0,
-            page_size=page_size,
-            root_page=3,
-            high_water_page=5,
-            transaction_id=2,
-        ),
-        _bbolt_meta_page(
-            1,
-            page_size=page_size,
-            root_page=3,
-            high_water_page=5,
-            transaction_id=1,
-        ),
-        bytearray(page_size),
-        _bbolt_leaf_page(
-            3,
-            [(1, b"libnetwork", struct.pack("<QQ", 4, 0))],
-            page_size=page_size,
-        ),
-        _bbolt_leaf_page(4, network_entries, page_size=page_size),
-    ]
-    struct.pack_into("<QHHI", pages[2], 0, 2, 0x10, 0, 0)
-    if stale_network_id is not None:
-        stale_key = network_prefix + stale_network_id.encode("ascii") + b"/"
-        pages[2][32 : 32 + len(stale_key)] = stale_key
-    return b"".join(pages)
 
 
 class Unused:
@@ -205,7 +93,7 @@ class StatusHost:
             agent_active=False,
             nft_present=False,
             managed_containers=0,
-            managed_networks=0,
+            managed_networks=None,
         )
 
 
@@ -288,13 +176,13 @@ def test_invocation_rejects_every_root_sudo_identity_drift(
         environment[change] = value
         arguments["environ"] = environment
 
-    with pytest.raises(AuthorityError, match="invocation_invalid"):
+    with pytest.raises(LauncherError, match="invocation_invalid"):
         verify_invocation(**arguments)
 
 
 def test_environment_is_rejected_then_replaced_with_fixed_literals() -> None:
     unsafe = _sudo_environment() | {"PYTHONPATH": "/operator/stage"}
-    with pytest.raises(AuthorityError, match="environment_invalid"):
+    with pytest.raises(LauncherError, match="invocation_invalid"):
         verify_invocation(
             argv=[str(LIBEXEC_PATH)],
             environ=unsafe,
@@ -318,7 +206,7 @@ def test_executable_entrypoint_does_not_resolve_python_from_inherited_path(
     tmp_path: Path,
 ) -> None:
     entrypoint = tmp_path / "authority"
-    entrypoint.write_bytes(Path(authority_module.__file__).read_bytes())
+    entrypoint.write_bytes(Path(launcher_module.__file__).read_bytes())
     entrypoint.chmod(0o555)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -341,6 +229,10 @@ def test_executable_entrypoint_does_not_resolve_python_from_inherited_path(
 
 
 def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
+    from scripts.ops.personal_dev_native_builder_runtime_authority_launcher import (
+        BROKER_PATH,
+    )
+
     assert LIBEXEC_PATH == Path(
         "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
     )
@@ -360,7 +252,16 @@ def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
     assert EPHEMERAL_SECRET_ROOT == Path(
         "/run/loom-personal-dev-native-builder-runtime-authority"
     )
+    assert BROKER_PATH == (
+        LIBRARY_ROOT
+        / "scripts"
+        / "ops"
+        / "personal_dev_native_builder_runtime_authority.py"
+    )
+    assert ASSET_SPECS["launcher"] == AssetSpec(LIBEXEC_PATH, 0o555)
+    assert ASSET_SPECS["broker"] == AssetSpec(BROKER_PATH, 0o444)
     assert set(ASSET_SPECS) == {
+        "launcher",
         "broker",
         "conformance",
         "converger",
@@ -378,6 +279,175 @@ def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
         "sudoers",
         "tmpfiles",
     }
+
+
+@pytest.mark.parametrize("poisoned_name", ["broker", "dependency"])
+def test_launcher_rejects_poisoned_application_before_top_level_code_runs(
+    tmp_path: Path,
+    poisoned_name: str,
+) -> None:
+    launcher_source = (
+        Path(__file__).parents[2]
+        / "scripts"
+        / "ops"
+        / "personal_dev_native_builder_runtime_authority_launcher.py"
+    )
+    installed_launcher = tmp_path / "authority"
+    broker = tmp_path / "broker.py"
+    dependency = tmp_path / "dependency.py"
+    policy_path = tmp_path / "policy.json"
+    marker = tmp_path / "poisoned-top-level-ran"
+    installed_launcher.write_bytes(launcher_source.read_bytes())
+    installed_launcher.chmod(0o555)
+    broker.write_text(
+        "import dependency\n"
+        "def serve_validated(_policy):\n"
+        "    raise RuntimeError('must not serve')\n",
+        encoding="ascii",
+    )
+    dependency.write_text("VALUE = 1\n", encoding="ascii")
+    broker.chmod(0o444)
+    dependency.chmod(0o444)
+    assets = {
+        "broker": hashlib.sha256(broker.read_bytes()).hexdigest(),
+        "dependency": hashlib.sha256(dependency.read_bytes()).hexdigest(),
+        "launcher": hashlib.sha256(installed_launcher.read_bytes()).hexdigest(),
+    }
+    policy_path.write_bytes(
+        (
+            json.dumps(
+                {
+                    "asset_sha256": assets,
+                    "authority_source_sha": SOURCE_SHA,
+                    "authority_source_tree": SOURCE_TREE,
+                    "runtime_profile_sha256": PROFILE_SHA256,
+                    "schema": (
+                        "loom.personal-dev-native-builder-runtime-authority-policy.v1"
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+    )
+    policy_path.chmod(0o444)
+    poisoned = broker if poisoned_name == "broker" else dependency
+    poisoned.chmod(0o644)
+    poisoned.write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="ascii",
+    )
+    poisoned.chmod(0o444)
+    child = (
+        "import importlib.machinery,importlib.util,os,pathlib,sys\n"
+        f"path=pathlib.Path({str(installed_launcher)!r})\n"
+        "loader=importlib.machinery.SourceFileLoader('installed_launcher',str(path))\n"
+        "spec=importlib.util.spec_from_loader('installed_launcher',loader)\n"
+        "module=importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name]=module\n"
+        "spec.loader.exec_module(module)\n"
+        "assets={\n"
+        f"'launcher':module.AssetSpec(path,0o555),\n"
+        f"'broker':module.AssetSpec(pathlib.Path({str(broker)!r}),0o444),\n"
+        f"'dependency':module.AssetSpec(pathlib.Path({str(dependency)!r}),0o444),\n"
+        "}\n"
+        "try:\n"
+        f" module.launch(policy_path=pathlib.Path({str(policy_path)!r}),"
+        f"asset_specs=assets,broker_path=pathlib.Path({str(broker)!r}),"
+        f"library_root=pathlib.Path({str(tmp_path)!r}),"
+        "expected_uid=os.getuid(),expected_gid=os.getgid())\n"
+        "except module.LauncherError:\n"
+        " print('rejected')\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "rejected\n"
+    assert completed.stderr == ""
+    assert not marker.exists()
+
+
+def test_launcher_registers_itself_before_loading_the_validated_broker(
+    tmp_path: Path,
+) -> None:
+    installed_launcher = tmp_path / "authority"
+    broker = tmp_path / "broker.py"
+    policy_path = tmp_path / "policy.json"
+    marker = tmp_path / "broker-served"
+    installed_launcher.write_bytes(Path(launcher_module.__file__).read_bytes())
+    installed_launcher.chmod(0o555)
+    broker.write_text(
+        "from scripts.ops.personal_dev_native_builder_runtime_authority_launcher "
+        "import LIBEXEC_PATH\n"
+        "def serve_validated(policy):\n"
+        "    from pathlib import Path\n"
+        f"    Path({str(marker)!r}).write_text("
+        "policy['schema'] + '\\n' + str(LIBEXEC_PATH), encoding='ascii')\n",
+        encoding="ascii",
+    )
+    broker.chmod(0o444)
+    assets = {
+        "broker": hashlib.sha256(broker.read_bytes()).hexdigest(),
+        "launcher": hashlib.sha256(installed_launcher.read_bytes()).hexdigest(),
+    }
+    policy_path.write_bytes(
+        (
+            json.dumps(
+                {
+                    "asset_sha256": assets,
+                    "authority_source_sha": SOURCE_SHA,
+                    "authority_source_tree": SOURCE_TREE,
+                    "runtime_profile_sha256": PROFILE_SHA256,
+                    "schema": (
+                        "loom.personal-dev-native-builder-runtime-authority-policy.v1"
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("ascii")
+    )
+    policy_path.chmod(0o444)
+    child = (
+        "import importlib.machinery,importlib.util,os,pathlib,sys\n"
+        f"path=pathlib.Path({str(installed_launcher)!r})\n"
+        "loader=importlib.machinery.SourceFileLoader('installed_launcher',str(path))\n"
+        "spec=importlib.util.spec_from_loader('installed_launcher',loader)\n"
+        "module=importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name]=module\n"
+        "spec.loader.exec_module(module)\n"
+        "assets={\n"
+        f"'launcher':module.AssetSpec(path,0o555),\n"
+        f"'broker':module.AssetSpec(pathlib.Path({str(broker)!r}),0o444),\n"
+        "}\n"
+        f"module.launch(policy_path=pathlib.Path({str(policy_path)!r}),"
+        f"asset_specs=assets,broker_path=pathlib.Path({str(broker)!r}),"
+        f"library_root=pathlib.Path({str(tmp_path)!r}),"
+        "expected_uid=os.getuid(),expected_gid=os.getgid())\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+    assert marker.read_text(encoding="ascii") == (
+        "loom.personal-dev-native-builder-runtime-authority-policy.v1\n"
+        "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
+    )
 
 
 def test_policy_loader_requires_canonical_root_owned_single_link_assets(
@@ -412,11 +482,11 @@ def test_policy_loader_requires_canonical_root_owned_single_link_assets(
         asset_specs=specs,
         expected_uid=os.getuid(),
         expected_gid=os.getgid(),
-    ) == policy
+    ) == policy.public()
 
     hardlink = tmp_path / "profile-hardlink"
     os.link(second, hardlink)
-    with pytest.raises(AuthorityError, match="asset_invalid"):
+    with pytest.raises(LauncherError, match="asset_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -426,7 +496,7 @@ def test_policy_loader_requires_canonical_root_owned_single_link_assets(
     hardlink.unlink()
 
     second.chmod(0o644)
-    with pytest.raises(AuthorityError, match="asset_invalid"):
+    with pytest.raises(LauncherError, match="asset_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -449,7 +519,7 @@ def test_policy_loader_rejects_symlink_digest_and_noncanonical_policy(
     policy_path.write_bytes(encode_policy(policy))
     policy_path.chmod(0o444)
 
-    with pytest.raises(AuthorityError, match="asset_invalid"):
+    with pytest.raises(LauncherError, match="asset_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -460,7 +530,7 @@ def test_policy_loader_rejects_symlink_digest_and_noncanonical_policy(
     asset.unlink()
     asset.write_bytes(b"drifted\n")
     asset.chmod(0o444)
-    with pytest.raises(AuthorityError, match="asset_invalid"):
+    with pytest.raises(LauncherError, match="asset_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -474,7 +544,7 @@ def test_policy_loader_rejects_symlink_digest_and_noncanonical_policy(
     policy_path.chmod(0o644)
     policy_path.write_bytes(encode_policy(policy).replace(b'"schema":', b'"schema": '))
     policy_path.chmod(0o444)
-    with pytest.raises(AuthorityError, match="policy_invalid"):
+    with pytest.raises(LauncherError, match="policy_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -503,7 +573,7 @@ def test_policy_loader_rejects_an_asset_below_a_symlinked_directory(
     policy_path.write_bytes(encode_policy(policy))
     policy_path.chmod(0o444)
 
-    with pytest.raises(AuthorityError, match="asset_invalid"):
+    with pytest.raises(LauncherError, match="asset_invalid"):
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
@@ -551,7 +621,7 @@ def test_status_is_canonical_public_and_capacity_zero() -> None:
         "executable_new_capacity": 0,
         "host_name": "gx10-01c7",
         "managed_containers": 0,
-        "managed_networks": 0,
+        "managed_networks": None,
         "nft_table": "absent",
         "operation": "status",
         "phase": "inert",
@@ -567,7 +637,7 @@ def test_status_is_canonical_public_and_capacity_zero() -> None:
         b'"authority_source_tree":"2222222222222222222222222222222222222222",'
         b'"dockerd_service":"inactive","executable_new_capacity":0,'
         b'"host_name":"gx10-01c7","managed_containers":0,'
-        b'"managed_networks":0,"nft_table":"absent","operation":"status",'
+        b'"managed_networks":null,"nft_table":"absent","operation":"status",'
         b'"phase":"inert","request_id":"00000000-0000-0000-0000-000000000001",'
         b'"runtime_profile_sha256":"3333333333333333333333333333333333333333333333333333333333333333",'
         b'"schema":"loom.personal-dev-native-builder-runtime-authority-receipt.v1",'
@@ -607,22 +677,29 @@ def test_dispatch_revalidates_forged_request_before_any_boundary() -> None:
         _runtime().dispatch(forged)
 
 
-def test_main_failure_is_stable_and_never_echoes_exception(
+def test_launcher_main_failure_is_stable_and_never_echoes_exception(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     def fail() -> None:
         raise RuntimeError("private-key-bytes ca-bytes /secret/path")
 
-    monkeypatch.setattr(authority_module, "_serve", fail)
+    monkeypatch.setattr(
+        launcher_module.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002),
+    )
+    monkeypatch.setattr(launcher_module, "verify_invocation", lambda **_values: None)
+    monkeypatch.setattr(launcher_module, "sanitize_environment", lambda _env: None)
+    monkeypatch.setattr(launcher_module, "launch", fail)
     with pytest.raises(SystemExit, match="1"):
-        authority_module.main()
+        launcher_module.main()
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "error:authority_failed\n"
 
 
-def test_serve_dispatches_one_frame_and_writes_one_canonical_receipt(
+def test_validated_broker_dispatches_only_after_launcher_policy_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import pwd
@@ -659,34 +736,21 @@ def test_serve_dispatches_one_frame_and_writes_one_canonical_receipt(
         operator_gid: int,
     ) -> Runtime:
         events.append("build")
-        assert observed_policy is policy
+        assert observed_policy == policy
         assert (operator_uid, operator_gid) == (1001, 1002)
         return Runtime()
 
     output = Output()
     monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002))
-    monkeypatch.setattr(authority_module, "verify_invocation", lambda **_values: events.append("verify"))
-    monkeypatch.setattr(authority_module, "sanitize_environment", lambda _env: events.append("sanitize"))
-    monkeypatch.setattr(authority_module, "load_policy", lambda: events.append("policy") or policy)
-    monkeypatch.setattr(
-        authority_module,
-        "_load_application_modules",
-        lambda: events.append("applications"),
-        raising=False,
-    )
     monkeypatch.setattr(authority_module, "authority_lock", locked)
     monkeypatch.setattr(authority_module, "parse_request", lambda _stream: events.append("parse") or request)
     monkeypatch.setattr(authority_module, "_build_runtime", build, raising=False)
     monkeypatch.setattr(authority_module.sys, "stdin", Input())
     monkeypatch.setattr(authority_module.sys, "stdout", output)
 
-    authority_module._serve()
+    authority_module.serve_validated(policy.public())
 
     assert events == [
-        "verify",
-        "sanitize",
-        "policy",
-        "applications",
         "lock.enter",
         "parse",
         "build",
@@ -881,17 +945,15 @@ def test_system_host_adapter_uses_only_fixed_commands_and_validates_output(
     ]
 
 
-def test_inactive_host_inventory_reads_runtime_metadata_but_ignores_image_cache(
+def test_inactive_host_inventory_proves_containers_empty_but_networks_unobserved(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     docker_root = tmp_path / "docker"
-    container_id = "a" * 64
-    network_id = "b" * 64
-    (docker_root / "containers" / container_id).mkdir(parents=True)
+    (docker_root / "containers").mkdir(parents=True)
     (docker_root / "network" / "files").mkdir(parents=True)
     (docker_root / "network" / "files" / "local-kv.db").write_bytes(
-        _bbolt_libnetwork_fixture([(network_id, "loom-runtime")])
+        b"docker/network/v1.0/network/" + (b"a" * 64) + b"/host-none-bytes"
     )
     (docker_root / "image").mkdir()
     (docker_root / "image" / "retained-cache").write_bytes(b"image metadata")
@@ -900,7 +962,6 @@ def test_inactive_host_inventory_reads_runtime_metadata_but_ignores_image_cache(
     for directory in (
         docker_root,
         docker_root / "containers",
-        docker_root / "containers" / container_id,
         docker_root / "network",
         docker_root / "network" / "files",
         docker_root / "image",
@@ -941,39 +1002,25 @@ def test_inactive_host_inventory_reads_runtime_metadata_but_ignores_image_cache(
         dockerd_active=False,
         agent_active=False,
         nft_present=False,
-        managed_containers=1,
-        managed_networks=1,
+        managed_containers=0,
+        managed_networks=None,
     )
 
 
-def test_inactive_host_inventory_counts_only_active_custom_network_records(
+def test_dockerd_start_rejects_a_stopped_container_store_before_start(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     docker_root = tmp_path / "docker"
-    host_id = "a" * 64
-    none_id = "b" * 64
-    custom_id = "c" * 64
-    stale_id = "d" * 64
-    (docker_root / "containers").mkdir(parents=True)
-    (docker_root / "network" / "files").mkdir(parents=True)
-    (docker_root / "network" / "files" / "local-kv.db").write_bytes(
-        _bbolt_libnetwork_fixture(
-            [
-                (host_id, "host"),
-                (none_id, "none"),
-                (custom_id, "loom-runtime"),
-            ],
-            stale_network_id=stale_id,
-        )
-    )
+    container_id = "a" * 64
+    (docker_root / "containers" / container_id).mkdir(parents=True)
     for directory in (
         docker_root,
         docker_root / "containers",
-        docker_root / "network",
-        docker_root / "network" / "files",
+        docker_root / "containers" / container_id,
     ):
         directory.chmod(0o755)
+    calls: list[tuple[str, ...]] = []
 
     class Runner:
         def run(
@@ -984,29 +1031,29 @@ def test_inactive_host_inventory_counts_only_active_custom_network_records(
             env: dict[str, str] | None = None,
         ) -> CommandResult:
             del check, env
+            calls.append(tuple(argv))
             if argv[0] == "/usr/bin/systemctl":
                 return CommandResult(3, "inactive\n", "")
             return CommandResult(0, "", "")
 
     monkeypatch.setattr(authority_module, "_DOCKER_DATA_ROOT", docker_root)
-    monkeypatch.setattr(
-        authority_module.os,
-        "uname",
-        lambda: SimpleNamespace(nodename="gx10-01c7", machine="aarch64"),
-    )
-
-    status = authority_module.SystemHostAdapter(
+    host = authority_module.SystemHostAdapter(
         runner=Runner(),
         expected_uid=os.getuid(),
         expected_gid=os.getgid(),
-    ).status()
+    )
 
-    assert status.managed_networks == 1
+    with pytest.raises(AuthorityError, match="managed_objects_invalid"):
+        host.start_dockerd()
+
+    assert not any(call[1:2] == ("start",) for call in calls)
 
 
+@pytest.mark.parametrize("live_kind", ["container", "network"])
 def test_dockerd_start_rejects_post_start_inventory_before_returning(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    live_kind: str,
 ) -> None:
     calls: list[tuple[str, ...]] = []
     active = False
@@ -1033,7 +1080,9 @@ def test_dockerd_start_rejects_post_start_inventory_before_returning(
                     )
                 active = action == "start"
                 return CommandResult(0, "", "")
-            return CommandResult(0, "c" * 64 + "\n", "")
+            if live_kind in command:
+                return CommandResult(0, "c" * 64 + "\n", "")
+            return CommandResult(0, "", "")
 
     monkeypatch.setattr(authority_module, "_DOCKER_DATA_ROOT", tmp_path / "docker")
     host = authority_module.SystemHostAdapter(
@@ -1594,7 +1643,9 @@ class RecordingHost:
             agent_active=self.agent_active,
             nft_present=self.nft_present,
             managed_containers=self.managed_containers,
-            managed_networks=self.managed_networks,
+            managed_networks=(
+                self.managed_networks if self.dockerd_active else None
+            ),
         )
 
     def verify_inert(self, *, require_empty: bool) -> HostStatus:
@@ -1603,7 +1654,13 @@ class RecordingHost:
             self.dockerd_active
             or self.agent_active
             or self.nft_present
-            or (require_empty and (self.managed_containers or self.managed_networks))
+            or (
+                require_empty
+                and (
+                    self.managed_containers
+                    or (self.dockerd_active and self.managed_networks)
+                )
+            )
         ):
             raise AuthorityError("host_state_invalid")
         self._after("host.verify_inert")
@@ -2450,6 +2507,25 @@ def test_remove_stops_only_exact_runtime_preserves_cache_and_removes_state_last(
     assert receipt["state"] is None
     assert receipt["state_sha256"] == ""
     assert receipt["executable_new_capacity"] == 0
+
+
+def test_remove_starts_inactive_daemon_for_live_inventory_before_removal() -> None:
+    runtime, events, host, states, _, _ = _transition_runtime(_prepared_state())
+    assert states.snapshot is not None
+
+    runtime.dispatch(_state_request("remove", states.snapshot.sha256))
+
+    assert events == [
+        "state.read",
+        "host.start_dockerd",
+        "host.stop_agent",
+        "host.stop_dockerd",
+        "host.delete_nft",
+        "installer.remove",
+        "host.verify_inert:true",
+        "state.remove",
+    ]
+    assert not host.dockerd_active
 
 
 def test_remove_rejects_managed_objects_before_mutation() -> None:
