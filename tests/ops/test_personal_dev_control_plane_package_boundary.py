@@ -936,9 +936,38 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
     ownership = _read("config/component-ownership.toml")
 
-    assert "rootlesskit version 3.0.1" in dockerfile
-    assert "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc" in dockerfile
-    assert "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce" in dockerfile
+    assert (
+        "# syntax=docker/dockerfile:1.20@sha256:"
+        "26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d" in dockerfile
+    )
+    assert (
+        "golang:1.26-alpine3.23@sha256:"
+        "b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57" in dockerfile
+    )
+    assert (
+        "https://github.com/moby/buildkit/archive/"
+        "991535e0973488b6a429096d21fa13f81f2d89d8.tar.gz" in dockerfile
+    )
+    assert "ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4" in dockerfile
+    assert (
+        "https://github.com/rootless-containers/rootlesskit/archive/"
+        "62d2101fbbe4f79bc845a337c4e868d27ff602c9.tar.gz" in dockerfile
+    )
+    assert "51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8da9340a" in dockerfile
+    assert dockerfile.count("go get golang.org/x/crypto@v0.55.0") == 2
+    assert "go version go1.26.7" in dockerfile
+    assert "golang.org/x/crypto" in dockerfile
+    assert 'required_version="v0.55.0"' in dockerfile
+    assert "rootlesskit version 3.1.0" in dockerfile
+    for binary_sha256 in (
+        "5c594a04284993e440e7d6fa8f007e15351df0118b3ee2f29e1a1baaf5a23a83",
+        "85a89191d7dc2ee53a06f54aaf7969df62092602e31b7dfbc008e1b67e6908c4",
+        "ab942b0add070aa7ff4be0f366b5fd20c6c99a485f071556a59d5564c5d8841b",
+        "c2e0830c20f1122e671d24a5a4fe91b5ab71e8bae80fc650ebbffec3168e155b",
+        "6c117ff680f6b94f28cca78961c6bee3ff7b49fa1e159c2db63322e7f2ecd549",
+        "3871394a3917b1c9d12f04f2d2296b9a870fb94be5d3ff812410777a77e922cd",
+    ):
+        assert binary_sha256 in dockerfile
     assert "ARG TARGETARCH" in dockerfile
     assert "/usr/bin/buildctl" in dockerfile
     assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile
