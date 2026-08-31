@@ -14,7 +14,7 @@ import sys
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import NoReturn, cast
 
 LIBEXEC_PATH = Path(
@@ -400,6 +400,24 @@ def sanitize_environment(environ: MutableMapping[str, str]) -> None:
     environ.update(_ROOT_ENVIRONMENT)
 
 
+def _pin_application_packages(library_root: Path) -> None:
+    if (
+        not isinstance(library_root, Path)
+        or not library_root.is_absolute()
+        or ".." in library_root.parts
+    ):
+        raise LauncherError("asset_spec_invalid")
+    scripts_package = ModuleType("scripts")
+    scripts_package.__package__ = "scripts"
+    scripts_package.__path__ = [str(library_root / "scripts")]
+    ops_package = ModuleType("scripts.ops")
+    ops_package.__package__ = "scripts.ops"
+    ops_package.__path__ = [str(library_root / "scripts" / "ops")]
+    scripts_package.__dict__["ops"] = ops_package
+    sys.modules["scripts"] = scripts_package
+    sys.modules["scripts.ops"] = ops_package
+
+
 def launch(
     *,
     policy_path: Path = POLICY_PATH,
@@ -418,7 +436,7 @@ def launch(
     )
     if asset_specs.get("broker") != AssetSpec(broker_path, 0o444):
         raise LauncherError("asset_spec_invalid")
-    sys.path.insert(0, str(library_root))
+    _pin_application_packages(library_root)
     try:
         sys.modules[
             "scripts.ops.personal_dev_native_builder_runtime_authority_launcher"
@@ -440,9 +458,6 @@ def launch(
         raise
     except BaseException as exc:
         raise LauncherError("broker_failed") from exc
-    finally:
-        if sys.path and sys.path[0] == str(library_root):
-            del sys.path[0]
 
 
 def main() -> None:

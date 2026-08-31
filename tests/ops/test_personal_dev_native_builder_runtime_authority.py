@@ -374,6 +374,94 @@ def test_launcher_rejects_poisoned_application_before_top_level_code_runs(
     assert not marker.exists()
 
 
+def test_launcher_pins_validated_namespace_modules_against_later_regular_package(
+    tmp_path: Path,
+) -> None:
+    source_root = Path(__file__).parents[2]
+    installed_launcher = tmp_path / "authority"
+    library_root = tmp_path / "library"
+    installed_ops = library_root / "scripts" / "ops"
+    installed_ops.mkdir(parents=True)
+    for directory in (library_root, library_root / "scripts", installed_ops):
+        directory.chmod(0o755)
+    installed_launcher.write_bytes(Path(launcher_module.__file__).read_bytes())
+    installed_launcher.chmod(0o555)
+    python_assets = {
+        "broker": "personal_dev_native_builder_runtime_authority.py",
+        "conformance": "personal_dev_native_builder_conformance.py",
+        "converger": "converge_personal_dev_native_builder_release.py",
+        "installer": "install_personal_dev_native_builder_runtime.py",
+        "protocol": "personal_dev_native_builder_runtime_authority_protocol.py",
+        "runtime_profile_helper": (
+            "personal_dev_native_builder_runtime_profile.py"
+        ),
+    }
+    installed_assets: dict[str, Path] = {"launcher": installed_launcher}
+    for name, filename in python_assets.items():
+        installed = installed_ops / filename
+        installed.write_bytes((source_root / "scripts" / "ops" / filename).read_bytes())
+        installed.chmod(0o444)
+        installed_assets[name] = installed
+
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_bytes(
+        encode_policy(
+            _policy(
+                assets={
+                    name: hashlib.sha256(path.read_bytes()).hexdigest()
+                    for name, path in installed_assets.items()
+                }
+            )
+        )
+    )
+    policy_path.chmod(0o444)
+    marker = tmp_path / "unvalidated-package-ran"
+    poison_root = tmp_path / "later-system-path"
+    poison_scripts = poison_root / "scripts"
+    poison_scripts.mkdir(parents=True)
+    (poison_scripts / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n",
+        encoding="ascii",
+    )
+    specifications = ",\n".join(
+        f" {name!r}:module.AssetSpec(pathlib.Path({str(path)!r}),"
+        f"{0o555 if name == 'launcher' else 0o444})"
+        for name, path in installed_assets.items()
+    )
+    child = (
+        "import importlib.machinery,importlib.util,os,pathlib,sys\n"
+        f"path=pathlib.Path({str(installed_launcher)!r})\n"
+        "loader=importlib.machinery.SourceFileLoader('installed_launcher',str(path))\n"
+        "spec=importlib.util.spec_from_loader('installed_launcher',loader)\n"
+        "module=importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name]=module\n"
+        "spec.loader.exec_module(module)\n"
+        f"sys.path.append({str(poison_root)!r})\n"
+        f"assets={{\n{specifications}\n}}\n"
+        "try:\n"
+        f" module.launch(policy_path=pathlib.Path({str(policy_path)!r}),"
+        f"asset_specs=assets,broker_path=pathlib.Path("
+        f"{str(installed_assets['broker'])!r}),"
+        f"library_root=pathlib.Path({str(library_root)!r}),"
+        "expected_uid=os.getuid(),expected_gid=os.getgid())\n"
+        "except module.LauncherError:\n"
+        " print('launch-completed-safely')\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "launch-completed-safely\n"
+    assert completed.stderr == ""
+    assert not marker.exists()
+
+
 def test_launcher_registers_itself_before_loading_the_validated_broker(
     tmp_path: Path,
 ) -> None:
@@ -2509,25 +2597,6 @@ def test_remove_stops_only_exact_runtime_preserves_cache_and_removes_state_last(
     assert receipt["executable_new_capacity"] == 0
 
 
-def test_remove_starts_inactive_daemon_for_live_inventory_before_removal() -> None:
-    runtime, events, host, states, _, _ = _transition_runtime(_prepared_state())
-    assert states.snapshot is not None
-
-    runtime.dispatch(_state_request("remove", states.snapshot.sha256))
-
-    assert events == [
-        "state.read",
-        "host.start_dockerd",
-        "host.stop_agent",
-        "host.stop_dockerd",
-        "host.delete_nft",
-        "installer.remove",
-        "host.verify_inert:true",
-        "state.remove",
-    ]
-    assert not host.dockerd_active
-
-
 def test_remove_rejects_managed_objects_before_mutation() -> None:
     runtime, events, host, states, _, _ = _transition_runtime(
         _active_state(),
@@ -2602,6 +2671,86 @@ def test_remove_retries_same_state_hash_after_state_deletion_failure() -> None:
     assert receipt["phase"] == "inert"
     assert states.snapshot is None
     assert events.count("installer.remove") == 2
+
+
+def test_remove_retry_reaches_installer_exact_absent_path_without_missing_unit_start(
+) -> None:
+    events: list[str] = []
+    unit_present = True
+    dockerd_active = False
+    inventory_starts = 0
+    installer_removals = 0
+
+    class BoundaryHost(RecordingHost):
+        def start_dockerd(self) -> None:
+            nonlocal dockerd_active
+            events.append("host.start_dockerd")
+            if not unit_present:
+                raise AuthorityError("unit_absent")
+            dockerd_active = True
+
+        def stop_dockerd(self) -> None:
+            nonlocal dockerd_active
+            events.append("host.stop_dockerd")
+            dockerd_active = False
+
+        def status(self) -> HostStatus:
+            self.dockerd_active = dockerd_active
+            return super().status()
+
+    class BoundaryInstaller(RecordingInstaller):
+        def remove(self) -> dict[str, object]:
+            nonlocal unit_present, dockerd_active
+            nonlocal inventory_starts, installer_removals
+            events.append("installer.remove")
+            installer_removals += 1
+            if unit_present:
+                events.append("installer.start_dockerd_for_inventory")
+                inventory_starts += 1
+                dockerd_active = True
+                events.append("installer.live_inventory_empty")
+                dockerd_active = False
+                unit_present = False
+                events.append("installer.unit_removed")
+            else:
+                events.append("installer.exact_already_removed")
+            return {
+                "operation": "remove",
+                "retained": "dedicated-image-cache-and-system-identities",
+                "state": "managed-files-absent",
+            }
+
+    host = BoundaryHost(events)
+    states = RecordingStates(events, fail_remove=True)
+    states.snapshot = _snapshot(_prepared_state())
+    runtime = RuntimeAuthority(
+        policy=_policy(),
+        installer=BoundaryInstaller(events),
+        converger_factory=Unused(),
+        conformance=Unused(),
+        host=host,
+        states=states,
+        archives=Unused(),
+        secrets=Unused(),
+    )
+    original = states.snapshot
+    assert original is not None
+    request = _state_request("remove", original.sha256)
+
+    with pytest.raises(AuthorityError, match="injected_failure"):
+        runtime.dispatch(request)
+
+    assert not unit_present
+    assert states.snapshot == original
+    states.fail_remove = False
+    receipt = runtime.dispatch(request)
+
+    assert receipt["phase"] == "inert"
+    assert states.snapshot is None
+    assert inventory_starts == 1
+    assert installer_removals == 2
+    assert events.count("host.start_dockerd") == 0
+    assert events.count("installer.exact_already_removed") == 1
 
 
 def test_ephemeral_secret_files_use_exclusive_fixed_modes_and_unlink_on_base_exception(

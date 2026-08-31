@@ -2180,8 +2180,6 @@ class RuntimeAuthority:
         mutating = False
         try:
             mutating = True
-            if not initial_host.dockerd_active:
-                self.host.start_dockerd()
             self.host.stop_agent()
             self.host.stop_dockerd()
             self.host.delete_nft()
