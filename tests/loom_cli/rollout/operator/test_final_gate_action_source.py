@@ -21,6 +21,12 @@ from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.final_gate_store import FinalGateExecutionStore
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ProtectedApplyComponent,
+    ProtectedApplyJournal,
+)
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -395,6 +401,100 @@ def test_resumed_convergence_uses_the_protected_apply_plan(tmp_path: Path) -> No
     assert convergence[convergence.index("--plan-sha256") + 1] == first_plan.plan_digest
     assert smoke[smoke.index("--plan") + 1] == str(attempt2 / "final-gate-plan.json")
     assert smoke[smoke.index("--plan-sha256") + 1] == resumed_plan.plan_digest
+
+
+def test_repeated_advanced_epoch_resume_reuses_original_protected_apply_plan(
+    tmp_path: Path,
+) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    first = _envelope(attestation)
+    admission = _admission(attestation)
+    source(first, attestation, 7, admission)
+    first_store = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    )
+    first_plan = first_store.read()
+    epoch_exact = False
+
+    def classify_epoch(_plan):
+        return ComponentObservation(
+            state=ComponentState.EXACT if epoch_exact else ComponentState.READY,
+            evidence_digest="1" * 64,
+            observed_epoch=8 if epoch_exact else 7,
+        )
+
+    def advance_epoch(_plan):
+        nonlocal epoch_exact
+        epoch_exact = True
+
+    ProtectedApplyJournal(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).execute(
+        first_plan,
+        (
+            ProtectedApplyComponent(
+                component_id="mutation-epoch-claim",
+                implementation_digest="2" * 64,
+                input_fingerprint="3" * 64,
+                classify=classify_epoch,
+                apply=advance_epoch,
+            ),
+        ),
+    )
+    attempt2 = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt2.mkdir(mode=0o700)
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    actions = source(resumed, attestation, 7, admission)
+    resumed_plan = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=2,
+    ).read()
+    actions["final.protected-apply"](CheckOperation.APPLY)
+    actions["final.convergence"](CheckOperation.VERIFY)
+    actions["final.smoke"](CheckOperation.APPLY)
+
+    protected_apply, convergence, smoke = calls[-3:]
+    for recovered in (protected_apply, convergence):
+        assert recovered[recovered.index("--plan") + 1] == str(first_store.path)
+        assert recovered[recovered.index("--plan-sha256") + 1] == first_plan.plan_digest
+    assert smoke[smoke.index("--plan") + 1] == str(attempt2 / "final-gate-plan.json")
+    assert smoke[smoke.index("--plan-sha256") + 1] == resumed_plan.plan_digest
+
+    FinalGateExecutionStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=2,
+    ).publish(_final_execution())
+    attempt3 = tmp_path / "state/requests/req-alpha/attempts/3"
+    attempt3.mkdir(mode=0o700)
+    repeated = replace(resumed, attempt_number=3)
+
+    repeated_actions = source(repeated, attestation, 7, admission)
+    repeated_plan = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=3,
+    ).read()
+    repeated_actions["final.convergence"](CheckOperation.VERIFY)
+    repeated_actions["final.smoke"](CheckOperation.APPLY)
+
+    convergence, smoke = calls[-2:]
+    assert convergence[convergence.index("--plan") + 1] == str(first_store.path)
+    assert convergence[convergence.index("--plan-sha256") + 1] == first_plan.plan_digest
+    assert smoke[smoke.index("--plan") + 1] == str(attempt3 / "final-gate-plan.json")
+    assert smoke[smoke.index("--plan-sha256") + 1] == repeated_plan.plan_digest
 
 
 def test_repeated_resume_convergence_uses_the_original_apply_plan(tmp_path: Path) -> None:

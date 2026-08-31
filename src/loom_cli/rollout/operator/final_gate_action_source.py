@@ -36,6 +36,7 @@ from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from .final_gate_store import FinalGateExecutionStore
 from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
+from .protected_apply_recovery import find_advanced_epoch_attempt
 
 
 class FinalGateRehearsalStore(Protocol):
@@ -133,7 +134,7 @@ class FinalGateActionSource:
             executable=self.executable,
             executable_owner_uid=self.executable_owner_uid,
         )
-        convergence_runner = runner
+        protected_plan_runner = runner
         if protected_apply_plan is not None:
             protected_apply_store = FinalGatePlanStore(
                 self.state_root,
@@ -141,7 +142,7 @@ class FinalGateActionSource:
                 attempt_number=protected_apply_plan.attempt_number,
                 service_uid=self.service_uid,
             )
-            convergence_runner = InstalledFinalGateStepRunner(
+            protected_plan_runner = InstalledFinalGateStepRunner(
                 service_uid=self.service_uid,
                 plan_path=protected_apply_store.path,
                 plan_digest=protected_apply_plan.plan_digest,
@@ -151,7 +152,11 @@ class FinalGateActionSource:
             )
 
         def action(check_id: str) -> FinalGateAction:
-            selected_runner = convergence_runner if check_id == "final.convergence" else runner
+            selected_runner = (
+                protected_plan_runner
+                if check_id in {"final.protected-apply", "final.convergence"}
+                else runner
+            )
 
             def execute(operation: CheckOperation) -> FinalGateResult:
                 return selected_runner(
@@ -214,23 +219,40 @@ class FinalGateActionSource:
         plan: FinalGatePlan,
     ) -> FinalGatePlan | None:
         predecessor: FinalGatePlan | None = None
-        for attempt_number in range(1, envelope.attempt_number):
-            executions = FinalGateExecutionStore(
-                self.state_root,
-                request_id=envelope.request_id,
-                attempt_number=attempt_number,
-                service_uid=self.service_uid,
-            ).read_all()
-            protected_apply = executions.get("final.protected-apply")
-            if protected_apply is None or not protected_apply.passed:
-                continue
+        recovery_attempt = find_advanced_epoch_attempt(
+            self.state_root,
+            request_id=envelope.request_id,
+            through_attempt=envelope.attempt_number - 1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=self.service_uid,
+        )
+        if recovery_attempt is not None:
             predecessor = FinalGatePlanStore(
                 self.state_root,
                 request_id=envelope.request_id,
-                attempt_number=attempt_number,
+                attempt_number=recovery_attempt,
                 service_uid=self.service_uid,
             ).read()
-            break
+        if predecessor is None:
+            for attempt_number in range(1, envelope.attempt_number):
+                executions = FinalGateExecutionStore(
+                    self.state_root,
+                    request_id=envelope.request_id,
+                    attempt_number=attempt_number,
+                    service_uid=self.service_uid,
+                ).read_all()
+                protected_apply = executions.get("final.protected-apply")
+                if protected_apply is None or not protected_apply.passed:
+                    continue
+                predecessor = FinalGatePlanStore(
+                    self.state_root,
+                    request_id=envelope.request_id,
+                    attempt_number=attempt_number,
+                    service_uid=self.service_uid,
+                ).read()
+                break
         if predecessor is None:
             return None
 

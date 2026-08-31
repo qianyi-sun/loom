@@ -867,8 +867,9 @@ by itself. The one recoverable crash window is an exact service-owned final
 plan whose component journal contains the matching mutation-epoch intent and
 terminal at `starting_epoch + 1`. A resumed attempt must bind that plan to the
 same request candidate and attestation, pass post-apply admission against the
-advanced live epoch, and rerun the protected action through a new component
-journal. Each component is then reclassified: exact effects receive terminal
+advanced live epoch, and rerun protected apply and convergence through that
+original attempt's plan and component journal. Each component is then
+reclassified: exact effects receive terminal
 evidence without repeating mutation, while any partial, ambiguous, or drifted
 state still fails closed.
 
