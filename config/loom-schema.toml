@@ -55,6 +55,36 @@ python_type = "str"
 default     = '{"schema_version":1,"keys":[]}'
 description = "Bounded Ed25519 public-key registry for signed execution image admission evidence. The empty default intentionally rejects every service-execution reservation."
 
+[service_config.service_execution_scheduler_enabled]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = false
+description = "Enable normal queued-Trial reservation for tasks carrying an immutable service_execution binding. Disabled environments retain the legacy worker-only claim path."
+
+[service_config.service_execution_scheduler_environment]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "development"
+description = "Logical environment whose healthy execution target may receive normal service-execution reservations."
+
+[service_config.service_execution_scheduler_pool_id]
+used_by     = ["control-plane"]
+python_type = "str"
+default     = "nebius-cpu"
+description = "Logical pool selected by the service-execution scheduler. Tasks must carry the same immutable pool binding."
+
+[service_config.service_execution_scheduler_interval_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 2.0
+description = "Polling interval when no converted queued Trial is currently reservable."
+
+[service_config.service_execution_scheduler_max_deadline_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 7200
+description = "Maximum admitted deadline, including phase timeouts, termination grace, and result-commit allowance."
+
 [service_config.storage_backend]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "str"

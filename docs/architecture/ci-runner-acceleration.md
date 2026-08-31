@@ -257,7 +257,7 @@ in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 ## Release image evidence
 
 Image routing remains separate from release authority. The untrusted build and
-trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
+trusted publication scans both use pinned Trivy v0.74.0 with `scan-type: image`,
 `vuln-type: os,library`, `timeout: 20m0s`, `severity: CRITICAL`, `exit-code:
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
 each scan, a repository helper writes the fixed config and reviewed ignore file
@@ -272,7 +272,7 @@ staging-compatible PostgreSQL 17.4 rehearsal dependencies. Each structured
 exception records its exact Debian PURL scope and review statement and expires
 at 2026-09-12 UTC; policy generation fails closed at that boundary. A second
 repository-owned helper installs only
-the architecture-specific v0.70.0 release archive against its
+the architecture-specific v0.74.0 release archive against its
 repository-pinned SHA-256; this avoids relying on actions forbidden by
 repository policy. The
 signed release predicate binds every reviewed field, scanner name/version,

@@ -705,7 +705,7 @@ class _TrustedScannerInput(_StrictModel):
     java_database_metadata_sha256: str
     java_database_sha256: str
     lock_sha256: str
-    trivy_version: Literal["v0.70.0"]
+    trivy_version: Literal["v0.74.0"]
 
     @field_validator(
         "binary_sha256",

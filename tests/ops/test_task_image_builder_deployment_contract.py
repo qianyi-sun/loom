@@ -212,3 +212,17 @@ def test_release_manifest_preserves_dual_arch_builder_activation() -> None:
     assert by_arch["arm64"]["enabled"] is True
     assert by_arch["arm64"]["activation_blockers"] == []
     assert all(row["exclusive"] is True for row in builders)
+
+
+def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None:
+    runbook = Path(
+        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
+    ).read_text(encoding="utf-8")
+    phase2_boundary = " ".join(
+        runbook.split("## Closed Phase 2 boundary", maxsplit=1)[1].split()
+    )
+
+    assert "do not activate a rootless provider, policy, or supervisor" in phase2_boundary
+    assert "does not block the active native Phase 1 builder" in phase2_boundary
+    assert "rerun task `4139e767`" in phase2_boundary
+    assert "must still wait for every active Phase 1 convergence gate above" in phase2_boundary

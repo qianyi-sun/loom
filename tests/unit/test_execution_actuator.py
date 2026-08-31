@@ -36,7 +36,7 @@ def _lease() -> ServiceExecutionLease:
         cpu_millis=1500,
         memory_mib=2048,
         ephemeral_storage_mib=4096,
-        isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+        isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=NetworkAccess.GATEWAY_ONLY,
         image_materialization=ImageMaterialization.IMMUTABLE_OCI,
         image_ref="registry.example/task@sha256:" + "a" * 64,
@@ -178,6 +178,49 @@ def test_job_renderer_is_deterministic_restricted_and_lease_scoped() -> None:
     }
     assert not ({"privileged", "hostNetwork", "hostPID", "hostIPC"} & pod.keys())
     assert "hostPath" not in str(pod)
+
+
+def test_job_renderer_uses_default_runtime_when_no_runtime_class_is_configured() -> None:
+    lease = _lease()
+    target = ExecutionTargetRuntime(
+        target_id="nebius-eu-north1-staging",
+        namespace="loom-nebius-staging",
+    )
+
+    pod = render_execution_job(lease, target=target)["spec"]["template"]["spec"]
+
+    assert "runtimeClassName" not in pod
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+
+
+def test_job_renderer_applies_target_node_placement() -> None:
+    lease = _lease()
+    target = ExecutionTargetRuntime(
+        target_id="nebius-eu-north1-staging",
+        namespace="loom-nebius-staging",
+        node_selector={"loom.nebius/node-role": "execution"},
+        tolerations=(
+            {
+                "key": "loom.nebius/execution",
+                "operator": "Equal",
+                "value": "true",
+                "effect": "NoSchedule",
+            },
+        ),
+    )
+
+    pod = render_execution_job(lease, target=target)["spec"]["template"]["spec"]
+
+    assert pod["nodeSelector"] == {"loom.nebius/node-role": "execution"}
+    assert pod["tolerations"] == [
+        {
+            "key": "loom.nebius/execution",
+            "operator": "Equal",
+            "value": "true",
+            "effect": "NoSchedule",
+        }
+    ]
 
 
 def test_job_renderer_rejects_mutable_image_missing_limits_and_wrong_scope() -> None:

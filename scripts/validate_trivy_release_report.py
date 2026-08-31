@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate exact suppressed-vulnerability evidence from Trivy v0.70.0."""
+"""Validate exact suppressed-vulnerability evidence from Trivy v0.74.0."""
 
 from __future__ import annotations
 
@@ -57,7 +57,6 @@ _PERL_BASE_COMPONENTS = (
     "personal-dev-native-builder-agent",
     "personal-dev-scanner-cache",
     "pipeline-orchestrator",
-    "service",
     "worker",
 )
 _EMPTY_COMPONENTS = (
@@ -65,6 +64,7 @@ _EMPTY_COMPONENTS = (
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
+    "service",
     "staging-admin-browser-smoke",
     "web",
 )
@@ -329,7 +329,7 @@ def validate_trivy_release_report(
     )
     if payload.get("SchemaVersion") != 2 or payload.get("ArtifactType") != "container_image":
         raise TrivyReportError("unsupported Trivy report schema")
-    if _object(payload.get("Trivy")).get("Version") != "0.70.0":
+    if _object(payload.get("Trivy")).get("Version") != "0.74.0":
         raise TrivyReportError("unsupported Trivy version")
     artifact_name = _required_string(payload, "ArtifactName")
     _validate_artifact_identity(component, architecture, artifact_name)

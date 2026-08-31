@@ -817,5 +817,8 @@ This Phase 2 evidence is a prerequisite record, not authorization to build or
 operate a rootless builder. Phase 2 must separately deliver and accept the
 node guard, allocation-contained build-environment provider, credential
 projection, network policy, publication/retention path, and contained BuildKit
-execution.  Until then, do not activate a provider/policy/supervisor, advertise
-a node feature, certify production, or rerun task `4139e767`.
+execution. Until then, do not activate a rootless provider, policy, or supervisor,
+advertise a rootless node feature, or certify rootless production readiness.
+This boundary does not block the active native Phase 1 builder, including the
+acceptance rerun task `4139e767`; that rerun must still wait for every active
+Phase 1 convergence gate above.

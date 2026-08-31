@@ -27,7 +27,7 @@ GuardIdentifier = Annotated[
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 PositiveGeneration = Annotated[int, Field(gt=0, le=MAX_SIGNED_BIGINT)]
 NonNegativeSequence = Annotated[int, Field(ge=0, le=MAX_SIGNED_BIGINT)]
-NetworkPolicy = Literal["public", "no-network", "allowlist"]
+NetworkPolicy = Literal["public", "no-network", "gateway-only", "allowlist"]
 
 
 class CapacityGuardContractError(ValueError):

@@ -61,6 +61,13 @@ OWNERSHIP_AUTHORITY_PATHS = {
     "tests/ops/test_component_ownership_manifest.py",
 }
 
+NEBIUS_IAC_EXACT = {
+    "scripts/check_nebius_iac.py",
+    "tests/ops/test_nebius_iac.py",
+}
+
+NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
+
 PROTECTED_STAGING_ROLLOUT_EXACT = {
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
@@ -335,6 +342,7 @@ def plan_validations(
         matched_owner = (
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
+            or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
             or _is_protected_staging_rollout_path(path)
         )
         if _is_dependency_authority_path(path):

@@ -10,8 +10,9 @@ import pytest
 from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
+    EphemeralDockerManifestState,
     ExternalToolError,
-    SkopeoBuildxPersonalDevRegistryPublisher,
+    SkopeoDockerManifestPersonalDevRegistryPublisher,
     SkopeoPersonalDevRegistryArtifactCollector,
     TrivyPersonalDevImageScanner,
 )
@@ -128,12 +129,14 @@ async def test_registry_publisher_preserves_platform_digest_and_verifies_joined_
         },
         separators=(",", ":"),
     ).encode()
-    runner = _Runner([b"", manifest, b"", index])
-    publisher = SkopeoBuildxPersonalDevRegistryPublisher(
+    runner = _Runner([b"", manifest, b"", b"", index])
+    registry_auth_file = tmp_path / "registry" / "config.json"
+    publisher = SkopeoDockerManifestPersonalDevRegistryPublisher(
         runner=runner,  # type: ignore[arg-type]
         skopeo_executable="/usr/bin/skopeo",
         docker_executable="/usr/bin/docker",
-        registry_auth_file=tmp_path / "registry" / "config.json",
+        registry_auth_file=registry_auth_file,
+        docker_manifest_state=EphemeralDockerManifestState(registry_auth_file),
     )
     registration = _running_registration()
     repository = "registry.example/personal-dev/loom-service"
@@ -156,8 +159,13 @@ async def test_registry_publisher_preserves_platform_digest_and_verifies_joined_
     assert copy[:3] == ["/usr/bin/skopeo", "copy", "--authfile"]
     assert "--preserve-digests" in copy
     assert copy[-1].startswith("docker://registry.example/")
-    join = runner.calls[2][0]
-    assert join[:4] == ["/usr/bin/docker", "buildx", "imagetools", "create"]
+    create = runner.calls[2][0]
+    push = runner.calls[3][0]
+    inspect = runner.calls[4][0]
+    assert create[:3] == ["/usr/bin/docker", "manifest", "create"]
+    assert push[:4] == ["/usr/bin/docker", "manifest", "push", "--purge"]
+    assert inspect[:3] == ["/usr/bin/skopeo", "inspect", "--authfile"]
+    assert all("buildx" not in argument for call, _timeout, _limit in runner.calls for argument in call)
 
 
 async def test_registry_artifact_collector_deletes_only_manifest_tags(
