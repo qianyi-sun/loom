@@ -51,7 +51,45 @@ evidence_root='<absolute-existing-owner-only-evidence-root-outside-repository>'
 gb10_target='<ssh-user>@gx10-01c7'
 slurm_observer='<read-only-slurm-observer-ssh-target>'
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
-loom_cli="$repository_root/.venv/bin/loom"
+ssh_run() {
+  local target="$1"
+  local remote_command
+  shift
+  remote_command="$(python3 - "$@" <<'PY'
+import shlex
+import sys
+
+if len(sys.argv) < 2:
+    raise SystemExit(1)
+sys.stdout.write(shlex.join(sys.argv[1:]))
+PY
+)"
+  test -n "$remote_command"
+  ssh "${ssh_options[@]}" "$target" -- "$remote_command"
+}
+loom_python="$repository_root/.venv/bin/python"
+loom_cli() {
+  env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+    PYTHONPATH="$repository_root/src" "$loom_python" -m loom_cli "$@"
+}
+verify_loom_cli_source() {
+  env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+    PYTHONPATH="$repository_root/src" "$loom_python" - "$repository_root" <<'PY'
+import sys
+from pathlib import Path
+
+import loom
+import loom_cli
+
+root = Path(sys.argv[1]).resolve(strict=True)
+expected_loom = root / "src" / "loom" / "__init__.py"
+expected_loom_cli = root / "src" / "loom_cli" / "__init__.py"
+observed_loom = Path(loom.__file__).resolve(strict=True)
+observed_loom_cli = Path(loom_cli.__file__).resolve(strict=True)
+if observed_loom != expected_loom or observed_loom_cli != expected_loom_cli:
+    raise SystemExit(1)
+PY
+}
 trusted_launcher_profile='<absolute-owner-only-trusted-launcher-profile.json>'
 scanner_finding_policy='<absolute-owner-only-scanner-finding-policy.json>'
 backup_restore_evidence='<absolute-owner-only-backup-restore-evidence.json>'
@@ -76,7 +114,8 @@ evidence_dir="$evidence_root/${timestamp}-native-two-owner-$merged_source_sha"
 test "$(git rev-parse --show-toplevel)" = "$repository_root"
 test "$(git rev-parse HEAD)" = "$merged_source_sha"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
-test -x "$loom_cli"
+test -x "$loom_python"
+verify_loom_cli_source
 for path in "$trusted_release" "$profile" "$acceptance_plan" \
   "$rollback_shadow_manifest" "$reviewed_kubeconfig" \
   "$trusted_launcher_profile" "$scanner_finding_policy" \
@@ -189,8 +228,8 @@ capture_namespaces() {
 }
 capture_slurm() {
   local output="$1" queue="$1.queue"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- scontrol show nodes --json | jq -cS . > "$output"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- squeue --json | jq -cS . > "$queue"
+  ssh_run "$slurm_observer" scontrol show nodes --json | jq -cS . > "$output"
+  ssh_run "$slurm_observer" squeue --json | jq -cS . > "$queue"
   jq -cnS --slurpfile nodes "$output" --slurpfile jobs "$queue" \
     '{nodes:$nodes[0],queue:$jobs[0]}' > "$output.merged"
   mv "$output.merged" "$output" && rm -f "$queue" && chmod 0600 "$output"
@@ -214,7 +253,7 @@ assert_canonical_json_line() {
   rm -f "$canonical"
 }
 acceptance_status() {
-  "$loom_cli" admin personal-dev-control-plane status-acceptance \
+  loom_cli admin personal-dev-control-plane status-acceptance \
     --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" \
     --trusted-release-file "$trusted_release" \
     --trusted-release-sha256 "$trusted_release_sha256" \
@@ -231,7 +270,7 @@ capture_counts "$evidence_dir/before-database-counts.json"
 capture_namespaces "$evidence_dir/before-namespaces.json"
 capture_slurm "$evidence_dir/before-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/before-slurm.json"
-"$loom_cli" admin capacity-control-plane status --namespace loom-dev \
+loom_cli admin capacity-control-plane status --namespace loom-dev \
   --kubeconfig "$kubeconfig" > "$evidence_dir/before-capacity.status.json"
 chmod 0600 "$evidence_dir/before-capacity.status.json"
 jq -e '.active_native_grants == null or .active_native_grants == 0' \
@@ -244,7 +283,7 @@ jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
 ## 3. Apply only the expiring schema-3 acceptance plane
 
 ```bash
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   jq -cnS \
     --arg activestate "$(systemctl show loom-personal-dev-native-builder-agent.service --property=ActiveState --value)" \
     --arg fragmentpath "$(systemctl show loom-personal-dev-native-builder-agent.service --property=FragmentPath --value)" \
@@ -258,7 +297,7 @@ jq -e 'length == 1 and .[0].activestate == "active" and
   "$evidence_dir/agent-active-pre-management.json" >/dev/null
 
 shadow_recheck="$evidence_dir/preflight-shadow.yaml"
-"$loom_cli" admin personal-dev-control-plane render --file "$profile" \
+loom_cli admin personal-dev-control-plane render --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   > "$shadow_recheck" 2> "$evidence_dir/preflight-shadow.render.json"
@@ -266,7 +305,7 @@ chmod 0600 "$shadow_recheck" "$evidence_dir/preflight-shadow.render.json"
 cmp -s "$shadow_recheck" "$rollback_shadow_manifest"
 
 acceptance_manifest="$evidence_dir/native-acceptance.rendered.yaml"
-"$loom_cli" admin personal-dev-control-plane render-acceptance \
+loom_cli admin personal-dev-control-plane render-acceptance \
   --file "$profile" --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --acceptance-plan-file "$acceptance_plan" \
@@ -313,8 +352,8 @@ owner request early.
 ```bash
 owner_0_whoami="$evidence_dir/owner-0.whoami.json"
 owner_1_whoami="$evidence_dir/owner-1.whoami.json"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" auth whoami --format json | jq -cS . > "$owner_0_whoami"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" auth whoami --format json | jq -cS . > "$owner_1_whoami"
+XDG_CONFIG_HOME="$owner_0_xdg" loom_cli auth whoami --format json | jq -cS . > "$owner_0_whoami"
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli auth whoami --format json | jq -cS . > "$owner_1_whoami"
 chmod 0600 "$owner_0_whoami" "$owner_1_whoami"
 for whoami in "$owner_0_whoami" "$owner_1_whoami"; do
   jq -e '.auth_kind == "bearer" and .credential_type == "user_owned_api_token" and
@@ -334,11 +373,11 @@ two simultaneous amd64 Jobs and two simultaneous arm64 grants plus two
 BuildKit/client pairs.
 
 ```bash
-( XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" service up \
+( XDG_CONFIG_HOME="$owner_0_xdg" loom_cli service up \
     --environment "dev-$owner_0_name" --source-root "$owner_0_source" \
     --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-0.deploy-v1.txt" 2>&1 &
 owner_0_deploy_pid=$!
-( XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
+( XDG_CONFIG_HOME="$owner_1_xdg" loom_cli service up \
     --environment "dev-$owner_1_name" --source-root "$owner_1_source" \
     --min-slots 0 --max-slots 2 ) > "$evidence_dir/owner-1.deploy-v1.txt" 2>&1 &
 owner_1_deploy_pid=$!
@@ -379,7 +418,7 @@ while true; do
   test "$SECONDS" -lt "$overlap_deadline"
   sleep 1
 done
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   endpoint=unix:///run/loom-personal-dev-builder/docker.sock
   ids="$(docker -H "$endpoint" ps -q --filter label=loom.personal-dev-native-builder.managed=true)"
   test "$(printf "%s\n" "$ids" | sed "/^$/d" | wc -l)" = 4
@@ -401,8 +440,8 @@ chmod 0600 "$evidence_dir/owner-0.deploy-v1.txt" "$evidence_dir/owner-1.deploy-v
 
 owner_0_initial="$evidence_dir/owner-0.initial.json"
 owner_1_initial="$evidence_dir/owner-1.initial.json"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_initial"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_initial"
+XDG_CONFIG_HOME="$owner_0_xdg" loom_cli dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_initial"
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_initial"
 chmod 0600 "$owner_0_initial" "$owner_1_initial"
 for status in "$owner_0_initial" "$owner_1_initial"; do
   jq -e '.status=="ready" and .application_status=="ready" and
@@ -437,11 +476,11 @@ acceptance_status "$evidence_dir/after-initial.status.json"
 ## 6. Update both owners and prove native publication
 
 ```bash
-( XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" service up \
+( XDG_CONFIG_HOME="$owner_0_xdg" loom_cli service up \
     --environment "dev-$owner_0_name" --source-root "$owner_0_update_source" \
     --min-slots 0 --max-slots 3 ) > "$evidence_dir/owner-0.deploy-v2.txt" 2>&1 &
 owner_0_update_pid=$!
-( XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
+( XDG_CONFIG_HOME="$owner_1_xdg" loom_cli service up \
     --environment "dev-$owner_1_name" --source-root "$owner_1_update_source" \
     --min-slots 0 --max-slots 4 ) > "$evidence_dir/owner-1.deploy-v2.txt" 2>&1 &
 owner_1_update_pid=$!
@@ -452,8 +491,8 @@ test "$owner_0_update_rc" -eq 0 && test "$owner_1_update_rc" -eq 0
 chmod 0600 "$evidence_dir/owner-0.deploy-v2.txt" "$evidence_dir/owner-1.deploy-v2.txt"
 owner_0_updated="$evidence_dir/owner-0.updated.json"
 owner_1_updated="$evidence_dir/owner-1.updated.json"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_updated"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_updated"
+XDG_CONFIG_HOME="$owner_0_xdg" loom_cli dev status "$owner_0_name" --format json | jq -cS . > "$owner_0_updated"
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_updated"
 chmod 0600 "$owner_0_updated" "$owner_1_updated"
 jq -e '.status=="ready" and .min_slots==0 and .max_slots==3 and .worker_available==false' "$owner_0_updated" >/dev/null
 jq -e '.status=="ready" and .min_slots==0 and .max_slots==4 and .worker_available==false' "$owner_1_updated" >/dev/null
@@ -561,22 +600,22 @@ probe_cross_owner_denial() {
   local before="$prefix.before.json" after="$prefix.after.json"
   local stdout="$prefix.stdout" stderr="$prefix.stderr" expected="$prefix.expected"
   local expected_receipt target_epoch rc=0
-  XDG_CONFIG_HOME="$target_xdg" "$loom_cli" dev status "$target_name" --format json | jq -cS . > "$before"
+  XDG_CONFIG_HOME="$target_xdg" loom_cli dev status "$target_name" --format json | jq -cS . > "$before"
   target_epoch="$(jq -er '.operation_epoch|select(type=="number" and .>0)' "$before")"
   case "$operation" in
     read)
       expected_receipt='{"error_code":"resource_hidden","http_method":"GET","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_read"}'
-      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" dev status "$target_name" \
+      XDG_CONFIG_HOME="$actor_xdg" loom_cli dev status "$target_name" \
         --format json --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
     update)
       expected_receipt='{"error_code":"resource_hidden","http_method":"PUT","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_update"}'
-      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" service up \
+      XDG_CONFIG_HOME="$actor_xdg" loom_cli service up \
         --environment "dev-$target_name" --candidate "$actor_candidate" \
         --expected-operation-epoch 1 --min-slots 0 --quiet \
         --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
     destroy)
       expected_receipt='{"error_code":"resource_hidden","http_method":"DELETE","schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,"target_phase":"target_destroy"}'
-      XDG_CONFIG_HOME="$actor_xdg" "$loom_cli" dev destroy "$target_name" \
+      XDG_CONFIG_HOME="$actor_xdg" loom_cli dev destroy "$target_name" \
         --format json --expected-operation-epoch "$target_epoch" \
         --expected-hidden-denial > "$stdout" 2> "$stderr" || rc=$? ;;
     *) return 2 ;;
@@ -584,7 +623,7 @@ probe_cross_owner_denial() {
   test "$rc" -eq 1 && test ! -s "$stdout"
   printf '%s\n' "$expected_receipt" > "$expected"
   cmp -s "$stderr" "$expected" && rm -f "$expected"
-  XDG_CONFIG_HOME="$target_xdg" "$loom_cli" dev status "$target_name" --format json | jq -cS . > "$after"
+  XDG_CONFIG_HOME="$target_xdg" loom_cli dev status "$target_name" --format json | jq -cS . > "$after"
   cmp -s "$before" "$after"; chmod 0600 "$before" "$after" "$stdout" "$stderr"
   jq -cS -n \
     --arg actor_team_id "$(jq -r ".acceptance_owners[$actor_index].team_id" "$acceptance_plan")" \
@@ -624,27 +663,27 @@ owner_1_redeployed="$evidence_dir/owner-1.redeployed.json"
 owner_1_final_destroyed="$evidence_dir/owner-1.final-destroyed.json"
 retained_subject_id="$(jq -er .subject_id "$owner_1_updated")"
 retained_incarnation="$(jq -er .subject_incarnation "$owner_1_updated")"
-XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev destroy "$owner_0_name" \
+XDG_CONFIG_HOME="$owner_0_xdg" loom_cli dev destroy "$owner_0_name" \
   --format json | jq -cS . > "$owner_0_destroyed"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name" \
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev destroy "$owner_1_name" \
   --keep-data --format json | jq -cS . > "$owner_1_destroyed"
 chmod 0600 "$owner_0_destroyed" "$owner_1_destroyed"
 jq -e '.status=="deleted" and .keep_data==false' "$owner_0_destroyed" >/dev/null
 jq -e '.status=="deleted" and .keep_data==true' "$owner_1_destroyed" >/dev/null
 owner_1_redeploy_epoch="$(jq -er '.operation_epoch|select(type=="number" and .>0)' "$owner_1_destroyed")"
 acceptance_status "$evidence_dir/after-destroy.status.json"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" service up \
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli service up \
   --environment "dev-$owner_1_name" --source-root "$owner_1_update_source" \
   --expected-operation-epoch "$owner_1_redeploy_epoch" --min-slots 0 --max-slots 2 \
   > "$evidence_dir/owner-1.redeploy.txt" 2>&1
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_redeployed"
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev status "$owner_1_name" --format json | jq -cS . > "$owner_1_redeployed"
 chmod 0600 "$evidence_dir/owner-1.redeploy.txt" "$owner_1_redeployed"
 jq -e --arg subject "$retained_subject_id" --arg incarnation "$retained_incarnation" '
   .status=="ready" and .subject_id==$subject and .subject_incarnation!=$incarnation and
   .deployment_generation==1 and .worker_available==false and .min_slots==0 and
   .max_slots==2' "$owner_1_redeployed" >/dev/null
 acceptance_status "$evidence_dir/after-redeploy.status.json"
-XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name" \
+XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev destroy "$owner_1_name" \
   --format json | jq -cS . > "$owner_1_final_destroyed"
 chmod 0600 "$owner_1_final_destroyed"
 jq -e '.status=="deleted" and .keep_data==false' "$owner_1_final_destroyed" >/dev/null
@@ -664,7 +703,7 @@ jq -e --slurpfile before "$evidence_dir/before-database-counts.json" '
   .active_native_grants==0' "$evidence_dir/final-zero-grants.json" >/dev/null
 capture_slurm "$evidence_dir/after-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/after-slurm.json"
-"$loom_cli" admin capacity-control-plane status --namespace loom-dev \
+loom_cli admin capacity-control-plane status --namespace loom-dev \
   --kubeconfig "$kubeconfig" > "$evidence_dir/final-capacity.status.json"
 jq -e '.=={executable_new_capacity_ceiling:0,status:"ready"}' \
   "$evidence_dir/final-capacity.status.json" >/dev/null
@@ -676,7 +715,7 @@ acceptance_status "$evidence_dir/pre-rollback.status.json"
 
 ```bash
 shadow_recheck_after="$evidence_dir/shadow-recheck-after.yaml"
-"$loom_cli" admin personal-dev-control-plane render --file "$profile" \
+loom_cli admin personal-dev-control-plane render --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   > "$shadow_recheck_after" 2> "$evidence_dir/shadow-recheck-after.render.json"
@@ -696,7 +735,7 @@ kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
 rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"
 rollback_status="$evidence_dir/rollback-shadow.status.json"
-"$loom_cli" admin personal-dev-control-plane status --namespace loom-dev \
+loom_cli admin personal-dev-control-plane status --namespace loom-dev \
   --kubeconfig "$kubeconfig" --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status_raw"
@@ -819,7 +858,7 @@ jq -cS -j -n \
 chmod 0600 "$acceptance_result"; assert_canonical_json "$acceptance_result"
 acceptance_result_sha256="$(sha256sum "$acceptance_result"|awk '{print $1}')"
 acceptance_verification="$evidence_dir/acceptance-result-verification.json"
-"$loom_cli" admin personal-dev-control-plane verify-acceptance-result \
+loom_cli admin personal-dev-control-plane verify-acceptance-result \
   --acceptance-plan-file "$acceptance_plan" \
   --acceptance-plan-sha256 "$acceptance_plan_sha256" \
   --acceptance-result-file "$acceptance_result" \
@@ -857,7 +896,7 @@ test "$(jq -er .schema_version "$operational_plan")" = 2
 test "$(jq -er .approval.acceptance_result_sha256 "$operational_plan")" = "$acceptance_result_sha256"
 test "$(jq -er .approval.rollback_evidence_sha256 "$operational_plan")" = "$rollback_shadow_status_sha256"
 operational_manifest="$evidence_dir/native-operational.rendered.yaml"
-"$loom_cli" admin personal-dev-control-plane render-operational \
+loom_cli admin personal-dev-control-plane render-operational \
   --file "$profile" --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
   --operational-plan-file "$operational_plan" \
@@ -879,7 +918,7 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
 chmod 0600 "$evidence_dir/native-operational.server-side-apply.txt"
 kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status \
   deployment/loom-personal-dev-management --timeout=300s
-"$loom_cli" admin personal-dev-control-plane status-operational \
+loom_cli admin personal-dev-control-plane status-operational \
   --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" \
   --trusted-release-file "$trusted_release" \
   --trusted-release-sha256 "$trusted_release_sha256" \
