@@ -103,6 +103,7 @@ services:
       # swap/PSI values; keep those host signals from making system smoke
       # wait five minutes or fail before it can build the fixture image.
       LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED: "false"
+      LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
     profiles: ["worker"]
     depends_on:
       control-plane:
@@ -110,6 +111,7 @@ services:
     volumes:
       - ../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
 
   task-image-builder:
     image: loom-worker:dev
@@ -129,6 +131,7 @@ services:
       # subsequent pull-only trial worker.
       LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: localhost:55000/loom-task-images
       LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS: "120"
+      LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
     profiles: ["task-image-builder"]
     depends_on:
       control-plane:
@@ -138,3 +141,7 @@ services:
     volumes:
       - ../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
+
+volumes:
+  task_image_builder_storage_probe:

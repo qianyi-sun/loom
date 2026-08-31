@@ -135,12 +135,19 @@ RBAC artifacts; it never restores exec automatically.
 
 Before it constructs a control-plane client or requests a materialization
 claim, an exclusive builder performs owned cleanup and records structured
-evidence: Docker root, final free bytes, required free bytes, probe
-availability, and cleanup error count. A missing probe or free space below
+evidence: Docker root, actual storage-probe path, final free bytes, required
+free bytes, probe availability, and cleanup error count. A missing probe or free space below
 `LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB` is a fatal storage-admission error. The
 allocation exits nonzero without consuming a lease, so the materialization
 remains queued. The same preparation and admission check runs again after each
 claim is processed, before another claim can be requested.
+
+Native processes use the daemon-reported Docker root as the probe path.
+Containerized builders instead receive an explicit
+`LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH` backed by an empty, read-only
+Docker-managed volume. The volume lives on the daemon data filesystem but does
+not expose its directory tree, and the fixed remote-worker volume name prevents
+one empty volume from accumulating per Slurm allocation.
 
 Cleanup first removes only stopped (`created`, `dead`, or `exited`) containers
 where the container itself or its referenced image carries one of

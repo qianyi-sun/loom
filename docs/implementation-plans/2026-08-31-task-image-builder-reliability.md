@@ -125,8 +125,8 @@ Run the five listed test files with `-p no:cacheprovider` and no bytecode writes
 - Test: `tests/unit/test_task_image_builder.py`
 
 **Interfaces:**
-- Produces: immutable `ManagedImageCleanupResult` with final/required free bytes, probe status, and cleanup error count.
-- Consumes: `LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB` as a hard builder admission floor.
+- Produces: immutable `ManagedImageCleanupResult` with Docker root, actual probe path, final/required free bytes, probe status, and cleanup error count.
+- Consumes: `LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB` as a hard builder admission floor and an optional explicit storage-probe path for containerized builders.
 
 - [ ] **Step 1: Write failing cleanup tests**
 

@@ -73,6 +73,7 @@ def _cleanup_result(
 ) -> ManagedImageCleanupResult:
     return ManagedImageCleanupResult(
         docker_root="/var/lib/docker",
+        storage_probe_path="/var/lib/docker",
         free_bytes=free_bytes,
         required_free_bytes=required_free_bytes,
         probe_available=probe_available,

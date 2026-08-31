@@ -72,14 +72,25 @@ deleted during convergence after both supervisors prove successful reads.
 ## Storage admission and owned cleanup
 
 Managed-image cleanup returns structured evidence containing the Docker root,
-final free bytes, required free bytes, probe availability, and cleanup error
-count. Before TTL and pressure eviction, it removes stopped containers only
+the actual storage-probe path, final free bytes, required free bytes, probe
+availability, and cleanup error count. Before TTL and pressure eviction, it
+removes stopped containers only
 when the container itself or its referenced image carries one of Loom's
 managed labels:
 
 - `loom.task-image=true`
 - `loom.task-sidecar=true`
 - `loom.trial-cache=true`
+
+A host-native process probes the daemon-reported Docker root directly. A
+Compose builder cannot assume that host path exists in its mount namespace, so
+the remote-worker, development, and system-smoke profiles set
+`LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH` to a read-only empty named volume.
+Docker allocates that volume inside its own data root, which makes its
+filesystem capacity authoritative without exposing Docker metadata to the
+container. Slurm jobs share one explicitly named, labelled probe volume per
+daemon instead of leaking a project-scoped volume for every allocation. Loom
+does not delete or store payloads in this evidence-only volume.
 
 Running containers and unlabelled resources are never removed. Container
 volumes are retained. Existing TTL pruning and oldest-first pressure eviction

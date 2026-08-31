@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -787,6 +788,7 @@ def test_evict_stale_managed_images_covers_all_managed_kinds(
     ]
     assert result == trial_cache.ManagedImageCleanupResult(
         docker_root="/var/lib/docker",
+        storage_probe_path="/var/lib/docker",
         free_bytes=25 * 1024**3,
         required_free_bytes=20 * 1024**3,
         probe_available=True,
@@ -895,11 +897,39 @@ def test_cleanup_returns_failed_probe_and_counts_cleanup_errors(
 
     assert result == trial_cache.ManagedImageCleanupResult(
         docker_root="/var/lib/docker",
+        storage_probe_path="/var/lib/docker",
         free_bytes=0,
         required_free_bytes=20 * 1024**3,
         probe_available=False,
         error_count=2,
     )
+
+
+def test_cleanup_uses_explicit_storage_probe_path_when_docker_root_is_unmounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    client.containers.list.return_value = []
+    client.info.return_value = {"DockerRootDir": "/var/lib/docker"}
+    settings = _StubSettings(trial_cache_min_free_gb=20)
+    settings.task_image_storage_probe_path = Path(
+        "/run/loom/docker-storage-probe",
+    )
+    observed_paths: list[str | Path] = []
+
+    def disk_usage(path: str | Path) -> SimpleNamespace:
+        observed_paths.append(path)
+        return SimpleNamespace(free=25 * 1024**3)
+
+    monkeypatch.setattr(trial_cache.shutil, "disk_usage", disk_usage)
+
+    result = trial_cache.evict_stale_managed_images(client, settings)
+
+    assert observed_paths == [Path("/run/loom/docker-storage-probe")]
+    assert result.docker_root == "/var/lib/docker"
+    assert result.storage_probe_path == "/run/loom/docker-storage-probe"
+    assert result.probe_available is True
+    assert result.free_bytes == 25 * 1024**3
 
 
 def test_cleanup_counts_invalid_docker_root_separately_from_prune_errors() -> None:

@@ -75,6 +75,15 @@ or the final free bytes are below that floor. It repeats this admission after
 each processed claim. Do not describe an allocation as materializing, or use a
 canary to test it, before this storage admission passes.
 
+Phase 1 launches the builder through `docker-compose.remote-worker.yml`, so the
+container reads free space through
+`LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH=/run/loom/docker-storage-probe`.
+That path is an empty read-only Docker-managed volume on the daemon data
+filesystem, explicitly named `loom-task-image-builder-storage-probe` and
+labelled `loom.task-image-storage-probe=true`. It is shared across allocation
+project names, contains no task data, is never pruned by Loom, and avoids
+mounting the daemon's Docker-root directory into the container.
+
 ## Ordered Phase 1 convergence
 
 Perform the following sequence in order. Each numbered acceptance command is a

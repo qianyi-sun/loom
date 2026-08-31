@@ -235,6 +235,7 @@ services:
       LOOM_WORKER_MAX_CONCURRENT: "${LOOM_WORKER_MAX_CONCURRENT:-5}"
       LOOM_TASK_IMAGE_BUILD_MAX_FILES: "${LOOM_TASK_IMAGE_BUILD_MAX_FILES:-2000}"
       LOOM_TASK_IMAGE_BUILD_MAX_BYTES: "${LOOM_TASK_IMAGE_BUILD_MAX_BYTES:-536870912}"
+      LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
       # Leave LOOM_WORKER_BLOCKING_IO_MAX_WORKERS unset so the worker derives
       # it from LOOM_WORKER_MAX_CONCURRENT. Set explicitly only for capacity
       # sweeps that need to isolate blocking Docker/S3/HF calls.
@@ -252,6 +253,7 @@ services:
       - ../packages:/app/packages
       - ../tests/fixtures:/app/tests/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
       - worker_trajectories:/var/lib/loom/trajectories
     ulimits:
       nofile:
@@ -288,6 +290,7 @@ services:
       LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: "localhost:${LOOM_DEV_REGISTRY_PORT:-55000}/loom-task-images"
       LOOM_TASK_IMAGE_BUILD_MAX_FILES: "${LOOM_TASK_IMAGE_BUILD_MAX_FILES:-2000}"
       LOOM_TASK_IMAGE_BUILD_MAX_BYTES: "${LOOM_TASK_IMAGE_BUILD_MAX_BYTES:-536870912}"
+      LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH: /run/loom/docker-storage-probe
       # Slurm builders idle-exit to scale to zero. Keep the laptop sidecar
       # looping; compose also restarts a clean idle-exit.
       LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS: "86400"
@@ -296,6 +299,7 @@ services:
       - ../packages:/app/packages
       - ../tests/fixtures:/app/tests/fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro
     depends_on:
       control-plane:
         condition: service_healthy
@@ -378,5 +382,6 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  task_image_builder_storage_probe:
   worker_trajectories:
   web_node_modules:
