@@ -11,6 +11,7 @@ import re
 import tarfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address, IPv4Network
 from typing import Any, Literal, NoReturn, Protocol, cast
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -32,8 +33,11 @@ _POLL_PATH = "/api/v1/internal/personal-dev/native-builder/poll"
 _GRANT_PATH = "/api/v1/internal/personal-dev/native-builder/grants"
 _MAX_RESPONSE_BYTES = 512 * 1024
 _DOCKER_SOCKET = "/run/loom-personal-dev-builder/docker.sock"
-_DOCKER_ROOT = "/var/lib/loom-personal-dev-builder"
+_DOCKER_ROOT = "/var/lib/loom-personal-dev-builder/docker"
 _CGROUP_PARENT = "loom-personal-dev-builder.slice"
+_NETWORK_SUBNETS = frozenset(
+    (IPv4Network("172.28.0.0/24"), IPv4Network("172.28.1.0/24"))
+)
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
 _MANAGED_LABEL_KEYS = {
     "loom.personal-dev-native-builder.managed",
@@ -660,6 +664,9 @@ class DockerPersonalDevNativeBuildRuntime:
             and host.get("MemorySwap") == 16 * 1024 * 1024 * 1024
             and host.get("Binds") in (None, [])
             and host.get("Devices") == []
+            and host.get("Privileged") is False
+            and host.get("PublishAllPorts") is False
+            and host.get("PortBindings") in (None, {})
             and host.get("RestartPolicy")
             in ({"Name": "no"}, {"Name": "no", "MaximumRetryCount": 0})
             and host.get("NetworkMode") == network_name
@@ -716,14 +723,72 @@ class DockerPersonalDevNativeBuildRuntime:
     ) -> bool:
         attrs = getattr(network, "attrs", None)
         grant_id = UUID(labels["loom.personal-dev-native-builder.grant-id"])
-        return isinstance(attrs, dict) and (
+        if not isinstance(attrs, dict):
+            return False
+        binding = self._network_ipam_binding(network)
+        if binding is None:
+            return False
+        subnet, gateway = binding
+        return (
             attrs.get("Name") == f"loom-pdev-{grant_id.hex[:12]}"
             and attrs.get("Driver") == "bridge"
             and attrs.get("Internal") is False
             and attrs.get("Attachable") is False
             and attrs.get("EnableIPv6") is False
             and attrs.get("Labels") == labels
+            and subnet in _NETWORK_SUBNETS
+            and gateway == IPv4Address(int(subnet.network_address) + 1)
         )
+
+    @staticmethod
+    def _network_ipam_binding(
+        network: Any,
+    ) -> tuple[IPv4Network, IPv4Address] | None:
+        attrs = getattr(network, "attrs", None)
+        if not isinstance(attrs, dict):
+            return None
+        ipam = attrs.get("IPAM")
+        if not isinstance(ipam, dict):
+            return None
+        config = ipam.get("Config")
+        if not isinstance(config, list) or len(config) != 1:
+            return None
+        binding = config[0]
+        if (
+            not isinstance(binding, dict)
+            or set(binding) not in (
+                {"Gateway", "Subnet"},
+                {"Gateway", "IPRange", "Subnet"},
+            )
+            or not isinstance(binding.get("Gateway"), str)
+            or not isinstance(binding.get("Subnet"), str)
+            or binding.get("IPRange", "") != ""
+            or ipam.get("Driver") != "default"
+            or ipam.get("Options") not in (None, {})
+        ):
+            return None
+        try:
+            subnet = IPv4Network(binding["Subnet"], strict=True)
+            gateway = IPv4Address(binding["Gateway"])
+        except ValueError:
+            return None
+        return subnet, gateway
+
+    def _next_network_subnet(self) -> IPv4Network:
+        used: set[IPv4Network] = set()
+        for resources in self._resources.values():
+            if resources.network is None:
+                continue
+            binding = self._network_ipam_binding(resources.network)
+            if binding is None or binding[0] not in _NETWORK_SUBNETS:
+                raise RuntimeError("native builder managed resource shape drift")
+            if binding[0] in used:
+                raise RuntimeError("native builder managed network slot collision")
+            used.add(binding[0])
+        for subnet in sorted(_NETWORK_SUBNETS, key=lambda item: int(item.network_address)):
+            if subnet not in used:
+                return subnet
+        raise RuntimeError("native builder local concurrency is exhausted")
 
     def _validate_bound_resources(
         self,
@@ -989,6 +1054,18 @@ class DockerPersonalDevNativeBuildRuntime:
                 for container in (buildkit, restricted)
             ):
                 active.append(grant_id)
+        networks_by_subnet: dict[IPv4Network, list[_DockerGrantResources]] = {}
+        for resources in discovered.values():
+            if resources.network is None:
+                continue
+            binding = self._network_ipam_binding(resources.network)
+            if binding is not None:
+                networks_by_subnet.setdefault(binding[0], []).append(resources)
+        for resources_with_subnet in networks_by_subnet.values():
+            if len(resources_with_subnet) > 1:
+                drift = True
+                for resources in resources_with_subnet:
+                    resources.safe = False
         self._resources = discovered
         available = host_valid and not drift
         reason = (
@@ -1053,6 +1130,8 @@ class DockerPersonalDevNativeBuildRuntime:
         buildkit_name = f"{network_name}-buildkit"
         client_name = f"{network_name}-client"
         buildkit_host = f"buildkit-{short_id}"
+        subnet = self._next_network_subnet()
+        gateway = IPv4Address(int(subnet.network_address) + 1)
         network = await asyncio.to_thread(
             self._client.networks.create,
             network_name,
@@ -1061,6 +1140,12 @@ class DockerPersonalDevNativeBuildRuntime:
             attachable=False,
             enable_ipv6=False,
             check_duplicate=True,
+            ipam={
+                "Driver": "default",
+                "Config": [
+                    {"Subnet": str(subnet), "Gateway": str(gateway)},
+                ],
+            },
             labels=self._labels(grant, role="network"),
         )
         common: dict[str, object] = {

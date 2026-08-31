@@ -176,6 +176,7 @@ def test_generated_dockerd_and_runsc_configs_are_exact_and_inert() -> None:
             {"base": "172.28.0.0/16", "size": 24},
         ],
         "default-runtime": "runsc-personal-dev-native",
+        "dns": ["1.1.1.1", "1.0.0.1"],
         "exec-root": str(profile.exec_root / "docker"),
         "hosts": [f"unix://{profile.docker_socket}"],
         "ip-forward": True,
@@ -226,6 +227,19 @@ def test_generated_network_and_units_keep_authorities_separate() -> None:
     assert "172.28.0.0/16" in nftables
     assert "1.1.1.1" in nftables and "1.0.0.1" in nftables
     assert "tcp dport { 80, 443 } accept" in nftables
+    assert "type filter hook output priority filter; policy accept;" in nftables
+    assert nftables.count("ip daddr 172.28.0.0/16 counter drop") == 2
+    assert (
+        "ip saddr 172.28.0.0/24 ip daddr 172.28.0.0/24 accept" in nftables
+    )
+    assert (
+        "ip saddr 172.28.1.0/24 ip daddr 172.28.1.0/24 accept" in nftables
+    )
+    assert nftables.index(
+        "ip daddr 172.28.0.0/16 ct state established,related accept"
+    ) < nftables.index(
+        "ip saddr 172.28.0.0/24 ip daddr 172.28.0.0/24 accept"
+    ) < nftables.rindex("ip daddr 172.28.0.0/16 counter drop")
     assert "ip daddr 10.0.0.0/8 drop" in nftables
     assert "ip daddr 192.168.0.0/16 drop" in nftables
     assert "masquerade" in nftables

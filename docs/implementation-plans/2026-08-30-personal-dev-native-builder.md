@@ -433,7 +433,7 @@
   ```bash
   uv run pytest -q tests/ops/test_personal_dev_native_builder_runtime_profile.py tests/ops/test_install_personal_dev_native_builder_runtime.py tests/ops/test_converge_personal_dev_native_builder_release.py
   uv run ruff check scripts/ops/personal_dev_native_builder_runtime_profile.py scripts/ops/install_personal_dev_native_builder_runtime.py scripts/ops/converge_personal_dev_native_builder_release.py tests/ops/test_personal_dev_native_builder_runtime_profile.py tests/ops/test_install_personal_dev_native_builder_runtime.py tests/ops/test_converge_personal_dev_native_builder_release.py
-  uv run mypy scripts/ops/personal_dev_native_builder_runtime_profile.py scripts/ops/install_personal_dev_native_builder_runtime.py scripts/ops/converge_personal_dev_native_builder_release.py
+  uv run mypy --explicit-package-bases scripts/ops/personal_dev_native_builder_runtime_profile.py scripts/ops/install_personal_dev_native_builder_runtime.py scripts/ops/converge_personal_dev_native_builder_release.py
   ```
 
 - [ ] **Step 9: Commit the inert host runtime**
@@ -640,8 +640,8 @@
   uv run ruff check src tests scripts migrations
   uv run mypy src/loom/personal_dev_native_builder_protocol.py src/loom/personal_dev_native_builder_store.py src/loom/personal_dev_native_builder_executor.py src/loom/personal_dev_native_builder_agent.py src/loom_service/routes/personal_dev_native_builder.py
   uv run loom config codegen --check
-  uv run alembic heads
-  git diff --check origin/dev..HEAD
+  uv run alembic -c migrations/alembic.ini heads
+  git diff --check origin/dev
   ```
 
 - [ ] **Step 3: Run full unit and ops suites**

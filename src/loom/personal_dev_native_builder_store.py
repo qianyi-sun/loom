@@ -551,7 +551,8 @@ async def poll_native_build_grant(
 
     grant_to_return: PersonalDevNativeBuildGrant | None = None
     running_rows: Sequence[PersonalDevNativeBuildGrant] = ()
-    if status.available and len(status.active_grant_ids) < status.max_concurrency:
+    reported_running_to_redeliver: list[PersonalDevNativeBuildGrant] = []
+    if status.available:
         running_rows = (
             await session.execute(
                 select(PersonalDevNativeBuildGrant)
@@ -561,13 +562,14 @@ async def poll_native_build_grant(
                     PersonalDevNativeBuildGrant.state == "running",
                 )
                 .order_by(
+                    PersonalDevNativeBuildGrant.heartbeat_at,
                     PersonalDevNativeBuildGrant.started_at,
                     PersonalDevNativeBuildGrant.id,
                 )
             )
         ).scalars().all()
         for row in running_rows:
-            if row.id in status.active_grant_ids or not _grant_matches_status(row, status):
+            if not _grant_matches_status(row, status):
                 continue
             parent = await session.get(PersonalDevCandidateBuildAttempt, row.attempt_id)
             if parent is not None and _parent_is_current(
@@ -575,8 +577,11 @@ async def poll_native_build_grant(
                 lease_epoch=row.attempt_lease_epoch,
                 now=now,
             ):
-                grant_to_return = row
-                break
+                if row.id in status.active_grant_ids:
+                    reported_running_to_redeliver.append(row)
+                else:
+                    grant_to_return = row
+                    break
 
     occupied_grant_ids = set(status.active_grant_ids)
     occupied_grant_ids.update(row.id for row in running_rows)
@@ -624,6 +629,9 @@ async def poll_native_build_grant(
             locked.updated_at = now
             grant_to_return = locked
             break
+
+    if grant_to_return is None and reported_running_to_redeliver:
+        grant_to_return = reported_running_to_redeliver[0]
 
     await session.commit()
     return NativeBuilderPollResult(

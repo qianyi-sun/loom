@@ -631,7 +631,7 @@ async def test_poll_claims_fifo_at_two_slots_resumes_same_agent_and_denies_forei
             ),
             _NOW + timedelta(seconds=12),
         )
-    assert full.grant is None
+    assert full.grant is not None and full.grant.id == issued[0].id
 
     async with sessions() as session:
         resumed = await poll_native_build_grant(
@@ -661,6 +661,85 @@ async def test_poll_claims_fifo_at_two_slots_resumes_same_agent_and_denies_forei
     async with sessions() as session:
         third = await session.get(PersonalDevNativeBuildGrant, issued[2].id)
         assert third is not None and third.state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_full_agent_restart_redelivers_both_running_grants_by_oldest_heartbeat(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A restarted same-instance agent can recover both occupied grant payloads."""
+    await _register_agent(sessions)
+    registrations = [
+        await _seed_running_attempt(sessions, now=_NOW + timedelta(seconds=index))
+        for index in range(2)
+    ]
+    issued: list[PersonalDevNativeBuildGrant] = []
+    for index, registration in enumerate(registrations):
+        async with sessions() as session:
+            issued.append(
+                await issue_native_build_grant(
+                    session,
+                    registration,
+                    _policy(),
+                    _NOW + timedelta(seconds=index),
+                )
+            )
+
+    async with sessions() as session:
+        first = await poll_native_build_grant(
+            session,
+            _poll(_NOW + timedelta(seconds=10)),
+            _NOW + timedelta(seconds=10),
+        )
+    assert first.grant is not None and first.grant.id == issued[0].id
+    async with sessions() as session:
+        second = await poll_native_build_grant(
+            session,
+            _poll(
+                _NOW + timedelta(seconds=11),
+                managed=(issued[0].id,),
+                active=(issued[0].id,),
+            ),
+            _NOW + timedelta(seconds=11),
+        )
+    assert second.grant is not None and second.grant.id == issued[1].id
+
+    full_inventory = (issued[0].id, issued[1].id)
+    async with sessions() as session:
+        recovered_first = await poll_native_build_grant(
+            session,
+            _poll(
+                _NOW + timedelta(seconds=12),
+                managed=full_inventory,
+                active=full_inventory,
+            ),
+            _NOW + timedelta(seconds=12),
+        )
+    assert recovered_first.grant is not None
+    assert recovered_first.grant.id == issued[0].id
+
+    async with sessions() as session:
+        assert await heartbeat_native_build_grant(
+            session,
+            _heartbeat(
+                registrations[0],
+                issued[0].id,
+                _NOW + timedelta(seconds=13),
+            ),
+            _NOW + timedelta(seconds=13),
+        )
+    async with sessions() as session:
+        recovered_second = await poll_native_build_grant(
+            session,
+            _poll(
+                _NOW + timedelta(seconds=14),
+                managed=full_inventory,
+                active=full_inventory,
+            ),
+            _NOW + timedelta(seconds=14),
+        )
+    assert recovered_second.grant is not None
+    assert recovered_second.grant.id == issued[1].id
 
 
 @pytest.mark.asyncio

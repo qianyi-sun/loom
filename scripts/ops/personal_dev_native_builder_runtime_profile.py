@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import stat
@@ -377,6 +378,7 @@ class NativeBuilderRuntimeProfile:
                     }
                 ],
                 "default-runtime": self.handler,
+                "dns": list(self.dns_servers),
                 "exec-root": str(self.exec_root / "docker"),
                 "hosts": [f"unix://{self.docker_socket}"],
                 "ip-forward": True,
@@ -407,16 +409,29 @@ class NativeBuilderRuntimeProfile:
     def nftables(self) -> bytes:
         dns = ", ".join(self.dns_servers)
         ports = ", ".join(str(value) for value in self.egress_tcp_ports)
+        address_pool = ipaddress.ip_network(self.address_pool, strict=True)
+        slots = tuple(
+            address_pool.subnets(new_prefix=self.bridge_prefix_length)
+        )[: self.max_concurrency]
+        same_slot_rules = "".join(
+            f"    ip saddr {slot} ip daddr {slot} accept\n" for slot in slots
+        )
         return f"""table inet {self.nft_table} {{
   chain input {{
     type filter hook input priority filter; policy accept;
     ip saddr {self.address_pool} counter drop
   }}
 
+  chain output {{
+    type filter hook output priority filter; policy accept;
+    ip daddr {self.address_pool} counter drop
+  }}
+
   chain forward {{
     type filter hook forward priority filter; policy accept;
     ip daddr {self.address_pool} ct state established,related accept
-    ip saddr {self.address_pool} ip daddr {self.address_pool} drop
+{same_slot_rules}\
+    ip daddr {self.address_pool} counter drop
     ip saddr {self.address_pool} ip daddr 0.0.0.0/8 drop
     ip saddr {self.address_pool} ip daddr 10.0.0.0/8 drop
     ip saddr {self.address_pool} ip daddr 100.64.0.0/10 drop

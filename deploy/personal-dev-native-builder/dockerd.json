@@ -8,6 +8,10 @@
     }
   ],
   "default-runtime": "runsc-personal-dev-native",
+  "dns": [
+    "1.1.1.1",
+    "1.0.0.1"
+  ],
   "exec-root": "/run/loom-personal-dev-builder/docker",
   "hosts": [
     "unix:///run/loom-personal-dev-builder/docker.sock"

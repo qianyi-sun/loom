@@ -479,6 +479,20 @@ def test_install_creates_exact_runtime_directories_and_applies_sysusers(
         installer.verify_staged()
 
 
+def test_verify_staged_rejects_live_provider_nft_table(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    runner = HostRunner()
+    installer = _installer(tmp_path, profile, runner=runner)
+    installer.install(archive)
+    runner.nft_table_output = f"table inet {profile.nft_table}\n"
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="nftables_state_invalid",
+    ):
+        installer.verify_staged()
+
+
 def test_preflight_accepts_safe_sysusers_dry_run_plan_output(tmp_path: Path) -> None:
     profile, archive = _archive(tmp_path)
     runner = HostRunner(
@@ -694,7 +708,13 @@ def test_remove_refuses_busy_or_drifted_state_and_removes_only_exact_install(
     config.write_bytes(profile.dockerd_json)
     config.chmod(0o444)
 
-    assert installer.remove()["state"] == "absent"
+    assert installer.remove() == {
+        "operation": "remove",
+        "profile_sha256": profile.sha256,
+        "release": profile.version,
+        "retained": "dedicated-image-cache-and-system-identities",
+        "state": "managed-files-absent",
+    }
     assert not _mapped(installer, profile.release_root).exists()
     assert _mapped(installer, Path("/var/lib")).is_dir()
 
@@ -707,7 +727,7 @@ def test_remove_temporarily_starts_only_dedicated_daemon_for_inventory(
     installer = _installer(tmp_path, profile, runner=runner)
     installer.install(archive)
 
-    assert installer.remove()["state"] == "absent"
+    assert installer.remove()["state"] == "managed-files-absent"
 
     service_calls = [
         call
@@ -719,6 +739,16 @@ def test_remove_temporarily_starts_only_dedicated_daemon_for_inventory(
         ("/usr/bin/systemctl", "stop", profile.dockerd_service_path.name),
     ]
     assert all(profile.agent_service_path.name not in call for call in service_calls)
+    assert (
+        "/usr/bin/docker",
+        "-H",
+        f"unix://{profile.docker_socket}",
+        "network",
+        "ls",
+        "--quiet",
+        "--filter",
+        "type=custom",
+    ) in (runner.calls or [])
 
 
 def test_cli_emits_canonical_receipt_and_requires_operation_arguments(

@@ -6,6 +6,7 @@ import json
 import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -33,6 +34,13 @@ from tests.unit.test_personal_dev_native_builder_protocol import (
     _poll,
     _status,
 )
+
+_ROOT = Path(__file__).resolve().parents[2]
+_DOCKER_DATA_ROOT = json.loads(
+    (_ROOT / "deploy/personal-dev-native-builder/dockerd.json").read_text(
+        encoding="utf-8"
+    )
+)["data-root"]
 
 
 def _grant_response() -> dict[str, object]:
@@ -730,6 +738,9 @@ class _FakeContainer:
                 "PidsLimit": options.get("pids_limit"),
                 "Binds": None,
                 "Devices": options.get("devices"),
+                "Privileged": False,
+                "PublishAllPorts": False,
+                "PortBindings": {},
                 "RestartPolicy": {
                     **dict(options.get("restart_policy", {})),
                     "MaximumRetryCount": 0,
@@ -800,6 +811,7 @@ class _FakeNetwork:
         events: list[str],
         *,
         enable_ipv6: bool,
+        ipam: dict[str, object] | None,
     ) -> None:
         self.name = name
         self.id = "3" * 64
@@ -810,9 +822,22 @@ class _FakeNetwork:
             "Internal": False,
             "Attachable": False,
             "EnableIPv6": enable_ipv6,
+            "IPAM": self._inspect_ipam(ipam),
             "Labels": labels,
         }
         self._events = events
+
+    @staticmethod
+    def _inspect_ipam(ipam: dict[str, object] | None) -> dict[str, object]:
+        if ipam is None:
+            config = {"Subnet": "172.28.0.0/24", "Gateway": "172.28.0.1"}
+        else:
+            config = dict(ipam["Config"][0])
+        return {
+            "Driver": "default",
+            "Options": {},
+            "Config": [{**config, "IPRange": ""}],
+        }
 
     def reload(self) -> None:
         self._events.append(f"reload:{self.name}")
@@ -833,6 +858,7 @@ class _FakeNetworks:
             kwargs["labels"],
             self.events,
             enable_ipv6=kwargs["enable_ipv6"],
+            ipam=kwargs.get("ipam"),
         )
         self.created.append(({"name": name, **kwargs}, network))
         return network
@@ -853,7 +879,7 @@ class _FakeDockerClient:
     def info(self) -> dict[str, object]:
         return {
             "Architecture": "aarch64",
-            "DockerRootDir": "/var/lib/loom-personal-dev-builder",
+            "DockerRootDir": _DOCKER_DATA_ROOT,
             "Runtimes": {"runsc-personal-dev-native": {"path": "/opt/loom/gvisor/runsc"}},
         }
 
@@ -885,6 +911,12 @@ async def test_docker_runtime_creates_exact_two_sandbox_contract_before_start() 
         "attachable": False,
         "enable_ipv6": False,
         "check_duplicate": True,
+        "ipam": {
+            "Driver": "default",
+            "Config": [
+                {"Subnet": "172.28.0.0/24", "Gateway": "172.28.0.1"},
+            ],
+        },
         "labels": network.attrs["Labels"],
     }
     assert len(client.containers.created) == 2
@@ -987,6 +1019,42 @@ async def test_docker_runtime_creates_exact_two_sandbox_contract_before_start() 
     assert client.events.index(f"archive:{client_name}") < client.events.index(
         f"start:{buildkit_name}"
     )
+
+
+async def test_docker_runtime_assigns_two_exact_isolated_network_slots() -> None:
+    first = _grant()
+    second = replace(
+        first,
+        grant_id=UUID("00000000-0000-0000-0000-000000000013"),
+        candidate_id=UUID("00000000-0000-0000-0000-000000000014"),
+        attempt_id=UUID("00000000-0000-0000-0000-000000000015"),
+    )
+    client = _FakeDockerClient(first.builder_image)
+    runtime = DockerPersonalDevNativeBuildRuntime(
+        client=client,
+        socket_path="/run/loom-personal-dev-builder/docker.sock",
+        identity=_identity(),
+        health_timeout_seconds=10,
+        health_poll_seconds=0.01,
+    )
+
+    await runtime.start(first)
+    await runtime.start(second)
+
+    assert [options["ipam"] for options, _network in client.networks.created] == [
+        {
+            "Driver": "default",
+            "Config": [
+                {"Subnet": "172.28.0.0/24", "Gateway": "172.28.0.1"},
+            ],
+        },
+        {
+            "Driver": "default",
+            "Config": [
+                {"Subnet": "172.28.1.0/24", "Gateway": "172.28.1.1"},
+            ],
+        },
+    ]
 
 
 async def test_docker_runtime_inventories_and_resumes_exact_running_grant() -> None:
@@ -1191,7 +1259,53 @@ async def test_docker_runtime_revalidates_labels_immediately_before_cleanup() ->
 
 @pytest.mark.parametrize(
     "mutation",
-    ["tmpfs", "cgroup-parent", "config", "networks", "alias"],
+    [
+        "outside-provider-pool",
+        "unsupported-provider-subnet",
+        "nonempty-ip-range",
+    ],
+)
+async def test_docker_runtime_rejects_unsafe_managed_network_ipam(
+    mutation: str,
+) -> None:
+    grant = _grant()
+    client = _FakeDockerClient(grant.builder_image)
+    runtime = DockerPersonalDevNativeBuildRuntime(
+        client=client,
+        socket_path="/run/loom-personal-dev-builder/docker.sock",
+        identity=_identity(),
+        health_timeout_seconds=10,
+        health_poll_seconds=0.01,
+    )
+    await runtime.start(grant)
+    _options, network = client.networks.created[0]
+    if mutation == "outside-provider-pool":
+        network.attrs["IPAM"]["Config"] = [
+            {"Subnet": "10.0.0.0/24", "IPRange": "", "Gateway": "10.0.0.1"}
+        ]
+    elif mutation == "unsupported-provider-subnet":
+        network.attrs["IPAM"]["Config"] = [
+            {
+                "Subnet": "172.28.2.0/24",
+                "IPRange": "",
+                "Gateway": "172.28.2.1",
+            }
+        ]
+    else:
+        network.attrs["IPAM"]["Config"][0]["IPRange"] = "172.28.0.128/25"
+
+    inventory = await runtime.inventory()
+
+    assert inventory.available is False
+    assert inventory.unavailable_reason == "managed_resource_shape_drift"
+    with pytest.raises(RuntimeError, match="shape drift"):
+        await runtime.cleanup(grant.grant_id)
+    assert not any(event == f"remove:{network.name}" for event in client.events)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["tmpfs", "cgroup-parent", "config", "networks", "alias", "privileged"],
 )
 async def test_docker_runtime_detects_security_and_tmpfs_shape_drift(
     mutation: str,
@@ -1215,10 +1329,12 @@ async def test_docker_runtime_detects_security_and_tmpfs_shape_drift(
         buildkit.attrs["Config"] = None
     elif mutation == "networks":
         buildkit.attrs["NetworkSettings"]["Networks"] = []
-    else:
+    elif mutation == "alias":
         buildkit.attrs["NetworkSettings"]["Networks"][f"loom-pdev-{grant.grant_id.hex[:12]}"][
             "Aliases"
         ] = ["wrong-name"]
+    else:
+        buildkit.attrs["HostConfig"]["Privileged"] = True
 
     restarted = DockerPersonalDevNativeBuildRuntime(
         client=client,

@@ -676,6 +676,23 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 "service_state_invalid"
             )
 
+    def _verify_nft_table_absent(self) -> None:
+        result = self._run(
+            "/usr/sbin/nft",
+            "list",
+            "tables",
+            check=False,
+        )
+        target = f"table inet {self.profile.nft_table}"
+        if (
+            result.returncode != 0
+            or result.stderr
+            or target in (line.strip() for line in result.stdout.splitlines())
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "nftables_state_invalid"
+            )
+
     def _systemctl(self, action: str, unit: str | None = None) -> None:
         arguments = ["/usr/bin/systemctl", action]
         if unit is not None:
@@ -916,6 +933,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 )
         self._verify_identity_inventory()
         self._verify_services_inactive()
+        self._verify_nft_table_absent()
         self._validate_generated_inputs()
 
     def _validate_generated_inputs(self) -> None:
@@ -1592,6 +1610,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
     def verify_staged(self) -> dict[str, str]:
         self._verify_installed()
         self._verify_services_inactive()
+        self._verify_nft_table_absent()
         return self._receipt("verify-staged", state="staged")
 
     def _dedicated_inventory(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1613,7 +1632,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "ls",
             "--quiet",
             "--filter",
-            "label=loom.personal-dev-native-builder.managed=true",
+            "type=custom",
             check=False,
         )
         if (
@@ -1836,7 +1855,9 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         ):
             self._remove_empty_directory(absolute)
         self._systemctl("daemon-reload")
-        return self._receipt("remove", state="absent")
+        receipt = self._receipt("remove", state="managed-files-absent")
+        receipt["retained"] = "dedicated-image-cache-and-system-identities"
+        return receipt
 
 
 class _InstallerOperations(Protocol):

@@ -425,9 +425,11 @@ observer to enforce freshness, identity, inventory, and zero-grant readiness.
 Rollback disables native-provider claim first, waits for or cancels exact
 grants, stops/removes only labeled agent resources, stops the agent and
 dedicated daemon, removes its exact nftables table, and then removes only
-byte-identical managed runtime files. It never restarts the existing Docker
-daemon, invokes Slurm, deletes a personal namespace directly, or changes task
-capacity.
+byte-identical managed runtime files. The dedicated image cache and
+sysusers-created identities remain inert; rollback never recursively deletes
+Docker state or host accounts and reports this retained state explicitly. It
+never restarts the existing Docker daemon, invokes Slurm, deletes a personal
+namespace directly, or changes task capacity.
 
 ## Verification requirements
 

@@ -27,6 +27,7 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert "umask 077" in runbook
     assert "merged_source_sha='<merged-40-lowercase-hex>'" in runbook
     assert "trusted_release_sha256='<trusted-release-64-lowercase-hex>'" in runbook
+    assert "previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-empty>'" in runbook
     assert "c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d" in runbook
     assert (
         "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292"
@@ -35,10 +36,19 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert 'test "$(git rev-parse HEAD)" = "$merged_source_sha"' in runbook
     assert 'test -z "$(git status --porcelain=v1 --untracked-files=all)"' in runbook
     assert 'sha256sum "$trusted_release"' in runbook
+    assert 'sha256sum "$previous_trusted_release"' in runbook
+    assert "previous_trusted_release_sha256:$previous_release" in runbook
+    assert runbook.index('test ! -L "$path"') < runbook.index(
+        'jq -er .source_sha "$trusted_release"'
+    )
+    assert runbook.index('test ! -L "$previous_trusted_release"') < runbook.index(
+        'jq -er .source_sha "$previous_trusted_release"'
+    )
     assert 'test "$(stat -c %a "$evidence_root")" = 700' in runbook
     assert 'case "$evidence_root/" in' in runbook
     assert '"$repository_root"/*) exit 1 ;;' in runbook
     assert 'install -d -m 0700 "$evidence_dir"' in runbook
+    assert runbook.count('> "$evidence_dir/immutable-inputs.json"') == 1
 
 
 def test_native_builder_runtime_orders_inert_stage_before_activation() -> None:
@@ -111,6 +121,22 @@ def test_native_builder_runtime_proves_two_separate_kvm_gvisor_sandboxes() -> No
     assert "buildkit-" in runbook
     assert "loom-native-conformance-client" in runbook
     assert "two-container-conformance" in runbook
+    assert '"$current_builder" "$current_agent" "$reviewed_public_store_origin"' in runbook
+    assert "docker_primary=(docker -H unix:///var/run/docker.sock)" in runbook
+    assert "foreign_client_name=loom-native-conformance-foreign-client" in runbook
+    assert "socket.create_connection((sys.argv[1],1234),timeout=2)" in normalized
+    assert "host_to_provider=denied" in runbook
+    assert "foreign_to_provider=denied" in runbook
+    assert "--subnet 172.28.0.0/24" in runbook
+    assert "--subnet 172.28.1.0/24" in runbook
+    assert "172.28.250.0/24" not in runbook
+    assert "172.28.251.0/24" not in runbook
+    assert 'buildkit_container_id="$("${docker_native[@]}" create' in runbook
+    assert 'foreign_client_id="$("${docker_primary[@]}" create' in runbook
+    assert '"${docker_native[@]}" rm -f "$client_container_id"' in runbook
+    assert '"${docker_primary[@]}" rm -f "$foreign_client_id"' in runbook
+    assert 'rm -f "$client_name"' not in runbook
+    assert 'rm -f "$foreign_client_name"' not in runbook
     assert 'test "$buildkit_container_id" != "$client_container_id"' in runbook
     assert 'test "$buildkit_sandbox_id" != "$client_sandbox_id"' in runbook
     assert "Runtime=runsc-personal-dev-native" in runbook
@@ -205,6 +231,9 @@ def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() ->
     assert 'cmp -s "$rollback_shadow_recheck" "$rollback_shadow_manifest"' in runtime
     assert "stop the agent before disabling the dedicated daemon" in runtime.casefold()
     assert "remove only byte-identical managed runtime files" in _normalized(runtime).casefold()
+    assert "dedicated image cache and system identities are retained" in _normalized(
+        runtime
+    ).casefold()
     assert "restore the exact operational state" in _normalized(acceptance).casefold()
     for runbook in (runtime, acceptance):
         assert "evidence-index.sha256" in runbook

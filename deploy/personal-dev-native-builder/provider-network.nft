@@ -4,10 +4,17 @@ table inet loom_personal_dev_builder {
     ip saddr 172.28.0.0/16 counter drop
   }
 
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ip daddr 172.28.0.0/16 counter drop
+  }
+
   chain forward {
     type filter hook forward priority filter; policy accept;
     ip daddr 172.28.0.0/16 ct state established,related accept
-    ip saddr 172.28.0.0/16 ip daddr 172.28.0.0/16 drop
+    ip saddr 172.28.0.0/24 ip daddr 172.28.0.0/24 accept
+    ip saddr 172.28.1.0/24 ip daddr 172.28.1.0/24 accept
+    ip daddr 172.28.0.0/16 counter drop
     ip saddr 172.28.0.0/16 ip daddr 0.0.0.0/8 drop
     ip saddr 172.28.0.0/16 ip daddr 10.0.0.0/8 drop
     ip saddr 172.28.0.0/16 ip daddr 100.64.0.0/10 drop
