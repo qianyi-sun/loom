@@ -265,10 +265,18 @@ class GitHubRouteAPI:
                 or any(not isinstance(item, dict) for item in runs)
             ):
                 continue
-            if total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW:
+            if (
+                total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW
+                or len(runs) > MAX_ACTIVE_RUNS_PER_WORKFLOW
+            ):
                 raise RouteControllerError("active workflow inventory exceeds the scan bound")
-            if total_count == len(runs):
-                return cast(list[dict[str, object]], runs)
+            # GitHub does not guarantee that ``total_count`` and the returned
+            # page are captured from the same instant. Runs frequently enter
+            # or leave ``in_progress`` between those two reads, especially
+            # during a PR burst. The page itself remains a bounded, useful
+            # snapshot: processing a partial snapshot is fail-safe because a
+            # missed request stays hosted and is rediscovered next cycle.
+            return cast(list[dict[str, object]], runs)
         raise RouteControllerError(
             "GitHub active workflow inventory remained malformed after bounded retries"
         )

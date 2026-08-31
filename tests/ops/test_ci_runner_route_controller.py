@@ -892,32 +892,26 @@ def test_github_active_run_inventory_overflow_fails_closed(
         api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0])
 
 
-def test_github_active_run_inventory_recovers_from_transient_count_race(
+def test_github_active_run_inventory_accepts_bounded_count_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
-    payloads = iter(
-        [
-            {"total_count": 2, "workflow_runs": [{"id": 30_000}]},
-            {"total_count": 1, "workflow_runs": [{"id": 30_000}]},
-        ]
-    )
     requests = 0
 
     def request(*_args: object, **_kwargs: object) -> object:
         nonlocal requests
         requests += 1
-        return next(payloads)
+        return {"total_count": 2, "workflow_runs": [{"id": 30_000}]}
 
     monkeypatch.setattr(api, "_request", request)
 
     assert api.active_workflow_runs(
         leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
     ) == [{"id": 30_000}]
-    assert requests == 2
+    assert requests == 1
 
 
-def test_github_active_run_inventory_persistent_malformed_fails_closed(
+def test_github_active_run_inventory_accepts_empty_count_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
@@ -927,6 +921,23 @@ def test_github_active_run_inventory_persistent_malformed_fails_closed(
         nonlocal requests
         requests += 1
         return {"total_count": 1, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == []
+    assert requests == 1
+
+
+def test_github_active_run_inventory_persistent_structural_malformed_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    requests = 0
+
+    def request(*_args: object, **_kwargs: object) -> object:
+        nonlocal requests
+        requests += 1
+        return {"total_count": "1", "workflow_runs": []}
 
     monkeypatch.setattr(api, "_request", request)
 
