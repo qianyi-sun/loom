@@ -238,6 +238,27 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert runbook.count('> "$evidence_dir/immutable-inputs.json"') == 1
 
 
+def test_native_builder_runtime_validates_protected_material_as_root() -> None:
+    runbook = _read(RUNTIME)
+    try:
+        validator = _shell_function(runbook, "validate_protected_material_metadata")
+    except ValueError:
+        validator = ""
+
+    assert validator.startswith("validate_protected_material_metadata() {")
+    assert "sudo /bin/sh -euc" in validator
+    assert 'test "$(stat -c %u "$key")" = 0' in validator
+    assert 'test "$(stat -c %g "$key")" = 0' in validator
+    assert 'test "$(stat -c %a "$key")" = 400' in validator
+    assert 'test "$(stat -c %s "$key")" = 32' in validator
+    assert 'test "$(stat -c %h "$key")" = 1' in validator
+    assert 'test "$(stat -c %u "$ca")" = 0' in validator
+    assert 'test "$(stat -c %g "$ca")" = 0' in validator
+    assert 'test "$(stat -c %a "$ca")" = 444' in validator
+    assert 'test "$(stat -c %h "$ca")" = 1' in validator
+    assert 'sh "$agent_private_key" "$service_ca"' in validator
+
+
 def test_native_builder_runtime_orders_inert_stage_before_activation() -> None:
     runbook = _read(RUNTIME)
     normalized = _normalized(runbook)
@@ -296,6 +317,51 @@ def test_native_builder_runtime_captures_exact_read_only_boundaries() -> None:
     assert 'test "$observed_public_store_cidrs" = "$reviewed_public_store_cidrs"' in runbook
     assert '"manager_ceiling":0' in runbook
     assert '"worker_available":false' in runbook
+
+
+def test_native_builder_runtime_normalizes_public_dns_cidrs() -> None:
+    runbook = _read(RUNTIME)
+    try:
+        normalizer = _shell_function(runbook, "normalize_public_store_cidrs")
+    except ValueError:
+        normalizer = ""
+    behavior = subprocess.run(
+        ["bash", "-seu"],
+        input=(
+            normalizer
+            + "\nprintf '%s\\n' '207.35.188.227' "
+            + "'::ffff:207.35.188.227' '2606:4700:4700::1111' "
+            + "'2606:4700:4700::1111' | normalize_public_store_cidrs\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert behavior.stdout == (
+        "207.35.188.227/32\n2606:4700:4700::1111/128\n"
+    )
+
+
+def test_native_builder_runtime_rejects_non_global_dns_addresses() -> None:
+    normalizer = _shell_function(
+        _read(RUNTIME), "normalize_public_store_cidrs"
+    )
+
+    for address in ("10.0.0.1", "::ffff:10.0.0.1", "fd00::1"):
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", address],
+            input=(
+                normalizer
+                + "\nprintf '%s\\n' \"$1\" | normalize_public_store_cidrs\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert behavior.returncode != 0, address
 
 
 def test_native_builder_runtime_proves_two_separate_kvm_gvisor_sandboxes() -> None:

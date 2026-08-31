@@ -306,14 +306,29 @@ Validate the private material only on the protected operator host. Do not
 record either file's bytes or private-key digest in issue comments.
 
 ```bash
-test -f "$agent_private_key"
-test ! -L "$agent_private_key"
-test "$(realpath -e "$agent_private_key")" = "$agent_private_key"
-test "$(stat -c %u "$agent_private_key")" = 0
-test "$(stat -c %g "$agent_private_key")" = 0
-test "$(stat -c %a "$agent_private_key")" = 400
-test "$(stat -c %s "$agent_private_key")" = 32
-test "$(stat -c %h "$agent_private_key")" = 1
+validate_protected_material_metadata() {
+  sudo /bin/sh -euc '
+    key="$1"
+    ca="$2"
+    test -f "$key"
+    test ! -L "$key"
+    test "$(realpath -e "$key")" = "$key"
+    test "$(stat -c %u "$key")" = 0
+    test "$(stat -c %g "$key")" = 0
+    test "$(stat -c %a "$key")" = 400
+    test "$(stat -c %s "$key")" = 32
+    test "$(stat -c %h "$key")" = 1
+    test -f "$ca"
+    test ! -L "$ca"
+    test "$(realpath -e "$ca")" = "$ca"
+    test "$(stat -c %u "$ca")" = 0
+    test "$(stat -c %g "$ca")" = 0
+    test "$(stat -c %a "$ca")" = 444
+    test "$(stat -c %h "$ca")" = 1
+  ' sh "$agent_private_key" "$service_ca"
+}
+
+validate_protected_material_metadata
 
 sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repository_root/src" \
   "$repository_root/.venv/bin/python" - "$agent_private_key" \
@@ -332,14 +347,6 @@ signer = load_personal_dev_native_builder_signer(
 if hashlib.sha256(signer.public_key_bytes(sys.argv[2])).hexdigest() != sys.argv[3]:
     raise SystemExit(1)
 PY
-
-test -f "$service_ca"
-test ! -L "$service_ca"
-test "$(realpath -e "$service_ca")" = "$service_ca"
-test "$(stat -c %u "$service_ca")" = 0
-test "$(stat -c %g "$service_ca")" = 0
-test "$(stat -c %a "$service_ca")" = 444
-test "$(stat -c %h "$service_ca")" = 1
 ```
 
 ## 2. Capture read-only before-state
@@ -483,11 +490,13 @@ dns_raw="$evidence_dir/public-store-dns.raw"
 } > "$dns_raw"
 chmod 0600 "$dns_raw"
 
-observed_public_store_cidrs="$(awk '{print $1}' "$dns_raw" | sort -u \
-  | python3 -c 'import ipaddress,sys
+normalize_public_store_cidrs() {
+  python3 -c 'import ipaddress,sys
 values=[]
 for line in sys.stdin:
     address=ipaddress.ip_address(line.strip())
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address=address.ipv4_mapped
     if not address.is_global:
         raise SystemExit(1)
     values.append(f"{address}/{address.max_prefixlen}")
@@ -498,7 +507,11 @@ print("\n".join(
     str(item) for item in sorted(
         networks,key=lambda item:(item.version,int(item.network_address))
     )
-))')"
+))'
+}
+
+observed_public_store_cidrs="$(awk '{print $1}' "$dns_raw" | sort -u \
+  | normalize_public_store_cidrs)"
 test "$observed_public_store_cidrs" = "$reviewed_public_store_cidrs"
 jq -cnS --arg host "$public_store_host" \
   --arg origin "$reviewed_public_store_origin" \
