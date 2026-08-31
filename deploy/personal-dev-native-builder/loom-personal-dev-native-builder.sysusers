@@ -1,0 +1,4 @@
+g loom-pdev-native 24850
+g loom-pdev-docker 24851
+u loom-pdev-native 24850:24850 "Loom native builder agent" /nonexistent /usr/sbin/nologin
+m loom-pdev-native loom-pdev-docker

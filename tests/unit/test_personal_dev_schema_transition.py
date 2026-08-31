@@ -42,17 +42,32 @@ def _write_json(path: Path, value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _legacy_profile(path: Path) -> Path:
-    profile = re.sub(
-        r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
-        "\n",
-        _PROFILE.read_text(encoding="utf-8").replace(
-            "schema_version = 2\n",
-            "schema_version = 1\n",
-            1,
-        ),
-        count=1,
+def _predecessor_profile(path: Path, *, includes_web: bool) -> Path:
+    profile = _PROFILE.read_text(encoding="utf-8").replace(
+        "schema_version = 3\n",
+        f"schema_version = {2 if includes_web else 1}\n",
+        1,
     )
+    profile = profile.replace("personal_dev_native_builder_enabled = false\n", "", 1)
+    profile = profile.replace(
+        'native_builder_public_secret = "loom-personal-dev-native-builder-public"\n',
+        "",
+        1,
+    )
+    profile = re.sub(
+        r"\n\[native_builder\]\n.*?(?=\n\[network\]\n)",
+        "\n",
+        profile,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if not includes_web:
+        profile = re.sub(
+            r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
+            "\n",
+            profile,
+            count=1,
+        )
     path.write_text(profile, encoding="utf-8")
     return path
 
@@ -171,8 +186,9 @@ def _transition_inputs(
     predecessor_value["images"]["loom_service"] = (
         "ghcr.io/qianyi-sun/loom-service@sha256:" + "d" * 64
     )
+    predecessor_value["schema_version"] = 3 if predecessor_includes_web else 2
+    del predecessor_value["images"]["personal_dev_native_builder_agent"]
     if not predecessor_includes_web:
-        predecessor_value["schema_version"] = 2
         del predecessor_value["images"]["loom_web"]
     predecessor_release_path = tmp_path / "predecessor-release.json"
     predecessor_release_sha256 = _write_json(
@@ -183,11 +199,10 @@ def _transition_inputs(
         predecessor_release_path,
         predecessor_release_sha256,
     )
-    predecessor_profile = (
-        profile
-        if predecessor_includes_web
-        else load_personal_dev_control_plane_profile(
-            _legacy_profile(tmp_path / "predecessor-profile.toml")
+    predecessor_profile = load_personal_dev_control_plane_profile(
+        _predecessor_profile(
+            tmp_path / "predecessor-profile.toml",
+            includes_web=predecessor_includes_web,
         )
     )
     predecessor_shadow = render_shadow_personal_dev_control_plane(
@@ -268,7 +283,7 @@ def _transition_inputs(
         "predecessor_shadow_sha256": predecessor_shadow_sha256,
         "alembic_ini_path": _ROOT / "migrations/alembic.ini",
         "expected_predecessor_head": "0112",
-        "expected_target_head": "0122",
+        "expected_target_head": "0123",
     }
 
 
@@ -313,7 +328,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["namespace"] == "loom-dev"
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0122"
+    assert plan["target"]["schema_head"] == "0123"
     predecessor_documents = list(
         yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
     )
@@ -341,6 +356,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0120",
         "0121",
         "0122",
+        "0123",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]

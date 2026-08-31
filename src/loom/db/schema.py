@@ -1050,6 +1050,291 @@ class PersonalDevCandidateBuildAttempt(Base):
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
+class PersonalDevNativeBuilderAgent(Base):
+    """Durable signed identity and secret-free inventory for one native agent."""
+
+    __tablename__ = "personal_dev_native_builder_agents"
+    __table_args__ = (
+        CheckConstraint(
+            "key_id ~ '^[a-z][a-z0-9._-]{0,63}$' "
+            "AND provider = 'gb10-gvisor-docker-v1' "
+            "AND platform = 'linux/arm64' "
+            "AND protocol_version = 1 "
+            "AND host_architecture = 'aarch64' "
+            "AND host_name <> '' AND host_name = btrim(host_name) "
+            "AND octet_length(agent_image) BETWEEN 73 AND 584 "
+            "AND agent_image ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$' "
+            "AND octet_length(builder_image) BETWEEN 73 AND 584 "
+            "AND builder_image ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$' "
+            "AND runtime_profile_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND readiness_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND status_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND max_concurrency = 2",
+            name="personal_dev_native_builder_agents_identity_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(managed_grant_ids_json) = 'array' "
+            "AND jsonb_array_length(managed_grant_ids_json) <= 64 "
+            "AND jsonb_typeof(active_grant_ids_json) = 'array' "
+            "AND jsonb_array_length(active_grant_ids_json) <= 2",
+            name="personal_dev_native_builder_agents_inventory_check",
+        ),
+        CheckConstraint(
+            "available = (unavailable_reason IS NULL) "
+            "AND (unavailable_reason IS NULL OR "
+            "unavailable_reason ~ '^[a-z][a-z0-9_]{0,127}$') "
+            "AND jsonb_typeof(status_json) = 'object' "
+            "AND ((status_json->>'agent_instance_id' = instance_id::text "
+            "AND status_json->>'agent_key_id' = key_id "
+            "AND status_json->>'provider' = provider "
+            "AND status_json->>'platform' = platform "
+            "AND (status_json->>'protocol_version')::integer = protocol_version "
+            "AND status_json->>'host_name' = host_name "
+            "AND status_json->>'host_architecture' = host_architecture "
+            "AND status_json->>'host_boot_id' = host_boot_id::text "
+            "AND status_json->>'agent_image' = agent_image "
+            "AND status_json->>'builder_image' = builder_image "
+            "AND status_json->>'runtime_profile_sha256' = runtime_profile_sha256 "
+            "AND (status_json->>'max_concurrency')::integer = max_concurrency "
+            "AND status_json->'managed_grant_ids' = managed_grant_ids_json "
+            "AND status_json->'active_grant_ids' = active_grant_ids_json "
+            "AND (status_json->>'available')::boolean = available "
+            "AND status_json->>'unavailable_reason' "
+            "IS NOT DISTINCT FROM unavailable_reason "
+            "AND status_json->>'readiness_evidence_sha256' = "
+            "readiness_evidence_sha256) IS TRUE) "
+            "AND first_seen_at <= last_seen_at AND last_seen_at <= updated_at",
+            name="personal_dev_native_builder_agents_status_check",
+        ),
+        UniqueConstraint(
+            "key_id",
+            name="personal_dev_native_builder_agents_key_uidx",
+        ),
+        Index(
+            "personal_dev_native_builder_agents_freshness_idx",
+            "available",
+            "last_seen_at",
+            "instance_id",
+        ),
+    )
+
+    instance_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    protocol_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    host_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    host_architecture: Mapped[str] = mapped_column(String(32), nullable=False)
+    host_boot_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    agent_image: Mapped[str] = mapped_column(Text, nullable=False)
+    builder_image: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    max_concurrency: Mapped[int] = mapped_column(Integer, nullable=False)
+    managed_grant_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    active_grant_ids_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    available: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    readiness_evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    last_poll_requested_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+    )
+    last_poll_nonce: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
+class PersonalDevNativeBuildGrant(Base):
+    """One agent-bound arm64 build under a whole-attempt lease epoch."""
+
+    __tablename__ = "personal_dev_native_build_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_lease_epoch > 0 "
+            "AND platform = 'linux/arm64' "
+            "AND provider = 'gb10-gvisor-docker-v1' "
+            "AND required_agent_key_id ~ '^[a-z][a-z0-9._-]{0,63}$' "
+            "AND (running_agent_instance_id IS NULL "
+            "OR running_agent_instance_id = required_agent_instance_id) "
+            "AND octet_length(agent_image) BETWEEN 73 AND 584 "
+            "AND agent_image ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$' "
+            "AND octet_length(builder_image) BETWEEN 73 AND 584 "
+            "AND builder_image ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$' "
+            "AND runtime_profile_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND contract_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND octet_length(contract_json) BETWEEN 2 AND 65536 "
+            "AND artifact_max_bytes BETWEEN 1 AND 17179869184 "
+            "AND active_deadline_seconds BETWEEN 300 AND 7200",
+            name="personal_dev_native_build_grants_identity_check",
+        ),
+        CheckConstraint(
+            "source_bucket <> '' AND source_bucket = btrim(source_bucket) "
+            "AND position('/' in source_bucket) = 0 "
+            "AND artifact_bucket = source_bucket "
+            "AND source_object_key <> '' AND artifact_object_key <> '' "
+            "AND octet_length(source_object_key) <= 2048 "
+            "AND octet_length(artifact_object_key) <= 2048 "
+            "AND source_object_key !~ '[[:cntrl:]]' "
+            "AND artifact_object_key !~ '[[:cntrl:]]' "
+            "AND artifact_object_key LIKE 'personal-dev/builds/%/artifacts.tar'",
+            name="personal_dev_native_build_grants_object_binding_check",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            name="personal_dev_native_build_grants_state_check",
+        ),
+        CheckConstraint(
+            "((last_request_at IS NULL AND last_request_nonce IS NULL) OR "
+            "(last_request_at IS NOT NULL AND last_request_nonce IS NOT NULL)) AND ("
+            "(state = 'queued' AND running_agent_instance_id IS NULL "
+            "AND started_at IS NULL AND heartbeat_at IS NULL AND finished_at IS NULL "
+            "AND failure_reason IS NULL AND completion_json IS NULL "
+            "AND completion_sha256 IS NULL AND runtime_evidence_json IS NULL "
+            "AND runtime_evidence_sha256 IS NULL AND artifact_head_json IS NULL "
+            "AND artifact_head_sha256 IS NULL) OR ("
+            "state = 'running' AND running_agent_instance_id IS NOT NULL "
+            "AND started_at IS NOT NULL AND heartbeat_at IS NOT NULL "
+            "AND finished_at IS NULL AND failure_reason IS NULL "
+            "AND completion_json IS NULL AND completion_sha256 IS NULL "
+            "AND runtime_evidence_json IS NULL AND runtime_evidence_sha256 IS NULL "
+            "AND artifact_head_json IS NULL AND artifact_head_sha256 IS NULL) OR ("
+            "state = 'succeeded' AND running_agent_instance_id IS NOT NULL "
+            "AND started_at IS NOT NULL AND heartbeat_at IS NOT NULL "
+            "AND finished_at IS NOT NULL AND failure_reason IS NULL "
+            "AND jsonb_typeof(completion_json) = 'object' "
+            "AND completion_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(runtime_evidence_json) = 'object' "
+            "AND runtime_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND jsonb_typeof(artifact_head_json) = 'object' "
+            "AND artifact_head_sha256 ~ '^[0-9a-f]{64}$') OR ("
+            "state = 'failed' AND running_agent_instance_id IS NOT NULL "
+            "AND started_at IS NOT NULL AND heartbeat_at IS NOT NULL "
+            "AND finished_at IS NOT NULL "
+            "AND failure_reason ~ '^[a-z][a-z0-9_]{0,127}$' "
+            "AND jsonb_typeof(completion_json) = 'object' "
+            "AND completion_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND runtime_evidence_json IS NULL AND runtime_evidence_sha256 IS NULL "
+            "AND artifact_head_json IS NULL AND artifact_head_sha256 IS NULL) OR ("
+            "state = 'cancelled' AND finished_at IS NOT NULL "
+            "AND failure_reason ~ '^[a-z][a-z0-9_]{0,127}$' "
+            "AND ((running_agent_instance_id IS NULL AND started_at IS NULL "
+            "AND heartbeat_at IS NULL) OR (running_agent_instance_id IS NOT NULL "
+            "AND started_at IS NOT NULL AND heartbeat_at IS NOT NULL)) "
+            "AND completion_json IS NULL AND completion_sha256 IS NULL "
+            "AND runtime_evidence_json IS NULL AND runtime_evidence_sha256 IS NULL "
+            "AND artifact_head_json IS NULL AND artifact_head_sha256 IS NULL)) "
+            "AND queued_at <= updated_at "
+            "AND (started_at IS NULL OR queued_at <= started_at) "
+            "AND (heartbeat_at IS NULL OR started_at <= heartbeat_at) "
+            "AND (finished_at IS NULL OR COALESCE(heartbeat_at, queued_at) <= finished_at)",
+            name="personal_dev_native_build_grants_terminal_check",
+        ),
+        UniqueConstraint(
+            "attempt_id",
+            "attempt_lease_epoch",
+            "platform",
+            name="personal_dev_native_build_grants_attempt_platform_uidx",
+        ),
+        Index(
+            "personal_dev_native_build_grants_picker_idx",
+            "state",
+            "queued_at",
+            "id",
+        ),
+        Index(
+            "personal_dev_native_build_grants_agent_state_idx",
+            "required_agent_instance_id",
+            "state",
+            "updated_at",
+            "id",
+        ),
+        Index(
+            "personal_dev_native_build_grants_attempt_idx",
+            "attempt_id",
+            "attempt_lease_epoch",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "personal_dev_candidates.id",
+            name="personal_dev_native_build_grants_candidate_fkey",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "personal_dev_candidate_build_attempts.id",
+            name="personal_dev_native_build_grants_attempt_fkey",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    attempt_lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    required_agent_instance_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "personal_dev_native_builder_agents.instance_id",
+            name="personal_dev_native_build_grants_required_agent_fkey",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    required_agent_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_image: Mapped[str] = mapped_column(Text, nullable=False)
+    builder_image: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_profile_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_json: Mapped[str] = mapped_column(Text, nullable=False)
+    contract_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    source_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_bucket: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_max_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active_deadline_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    running_agent_instance_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "personal_dev_native_builder_agents.instance_id",
+            name="personal_dev_native_build_grants_running_agent_fkey",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    last_request_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    last_request_nonce: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    completion_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    completion_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    runtime_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    runtime_evidence_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_head_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    artifact_head_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class DevLifecycleOperation(Base):
     """Owner-bound, epoch-fenced apply request for one personal environment."""
 

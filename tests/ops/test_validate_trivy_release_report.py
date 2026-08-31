@@ -339,6 +339,7 @@ def test_validator_rejects_stage1_arm64_substitution(tmp_path: Path) -> None:
         "family-orchestrator",
         "llm-gateway",
         "personal-dev-activation-agent",
+        "personal-dev-native-builder-agent",
         "pipeline-orchestrator",
     ),
 )

@@ -16,6 +16,7 @@ import yaml
 
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlanError,
+    PersonalDevOperationalPlanError,
     load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
     load_personal_dev_operational_plan,
@@ -51,7 +52,7 @@ _MANAGEMENT_FILES = {
 
 def _release_value() -> dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -62,6 +63,10 @@ def _release_value() -> dict[str, Any]:
             ),
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
+            ),
+            "personal_dev_native_builder_agent": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+                + "c" * 64
             ),
             "personal_dev_scanner_cache": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
@@ -106,6 +111,29 @@ def _inputs(tmp_path: Path):
     )
 
 
+def _prepared_profile(tmp_path: Path):
+    source = _PROFILE.read_text(encoding="utf-8")
+    replacements = {
+        'prepared = false\nagent_instance_id = ""\nagent_key_id = ""\npublic_key_sha256 = ""\nhost_name = ""\nruntime_profile_sha256 = ""\npublic_store_origin = ""\npublic_store_endpoint_cidrs = []\nprovider = "gb10-gvisor-docker-v1"': (
+            'prepared = true\n'
+            'agent_instance_id = "10000000-0000-0000-0000-000000000001"\n'
+            'agent_key_id = "gb10-native-builder-v1"\n'
+            f'public_key_sha256 = "{"d" * 64}"\n'
+            'host_name = "gx10-01c7"\n'
+            f'runtime_profile_sha256 = "{"e" * 64}"\n'
+            'public_store_origin = "https://objects.dev.yylx.world"\n'
+            'public_store_endpoint_cidrs = ["207.35.188.227/32"]\n'
+            'provider = "gb10-gvisor-docker-v1"'
+        )
+    }
+    for old, new in replacements.items():
+        assert old in source
+        source = source.replace(old, new, 1)
+    path = tmp_path / "prepared-profile.toml"
+    path.write_text(source, encoding="utf-8")
+    return load_personal_dev_control_plane_profile(path)
+
+
 def _render(tmp_path: Path):
     profile, release = _inputs(tmp_path)
     rendered = render_shadow_personal_dev_control_plane(profile, release)
@@ -113,20 +141,37 @@ def _render(tmp_path: Path):
     return profile, release, rendered, documents
 
 
-def _legacy_inputs(tmp_path: Path):
-    profile_text = re.sub(
+def _legacy_profile_text(text: str) -> str:
+    value = text.replace("schema_version = 3\n", "schema_version = 1\n", 1)
+    value = value.replace("personal_dev_native_builder_enabled = false\n", "", 1)
+    value = value.replace(
+        'native_builder_public_secret = "loom-personal-dev-native-builder-public"\n',
+        "",
+        1,
+    )
+    value = re.sub(
+        r"\n\[native_builder\]\n.*?(?=\n\[network\]\n)",
+        "\n",
+        value,
+        count=1,
+        flags=re.DOTALL,
+    )
+    return re.sub(
         r"\n\[resources\.web\]\n(?:[^\n]*\n){4}",
         "\n",
-        _PROFILE.read_text(encoding="utf-8").replace(
-            "schema_version = 2\n", "schema_version = 1\n", 1
-        ),
+        value,
         count=1,
     )
+
+
+def _legacy_inputs(tmp_path: Path):
+    profile_text = _legacy_profile_text(_PROFILE.read_text(encoding="utf-8"))
     profile_path = tmp_path / "legacy-profile.toml"
     profile_path.write_text(profile_text, encoding="utf-8")
     release_value = _release_value()
     release_value["schema_version"] = 2
     del release_value["images"]["loom_web"]
+    del release_value["images"]["personal_dev_native_builder_agent"]
     payload = json.dumps(
         release_value,
         sort_keys=True,
@@ -171,7 +216,8 @@ def _quota_value(profile: Any) -> dict[str, int]:
 
 
 def _acceptance_render(tmp_path: Path):
-    profile, release = _inputs(tmp_path)
+    _shadow_profile, release = _inputs(tmp_path)
+    profile = _prepared_profile(tmp_path)
     shadow = render_shadow_personal_dev_control_plane(profile, release)
     release_sha256 = hashlib.sha256(release.canonical_bytes()).hexdigest()
     protocol_sha256 = hashlib.sha256(
@@ -182,10 +228,16 @@ def _acceptance_render(tmp_path: Path):
         ).encode("ascii")
     ).hexdigest()
     value = {
-        "acceptance_owner": {
-            "team_id": "00000000-0000-0000-0000-000000000201",
-            "user_id": "00000000-0000-0000-0000-000000000301",
-        },
+        "acceptance_owners": [
+            {
+                "team_id": "00000000-0000-0000-0000-000000000201",
+                "user_id": "00000000-0000-0000-0000-000000000301",
+            },
+            {
+                "team_id": "00000000-0000-0000-0000-000000000202",
+                "user_id": "00000000-0000-0000-0000-000000000302",
+            },
+        ],
         "activation": {
             "key_id": "personal-dev-agent-v1",
             "public_key_sha256": "c" * 64,
@@ -215,6 +267,23 @@ def _acceptance_render(tmp_path: Path):
             "execution_epoch": 0,
             "execution_state": "shadow",
         },
+        "native_builder": {
+            "agent_instance_id": profile.native_builder.agent_instance_id,
+            "agent_key_id": profile.native_builder.agent_key_id,
+            "public_key_sha256": profile.native_builder.public_key_sha256,
+            "host_name": profile.native_builder.host_name,
+            "host_boot_id": "20000000-0000-0000-0000-000000000001",
+            "runtime_profile_sha256": profile.native_builder.runtime_profile_sha256,
+            "public_store_origin": profile.native_builder.public_store_origin,
+            "public_store_endpoint_cidrs": list(
+                profile.native_builder.public_store_endpoint_cidrs
+            ),
+            "provider": profile.native_builder.provider,
+            "platform": profile.native_builder.platform,
+            "protocol_version": profile.native_builder.protocol_version,
+            "freshness_seconds": profile.native_builder.freshness_seconds,
+            "max_concurrency": profile.native_builder.max_concurrency,
+        },
         "principals": {
             "lifecycle_principal_id": "personal-dev-lifecycle",
             "reporter_principal_id": "personal-dev-reporter",
@@ -226,11 +295,11 @@ def _acceptance_render(tmp_path: Path):
             "shadow_manifest_sha256": hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
             "trusted_release_sha256": release_sha256,
         },
-        "schema_version": 1,
+        "schema_version": 3,
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0122",
+            "schema_head": "0123",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
@@ -259,8 +328,9 @@ def _acceptance_render(tmp_path: Path):
 def _operational_render(tmp_path: Path):
     profile, release, acceptance, shadow, _rendered, _documents = _acceptance_render(tmp_path)
     value = acceptance.canonical_value()
-    value.pop("acceptance_owner")
+    value.pop("acceptance_owners")
     value.pop("window")
+    value["schema_version"] = 2
     value["approval"] = {
         "acceptance_result_sha256": "4" * 64,
         "approved_at": "2026-08-17T20:30:00Z",
@@ -327,7 +397,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "b88caf2d008c00d8a5250c872c934b37d1d87259dec412e7e8db82e939417ec7"
+        "478c57e32f6a4afa48e8cceb5ef10eca2fe8f05536f06047a065f7dd73d9c54e"
     )
 
     identities = {_identity(document) for document in documents}
@@ -610,47 +680,87 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             assert template["annotations"]["loom.dev/acceptance-plan-sha256"] == plan.sha256
 
 
-def test_acceptance_render_v2_two_owners_preserves_resource_shape(tmp_path: Path) -> None:
-    profile, release, v1_plan, _shadow, v1_rendered, v1_documents = _acceptance_render(tmp_path)
-    profile = replace(
-        profile,
-        limits=replace(
-            profile.limits,
-            global_live_instances=2,
-            builder_global_concurrency=2,
-        ),
+def test_acceptance_render_rejects_predecessor_v2_plan(tmp_path: Path) -> None:
+    profile, release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
     )
-    shadow = render_shadow_personal_dev_control_plane(profile, release)
-    value = v1_plan.canonical_value()
+    value = native_plan.canonical_value()
     value["schema_version"] = 2
-    owner_0 = value.pop("acceptance_owner")
-    owner_1 = {
-        "team_id": "00000000-0000-0000-0000-000000000006",
-        "user_id": "00000000-0000-0000-0000-000000000005",
-    }
-    value["acceptance_owners"] = sorted(
-        [owner_0, owner_1],
-        key=lambda item: (item["team_id"], item["user_id"]),
-    )
-    value["quotas"]["global_live_instances"] = 2
-    value["quotas"]["builder_global_concurrency"] = 2
-    value["release"]["shadow_manifest_sha256"] = hashlib.sha256(
-        shadow.yaml_text.encode("utf-8")
-    ).hexdigest()
+    value.pop("native_builder")
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
     path = tmp_path / "acceptance-plan-v2.json"
     path.write_bytes(payload)
     path.chmod(0o600)
     plan = load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
 
-    rendered = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
-    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+    assert plan.schema_version == 2
+    assert plan.native_builder is None
 
-    assert plan.acceptance_owners[0].team_id != plan.acceptance_owners[1].team_id
-    assert rendered.resource_count == v1_rendered.resource_count
-    assert {_identity(item) for item in documents if item["kind"] != "Job"} == {
-        _identity(item) for item in v1_documents if item["kind"] != "Job"
-    }
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
+
+
+def test_acceptance_plan_v2_rejects_native_identity_extension(tmp_path: Path) -> None:
+    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    value = native_plan.canonical_value()
+    value["schema_version"] = 2
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "acceptance-plan-v2-native.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
+
+
+def test_acceptance_plan_rejects_out_of_range_native_public_store_port(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    value = native_plan.canonical_value()
+    value["native_builder"]["public_store_origin"] = (
+        "https://objects.dev.yylx.world:99999"
+    )
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "acceptance-plan-invalid-public-store.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
+
+
+@pytest.mark.parametrize("mode", ["acceptance", "operational"])
+def test_enabled_render_rejects_native_identity_under_predecessor_schema(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    if mode == "acceptance":
+        profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+            tmp_path
+        )
+        with pytest.raises(PersonalDevAcceptancePlanError):
+            render_acceptance_personal_dev_control_plane(
+                profile,
+                release,
+                replace(plan, schema_version=2),
+                now=_NOW,
+            )
+    else:
+        profile, release, plan, _shadow, _rendered, _documents = _operational_render(
+            tmp_path
+        )
+        with pytest.raises(PersonalDevOperationalPlanError):
+            render_operational_personal_dev_control_plane(
+                profile,
+                release,
+                replace(plan, schema_version=1),
+                now=_NOW,
+            )
 
 
 def test_acceptance_render_preserves_shadow_claim_template_lineage(
@@ -699,6 +809,7 @@ def test_acceptance_render_enables_only_personal_application_authorities(
 
     assert env["LOOM_SVC_DEV_INSTANCES_ENABLED"] == "true"
     assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED"] == "true"
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED"] == "true"
     assert env["LOOM_SVC_K8S_WORKER_ENABLED"] == "false"
     assert env["LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256"] == plan.sha256
     assert env["LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON"] == (plan.manager_runtime_json())
@@ -715,9 +826,53 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     assert env["LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256"] == (
         plan.builder.trusted_launcher_profile_sha256
     )
+    assert env["LOOM_SVC_MINIO_PUBLIC_ENDPOINT"] == plan.native_builder.public_store_origin
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID"] == str(
+        plan.native_builder.agent_instance_id
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_KEY_ID"] == (
+        plan.native_builder.agent_key_id
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_FILE"] == (
+        "/run/loom-personal-dev/native-builder-public/files/public-key"
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_SHA256"] == (
+        plan.native_builder.public_key_sha256
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE"] == (
+        plan.release.images.personal_dev_native_builder_agent
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_RUNTIME_PROFILE_SHA256"] == (
+        plan.native_builder.runtime_profile_sha256
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PROTOCOL_VERSION"] == "1"
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_MAX_CONCURRENCY"] == "2"
+    assert env["LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_FRESHNESS_SEC"] == "60"
+    management_policy = next(
+        item
+        for item in documents
+        if item["kind"] == "NetworkPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management"
+    )
+    assert {
+        "to": [{"ipBlock": {"cidr": "207.35.188.227/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    } in management_policy["spec"]["egress"]
+    pod_spec = management["spec"]["template"]["spec"]
+    native_volume = next(
+        volume for volume in pod_spec["volumes"] if volume["name"] == "native-builder-public-projected"
+    )
+    assert native_volume["secret"] == {
+        "defaultMode": 0o440,
+        "items": [{"key": "public-key", "path": "public-key"}],
+        "secretName": "loom-personal-dev-native-builder-public",
+    }
+    assert "private" not in json.dumps(native_volume, sort_keys=True).lower()
     assert not any("SLURM" in name for name in env)
     assert (
-        management["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"]
+        management["spec"]["template"]["spec"]["containers"][0]["readinessProbe"][
+            "httpGet"
+        ]["path"]
         == "/api/v1/health/personal-dev-acceptance"
     )
     assert deployments["loom-personal-dev-activation-agent"]["spec"]["replicas"] == 1
@@ -728,6 +883,173 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     }
     assert "loom-worker" not in workload_names
     assert "loom-capacity-manager" not in workload_names
+
+
+def test_prepared_shadow_keeps_public_store_egress_inert(tmp_path: Path) -> None:
+    _shadow_profile, release = _inputs(tmp_path)
+    profile = _prepared_profile(tmp_path)
+
+    rendered = render_shadow_personal_dev_control_plane(profile, release)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+    management_policy = next(
+        item
+        for item in documents
+        if item["kind"] == "NetworkPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management"
+    )
+
+    assert "207.35.188.227/32" not in yaml.safe_dump(
+        management_policy["spec"]["egress"]
+    )
+
+
+def test_enabled_render_rejects_direct_public_store_cidr_relaxation(
+    tmp_path: Path,
+) -> None:
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    assert profile.native_builder is not None
+    assert plan.native_builder is not None
+    relaxed_cidrs = ("0.0.0.0/0",)
+    relaxed_profile = replace(
+        profile,
+        native_builder=replace(
+            profile.native_builder,
+            public_store_endpoint_cidrs=relaxed_cidrs,
+        ),
+    )
+    relaxed_shadow = render_shadow_personal_dev_control_plane(
+        relaxed_profile,
+        release,
+    )
+    relaxed_plan = replace(
+        plan,
+        native_builder=replace(
+            plan.native_builder,
+            public_store_endpoint_cidrs=relaxed_cidrs,
+        ),
+        release=replace(
+            plan.release,
+            shadow_manifest_sha256=hashlib.sha256(
+                relaxed_shadow.yaml_text.encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            relaxed_profile,
+            release,
+            relaxed_plan,
+            now=_NOW,
+        )
+
+
+def test_enabled_render_rejects_direct_profile_schema_downgrade(
+    tmp_path: Path,
+) -> None:
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    downgraded_profile = replace(profile, schema_version=2)
+    downgraded_shadow = render_shadow_personal_dev_control_plane(
+        downgraded_profile,
+        release,
+    )
+    rebound_plan = replace(
+        plan,
+        release=replace(
+            plan.release,
+            shadow_manifest_sha256=hashlib.sha256(
+                downgraded_shadow.yaml_text.encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            downgraded_profile,
+            release,
+            rebound_plan,
+            now=_NOW,
+        )
+
+
+def test_enabled_render_revalidates_direct_nested_native_plan(
+    tmp_path: Path,
+) -> None:
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    assert profile.native_builder is not None
+    assert plan.native_builder is not None
+    relaxed_origin = "http://objects.dev.yylx.world"
+    relaxed_profile = replace(
+        profile,
+        native_builder=replace(
+            profile.native_builder,
+            public_store_origin=relaxed_origin,
+        ),
+    )
+    relaxed_shadow = render_shadow_personal_dev_control_plane(
+        relaxed_profile,
+        release,
+    )
+    relaxed_plan = replace(
+        plan,
+        native_builder=replace(
+            plan.native_builder,
+            public_store_origin=relaxed_origin,
+        ),
+        release=replace(
+            plan.release,
+            shadow_manifest_sha256=hashlib.sha256(
+                relaxed_shadow.yaml_text.encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            relaxed_profile,
+            release,
+            relaxed_plan,
+            now=_NOW,
+        )
+
+
+def test_enabled_render_revalidates_direct_nested_profile(
+    tmp_path: Path,
+) -> None:
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(
+        tmp_path
+    )
+    relaxed_profile = replace(
+        profile,
+        network=replace(profile.network, kubernetes_api_cidr="0.0.0.0/0"),
+    )
+    relaxed_shadow = render_shadow_personal_dev_control_plane(
+        relaxed_profile,
+        release,
+    )
+    rebound_plan = replace(
+        plan,
+        release=replace(
+            plan.release,
+            shadow_manifest_sha256=hashlib.sha256(
+                relaxed_shadow.yaml_text.encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            relaxed_profile,
+            release,
+            rebound_plan,
+            now=_NOW,
+        )
 
 
 def test_acceptance_builder_capabilities_use_cross_namespace_minio_identity(

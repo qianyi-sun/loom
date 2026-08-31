@@ -92,6 +92,17 @@ class PersonalDevBuildPublicationExporter(Protocol):
     ) -> Mapping[str, object]: ...
 
 
+class PersonalDevPlatformBuildExecutor(Protocol):
+    async def build_platform(
+        self,
+        registration: CandidateRegistration,
+        *,
+        source_archive: Path,
+    ) -> None: ...
+
+    async def cleanup_platform(self, registration: CandidateRegistration) -> None: ...
+
+
 class PresigningObjectStore(Protocol):
     def generate_presigned_url(
         self,
@@ -342,9 +353,123 @@ def _verify_builder_job_runtime(
         ) from None
 
 
+async def _wait_and_verify_job(
+    cluster: PersonalDevBuilderCluster,
+    *,
+    namespace: str,
+    job_name: str,
+) -> None:
+    completion = asyncio.create_task(cluster.wait_job(namespace, job_name))
+    failure = asyncio.create_task(cluster.wait_job_failure(namespace, job_name))
+    try:
+        done, _pending = await asyncio.wait(
+            {completion, failure},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if failure in done:
+            failure.result()
+            raise RuntimeError("personal-dev builder Job reported failure")
+        completion.result()
+    finally:
+        for task in (completion, failure):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(completion, failure, return_exceptions=True)
+    observation = await cluster.list_job_pods(namespace, job_name)
+    _verify_builder_job_runtime(observation, job_name=job_name)
+
+
+@dataclass(slots=True)
+class KubectlPersonalDevPlatformBuildExecutor:
+    """Run exactly one platform in a Kubernetes/KVM-gVisor sandbox."""
+
+    cluster: PersonalDevBuilderCluster
+    capabilities: PersonalDevBuildCapabilityProvider
+    manifest_config: PersonalDevBuilderManifestConfig
+    platform: PersonalDevPlatform
+
+    def __post_init__(self) -> None:
+        if self.platform not in PERSONAL_DEV_PLATFORMS:
+            raise ValueError("personal-dev builder platform is unsupported")
+
+    async def _prepare_platform(
+        self,
+        registration: CandidateRegistration,
+    ) -> tuple[str, str]:
+        namespace = _namespace(registration)
+        capability = await self.capabilities.issue(
+            registration,
+            platform=self.platform,
+        )
+        minimum_expiry = datetime.now(UTC) + timedelta(
+            seconds=self.manifest_config.active_deadline_seconds + 60
+        )
+        if capability.expires_at.astimezone(UTC) < minimum_expiry:
+            raise RuntimeError("personal-dev builder capability expires before its deadline")
+        documents = personal_dev_builder_manifest_documents(
+            registration,
+            platform=self.platform,
+            config=self.manifest_config,
+        )
+        job = documents[-1]
+        job_name = str(job["metadata"]["name"])
+        pod_volumes = job["spec"]["template"]["spec"]["volumes"]
+        capability_volume = next(
+            volume for volume in pod_volumes if volume["name"] == "attempt-capability"
+        )
+        secret_name = str(capability_volume["secret"]["secretName"])
+        secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": secret_name,
+                "namespace": namespace,
+                "labels": dict(job["metadata"]["labels"]),
+            },
+            "immutable": True,
+            "type": "Opaque",
+            "stringData": {
+                "artifact-upload.json": json.dumps(
+                    {
+                        "fields": dict(capability.artifact_upload_fields),
+                        "max_bytes": capability.artifact_max_bytes,
+                        "url": capability.artifact_upload_url,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ),
+                "source-get-url": capability.source_get_url,
+            },
+        }
+        await self.cluster.apply(
+            yaml.safe_dump_all(documents[:-1], sort_keys=False, explicit_start=True)
+        )
+        await self.cluster.apply(yaml.safe_dump(secret, sort_keys=False))
+        await self.cluster.apply(yaml.safe_dump(job, sort_keys=False))
+        return namespace, job_name
+
+    async def build_platform(
+        self,
+        registration: CandidateRegistration,
+        *,
+        source_archive: Path,
+    ) -> None:
+        await asyncio.to_thread(_verify_staged_source, registration, source_archive)
+        namespace, job_name = await self._prepare_platform(registration)
+        await _wait_and_verify_job(
+            self.cluster,
+            namespace=namespace,
+            job_name=job_name,
+        )
+
+    async def cleanup_platform(self, registration: CandidateRegistration) -> None:
+        await self.cluster.delete_namespace(_namespace(registration))
+
+
 @dataclass(slots=True)
 class KubectlPersonalDevBuildExecutor:
-    """Run native sandboxes; retain registry/export authority outside them."""
+    """Legacy two-platform Kubernetes executor and trusted exporter."""
 
     cluster: PersonalDevBuilderCluster
     capabilities: PersonalDevBuildCapabilityProvider
@@ -358,103 +483,108 @@ class KubectlPersonalDevBuildExecutor:
         source_archive: Path,
     ) -> Mapping[str, object]:
         await asyncio.to_thread(_verify_staged_source, registration, source_archive)
-        namespace = _namespace(registration)
-        jobs: list[str] = []
-        minimum_expiry = datetime.now(UTC) + timedelta(
-            seconds=self.manifest_config.active_deadline_seconds + 60
-        )
-        for platform in PERSONAL_DEV_PLATFORMS:
-            capability = await self.capabilities.issue(registration, platform=platform)
-            if capability.expires_at.astimezone(UTC) < minimum_expiry:
-                raise RuntimeError("personal-dev builder capability expires before its deadline")
-            documents = personal_dev_builder_manifest_documents(
-                registration,
+        executors = tuple(
+            KubectlPersonalDevPlatformBuildExecutor(
+                cluster=self.cluster,
+                capabilities=self.capabilities,
+                manifest_config=self.manifest_config,
                 platform=platform,
-                config=self.manifest_config,
             )
-            job = documents[-1]
-            job_name = str(job["metadata"]["name"])
-            pod_volumes = job["spec"]["template"]["spec"]["volumes"]
-            capability_volume = next(
-                volume for volume in pod_volumes if volume["name"] == "attempt-capability"
-            )
-            secret_name = str(capability_volume["secret"]["secretName"])
-            secret = {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": {
-                    "name": secret_name,
-                    "namespace": namespace,
-                    "labels": dict(job["metadata"]["labels"]),
-                },
-                "immutable": True,
-                "type": "Opaque",
-                "stringData": {
-                    "artifact-upload.json": json.dumps(
-                        {
-                            "fields": dict(capability.artifact_upload_fields),
-                            "max_bytes": capability.artifact_max_bytes,
-                            "url": capability.artifact_upload_url,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    ),
-                    "source-get-url": capability.source_get_url,
-                },
-            }
-            await self.cluster.apply(
-                yaml.safe_dump_all(documents[:-1], sort_keys=False, explicit_start=True)
-            )
-            await self.cluster.apply(yaml.safe_dump(secret, sort_keys=False))
-            await self.cluster.apply(yaml.safe_dump(job, sort_keys=False))
-            jobs.append(job_name)
-        async def wait_and_verify(job_name: str) -> None:
-            completion = asyncio.create_task(
-                self.cluster.wait_job(namespace, job_name)
-            )
-            failure = asyncio.create_task(
-                self.cluster.wait_job_failure(namespace, job_name)
-            )
-            try:
-                done, _pending = await asyncio.wait(
-                    {completion, failure},
-                    return_when=asyncio.FIRST_COMPLETED,
+            for platform in PERSONAL_DEV_PLATFORMS
+        )
+        prepared = [
+            await executor._prepare_platform(registration)
+            for executor in executors
+        ]
+        tasks = [
+            asyncio.create_task(
+                _wait_and_verify_job(
+                    self.cluster,
+                    namespace=namespace,
+                    job_name=job_name,
                 )
-                if failure in done:
-                    failure.result()
-                    raise RuntimeError(
-                        "personal-dev builder Job reported failure"
-                    )
-                completion.result()
-            finally:
-                for task in (completion, failure):
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(completion, failure, return_exceptions=True)
-            observation = await self.cluster.list_job_pods(namespace, job_name)
-            _verify_builder_job_runtime(observation, job_name=job_name)
-
-        wait_tasks = [asyncio.create_task(wait_and_verify(name)) for name in jobs]
+            )
+            for namespace, job_name in prepared
+        ]
         try:
-            await asyncio.gather(*wait_tasks)
+            await asyncio.gather(*tasks)
         finally:
-            for task in wait_tasks:
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*wait_tasks, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
         return await self.exporter.publish(registration)
 
     async def cleanup(self, registration: CandidateRegistration) -> None:
         await self.cluster.delete_namespace(_namespace(registration))
 
 
+@dataclass(slots=True)
+class CompositePersonalDevBuildExecutor:
+    """Run one exact executor per architecture before trusted publication."""
+
+    platform_executors: Mapping[
+        PersonalDevPlatform,
+        PersonalDevPlatformBuildExecutor,
+    ]
+    exporter: PersonalDevBuildPublicationExporter
+
+    def __post_init__(self) -> None:
+        executors = dict(self.platform_executors)
+        if set(executors) != set(PERSONAL_DEV_PLATFORMS) or any(
+            not callable(getattr(executor, "build_platform", None))
+            or not callable(getattr(executor, "cleanup_platform", None))
+            for executor in executors.values()
+        ):
+            raise ValueError("personal-dev platform executor set is invalid")
+        object.__setattr__(self, "platform_executors", MappingProxyType(executors))
+
+    async def build(
+        self,
+        registration: CandidateRegistration,
+        *,
+        source_archive: Path,
+    ) -> Mapping[str, object]:
+        tasks = [
+            asyncio.create_task(
+                self.platform_executors[platform].build_platform(
+                    registration,
+                    source_archive=source_archive,
+                )
+            )
+            for platform in PERSONAL_DEV_PLATFORMS
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return await self.exporter.publish(registration)
+
+    async def cleanup(self, registration: CandidateRegistration) -> None:
+        results = await asyncio.gather(
+            *(
+                self.platform_executors[platform].cleanup_platform(registration)
+                for platform in PERSONAL_DEV_PLATFORMS
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+
 __all__ = [
+    "CompositePersonalDevBuildExecutor",
     "KubectlPersonalDevBuildExecutor",
+    "KubectlPersonalDevPlatformBuildExecutor",
     "PersonalDevBuildCapability",
     "PersonalDevBuildCapabilityProvider",
     "PersonalDevBuildPublicationExporter",
     "PersonalDevBuilderCluster",
+    "PersonalDevPlatformBuildExecutor",
     "S3PersonalDevBuildCapabilityProvider",
     "personal_dev_build_artifact_key",
 ]

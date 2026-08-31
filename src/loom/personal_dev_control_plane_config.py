@@ -22,6 +22,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom.db.schema_startup import service_schema_heads
+from loom.personal_dev_native_builder_protocol import (
+    NATIVE_BUILDER_MAX_CONCURRENCY,
+    NATIVE_BUILDER_PLATFORM,
+    NATIVE_BUILDER_PROTOCOL_VERSION,
+    NATIVE_BUILDER_PROVIDER,
+)
 
 NAMESPACE = "loom-dev"
 PERSONAL_NAMESPACE_PREFIX = "loom-dev-"
@@ -31,6 +37,7 @@ REQUIRED_IMAGE_KEYS = {
     "loom_web",
     "personal_dev_builder",
     "personal_dev_activation_agent",
+    "personal_dev_native_builder_agent",
     "personal_dev_scanner_cache",
     "postgres",
     "minio",
@@ -75,6 +82,40 @@ def _is_private_use_address(address: ipaddress.IPv4Address | ipaddress.IPv6Addre
     return address in _PRIVATE_USE_IPV6_NETWORK
 
 
+def _public_store_endpoint_cidrs(value: list[str]) -> list[str]:
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for cidr in value:
+        try:
+            network = ipaddress.ip_network(cidr, strict=True)
+        except ValueError:
+            raise ValueError("public store endpoint CIDR is invalid") from None
+        address = network.network_address
+        if (
+            cidr != str(network)
+            or network.prefixlen != network.max_prefixlen
+            or not address.is_global
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            raise ValueError("public store endpoint must be one public host")
+        networks.append(network)
+    if len({str(network) for network in networks}) != len(networks):
+        raise ValueError("public store endpoint CIDRs must be unique")
+    canonical = [
+        str(network)
+        for network in sorted(
+            networks,
+            key=lambda item: (item.version, int(item.network_address)),
+        )
+    ]
+    if value != canonical:
+        raise ValueError("public store endpoint CIDRs must be in canonical order")
+    return value
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -101,11 +142,12 @@ class _IdentitiesInput(_StrictModel):
     management_service: str
     management_ingress: str
     scanner_cache_pvc: str
+    native_builder_public_secret: str | None = None
 
     @field_validator("*")
     @classmethod
-    def _identity_is_safe(cls, value: str) -> str:
-        if _DNS_LABEL.fullmatch(value) is None:
+    def _identity_is_safe(cls, value: str | None) -> str | None:
+        if value is not None and _DNS_LABEL.fullmatch(value) is None:
             raise ValueError("Kubernetes identity is invalid")
         return value
 
@@ -121,8 +163,12 @@ class _IdentitiesInput(_StrictModel):
             "management_service": "loom-personal-dev-management",
             "management_ingress": "loom-personal-dev-management",
             "scanner_cache_pvc": "loom-personal-dev-scanner-cache",
+            "native_builder_public_secret": self.native_builder_public_secret,
         }
-        if self.model_dump() != expected:
+        if self.native_builder_public_secret not in {
+            None,
+            "loom-personal-dev-native-builder-public",
+        } or self.model_dump() != expected:
             raise ValueError("personal-dev Kubernetes identities differ from the contract")
         return self
 
@@ -226,6 +272,78 @@ class _BuilderInput(_StrictModel):
         return value
 
 
+class _NativeBuilderInput(_StrictModel):
+    prepared: bool
+    agent_instance_id: str
+    agent_key_id: str
+    public_key_sha256: str
+    host_name: str
+    runtime_profile_sha256: str
+    public_store_origin: str
+    public_store_endpoint_cidrs: list[str] = Field(default_factory=list, max_length=8)
+    provider: Literal["gb10-gvisor-docker-v1"]
+    platform: Literal["linux/arm64"]
+    protocol_version: Literal[1]
+    freshness_seconds: int = Field(ge=15, le=300)
+    max_concurrency: Literal[2]
+
+    @model_validator(mode="after")
+    def _identity_matches_prepared_state(self) -> _NativeBuilderInput:
+        identity = (
+            self.agent_instance_id,
+            self.agent_key_id,
+            self.public_key_sha256,
+            self.host_name,
+            self.runtime_profile_sha256,
+            self.public_store_origin,
+            self.public_store_endpoint_cidrs,
+        )
+        if not self.prepared:
+            if any(identity):
+                raise ValueError("unprepared native builder identity must be empty")
+            return self
+        _canonical_uuid(self.agent_instance_id, "native builder agent instance")
+        if _KEY_ID.fullmatch(self.agent_key_id) is None:
+            raise ValueError("native builder agent key is invalid")
+        _nonzero_digest(self.public_key_sha256, "native builder public key digest")
+        _nonzero_digest(self.runtime_profile_sha256, "native builder runtime profile")
+        if self.host_name != "gx10-01c7":
+            raise ValueError("native builder host identity is invalid")
+        if not self.public_store_endpoint_cidrs:
+            raise ValueError("native builder public store endpoint is unavailable")
+        try:
+            parsed = urlsplit(self.public_store_origin)
+            port = parsed.port
+        except ValueError:
+            raise ValueError("native builder public store origin is invalid") from None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or self.public_store_origin.endswith("/")
+            or _DNS_SUBDOMAIN.fullmatch(parsed.hostname) is None
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("native builder public store origin is invalid")
+        if (
+            self.provider != NATIVE_BUILDER_PROVIDER
+            or self.platform != NATIVE_BUILDER_PLATFORM
+            or self.protocol_version != NATIVE_BUILDER_PROTOCOL_VERSION
+            or self.max_concurrency != NATIVE_BUILDER_MAX_CONCURRENCY
+        ):
+            raise ValueError("native builder protocol identity is invalid")
+        return self
+
+    @field_validator("public_store_endpoint_cidrs")
+    @classmethod
+    def _public_store_endpoints_are_exact(cls, value: list[str]) -> list[str]:
+        return _public_store_endpoint_cidrs(value)
+
+
 class _NetworkInput(_StrictModel):
     public_origin: str
     ingress_class_name: str
@@ -271,7 +389,11 @@ class _NetworkInput(_StrictModel):
     @field_validator("public_origin")
     @classmethod
     def _public_origin_is_https(cls, value: str) -> str:
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError:
+            raise ValueError("public origin must be one HTTPS origin") from None
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -447,7 +569,7 @@ class _ResourcesInput(_StrictModel):
 
 
 class _ProfileInput(_StrictModel):
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     namespace: str
     personal_namespace_prefix: str
     min_slots_default: Literal[0]
@@ -455,11 +577,13 @@ class _ProfileInput(_StrictModel):
     executable_new_capacity_ceiling: Literal[0]
     dev_instances_enabled: Literal[False]
     personal_dev_builder_enabled: Literal[False]
+    personal_dev_native_builder_enabled: Literal[False] = False
     activation_agent_replicas: Literal[0]
     protocol_versions_json: str
     identities: _IdentitiesInput
     storage: _StorageInput
     builder: _BuilderInput
+    native_builder: _NativeBuilderInput | None = None
     network: _NetworkInput
     limits: _LimitsInput
     resources: _ResourcesInput
@@ -501,8 +625,13 @@ class _ProfileInput(_StrictModel):
 
     @model_validator(mode="after")
     def _profile_is_exact_shadow(self) -> _ProfileInput:
-        if (self.schema_version == 2) != (self.resources.web is not None):
+        if (self.schema_version >= 2) != (self.resources.web is not None):
             raise ValueError("personal-dev web resources do not match profile schema")
+        native_schema = self.schema_version == 3
+        if native_schema != (self.native_builder is not None) or native_schema != (
+            self.identities.native_builder_public_secret is not None
+        ):
+            raise ValueError("personal-dev native builder does not match profile schema")
         observed = {item.pool_id: item.architecture for item in self.pools}
         if len(observed) != len(self.pools) or observed != REQUIRED_POOLS:
             raise ValueError("personal-dev pools must be exactly OLDLAB and GB10")
@@ -520,6 +649,7 @@ class _ImagesInput(_StrictModel):
     loom_web: str | None = None
     personal_dev_builder: str
     personal_dev_activation_agent: str
+    personal_dev_native_builder_agent: str | None = None
     personal_dev_scanner_cache: str
     postgres: str
     minio: str
@@ -533,6 +663,9 @@ class _ImagesInput(_StrictModel):
             "personal_dev_builder": "ghcr.io/qianyi-sun/loom-personal-dev-builder",
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent"
+            ),
+            "personal_dev_native_builder_agent": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent"
             ),
             "personal_dev_scanner_cache": ("ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache"),
             "postgres": "docker.io/library/postgres",
@@ -601,7 +734,7 @@ class _TrustedScannerInput(_StrictModel):
 
 
 class _TrustedReleaseInput(_StrictModel):
-    schema_version: Literal[2, 3]
+    schema_version: Literal[2, 3, 4]
     source_sha: str
     source_tree: str
     images: _ImagesInput
@@ -609,9 +742,13 @@ class _TrustedReleaseInput(_StrictModel):
     release_evidence_sha256: str
 
     @model_validator(mode="after")
-    def _web_image_matches_schema(self) -> _TrustedReleaseInput:
-        if (self.schema_version == 3) != (self.images.loom_web is not None):
+    def _images_match_schema(self) -> _TrustedReleaseInput:
+        if (self.schema_version >= 3) != (self.images.loom_web is not None):
             raise ValueError("trusted web image does not match release schema")
+        if (self.schema_version == 4) != (
+            self.images.personal_dev_native_builder_agent is not None
+        ):
+            raise ValueError("trusted native builder image does not match release schema")
         return self
 
     @field_validator("source_sha", "source_tree")
@@ -717,6 +854,76 @@ class _AcceptanceActivationInput(_StrictModel):
         if _KEY_ID.fullmatch(value) is None:
             raise ValueError("acceptance activation key id is invalid")
         return value
+
+
+class _AcceptanceNativeBuilderInput(_StrictModel):
+    agent_instance_id: str
+    agent_key_id: str
+    public_key_sha256: str
+    host_name: str
+    host_boot_id: str
+    runtime_profile_sha256: str
+    public_store_origin: str
+    public_store_endpoint_cidrs: list[str] = Field(min_length=1, max_length=8)
+    provider: Literal["gb10-gvisor-docker-v1"]
+    platform: Literal["linux/arm64"]
+    protocol_version: Literal[1]
+    freshness_seconds: int = Field(ge=15, le=300)
+    max_concurrency: Literal[2]
+
+    @field_validator("agent_instance_id", "host_boot_id")
+    @classmethod
+    def _uuid_is_exact(cls, value: str) -> str:
+        return _canonical_uuid(value, "acceptance native builder identity")
+
+    @field_validator("agent_key_id")
+    @classmethod
+    def _key_id_is_exact(cls, value: str) -> str:
+        if _KEY_ID.fullmatch(value) is None:
+            raise ValueError("acceptance native builder key id is invalid")
+        return value
+
+    @field_validator("public_key_sha256", "runtime_profile_sha256")
+    @classmethod
+    def _digest_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "acceptance native builder digest")
+
+    @field_validator("host_name")
+    @classmethod
+    def _host_is_exact(cls, value: str) -> str:
+        if value != "gx10-01c7":
+            raise ValueError("acceptance native builder host is invalid")
+        return value
+
+    @field_validator("public_store_origin")
+    @classmethod
+    def _public_store_is_exact(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError:
+            raise ValueError(
+                "acceptance native builder public store is invalid"
+            ) from None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or value.endswith("/")
+            or _DNS_SUBDOMAIN.fullmatch(parsed.hostname) is None
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ValueError("acceptance native builder public store is invalid")
+        return value
+
+    @field_validator("public_store_endpoint_cidrs")
+    @classmethod
+    def _public_store_endpoints_are_exact(cls, value: list[str]) -> list[str]:
+        return _public_store_endpoint_cidrs(value)
 
 
 class _AcceptanceBuilderInput(_StrictModel):
@@ -874,6 +1081,7 @@ class _AcceptancePlanCommonInput(_StrictModel):
     storage: _AcceptanceStorageInput
     activation: _AcceptanceActivationInput
     builder: _AcceptanceBuilderInput
+    native_builder: _AcceptanceNativeBuilderInput | None = None
     manager: _AcceptanceManagerInput
     principals: _AcceptancePrincipalsInput
     quotas: _AcceptanceQuotasInput
@@ -883,6 +1091,12 @@ class _AcceptancePlanCommonInput(_StrictModel):
 class _AcceptancePlanV1Input(_AcceptancePlanCommonInput):
     schema_version: Literal[1]
     acceptance_owner: _AcceptanceOwnerInput
+
+    @model_validator(mode="after")
+    def _native_builder_is_absent(self) -> _AcceptancePlanV1Input:
+        if self.native_builder is not None:
+            raise ValueError("v1 acceptance plan cannot bind a native builder")
+        return self
 
 
 class _AcceptancePlanV2Input(_AcceptancePlanCommonInput):
@@ -900,13 +1114,39 @@ class _AcceptancePlanV2Input(_AcceptancePlanCommonInput):
     def _owners_and_quotas_are_exact(self) -> _AcceptancePlanV2Input:
         owners = self.acceptance_owners
         if (
-            owners != tuple(sorted(owners, key=lambda owner: (owner.team_id, owner.user_id)))
+            self.native_builder is not None
+            or owners
+            != tuple(sorted(owners, key=lambda owner: (owner.team_id, owner.user_id)))
             or len({owner.team_id for owner in owners}) != 2
             or len({owner.user_id for owner in owners}) != 2
             or self.quotas.global_live_instances < 2
             or self.quotas.builder_global_concurrency < 2
         ):
             raise ValueError("two-owner acceptance plan contract is invalid")
+        return self
+
+
+class _AcceptancePlanV3Input(_AcceptancePlanCommonInput):
+    schema_version: Literal[3]
+    native_builder: _AcceptanceNativeBuilderInput
+    acceptance_owners: tuple[_AcceptanceOwnerInput, _AcceptanceOwnerInput]
+
+    @field_validator("acceptance_owners", mode="before")
+    @classmethod
+    def _owners_are_json_array(cls, value: object) -> tuple[object, ...]:
+        return _AcceptancePlanV2Input._owners_are_json_array(value)
+
+    @model_validator(mode="after")
+    def _owners_and_quotas_are_exact(self) -> _AcceptancePlanV3Input:
+        owners = self.acceptance_owners
+        if (
+            owners != tuple(sorted(owners, key=lambda owner: (owner.team_id, owner.user_id)))
+            or len({owner.team_id for owner in owners}) != 2
+            or len({owner.user_id for owner in owners}) != 2
+            or self.quotas.global_live_instances < 2
+            or self.quotas.builder_global_concurrency < 2
+        ):
+            raise ValueError("two-owner native acceptance plan contract is invalid")
         return self
 
 
@@ -926,17 +1166,32 @@ class _OperationalApprovalInput(_StrictModel):
         return _canonical_timestamp(value)
 
 
-class _OperationalPlanInput(_StrictModel):
-    schema_version: Literal[1]
+class _OperationalPlanCommonInput(_StrictModel):
     source: _AcceptanceSourceInput
     release: _AcceptanceReleaseInput
     storage: _AcceptanceStorageInput
     activation: _AcceptanceActivationInput
     builder: _AcceptanceBuilderInput
+    native_builder: _AcceptanceNativeBuilderInput | None = None
     manager: _AcceptanceManagerInput
     principals: _AcceptancePrincipalsInput
     quotas: _AcceptanceQuotasInput
     approval: _OperationalApprovalInput
+
+
+class _OperationalPlanV1Input(_OperationalPlanCommonInput):
+    schema_version: Literal[1]
+
+    @model_validator(mode="after")
+    def _native_builder_is_absent(self) -> _OperationalPlanV1Input:
+        if self.native_builder is not None:
+            raise ValueError("v1 operational plan cannot bind a native builder")
+        return self
+
+
+class _OperationalPlanV2Input(_OperationalPlanCommonInput):
+    schema_version: Literal[2]
+    native_builder: _AcceptanceNativeBuilderInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -956,6 +1211,7 @@ class PersonalDevControlPlaneIdentities:
     management_service: str
     management_ingress: str
     scanner_cache_pvc: str
+    native_builder_public_secret: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -976,6 +1232,23 @@ class PersonalDevBuilderTrust:
     runtime_profile_sha256: str
     publisher_identity: str
     registry_prefix: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevNativeBuilderTrust:
+    prepared: bool
+    agent_instance_id: str
+    agent_key_id: str
+    public_key_sha256: str
+    host_name: str
+    runtime_profile_sha256: str
+    public_store_origin: str
+    public_store_endpoint_cidrs: tuple[str, ...]
+    provider: str
+    platform: str
+    protocol_version: int
+    freshness_seconds: int
+    max_concurrency: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1040,11 +1313,13 @@ class PersonalDevControlPlaneProfile:
     executable_new_capacity_ceiling: int
     dev_instances_enabled: bool
     personal_dev_builder_enabled: bool
+    personal_dev_native_builder_enabled: bool
     activation_agent_replicas: int
     protocol_versions: Mapping[str, str]
     identities: PersonalDevControlPlaneIdentities
     storage: PersonalDevControlPlaneStorage
     builder: PersonalDevBuilderTrust
+    native_builder: PersonalDevNativeBuilderTrust | None
     network: PersonalDevControlPlaneNetwork
     limits: PersonalDevControlPlaneLimits
     resources: PersonalDevControlPlaneResources
@@ -1053,12 +1328,15 @@ class PersonalDevControlPlaneProfile:
     def canonical_value(self) -> dict[str, Any]:
         """Return the complete primitive profile value used for render binding."""
 
-        return {
+        identities = _dataclass_value(self.identities)
+        if self.identities.native_builder_public_secret is None:
+            identities.pop("native_builder_public_secret")
+        value = {
             "activation_agent_replicas": self.activation_agent_replicas,
             "builder": _dataclass_value(self.builder),
             "dev_instances_enabled": self.dev_instances_enabled,
             "executable_new_capacity_ceiling": self.executable_new_capacity_ceiling,
-            "identities": _dataclass_value(self.identities),
+            "identities": identities,
             "limits": _dataclass_value(self.limits),
             "max_slots_limit": self.max_slots_limit,
             "min_slots_default": self.min_slots_default,
@@ -1082,6 +1360,14 @@ class PersonalDevControlPlaneProfile:
             "schema_version": self.schema_version,
             "storage": _dataclass_value(self.storage),
         }
+        if self.schema_version >= 3:
+            value["personal_dev_native_builder_enabled"] = (
+                self.personal_dev_native_builder_enabled
+            )
+            if self.native_builder is None:  # pragma: no cover - parser enforces schema
+                raise ValueError("native builder profile is unavailable")
+            value["native_builder"] = _dataclass_value(self.native_builder)
+        return value
 
     def canonical_bytes(self) -> bytes:
         return _canonical_json(self.canonical_value())
@@ -1097,12 +1383,15 @@ class PersonalDevTrustedImages:
     postgres: str
     minio: str
     minio_client: str
+    personal_dev_native_builder_agent: str | None = None
 
 
 def _canonical_images(images: PersonalDevTrustedImages) -> dict[str, Any]:
     value = _dataclass_value(images)
     if images.loom_web is None:
         value.pop("loom_web")
+    if images.personal_dev_native_builder_agent is None:
+        value.pop("personal_dev_native_builder_agent")
     return value
 
 
@@ -1169,6 +1458,23 @@ class PersonalDevAcceptanceActivation:
 
 
 @dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceNativeBuilder:
+    agent_instance_id: UUID
+    agent_key_id: str
+    public_key_sha256: str
+    host_name: str
+    host_boot_id: UUID
+    runtime_profile_sha256: str
+    public_store_origin: str
+    public_store_endpoint_cidrs: tuple[str, ...]
+    provider: str
+    platform: str
+    protocol_version: int
+    freshness_seconds: int
+    max_concurrency: int
+
+
+@dataclass(frozen=True, slots=True)
 class PersonalDevAcceptanceBuilder:
     runtime_class_name: str
     runtime_handler: str
@@ -1222,6 +1528,7 @@ class PersonalDevAcceptancePlan:
     storage: PersonalDevAcceptanceStorage
     activation: PersonalDevAcceptanceActivation
     builder: PersonalDevAcceptanceBuilder
+    native_builder: PersonalDevAcceptanceNativeBuilder | None
     manager: PersonalDevAcceptanceManager
     principals: PersonalDevAcceptancePrincipals
     quotas: PersonalDevControlPlaneLimits
@@ -1261,6 +1568,12 @@ class PersonalDevAcceptancePlan:
                 "started_at": _format_timestamp(self.window.started_at),
             },
         }
+        if self.native_builder is not None:
+            value["native_builder"] = {
+                **_dataclass_value(self.native_builder),
+                "agent_instance_id": str(self.native_builder.agent_instance_id),
+                "host_boot_id": str(self.native_builder.host_boot_id),
+            }
         if self.schema_version == 1:
             value["acceptance_owner"] = {
                 "team_id": str(self.acceptance_owner.team_id),
@@ -1320,13 +1633,14 @@ class PersonalDevOperationalPlan:
     storage: PersonalDevAcceptanceStorage
     activation: PersonalDevAcceptanceActivation
     builder: PersonalDevAcceptanceBuilder
+    native_builder: PersonalDevAcceptanceNativeBuilder | None
     manager: PersonalDevAcceptanceManager
     principals: PersonalDevAcceptancePrincipals
     quotas: PersonalDevControlPlaneLimits
     approval: PersonalDevOperationalApproval
 
     def canonical_value(self) -> dict[str, Any]:
-        return {
+        value = {
             "activation": _dataclass_value(self.activation),
             "approval": {
                 "acceptance_result_sha256": self.approval.acceptance_result_sha256,
@@ -1350,6 +1664,13 @@ class PersonalDevOperationalPlan:
             "source": _dataclass_value(self.source),
             "storage": _dataclass_value(self.storage),
         }
+        if self.native_builder is not None:
+            value["native_builder"] = {
+                **_dataclass_value(self.native_builder),
+                "agent_instance_id": str(self.native_builder.agent_instance_id),
+                "host_boot_id": str(self.native_builder.host_boot_id),
+            }
+        return value
 
     def canonical_bytes(self) -> bytes:
         return _canonical_json(self.canonical_value())
@@ -1497,11 +1818,28 @@ def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPla
         executable_new_capacity_ceiling=parsed.executable_new_capacity_ceiling,
         dev_instances_enabled=parsed.dev_instances_enabled,
         personal_dev_builder_enabled=parsed.personal_dev_builder_enabled,
+        personal_dev_native_builder_enabled=(
+            parsed.personal_dev_native_builder_enabled
+        ),
         activation_agent_replicas=parsed.activation_agent_replicas,
         protocol_versions=MappingProxyType(dict(sorted(protocols.items()))),
         identities=PersonalDevControlPlaneIdentities(**parsed.identities.model_dump()),
         storage=PersonalDevControlPlaneStorage(**parsed.storage.model_dump()),
         builder=PersonalDevBuilderTrust(**parsed.builder.model_dump()),
+        native_builder=(
+            PersonalDevNativeBuilderTrust(
+                **{
+                    **parsed.native_builder.model_dump(
+                        exclude={"public_store_endpoint_cidrs"}
+                    ),
+                    "public_store_endpoint_cidrs": tuple(
+                        parsed.native_builder.public_store_endpoint_cidrs
+                    ),
+                }
+            )
+            if parsed.native_builder is not None
+            else None
+        ),
         network=PersonalDevControlPlaneNetwork(
             **{
                 **parsed.network.model_dump(),
@@ -1680,6 +2018,20 @@ def _parse_acceptance_timestamp(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
+def _acceptance_native_builder(
+    value: _AcceptanceNativeBuilderInput | None,
+) -> PersonalDevAcceptanceNativeBuilder | None:
+    if value is None:
+        return None
+    fields = value.model_dump()
+    fields["agent_instance_id"] = UUID(value.agent_instance_id)
+    fields["host_boot_id"] = UUID(value.host_boot_id)
+    fields["public_store_endpoint_cidrs"] = tuple(
+        value.public_store_endpoint_cidrs
+    )
+    return PersonalDevAcceptanceNativeBuilder(**fields)
+
+
 def load_personal_dev_acceptance_plan(
     path: Path,
     expected_sha256: str,
@@ -1710,12 +2062,20 @@ def load_personal_dev_acceptance_plan(
         owners: tuple[_AcceptanceOwnerInput, ...]
         if schema_version == 1:
             parsed_v1 = _AcceptancePlanV1Input.model_validate(value)
-            parsed: _AcceptancePlanV1Input | _AcceptancePlanV2Input = parsed_v1
+            parsed: (
+                _AcceptancePlanV1Input
+                | _AcceptancePlanV2Input
+                | _AcceptancePlanV3Input
+            ) = parsed_v1
             owners = (parsed_v1.acceptance_owner,)
         elif schema_version == 2:
             parsed_v2 = _AcceptancePlanV2Input.model_validate(value)
             parsed = parsed_v2
             owners = parsed_v2.acceptance_owners
+        elif schema_version == 3:
+            parsed_v3 = _AcceptancePlanV3Input.model_validate(value)
+            parsed = parsed_v3
+            owners = parsed_v3.acceptance_owners
         else:
             raise ValueError("acceptance plan schema version is invalid")
         plan = PersonalDevAcceptancePlan(
@@ -1730,6 +2090,7 @@ def load_personal_dev_acceptance_plan(
             storage=PersonalDevAcceptanceStorage(**parsed.storage.model_dump()),
             activation=PersonalDevAcceptanceActivation(**parsed.activation.model_dump()),
             builder=PersonalDevAcceptanceBuilder(**parsed.builder.model_dump()),
+            native_builder=_acceptance_native_builder(parsed.native_builder),
             manager=PersonalDevAcceptanceManager(
                 authority_incarnation=UUID(parsed.manager.authority_incarnation),
                 configuration_epoch=parsed.manager.configuration_epoch,
@@ -1789,7 +2150,15 @@ def load_personal_dev_operational_plan(
         )
         if not isinstance(value, dict) or _canonical_json(value) != payload:
             raise ValueError("operational plan JSON is not canonical")
-        parsed = _OperationalPlanInput.model_validate(value)
+        schema_version = value.get("schema_version")
+        if schema_version == 1:
+            parsed: _OperationalPlanV1Input | _OperationalPlanV2Input = (
+                _OperationalPlanV1Input.model_validate(value)
+            )
+        elif schema_version == 2:
+            parsed = _OperationalPlanV2Input.model_validate(value)
+        else:
+            raise ValueError("operational plan schema version is invalid")
         plan = PersonalDevOperationalPlan(
             schema_version=parsed.schema_version,
             source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
@@ -1802,6 +2171,7 @@ def load_personal_dev_operational_plan(
             storage=PersonalDevAcceptanceStorage(**parsed.storage.model_dump()),
             activation=PersonalDevAcceptanceActivation(**parsed.activation.model_dump()),
             builder=PersonalDevAcceptanceBuilder(**parsed.builder.model_dump()),
+            native_builder=_acceptance_native_builder(parsed.native_builder),
             manager=PersonalDevAcceptanceManager(
                 authority_incarnation=UUID(parsed.manager.authority_incarnation),
                 configuration_epoch=parsed.manager.configuration_epoch,
@@ -1837,7 +2207,32 @@ def _validate_personal_dev_enabled_plan(
     if not isinstance(plan, (PersonalDevAcceptancePlan, PersonalDevOperationalPlan)):
         raise ValueError
     if (
-        profile.namespace != NAMESPACE
+        isinstance(plan, PersonalDevAcceptancePlan)
+        and plan.schema_version != 3
+    ) or (
+        isinstance(plan, PersonalDevOperationalPlan)
+        and plan.schema_version != 2
+    ):
+        raise ValueError
+    profile_value = profile.canonical_value()
+    protocol_versions = profile_value.pop("protocol_versions")
+    profile_value["protocol_versions_json"] = _canonical_json(
+        protocol_versions
+    ).decode("ascii")
+    validated_profile = _ProfileInput.model_validate(
+        json.loads(_canonical_json(profile_value))
+    )
+    if validated_profile.schema_version != 3:
+        raise ValueError
+    plan_value = json.loads(plan.canonical_bytes())
+    if isinstance(plan, PersonalDevAcceptancePlan):
+        _AcceptancePlanV3Input.model_validate(plan_value)
+    else:
+        _OperationalPlanV2Input.model_validate(plan_value)
+    if (
+        type(profile.schema_version) is not int
+        or profile.schema_version != 3
+        or profile.namespace != NAMESPACE
         or profile.personal_namespace_prefix != PERSONAL_NAMESPACE_PREFIX
         or type(profile.min_slots_default) is not int
         or profile.min_slots_default != 0
@@ -1847,12 +2242,43 @@ def _validate_personal_dev_enabled_plan(
         or profile.executable_new_capacity_ceiling != 0
         or profile.dev_instances_enabled is not False
         or profile.personal_dev_builder_enabled is not False
+        or profile.personal_dev_native_builder_enabled is not False
         or type(profile.activation_agent_replicas) is not int
         or profile.activation_agent_replicas != 0
         or len(profile.pools) != len(REQUIRED_POOLS)
         or {item.pool_id: item.architecture for item in profile.pools} != REQUIRED_POOLS
     ):
         raise ValueError
+    native = plan.native_builder
+    profile_native = profile.native_builder
+    if (
+        native is None
+        or profile_native is None
+        or not profile_native.prepared
+        or release.schema_version != 4
+        or release.images.personal_dev_native_builder_agent is None
+        or native.agent_instance_id != UUID(profile_native.agent_instance_id)
+        or native.agent_key_id != profile_native.agent_key_id
+        or native.public_key_sha256 != profile_native.public_key_sha256
+        or native.host_name != profile_native.host_name
+        or native.runtime_profile_sha256 != profile_native.runtime_profile_sha256
+        or native.public_store_origin != profile_native.public_store_origin
+        or native.public_store_endpoint_cidrs
+        != profile_native.public_store_endpoint_cidrs
+        or native.provider != profile_native.provider
+        or native.platform != profile_native.platform
+        or native.protocol_version != profile_native.protocol_version
+        or native.freshness_seconds != profile_native.freshness_seconds
+        or native.max_concurrency != profile_native.max_concurrency
+    ):
+        raise ValueError
+    if (
+        type(native.public_store_endpoint_cidrs) is not tuple
+        or type(profile_native.public_store_endpoint_cidrs) is not tuple
+        or not native.public_store_endpoint_cidrs
+    ):
+        raise ValueError
+    _public_store_endpoint_cidrs(list(native.public_store_endpoint_cidrs))
     shadow_yaml_sha256 = _nonzero_digest(shadow_yaml_sha256, "shadow manifest digest")
     if (
         plan.source.commit != release.source_sha

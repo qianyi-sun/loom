@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlsplit, urlunparse
 
+from loom.personal_dev_builder_runtime import S3PersonalDevBuildCapabilityProvider
 from loom.storage_credentials import build_s3_client
 from loom_service.config import LoomServiceSettings
 
@@ -41,6 +42,65 @@ def create_minio_presign_client(settings: LoomServiceSettings) -> Any:
         settings,
         endpoint_url=settings.minio_public_endpoint or settings.minio_endpoint,
     )
+
+
+def create_personal_dev_native_builder_presign_client(
+    settings: LoomServiceSettings,
+) -> Any:
+    """Create the native-builder capability client for one exact public origin."""
+    configured = settings.minio_public_endpoint
+    value = str(configured) if configured is not None else ""
+    try:
+        parsed = urlsplit(value)
+        valid_port = parsed.port
+    except ValueError:
+        parsed = None
+        valid_port = None
+    if (
+        parsed is None
+        or not 1 <= len(value) <= 2048
+        or parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or (valid_port is not None and not 1 <= valid_port <= 65535)
+        or any(character in value for character in "\r\n\0")
+    ):
+        raise RuntimeError("personal-dev native builder public object-store origin is invalid")
+    return create_minio_client(settings, endpoint_url=value)
+
+
+def configure_personal_dev_native_builder_storage(
+    app_state: Any,
+    settings: LoomServiceSettings,
+) -> None:
+    """Install public capability state only for explicitly enabled native mode."""
+    if not getattr(settings, "personal_dev_native_builder_enabled", False):
+        return
+    public_client = create_personal_dev_native_builder_presign_client(settings)
+    if public_client is getattr(app_state, "minio_client", None):
+        raise RuntimeError(
+            "personal-dev native builder public presign client must be separate"
+        )
+    try:
+        capabilities = S3PersonalDevBuildCapabilityProvider(
+            object_store=public_client,
+            expected_bucket=settings.artifacts_bucket,
+            expiry_seconds=settings.personal_dev_builder_lease_sec,
+            max_artifact_bytes=settings.personal_dev_builder_max_artifact_bytes,
+        )
+    except Exception:
+        close = getattr(public_client, "close", None)
+        if callable(close):
+            close()
+        raise
+    app_state.personal_dev_native_builder_presign_client = public_client
+    app_state.personal_dev_native_builder_capabilities = capabilities
+    app_state._owned_personal_dev_native_builder_presign_client = public_client
 
 
 def get_minio_presign_client(app_state: Any) -> Any:

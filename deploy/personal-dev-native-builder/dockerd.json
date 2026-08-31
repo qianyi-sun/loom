@@ -1,0 +1,43 @@
+{
+  "bridge": "none",
+  "data-root": "/var/lib/loom-personal-dev-builder/docker",
+  "default-address-pools": [
+    {
+      "base": "172.28.0.0/16",
+      "size": 24
+    }
+  ],
+  "default-runtime": "runsc-personal-dev-native",
+  "dns": [
+    "1.1.1.1",
+    "1.0.0.1"
+  ],
+  "exec-root": "/run/loom-personal-dev-builder/docker",
+  "hosts": [
+    "unix:///run/loom-personal-dev-builder/docker.sock"
+  ],
+  "ip-forward": true,
+  "ip-masq": false,
+  "ip6tables": false,
+  "iptables": false,
+  "ipv6": false,
+  "live-restore": false,
+  "log-driver": "local",
+  "log-opts": {
+    "max-file": "3",
+    "max-size": "10m"
+  },
+  "no-new-privileges": false,
+  "pidfile": "/run/loom-personal-dev-builder/dockerd.pid",
+  "runtimes": {
+    "runsc-personal-dev-native": {
+      "options": {
+        "ConfigPath": "/etc/loom/personal-dev-native-builder/runsc.toml",
+        "TypeUrl": "io.containerd.runsc.v1.options"
+      },
+      "runtimeType": "/opt/loom/gvisor/release-20260810.0/containerd-shim-runsc-v1"
+    }
+  },
+  "storage-driver": "overlay2",
+  "userland-proxy": false
+}

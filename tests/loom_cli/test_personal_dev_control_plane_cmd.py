@@ -44,6 +44,8 @@ from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
 from loom_cli.personal_dev_minio_backup_cmd import PersonalDevMinioCommandResult
 from tests.unit.test_personal_dev_acceptance_evidence import (
+    _native_result_plan,
+    _native_result_value,
     _result_plan,
     _result_value,
     _rollback_shadow_manifest_payload,
@@ -82,7 +84,7 @@ _SOURCE_SHA, _SOURCE_TREE = _git_identity()
 
 def _release_value() -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "images": {
@@ -93,6 +95,9 @@ def _release_value() -> dict[str, object]:
             ),
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
+            ),
+            "personal_dev_native_builder_agent": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
             ),
             "personal_dev_scanner_cache": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
@@ -131,15 +136,48 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     return path, hashlib.sha256(payload).hexdigest()
 
 
+def _prepared_profile(tmp_path: Path, *, source: Path = _PROFILE) -> Path:
+    value = source.read_text(encoding="utf-8")
+    inert = (
+        "prepared = false\n"
+        'agent_instance_id = ""\n'
+        'agent_key_id = ""\n'
+        'public_key_sha256 = ""\n'
+        'host_name = ""\n'
+        'runtime_profile_sha256 = ""\n'
+        'public_store_origin = ""\n'
+        "public_store_endpoint_cidrs = []\n"
+        'provider = "gb10-gvisor-docker-v1"'
+    )
+    prepared = (
+        "prepared = true\n"
+        'agent_instance_id = "10000000-0000-0000-0000-000000000001"\n'
+        'agent_key_id = "gb10-native-builder-v1"\n'
+        f'public_key_sha256 = "{"d" * 64}"\n'
+        'host_name = "gx10-01c7"\n'
+        f'runtime_profile_sha256 = "{"e" * 64}"\n'
+        'public_store_origin = "https://objects.dev.yylx.world"\n'
+        'public_store_endpoint_cidrs = ["207.35.188.227/32"]\n'
+        'provider = "gb10-gvisor-docker-v1"'
+    )
+    assert inert in value
+    path = tmp_path / "prepared-personal-dev-control-plane.toml"
+    path.write_text(value.replace(inert, prepared, 1), encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
 def _acceptance_plan(
     tmp_path: Path,
     release_path: Path,
     release_digest: str,
     *,
-    profile_path: Path = _PROFILE,
+    profile_path: Path,
 ):
     profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
+    assert profile.native_builder is not None
+    assert profile.native_builder.prepared
     shadow = render_shadow_personal_dev_control_plane(profile, release)
     protocol_sha256 = hashlib.sha256(
         json.dumps(
@@ -192,9 +230,9 @@ def _acceptance_plan(
         "postgres": {
             "dump_sha256": "b" * 64,
             "image": release.images.postgres,
-            "restored_schema_head": "0122",
+            "restored_schema_head": "0123",
             "restored_state_sha256": "c" * 64,
-            "source_schema_head": "0122",
+            "source_schema_head": "0123",
             "source_state_sha256": "c" * 64,
         },
         "release_sha256": release_digest,
@@ -216,10 +254,16 @@ def _acceptance_plan(
     backup_path.write_bytes(backup_payload)
     backup_path.chmod(0o600)
     value = {
-        "acceptance_owner": {
-            "team_id": "00000000-0000-0000-0000-000000000201",
-            "user_id": "00000000-0000-0000-0000-000000000301",
-        },
+        "acceptance_owners": [
+            {
+                "team_id": "00000000-0000-0000-0000-000000000201",
+                "user_id": "00000000-0000-0000-0000-000000000301",
+            },
+            {
+                "team_id": "00000000-0000-0000-0000-000000000202",
+                "user_id": "00000000-0000-0000-0000-000000000302",
+            },
+        ],
         "activation": {
             "key_id": "personal-dev-agent-v1",
             "public_key_sha256": "c" * 64,
@@ -249,6 +293,21 @@ def _acceptance_plan(
             "execution_epoch": 11,
             "execution_state": "prepared",
         },
+        "native_builder": {
+            "agent_instance_id": profile.native_builder.agent_instance_id,
+            "agent_key_id": profile.native_builder.agent_key_id,
+            "public_key_sha256": profile.native_builder.public_key_sha256,
+            "host_name": profile.native_builder.host_name,
+            "host_boot_id": "20000000-0000-0000-0000-000000000001",
+            "runtime_profile_sha256": profile.native_builder.runtime_profile_sha256,
+            "public_store_origin": profile.native_builder.public_store_origin,
+            "public_store_endpoint_cidrs": list(profile.native_builder.public_store_endpoint_cidrs),
+            "provider": profile.native_builder.provider,
+            "platform": profile.native_builder.platform,
+            "protocol_version": profile.native_builder.protocol_version,
+            "freshness_seconds": profile.native_builder.freshness_seconds,
+            "max_concurrency": profile.native_builder.max_concurrency,
+        },
         "principals": {
             "lifecycle_principal_id": "personal-dev-lifecycle",
             "reporter_principal_id": "personal-dev-reporter",
@@ -270,11 +329,11 @@ def _acceptance_plan(
             "shadow_manifest_sha256": hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
             "trusted_release_sha256": hashlib.sha256(release.canonical_bytes()).hexdigest(),
         },
-        "schema_version": 1,
+        "schema_version": 3,
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": hashlib.sha256(backup_payload).hexdigest(),
-            "schema_head": "0122",
+            "schema_head": "0123",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -294,15 +353,19 @@ def _operational_plan(
     tmp_path: Path,
     release_path: Path,
     release_digest: str,
+    *,
+    profile_path: Path,
 ):
     _path, _digest, acceptance = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
     value = acceptance.canonical_value()
-    value.pop("acceptance_owner")
+    value.pop("acceptance_owners")
     value.pop("window")
+    value["schema_version"] = 2
     value["approval"] = {
         "acceptance_result_sha256": "4" * 64,
         "approved_at": "2026-08-17T20:00:00Z",
@@ -582,6 +645,8 @@ def _acceptance_status_argv(
     plan: Path,
     plan_digest: str,
     kubeconfig: Path,
+    *,
+    profile: Path = _PROFILE,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
@@ -591,7 +656,7 @@ def _acceptance_status_argv(
         "--kubeconfig",
         str(kubeconfig),
         "--file",
-        str(_PROFILE),
+        str(profile),
         "--trusted-release-file",
         str(release),
         "--trusted-release-sha256",
@@ -616,12 +681,14 @@ def _operational_argv(
     digest: str,
     plan: Path,
     plan_digest: str,
+    *,
+    profile: Path = _PROFILE,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
         "render-operational",
         "--file",
-        str(_PROFILE),
+        str(profile),
         "--trusted-release-file",
         str(release),
         "--trusted-release-sha256",
@@ -647,6 +714,8 @@ def _operational_status_argv(
     plan: Path,
     plan_digest: str,
     kubeconfig: Path,
+    *,
+    profile: Path = _PROFILE,
 ) -> list[str]:
     return [
         "personal-dev-control-plane",
@@ -656,7 +725,7 @@ def _operational_status_argv(
         "--kubeconfig",
         str(kubeconfig),
         "--file",
-        str(_PROFILE),
+        str(profile),
         "--trusted-release-file",
         str(release),
         "--trusted-release-sha256",
@@ -723,9 +792,15 @@ def _rewrite_acceptance_result_rollback_digest(
 
 def _acceptance_result_files(
     tmp_path: Path,
+    *,
+    native: bool = False,
 ) -> tuple[Path, str, Path, str, Path, Path, str]:
-    plan, _v1_plan = _result_plan(tmp_path)
-    plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
+    if native:
+        plan = _native_result_plan(tmp_path)
+        plan_path = tmp_path / "native-result-plan" / "acceptance-plan.json"
+    else:
+        plan, _v1_plan = _result_plan(tmp_path)
+        plan_path = tmp_path / "result-plan" / "acceptance-plan.json"
     rollback_input_sha256 = "1" * 64
     rollback_manifest_path = tmp_path / "rollback-shadow.yaml"
     rollback_manifest_payload = _rollback_shadow_manifest_payload(
@@ -745,7 +820,7 @@ def _acceptance_result_files(
     rollback_value["release_sha256"] = plan.release.trusted_release_sha256
     rollback_path = tmp_path / "rollback-shadow.status.json"
     rollback_sha256 = _write_canonical_owner_only(rollback_path, rollback_value)
-    result_value = _result_value(plan)
+    result_value = _native_result_value(plan) if native else _result_value(plan)
     result_value["status_sha256s"]["rollback_shadow"] = rollback_sha256
     result_path = tmp_path / "acceptance-result.json"
     result_sha256 = _write_canonical_owner_only(result_path, result_value)
@@ -760,9 +835,11 @@ def _acceptance_result_files(
     )
 
 
+@pytest.mark.parametrize("native", [False, True])
 def test_verify_acceptance_result_emits_canonical_secret_free_projection(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    native: bool,
 ) -> None:
     (
         plan_path,
@@ -772,7 +849,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         rollback_manifest_path,
         rollback_path,
         rollback_sha256,
-    ) = _acceptance_result_files(tmp_path)
+    ) = _acceptance_result_files(tmp_path, native=native)
     plan = load_personal_dev_acceptance_plan(plan_path, plan_sha256)
 
     rc = dispatch(
@@ -806,6 +883,7 @@ def test_verify_acceptance_result_emits_canonical_secret_free_projection(
         "acceptance_plan_sha256": plan_sha256,
         "acceptance_result_sha256": result_sha256,
         "cross_owner_denial_count": 6,
+        "native": native,
         "owner_count": 2,
         "release_sha256": plan.release.trusted_release_sha256,
         "rollback_shadow_status_sha256": rollback_sha256,
@@ -1325,7 +1403,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0122",
+            "0123",
         ]
     )
 
@@ -1336,7 +1414,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
     assert captured_inputs["backup_evidence_sha256"] == "a" * 64
     assert captured_inputs["predecessor_shadow_sha256"] == "b" * 64
     assert captured_inputs["expected_predecessor_head"] == "0112"
-    assert captured_inputs["expected_target_head"] == "0122"
+    assert captured_inputs["expected_target_head"] == "0123"
     assert source_validation_count == 2
 
 
@@ -1429,7 +1507,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         "--expected-predecessor-schema-head",
         "0112",
         "--expected-target-schema-head",
-        "0122",
+        "0123",
     ]
     program = (
         "import json, sys\n"
@@ -1457,7 +1535,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
     assert job["metadata"]["namespace"] == "loom-dev"
     assert plan["schema"] == "loom-personal-dev-schema-transition-plan-v1"
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0122"
+    assert plan["target"]["schema_head"] == "0123"
     assert plan["target"]["source_commit"] == source_sha
     assert plan["target"]["source_tree"] == source_tree
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
@@ -1594,7 +1672,7 @@ def test_render_schema_transition_has_a_specific_fail_closed_error(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0122",
+            "0123",
         ]
     )
 
@@ -1609,12 +1687,14 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, plan = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
     expected = render_acceptance_personal_dev_control_plane(
         profile,
@@ -1623,7 +1703,15 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
         now=_NOW,
     )
 
-    result = dispatch(_acceptance_argv(release_path, release_digest, plan_path, plan_digest))
+    result = dispatch(
+        _acceptance_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            profile=profile_path,
+        )
+    )
 
     captured = capsys.readouterr()
     assert result == 0
@@ -1645,20 +1733,21 @@ def test_render_acceptance_requires_exact_plan_and_emits_only_yaml_and_evidence(
     }
 
 
-def test_render_acceptance_loads_v2_two_owner_local_input_without_shape_change(
+def test_render_acceptance_loads_v3_two_owner_local_input(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
-    profile_path = tmp_path / "personal-dev-control-plane-v2.toml"
-    profile_path.write_text(
+    profile_source = tmp_path / "personal-dev-control-plane-v3.toml"
+    profile_source.write_text(
         _PROFILE.read_text(encoding="utf-8")
         .replace("global_live_instances = 16", "global_live_instances = 2")
         .replace("builder_global_concurrency = 4", "builder_global_concurrency = 2"),
         encoding="utf-8",
     )
-    profile_path.chmod(0o600)
-    plan_path, _plan_digest, v1_plan = _acceptance_plan(
+    profile_source.chmod(0o600)
+    profile_path = _prepared_profile(tmp_path, source=profile_source)
+    plan_path, plan_digest, plan = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
@@ -1666,30 +1755,6 @@ def test_render_acceptance_loads_v2_two_owner_local_input_without_shape_change(
     )
     profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
-    v1_expected = render_acceptance_personal_dev_control_plane(
-        profile,
-        release,
-        v1_plan,
-        now=_NOW,
-    )
-    value = v1_plan.canonical_value()
-    value["schema_version"] = 2
-    owner_0 = value.pop("acceptance_owner")
-    owner_1 = {
-        "team_id": "00000000-0000-0000-0000-000000000006",
-        "user_id": "00000000-0000-0000-0000-000000000005",
-    }
-    value["acceptance_owners"] = sorted(
-        [owner_0, owner_1],
-        key=lambda item: (item["team_id"], item["user_id"]),
-    )
-    value["quotas"]["global_live_instances"] = 2
-    value["quotas"]["builder_global_concurrency"] = 2
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
-    plan_path.write_bytes(payload)
-    plan_path.chmod(0o600)
-    plan_digest = hashlib.sha256(payload).hexdigest()
-    plan = load_personal_dev_acceptance_plan(plan_path, plan_digest)
     expected = render_acceptance_personal_dev_control_plane(profile, release, plan, now=_NOW)
 
     result = dispatch(
@@ -1705,16 +1770,10 @@ def test_render_acceptance_loads_v2_two_owner_local_input_without_shape_change(
     captured = capsys.readouterr()
     assert result == 0
     assert captured.out == expected.yaml_text
-    assert expected.resource_count == v1_expected.resource_count
-    assert {
-        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
-        for item in yaml.safe_load_all(expected.yaml_text)
-        if item and item["kind"] != "Job"
-    } == {
-        (item["kind"], item["metadata"].get("namespace", ""), item["metadata"]["name"])
-        for item in yaml.safe_load_all(v1_expected.yaml_text)
-        if item and item["kind"] != "Job"
-    }
+    assert plan.schema_version == 3
+    assert len(plan.acceptance_owners) == 2
+    assert plan.quotas.global_live_instances == 2
+    assert plan.quotas.builder_global_concurrency == 2
 
 
 def test_render_operational_emits_durable_plan_binding(
@@ -1722,12 +1781,14 @@ def test_render_operational_emits_durable_plan_binding(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, plan = _operational_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
-    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    profile = load_personal_dev_control_plane_profile(profile_path)
     release = load_personal_dev_trusted_release(release_path, release_digest)
     expected = render_operational_personal_dev_control_plane(
         profile,
@@ -1736,7 +1797,15 @@ def test_render_operational_emits_durable_plan_binding(
         now=_NOW,
     )
 
-    result = dispatch(_operational_argv(release_path, release_digest, plan_path, plan_digest))
+    result = dispatch(
+        _operational_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            profile=profile_path,
+        )
+    )
 
     captured = capsys.readouterr()
     assert result == 0
@@ -1771,13 +1840,21 @@ def test_acceptance_commands_reject_partial_plan_bindings(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, _plan = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
     if operation == "render-acceptance":
-        argv = _acceptance_argv(release_path, release_digest, plan_path, plan_digest)
+        argv = _acceptance_argv(
+            release_path,
+            release_digest,
+            plan_path,
+            plan_digest,
+            profile=profile_path,
+        )
     else:
         kubeconfig = _reviewed_kubeconfig(tmp_path)
         argv = _acceptance_status_argv(
@@ -1786,6 +1863,7 @@ def test_acceptance_commands_reject_partial_plan_bindings(
             plan_path,
             plan_digest,
             kubeconfig.resolve(),
+            profile=profile_path,
         )
     index = argv.index(omitted)
     del argv[index : index + 2]
@@ -2063,10 +2141,12 @@ def test_status_acceptance_emits_one_canonical_read_only_record(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, plan = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
     kubeconfig = _reviewed_kubeconfig(tmp_path)
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
@@ -2110,6 +2190,7 @@ def test_status_acceptance_emits_one_canonical_read_only_record(
             plan_path,
             plan_digest,
             kubeconfig.resolve(),
+            profile=profile_path,
         )
     )
 
@@ -2131,10 +2212,12 @@ def test_status_operational_emits_one_canonical_read_only_record(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, plan = _operational_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
     kubeconfig = _reviewed_kubeconfig(tmp_path)
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
@@ -2178,6 +2261,7 @@ def test_status_operational_emits_one_canonical_read_only_record(
             plan_path,
             plan_digest,
             kubeconfig.resolve(),
+            profile=profile_path,
         )
     )
 
@@ -2197,10 +2281,12 @@ def test_status_acceptance_rejects_invalid_plan_before_constructing_runner(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
+    profile_path = _prepared_profile(tmp_path)
     plan_path, plan_digest, _plan = _acceptance_plan(
         tmp_path,
         release_path,
         release_digest,
+        profile_path=profile_path,
     )
     kubeconfig = _reviewed_kubeconfig(tmp_path)
     plan_path.chmod(0o644)
@@ -2219,6 +2305,7 @@ def test_status_acceptance_rejects_invalid_plan_before_constructing_runner(
             plan_path,
             plan_digest,
             kubeconfig.resolve(),
+            profile=profile_path,
         )
     )
 

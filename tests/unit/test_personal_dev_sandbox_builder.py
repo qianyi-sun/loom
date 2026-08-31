@@ -80,9 +80,17 @@ def test_sandbox_contract_rejects_noncanonical_or_changed_authority() -> None:
         PersonalDevSandboxBuildContract.parse(payload)
 
 
-def test_build_images_uses_only_the_fixed_sidecar_socket(
+@pytest.mark.parametrize(
+    "buildkit_address",
+    [
+        "unix:///var/run/loom-buildkit/buildkitd.sock",
+        "tcp://buildkit-012345abcdef:1234",
+    ],
+)
+def test_build_images_uses_only_a_fixed_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    buildkit_address: str,
 ) -> None:
     contract = _contract()
     source = tmp_path / "source"
@@ -104,13 +112,14 @@ def test_build_images_uses_only_the_fixed_sidecar_socket(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setenv("BUILDKIT_HOST", "tcp://attacker.example:9999")
 
     images = _build_images(
         contract,
         source_directory=source,
         output_directory=tmp_path / "images",
         buildctl_path=Path("/usr/bin/buildctl"),
-        buildkit_address="unix:///var/run/loom-buildkit/buildkitd.sock",
+        buildkit_address=buildkit_address,
     )
 
     assert set(images) == set(PERSONAL_DEV_COMPONENTS)
@@ -124,14 +133,54 @@ def test_build_images_uses_only_the_fixed_sidecar_socket(
     for command, kwargs in calls:
         assert command[:3] == [
             "/usr/bin/buildctl",
-            "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+            f"--addr={buildkit_address}",
             "build",
         ]
         environment = kwargs.get("env", {})
         assert isinstance(environment, dict)
+        assert "BUILDKIT_HOST" not in environment
         assert "BUILDKITD" not in environment
         serialized = repr((command, environment)).casefold()
         assert all(value not in serialized for value in forbidden)
+
+
+def test_main_keeps_uds_default_and_accepts_explicit_native_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run_personal_dev_sandbox_build(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        sandbox_builder,
+        "run_personal_dev_sandbox_build",
+        run_personal_dev_sandbox_build,
+    )
+    arguments = [
+        "build",
+        "--contract-file",
+        str(tmp_path / "contract.json"),
+        "--capability-directory",
+        str(tmp_path / "capabilities"),
+        "--workspace",
+        str(tmp_path / "workspace"),
+    ]
+
+    assert sandbox_builder.main(arguments) == 0
+    assert sandbox_builder.main(
+        [
+            *arguments,
+            "--native-buildkit-address",
+            "tcp://buildkit-012345abcdef:1234",
+        ]
+    ) == 0
+
+    assert [call["buildkit_address"] for call in calls] == [
+        "unix:///var/run/loom-buildkit/buildkitd.sock",
+        "tcp://buildkit-012345abcdef:1234",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -141,6 +190,25 @@ def test_build_images_uses_only_the_fixed_sidecar_socket(
         (Path("/tmp/buildctl"), "unix:///var/run/loom-buildkit/buildkitd.sock"),
         (Path("/usr/bin/buildctl"), "unix:///tmp/buildkitd.sock"),
         (Path("/usr/bin/buildctl"), "tcp://127.0.0.1:1234"),
+        (Path("/usr/bin/buildctl"), "tcp://[::1]:1234"),
+        (Path("/usr/bin/buildctl"), "tcp://buildkit-012345abcde:1234"),
+        (Path("/usr/bin/buildctl"), "tcp://buildkit-012345abcdef0:1234"),
+        (Path("/usr/bin/buildctl"), "tcp://buildkit-012345abcdeF:1234"),
+        (Path("/usr/bin/buildctl"), "tcp://other-012345abcdef:1234"),
+        (
+            Path("/usr/bin/buildctl"),
+            "tcp://user@buildkit-012345abcdef:1234",
+        ),
+        (
+            Path("/usr/bin/buildctl"),
+            "tcp://buildkit-012345abcdef:1234?changed=1",
+        ),
+        (
+            Path("/usr/bin/buildctl"),
+            "tcp://buildkit-012345abcdef:1234#changed",
+        ),
+        (Path("/usr/bin/buildctl"), "tcp://buildkit-012345abcdef:1235"),
+        (Path("/usr/bin/buildctl"), "tcp://buildkit-012345abcdef:1234/"),
     ],
 )
 def test_build_images_rejects_untrusted_client_endpoints(
@@ -155,6 +223,59 @@ def test_build_images_rejects_untrusted_client_endpoints(
             output_directory=tmp_path / "images",
             buildctl_path=buildctl_path,
             buildkit_address=buildkit_address,
+        )
+
+
+@pytest.mark.parametrize(
+    ("option", "address"),
+    [
+        ("--buildkit-address", "tcp://buildkit-012345abcdef:1234"),
+        ("--native-buildkit-address", "unix:///var/run/loom-buildkit/buildkitd.sock"),
+        ("--native-buildkit-address", "tcp://127.0.0.1:1234"),
+        ("--native-buildkit-address", "tcp://buildkit-012345abcdeF:1234"),
+        ("--native-buildkit-address", "tcp://buildkit-012345abcdef:1235"),
+        (
+            "--native-buildkit-address",
+            "tcp://user@buildkit-012345abcdef:1234",
+        ),
+        (
+            "--native-buildkit-address",
+            "tcp://buildkit-012345abcdef:1234?changed=1",
+        ),
+        (
+            "--native-buildkit-address",
+            "tcp://buildkit-012345abcdef:1234#changed",
+        ),
+    ],
+)
+def test_main_rejects_nonexplicit_or_malformed_native_address(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+    address: str,
+) -> None:
+    def unexpected_build(**kwargs: object) -> None:
+        pytest.fail(f"invalid endpoint reached builder: {kwargs!r}")
+
+    monkeypatch.setattr(
+        sandbox_builder,
+        "run_personal_dev_sandbox_build",
+        unexpected_build,
+    )
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="buildctl"):
+        sandbox_builder.main(
+            [
+                "build",
+                "--contract-file",
+                str(tmp_path / "contract.json"),
+                "--capability-directory",
+                str(tmp_path / "capabilities"),
+                "--workspace",
+                str(tmp_path / "workspace"),
+                option,
+                address,
+            ]
         )
 
 

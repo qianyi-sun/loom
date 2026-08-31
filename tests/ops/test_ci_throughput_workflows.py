@@ -684,7 +684,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 20
+    assert len(matrix) == 21
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "capacity-executor",
@@ -700,6 +700,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "llm-gateway-sandbox",
         "personal-dev-activation-agent",
         "personal-dev-builder",
+        "personal-dev-native-builder-agent",
         "personal-dev-scanner-cache",
         "rehearsal-postgres",
         "service",
@@ -708,7 +709,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 40
+    assert len(native_matrix) == 42
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -740,6 +741,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "pipeline-core-fixture",
         "personal-dev-activation-agent",
         "personal-dev-builder",
+        "personal-dev-native-builder-agent",
         "personal-dev-scanner-cache",
         "llm-gateway",
         "staging-admin-browser-smoke",
@@ -1601,8 +1603,11 @@ def test_images_gate_requires_personal_release_only_for_protected_selected_publi
     selected = json.dumps(
         [
             {"image": "service"},
+            {"image": "web"},
             {"image": "personal-dev-builder"},
             {"image": "personal-dev-activation-agent"},
+            {"image": "personal-dev-native-builder-agent"},
+            {"image": "personal-dev-scanner-cache"},
         ],
         separators=(",", ":"),
     )

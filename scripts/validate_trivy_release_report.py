@@ -54,6 +54,7 @@ _PERL_BASE_COMPONENTS = (
     "family-orchestrator",
     "llm-gateway",
     "personal-dev-activation-agent",
+    "personal-dev-native-builder-agent",
     "personal-dev-scanner-cache",
     "pipeline-orchestrator",
     "service",

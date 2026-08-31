@@ -21,6 +21,7 @@ from typing import Any, BinaryIO, Protocol
 import yaml  # type: ignore[import-untyped]
 
 from loom.personal_dev_acceptance_evidence import (
+    PersonalDevAcceptanceResultV3,
     build_personal_dev_backup_restore_evidence,
     build_personal_dev_scanner_finding_policy,
     build_personal_dev_trusted_launcher_profile,
@@ -1620,6 +1621,7 @@ def _verify_acceptance_result(args: argparse.Namespace) -> int:
         "acceptance_plan_sha256": plan.sha256,
         "acceptance_result_sha256": args.acceptance_result_sha256,
         "cross_owner_denial_count": len(result.cross_owner_denials),
+        "native": isinstance(result, PersonalDevAcceptanceResultV3),
         "owner_count": len(result.owners),
         "release_sha256": result.release_sha256,
         "rollback_shadow_status_sha256": result.status_sha256s.rollback_shadow,

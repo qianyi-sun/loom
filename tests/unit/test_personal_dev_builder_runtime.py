@@ -11,6 +11,7 @@ import pytest
 from loom.personal_dev_builder_manifest import PersonalDevBuilderManifestConfig
 from loom.personal_dev_builder_runtime import (
     KubectlPersonalDevBuildExecutor,
+    KubectlPersonalDevPlatformBuildExecutor,
     PersonalDevBuildCapability,
     S3PersonalDevBuildCapabilityProvider,
     personal_dev_build_artifact_key,
@@ -86,6 +87,51 @@ class _Exporter:
         return _publication(registration.candidate)
 
 
+async def test_kubectl_platform_executor_builds_only_requested_native_platform(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    cluster = _Cluster()
+    executor = KubectlPersonalDevPlatformBuildExecutor(
+        cluster=cluster,  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+        platform="linux/amd64",
+    )
+
+    await executor.build_platform(registration, source_archive=source)
+
+    applied = "\n".join(cluster.applied)
+    assert "build-amd64" in applied
+    assert "build-arm64" not in applied
+    assert cluster.waited == [
+        (
+            f"loom-build-{registration.build_attempt.id.hex}-"
+            f"l{registration.build_attempt.lease_epoch:016x}",
+            "build-amd64",
+        )
+    ]
+    assert cluster.inspected == cluster.waited
+
+    await executor.cleanup_platform(registration)
+    assert cluster.deleted == [
+        f"loom-build-{registration.build_attempt.id.hex}-"
+        f"l{registration.build_attempt.lease_epoch:016x}"
+    ]
+
+
 async def test_kubectl_builder_uses_native_ephemeral_jobs_and_secret_stdin(
     tmp_path: Path,
 ) -> None:
@@ -138,6 +184,51 @@ async def test_kubectl_builder_uses_native_ephemeral_jobs_and_secret_stdin(
         f"loom-build-{registration.build_attempt.id.hex}-"
         f"l{registration.build_attempt.lease_epoch:016x}"
     ]
+
+
+async def test_legacy_kubectl_builder_serializes_shared_resource_application(
+    tmp_path: Path,
+) -> None:
+    class _SerialApplyCluster(_Cluster):
+        def __init__(self) -> None:
+            super().__init__()
+            self.applying = False
+            self.concurrent_apply = False
+
+        async def apply(self, manifest: str, **kwargs) -> None:
+            if self.applying:
+                self.concurrent_apply = True
+            self.applying = True
+            try:
+                await asyncio.sleep(0.001)
+                await super().apply(manifest, **kwargs)
+            finally:
+                self.applying = False
+
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    cluster = _SerialApplyCluster()
+    executor = KubectlPersonalDevBuildExecutor(
+        cluster=cluster,  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        exporter=_Exporter(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+    )
+
+    await executor.build(registration, source_archive=source)
+
+    assert cluster.concurrent_apply is False
 
 
 @pytest.mark.parametrize(

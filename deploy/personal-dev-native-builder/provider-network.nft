@@ -1,0 +1,44 @@
+table inet loom_personal_dev_builder {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    ip saddr 172.28.0.0/16 counter drop
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+    ip daddr 172.28.0.0/16 counter drop
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+    ip daddr 172.28.0.0/16 ct state established,related accept
+    ip saddr 172.28.0.0/24 ip daddr 172.28.0.0/24 accept
+    ip saddr 172.28.1.0/24 ip daddr 172.28.1.0/24 accept
+    ip daddr 172.28.0.0/16 counter drop
+    ip saddr 172.28.0.0/16 ip daddr 0.0.0.0/8 drop
+    ip saddr 172.28.0.0/16 ip daddr 10.0.0.0/8 drop
+    ip saddr 172.28.0.0/16 ip daddr 100.64.0.0/10 drop
+    ip saddr 172.28.0.0/16 ip daddr 127.0.0.0/8 drop
+    ip saddr 172.28.0.0/16 ip daddr 169.254.0.0/16 drop
+    ip saddr 172.28.0.0/16 ip daddr 172.16.0.0/12 drop
+    ip saddr 172.28.0.0/16 ip daddr 192.0.0.0/24 drop
+    ip saddr 172.28.0.0/16 ip daddr 192.0.2.0/24 drop
+    ip saddr 172.28.0.0/16 ip daddr 192.168.0.0/16 drop
+    ip saddr 172.28.0.0/16 ip daddr 198.18.0.0/15 drop
+    ip saddr 172.28.0.0/16 ip daddr 198.51.100.0/24 drop
+    ip saddr 172.28.0.0/16 ip daddr 203.0.113.0/24 drop
+    ip saddr 172.28.0.0/16 ip daddr 224.0.0.0/4 drop
+    ip saddr 172.28.0.0/16 ip daddr 240.0.0.0/4 drop
+    ip saddr 172.28.0.0/16 ip daddr { 1.1.1.1, 1.0.0.1 } udp dport 53 accept
+    ip saddr 172.28.0.0/16 ip daddr { 1.1.1.1, 1.0.0.1 } tcp dport 53 accept
+    ip saddr 172.28.0.0/16 udp dport 53 drop
+    ip saddr 172.28.0.0/16 tcp dport 53 drop
+    ip saddr 172.28.0.0/16 tcp dport { 80, 443 } accept
+    ip saddr 172.28.0.0/16 drop
+  }
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 172.28.0.0/16 ip daddr != 172.28.0.0/16 masquerade
+  }
+}

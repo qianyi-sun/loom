@@ -2268,6 +2268,9 @@ def _management_env(
     registry_prefix = profile.builder.registry_prefix
     publisher_identity = profile.builder.publisher_identity
     activation_key_id = "personal-dev-agent-v1"
+    native_builder_env = [
+        _literal_env("LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED", "false")
+    ]
     if plan is not None:
         scanner_policy_sha256 = plan.builder.scanner_finding_policy_sha256
         launcher_profile_sha256 = plan.builder.trusted_launcher_profile_sha256
@@ -2275,6 +2278,50 @@ def _management_env(
         registry_prefix = plan.builder.registry_prefix
         publisher_identity = plan.builder.publisher_identity
         activation_key_id = plan.activation.key_id
+        native_builder = plan.native_builder
+        native_agent_image = plan.release.images.personal_dev_native_builder_agent
+        if native_builder is None or native_agent_image is None:
+            raise ValueError("personal-dev native builder plan is incomplete")
+        native_builder_env = [
+            _literal_env("LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED", "true"),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID",
+                str(native_builder.agent_instance_id),
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_KEY_ID",
+                native_builder.agent_key_id,
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_FILE",
+                "/run/loom-personal-dev/native-builder-public/files/public-key",
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_SHA256",
+                native_builder.public_key_sha256,
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE",
+                native_agent_image,
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_RUNTIME_PROFILE_SHA256",
+                native_builder.runtime_profile_sha256,
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PROTOCOL_VERSION",
+                str(native_builder.protocol_version),
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_FRESHNESS_SEC",
+                str(native_builder.freshness_seconds),
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_MAX_CONCURRENCY",
+                str(native_builder.max_concurrency),
+            ),
+            _literal_env("LOOM_SVC_MINIO_PUBLIC_ENDPOINT", native_builder.public_store_origin),
+        ]
         if isinstance(plan, PersonalDevAcceptancePlan):
             enablement_env = [
                 _literal_env("LOOM_SVC_PERSONAL_DEV_RUNTIME_MODE", "acceptance"),
@@ -2327,6 +2374,7 @@ def _management_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED",
             "true" if plan is not None else "false",
         ),
+        *native_builder_env,
         *enablement_env,
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT", ""),
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBECTL_PATH", "/usr/local/bin/kubectl"),
@@ -2599,6 +2647,9 @@ def _management_deployment(
     projected_management = [{"key": filename, "path": filename} for filename in _MANAGEMENT_FILES]
     generation_subpath = f"generations/{release.scanner.cache_identity_sha256}"
     generation_path = f"/var/lib/loom-personal-dev-scanner/{generation_subpath}"
+    native_public_secret = profile.identities.native_builder_public_secret
+    if plan is not None and native_public_secret is None:
+        raise ValueError("personal-dev native builder public key secret is unavailable")
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -2639,6 +2690,27 @@ def _management_deployment(
                             destination_parent="/run/loom-personal-dev/activation-public",
                             destination="/run/loom-personal-dev/activation-public/files",
                             profile="activation-public",
+                        ),
+                        *(
+                            [
+                                _credential_init(
+                                    name="native-builder-public-credential-init",
+                                    image=release.images.loom_service,
+                                    source_volume="native-builder-public-projected",
+                                    source_path=(
+                                        "/var/run/loom-personal-dev-native-builder-public-projected"
+                                    ),
+                                    destination_parent=(
+                                        "/run/loom-personal-dev/native-builder-public"
+                                    ),
+                                    destination=(
+                                        "/run/loom-personal-dev/native-builder-public/files"
+                                    ),
+                                    profile="native-builder-public",
+                                )
+                            ]
+                            if plan is not None
+                            else []
                         ),
                     ],
                     "containers": [
@@ -2704,6 +2776,22 @@ def _management_deployment(
                                 "items": [{"key": "public-key", "path": "public-key"}],
                             },
                         },
+                        *(
+                            [
+                                {
+                                    "name": "native-builder-public-projected",
+                                    "secret": {
+                                        "secretName": native_public_secret,
+                                        "defaultMode": 0o440,
+                                        "items": [
+                                            {"key": "public-key", "path": "public-key"}
+                                        ],
+                                    },
+                                }
+                            ]
+                            if plan is not None
+                            else []
+                        ),
                         {
                             "name": "runtime-credentials",
                             "emptyDir": {"medium": "Memory", "sizeLimit": "32Mi"},
@@ -3024,6 +3112,7 @@ def _network_policies(
     profile: PersonalDevControlPlaneProfile,
     *,
     include_web: bool,
+    plan: PersonalDevEnabledPlan | None,
 ) -> tuple[dict[str, Any], ...]:
     def policy(name: str, spec: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -3062,6 +3151,21 @@ def _network_policies(
         }
         for cidr in profile.network.kubernetes_api_endpoint_cidrs
     )
+    public_store: tuple[dict[str, Any], ...] = ()
+    if plan is not None:
+        native_builder = plan.native_builder
+        if native_builder is None:
+            raise ValueError("personal-dev native builder plan is incomplete")
+        public_store_port = urlsplit(native_builder.public_store_origin).port or 443
+        public_store = (
+            {
+                "to": [
+                    {"ipBlock": {"cidr": cidr}}
+                    for cidr in native_builder.public_store_endpoint_cidrs
+                ],
+                "ports": [{"protocol": "TCP", "port": public_store_port}],
+            },
+        )
     postgres = {
         "to": [{"podSelector": {"matchLabels": {"app": "loom-dev-postgres"}}}],
         "ports": [{"protocol": "TCP", "port": 5432}],
@@ -3172,7 +3276,15 @@ def _network_policies(
         {
             "podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}},
             "policyTypes": ["Egress"],
-            "egress": [dns, postgres, minio, manager, api, *api_endpoints],
+            "egress": [
+                dns,
+                postgres,
+                minio,
+                manager,
+                api,
+                *api_endpoints,
+                *public_store,
+            ],
         },
     )
     capacity_manager_ingress = policy(
@@ -3333,7 +3445,12 @@ def _render_documents(
         *([_web_deployment(context, profile, release)] if include_web else []),
         *_public_services_and_ingress(context, profile, include_web=include_web),
         _activation_deployment(context, profile, release, plan),
-        *_network_policies(context, profile, include_web=include_web),
+        *_network_policies(
+            context,
+            profile,
+            include_web=include_web,
+            plan=plan,
+        ),
     ]
     documents.sort(key=_sort_key)
     yaml_text = yaml.safe_dump_all(

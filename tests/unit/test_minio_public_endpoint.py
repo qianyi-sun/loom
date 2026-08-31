@@ -17,10 +17,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from loom_service.storage import rewrite_to_public
+from loom_service.storage import (
+    configure_personal_dev_native_builder_storage,
+    create_personal_dev_native_builder_presign_client,
+    rewrite_to_public,
+)
 
 # ─── helper: build a minimal LoomServiceSettings-like namespace ───────────────
 
@@ -244,3 +249,105 @@ def test_rewrite_to_public_type_stability() -> None:
     assert isinstance(
         rewrite_to_public(url, _settings("https://public.example.com")), str,
     )
+
+
+def test_native_builder_presign_client_uses_exact_https_public_origin(monkeypatch) -> None:
+    settings = _settings("https://objects.example.test:9443/")
+    expected_client = object()
+    observed: list[tuple[object, str]] = []
+
+    def create_client(value: object, *, endpoint_url: str) -> object:
+        observed.append((value, endpoint_url))
+        return expected_client
+
+    monkeypatch.setattr("loom_service.storage.create_minio_client", create_client)
+
+    client = create_personal_dev_native_builder_presign_client(settings)  # type: ignore[arg-type]
+
+    assert client is expected_client
+    assert observed == [(settings, "https://objects.example.test:9443/")]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        None,
+        "",
+        "http://objects.example.test",
+        "https://user@objects.example.test",
+        "https://objects.example.test/prefix",
+        "https://objects.example.test?tenant=loom",
+        "https://objects.example.test#fragment",
+        "https://objects.example.test/%2f",
+    ],
+)
+def test_native_builder_presign_client_rejects_non_origin_endpoint(endpoint) -> None:
+    with pytest.raises(RuntimeError, match="native builder public object-store origin"):
+        create_personal_dev_native_builder_presign_client(
+            _settings(endpoint),  # type: ignore[arg-type]
+        )
+
+
+def test_native_builder_storage_state_is_absent_when_provider_is_disabled(monkeypatch) -> None:
+    app_state = SimpleNamespace(minio_client=object())
+    settings = SimpleNamespace(personal_dev_native_builder_enabled=False)
+
+    def unexpected(_settings):
+        raise AssertionError("disabled native mode must not create a public client")
+
+    monkeypatch.setattr(
+        "loom_service.storage.create_personal_dev_native_builder_presign_client",
+        unexpected,
+    )
+
+    configure_personal_dev_native_builder_storage(app_state, settings)  # type: ignore[arg-type]
+
+    assert not hasattr(app_state, "personal_dev_native_builder_presign_client")
+    assert not hasattr(app_state, "personal_dev_native_builder_capabilities")
+
+
+def test_native_builder_storage_state_uses_distinct_public_presign_client(monkeypatch) -> None:
+    internal = object()
+    public = object()
+    app_state = SimpleNamespace(minio_client=internal)
+    settings = SimpleNamespace(
+        personal_dev_native_builder_enabled=True,
+        artifacts_bucket="artifacts",
+        personal_dev_builder_lease_sec=4200,
+        personal_dev_builder_max_artifact_bytes=6 * 1024 * 1024 * 1024,
+    )
+    monkeypatch.setattr(
+        "loom_service.storage.create_personal_dev_native_builder_presign_client",
+        lambda _settings: public,
+    )
+
+    configure_personal_dev_native_builder_storage(app_state, settings)  # type: ignore[arg-type]
+
+    assert app_state.minio_client is internal
+    assert app_state.personal_dev_native_builder_presign_client is public
+    assert app_state._owned_personal_dev_native_builder_presign_client is public
+    provider = app_state.personal_dev_native_builder_capabilities
+    assert provider.object_store is public
+    assert provider.expected_bucket == "artifacts"
+    assert provider.expiry_seconds == 4200
+    assert provider.max_artifact_bytes == 6 * 1024 * 1024 * 1024
+
+
+def test_native_builder_storage_state_rejects_reused_internal_client(monkeypatch) -> None:
+    internal = object()
+    app_state = SimpleNamespace(minio_client=internal)
+    settings = SimpleNamespace(
+        personal_dev_native_builder_enabled=True,
+        artifacts_bucket="artifacts",
+        personal_dev_builder_lease_sec=4200,
+        personal_dev_builder_max_artifact_bytes=6 * 1024 * 1024 * 1024,
+    )
+    monkeypatch.setattr(
+        "loom_service.storage.create_personal_dev_native_builder_presign_client",
+        lambda _settings: internal,
+    )
+
+    with pytest.raises(RuntimeError, match="must be separate"):
+        configure_personal_dev_native_builder_storage(app_state, settings)  # type: ignore[arg-type]
+
+    assert not hasattr(app_state, "personal_dev_native_builder_presign_client")

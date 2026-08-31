@@ -943,7 +943,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 21
+    assert len(matrix) == 22
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -981,6 +981,43 @@ def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> No
             "dockerfile": "deploy/Dockerfile.capacity-manager",
             "context": ".",
         },
+    )
+
+
+def test_native_builder_agent_image_has_authority_minimal_release_ownership() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    component = next(
+        component
+        for component in manifest.release_components()
+        if component.id == "personal-dev-native-builder-agent"
+    )
+
+    assert component.dockerfile == "deploy/Dockerfile.personal-dev-native-builder-agent"
+    assert component.release_digest == "loom-personal-dev-native-builder-agent"
+    assert component.runtime_policy == "conformance"
+    assert component.rollout_role == "none"
+    assert set(component.source_paths) == {
+        ".dockerignore",
+        "deploy/Dockerfile.personal-dev-native-builder-agent",
+        "deploy/personal-dev-native-builder-agent-requirements.txt",
+        "src/loom/__init__.py",
+        "src/loom/personal_dev_native_builder_agent.py",
+        "src/loom/personal_dev_native_builder_protocol.py",
+        "src/loom_personal_dev_native_builder_agent/**",
+    }
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=("src/loom/personal_dev_native_builder_agent.py",),
+        force_all=False,
+    )
+    assert (
+        {
+            "image": "personal-dev-native-builder-agent",
+            "image_name": "loom-personal-dev-native-builder-agent",
+            "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
+            "context": ".",
+        }
+        in selected
     )
 
 

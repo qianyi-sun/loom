@@ -162,12 +162,15 @@ def _metadata(
     }
 
 
-def _contract(
+def personal_dev_builder_contract(
     registration: CandidateRegistration,
     *,
-    platform: str,
+    platform: PersonalDevPlatform,
     config: PersonalDevBuilderManifestConfig,
 ) -> str:
+    """Render the canonical, capability-free contract for one platform build."""
+    if platform not in PERSONAL_DEV_PLATFORMS:
+        raise ValueError("personal-dev builder platform is unsupported")
     candidate = registration.candidate
     attempt = _attempt(registration)
     value = {
@@ -353,7 +356,7 @@ def personal_dev_builder_manifest_documents(
         "metadata": _metadata(contract_name, namespace, registration),
         "immutable": True,
         "data": {
-            "contract.json": _contract(
+            "contract.json": personal_dev_builder_contract(
                 registration,
                 platform=platform,
                 config=config,

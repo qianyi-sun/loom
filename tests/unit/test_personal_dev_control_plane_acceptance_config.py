@@ -221,7 +221,9 @@ def _inputs(
     return profile, release, _plan_value(profile, release, release_sha256)
 
 
-def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Path) -> None:
+def test_predecessor_acceptance_plan_loads_but_cannot_enable_native_contract(
+    tmp_path: Path,
+) -> None:
     profile, release, value = _inputs(tmp_path)
     path, digest = _write_plan(tmp_path, value)
 
@@ -247,13 +249,14 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
     assert plan.acceptance_owners == (plan.acceptance_owner,)
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
-    validate_personal_dev_acceptance_plan(
-        profile,
-        release,
-        "a" * 64,
-        plan,
-        now=_NOW,
-    )
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        validate_personal_dev_acceptance_plan(
+            profile,
+            release,
+            "a" * 64,
+            plan,
+            now=_NOW,
+        )
 
 
 def test_legacy_release_images_remain_canonical_in_v1_plan_types(tmp_path: Path) -> None:
@@ -575,7 +578,7 @@ def test_acceptance_plan_cross_validation_rejects_drift(
     ("state", "epoch"),
     [("prepared", 4), ("drain-only", 5)],
 )
-def test_acceptance_plan_permits_only_coherent_non_executable_manager_states(
+def test_predecessor_acceptance_plan_parses_coherent_non_executable_manager_states(
     tmp_path: Path,
     state: str,
     epoch: int,
@@ -586,13 +589,16 @@ def test_acceptance_plan_permits_only_coherent_non_executable_manager_states(
 
     plan = load_personal_dev_acceptance_plan(path, digest)
 
-    validate_personal_dev_acceptance_plan(
-        profile,
-        release,
-        "a" * 64,
-        plan,
-        now=_NOW,
-    )
+    assert plan.manager.execution_state == state
+    assert plan.manager.execution_epoch == epoch
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        validate_personal_dev_acceptance_plan(
+            profile,
+            release,
+            "a" * 64,
+            plan,
+            now=_NOW,
+        )
 
 
 def test_acceptance_cross_validation_normalizes_invalid_runtime_types(
@@ -651,7 +657,7 @@ def _operational_plan_value(value: dict[str, Any]) -> dict[str, Any]:
     return operational
 
 
-def test_operational_plan_loads_accepted_non_expiring_zero_capacity_contract(
+def test_predecessor_operational_plan_loads_but_cannot_enable_native_contract(
     tmp_path: Path,
 ) -> None:
     profile, release, acceptance = _inputs(tmp_path)
@@ -665,13 +671,14 @@ def test_operational_plan_loads_accepted_non_expiring_zero_capacity_contract(
     assert plan.canonical_bytes() == path.read_bytes()
     assert plan.sha256 == digest
     assert "expires_at" not in plan.manager_runtime_json()
-    validate_personal_dev_operational_plan(
-        profile,
-        release,
-        "a" * 64,
-        plan,
-        now=_NOW,
-    )
+    with pytest.raises(PersonalDevOperationalPlanError):
+        validate_personal_dev_operational_plan(
+            profile,
+            release,
+            "a" * 64,
+            plan,
+            now=_NOW,
+        )
 
 
 @pytest.mark.parametrize(

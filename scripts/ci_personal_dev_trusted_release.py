@@ -13,22 +13,14 @@ import stat
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from src.loom.personal_dev_scanner_cache import (
-        PersonalDevScannerCacheError,
-        PersonalDevScannerCacheFiles,
-        PersonalDevScannerCacheLock,
-        load_personal_dev_scanner_cache_lock,
-    )
-else:
-    from loom.personal_dev_scanner_cache import (
-        PersonalDevScannerCacheError,
-        PersonalDevScannerCacheFiles,
-        PersonalDevScannerCacheLock,
-        load_personal_dev_scanner_cache_lock,
-    )
+from loom.personal_dev_scanner_cache import (
+    PersonalDevScannerCacheError,
+    PersonalDevScannerCacheFiles,
+    PersonalDevScannerCacheLock,
+    load_personal_dev_scanner_cache_lock,
+)
 
 if __package__ in {None, ""}:  # pragma: no cover - direct workflow script entry point
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -66,6 +58,11 @@ _INTERNAL_IMAGES: dict[str, dict[str, str]] = {
         "release_key": "personal_dev_activation_agent",
         "image_name": "loom-personal-dev-activation-agent",
         "dockerfile": "deploy/Dockerfile.personal-dev-activation-agent",
+    },
+    "personal-dev-native-builder-agent": {
+        "release_key": "personal_dev_native_builder_agent",
+        "image_name": "loom-personal-dev-native-builder-agent",
+        "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
     },
     "personal-dev-scanner-cache": {
         "release_key": "personal_dev_scanner_cache",
@@ -450,7 +447,7 @@ def assemble_personal_dev_trusted_release(
     repository_owner_id: str,
     runner_environment: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Validate eight indexes and return canonical release and evidence values."""
+    """Validate nine indexes and return canonical release and evidence values."""
 
     repository = _exact_text(_REPOSITORY, repository, "repository")
     if ref_name not in {"dev", "main"}:
@@ -596,7 +593,7 @@ def assemble_personal_dev_trusted_release(
         raise TrustedReleaseError("trusted image index digests must be distinct")
 
     evidence: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "release": {
             "repository": repository,
             "ref": f"refs/heads/{ref_name}",
@@ -610,7 +607,7 @@ def assemble_personal_dev_trusted_release(
         "scanner": scanner_evidence,
     }
     release: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "source_sha": source_sha,
         "source_tree": source_tree,
         "images": release_images,

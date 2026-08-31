@@ -11,11 +11,28 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import loom_service.personal_dev_builder as builder_module
+from loom.personal_dev_builder_runtime import (
+    CompositePersonalDevBuildExecutor,
+    KubectlPersonalDevBuildExecutor,
+    KubectlPersonalDevPlatformBuildExecutor,
+)
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
+from loom.personal_dev_native_builder_executor import (
+    NativeAgentPersonalDevPlatformBuildExecutor,
+)
+from loom.personal_dev_native_builder_protocol import PersonalDevNativeBuilderVerifier
+from loom_service.app import (
+    configure_personal_dev_native_builder_verifier,
+    validate_personal_dev_native_builder_settings,
+)
+from loom_service.config import LoomServiceSettings
 from loom_service.personal_dev_builder import build_personal_dev_builder_runtime
 from loom_service.personal_dev_candidate_gc import build_personal_dev_artifact_collector
+from tests.unit.test_personal_dev_builder import _registration
 
 _FILE_OWNER_UID = os.geteuid()
 _ROOT = Path(__file__).resolve().parents[2]
@@ -185,6 +202,203 @@ def test_builder_runtime_wires_one_exact_bounded_authority(tmp_path: Path) -> No
     assert runtime.manifest_config.runtime_class_name == "loom-personal-dev-builder"
     assert runtime.capabilities.max_artifact_bytes == 8 * 1024 * 1024
     assert runtime.exporter.registry_prefix == "registry.example/personal-dev"
+    assert isinstance(runtime.executor, KubectlPersonalDevBuildExecutor)
+
+
+def test_builder_runtime_native_mode_binds_each_architecture_to_exact_provider(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        personal_dev_native_builder_enabled=True,
+        personal_dev_native_builder_agent_instance_id=(
+            "10000000-0000-0000-0000-000000000001"
+        ),
+        personal_dev_native_builder_agent_key_id="gb10-native-builder-v1",
+        personal_dev_native_builder_agent_image=(
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+            + "e" * 64
+        ),
+        personal_dev_native_builder_runtime_profile_sha256="f" * 64,
+        personal_dev_native_builder_poll_interval_sec=1.0,
+    )
+
+    runtime = build_personal_dev_builder_runtime(
+        settings,  # type: ignore[arg-type]
+        minio_client=object(),
+        session_factory=lambda: None,  # type: ignore[arg-type]
+    )
+
+    assert runtime is not None
+    assert isinstance(runtime.executor, CompositePersonalDevBuildExecutor)
+    assert set(runtime.executor.platform_executors) == {
+        "linux/amd64",
+        "linux/arm64",
+    }
+    assert isinstance(
+        runtime.executor.platform_executors["linux/amd64"],
+        KubectlPersonalDevPlatformBuildExecutor,
+    )
+    assert isinstance(
+        runtime.executor.platform_executors["linux/arm64"],
+        NativeAgentPersonalDevPlatformBuildExecutor,
+    )
+    native = runtime.executor.platform_executors["linux/arm64"]
+    assert isinstance(native, NativeAgentPersonalDevPlatformBuildExecutor)
+    policy = native.policy_factory(_registration())
+    assert policy.agent_instance_id.hex == "10000000000000000000000000000001"
+    assert policy.agent_key_id == "gb10-native-builder-v1"
+    assert policy.agent_image.endswith("@sha256:" + "e" * 64)
+    assert policy.builder_image == settings.personal_dev_builder_image
+    assert policy.runtime_profile_sha256 == "f" * 64
+    assert json.loads(policy.contract_json)["platform"] == "linux/arm64"
+    assert policy.artifact_max_bytes == settings.personal_dev_builder_max_artifact_bytes
+    assert policy.active_deadline_seconds == 3600
+
+
+def test_builder_runtime_native_mode_requires_session_authority(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        personal_dev_native_builder_enabled=True,
+        personal_dev_native_builder_agent_instance_id=(
+            "10000000-0000-0000-0000-000000000001"
+        ),
+        personal_dev_native_builder_agent_key_id="gb10-native-builder-v1",
+        personal_dev_native_builder_agent_image=(
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+            + "e" * 64
+        ),
+        personal_dev_native_builder_runtime_profile_sha256="f" * 64,
+        personal_dev_native_builder_poll_interval_sec=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="requires a database session factory"):
+        build_personal_dev_builder_runtime(
+            settings,  # type: ignore[arg-type]
+            minio_client=object(),
+        )
+
+
+def test_native_builder_service_settings_default_to_inert_exact_bounds() -> None:
+    fields = LoomServiceSettings.model_fields
+
+    assert fields["personal_dev_native_builder_enabled"].default is False
+    assert fields["personal_dev_native_builder_agent_instance_id"].default == ""
+    assert fields["personal_dev_native_builder_agent_key_id"].default == ""
+    assert fields["personal_dev_native_builder_public_key_file"].default is None
+    assert fields["personal_dev_native_builder_public_key_sha256"].default == ""
+    assert fields["personal_dev_native_builder_agent_image"].default == ""
+    assert fields["personal_dev_native_builder_runtime_profile_sha256"].default == ""
+    assert fields["personal_dev_native_builder_protocol_version"].default == 1
+    assert fields["personal_dev_native_builder_freshness_sec"].default == 60
+    assert fields["personal_dev_native_builder_max_concurrency"].default == 2
+    assert fields["personal_dev_native_builder_poll_interval_sec"].default == 1.0
+
+
+def _native_startup_settings(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "dev_instances_enabled": True,
+        "personal_dev_builder_enabled": True,
+        "personal_dev_builder_image": (
+            "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "a" * 64
+        ),
+        "personal_dev_builder_lease_sec": 4200,
+        "personal_dev_native_builder_enabled": True,
+        "personal_dev_native_builder_agent_instance_id": (
+            "10000000-0000-0000-0000-000000000001"
+        ),
+        "personal_dev_native_builder_agent_key_id": "gb10-native-builder-v1",
+        "personal_dev_native_builder_public_key_file": Path(
+            "/run/loom-personal-dev/native-builder-public/files/public-key"
+        ),
+        "personal_dev_native_builder_public_key_sha256": "b" * 64,
+        "personal_dev_native_builder_agent_image": (
+            "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+            + "c" * 64
+        ),
+        "personal_dev_native_builder_runtime_profile_sha256": "d" * 64,
+        "personal_dev_native_builder_protocol_version": 1,
+        "personal_dev_native_builder_freshness_sec": 60,
+        "personal_dev_native_builder_max_concurrency": 2,
+        "personal_dev_native_builder_poll_interval_sec": 1.0,
+        "minio_public_endpoint": "https://objects.dev.yylx.world",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_native_builder_service_startup_accepts_only_complete_release_binding() -> None:
+    validate_personal_dev_native_builder_settings(_native_startup_settings())  # type: ignore[arg-type]
+
+
+def test_native_builder_verifier_is_installed_only_for_enabled_exact_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = SimpleNamespace()
+    disabled = _native_startup_settings(personal_dev_native_builder_enabled=False)
+    configure_personal_dev_native_builder_verifier(state, disabled)  # type: ignore[arg-type]
+    assert not hasattr(state, "personal_dev_native_builder_verifier")
+
+    public_key = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    path = tmp_path / "native-builder-public-key"
+    path.write_bytes(public_key)
+    path.chmod(0o440)
+    settings = _native_startup_settings(
+        personal_dev_native_builder_public_key_file=path,
+        personal_dev_native_builder_public_key_sha256=hashlib.sha256(
+            public_key
+        ).hexdigest(),
+    )
+    monkeypatch.setattr(
+        "loom.personal_dev_native_builder_protocol.os.geteuid",
+        lambda: _FILE_OWNER_UID,
+    )
+
+    configure_personal_dev_native_builder_verifier(state, settings)  # type: ignore[arg-type]
+
+    verifier = state.personal_dev_native_builder_verifier
+    assert isinstance(verifier, PersonalDevNativeBuilderVerifier)
+    assert verifier._max_age.total_seconds() == 60
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"dev_instances_enabled": False}, "personal development"),
+        ({"personal_dev_builder_enabled": False}, "personal development"),
+        ({"minio_public_endpoint": None}, "public object-store"),
+        ({"minio_public_endpoint": "http://objects.dev.yylx.world"}, "public object-store"),
+        ({"personal_dev_native_builder_public_key_file": None}, "public key"),
+        ({"personal_dev_native_builder_public_key_sha256": ""}, "public key"),
+        ({"personal_dev_native_builder_agent_instance_id": ""}, "agent instance"),
+        ({"personal_dev_native_builder_agent_key_id": ""}, "agent key"),
+        ({"personal_dev_native_builder_agent_image": "agent:latest"}, "agent image"),
+        ({"personal_dev_builder_image": "builder:latest"}, "builder image"),
+        ({"personal_dev_native_builder_runtime_profile_sha256": ""}, "runtime profile"),
+        ({"personal_dev_native_builder_protocol_version": 2}, "protocol"),
+        ({"personal_dev_native_builder_freshness_sec": 0}, "freshness"),
+        ({"personal_dev_native_builder_freshness_sec": 301}, "freshness"),
+        ({"personal_dev_native_builder_max_concurrency": 1}, "concurrency"),
+        ({"personal_dev_native_builder_poll_interval_sec": 0}, "poll interval"),
+        ({"personal_dev_builder_lease_sec": 3660}, "outlive"),
+    ],
+)
+def test_native_builder_service_startup_rejects_incomplete_or_relaxed_binding(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        validate_personal_dev_native_builder_settings(  # type: ignore[arg-type]
+            _native_startup_settings(**overrides)
+        )
 
 
 async def test_builder_run_loop_starts_one_lease_owner_per_global_slot(

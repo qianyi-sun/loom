@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -25,9 +26,14 @@ from loom.personal_dev_builder import (
 from loom.personal_dev_builder_exporter import (
     S3TrustedPersonalDevBuildPublicationExporter,
 )
-from loom.personal_dev_builder_manifest import PersonalDevBuilderManifestConfig
+from loom.personal_dev_builder_manifest import (
+    PersonalDevBuilderManifestConfig,
+    personal_dev_builder_contract,
+)
 from loom.personal_dev_builder_runtime import (
+    CompositePersonalDevBuildExecutor,
     KubectlPersonalDevBuildExecutor,
+    KubectlPersonalDevPlatformBuildExecutor,
     S3PersonalDevBuildCapabilityProvider,
 )
 from loom.personal_dev_builder_tools import (
@@ -37,6 +43,10 @@ from loom.personal_dev_builder_tools import (
 )
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
+from loom.personal_dev_native_builder_executor import (
+    NativeAgentPersonalDevPlatformBuildExecutor,
+)
+from loom.personal_dev_native_builder_store import NativeBuilderGrantPolicy
 from loom.personal_dev_scanner_cache import (
     PersonalDevScannerCacheBinding,
     PersonalDevScannerCacheFiles,
@@ -96,7 +106,7 @@ _STABLE_FILE_FIELDS = (
 @dataclass(frozen=True, slots=True)
 class PersonalDevBuilderRuntime:
     source: S3PersonalDevBuildSource
-    executor: KubectlPersonalDevBuildExecutor
+    executor: PersonalDevBuildExecutor
     manifest_config: PersonalDevBuilderManifestConfig
     capabilities: S3PersonalDevBuildCapabilityProvider
     exporter: S3TrustedPersonalDevBuildPublicationExporter
@@ -459,6 +469,7 @@ def build_personal_dev_builder_runtime(
     settings: LoomServiceSettings,
     *,
     minio_client: Any,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> PersonalDevBuilderRuntime | None:
     """Build the inert-by-default restricted build and publication authority."""
     if not settings.personal_dev_builder_enabled:
@@ -564,12 +575,82 @@ def build_personal_dev_builder_runtime(
         field_manager="loom-personal-dev-builder",
         job_wait_timeout_seconds=manifest_config.active_deadline_seconds + 60,
     )
-    executor = KubectlPersonalDevBuildExecutor(
-        cluster=kubectl,
-        capabilities=capabilities,
-        exporter=exporter,
-        manifest_config=manifest_config,
-    )
+    if getattr(settings, "personal_dev_native_builder_enabled", False):
+        if session_factory is None:
+            raise RuntimeError(
+                "personal-dev native builder requires a database session factory"
+            )
+        try:
+            agent_instance_id = UUID(
+                str(getattr(settings, "personal_dev_native_builder_agent_instance_id", ""))
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise RuntimeError(
+                "personal-dev native builder agent instance is invalid"
+            ) from None
+
+        def native_policy(registration):  # type: ignore[no-untyped-def]
+            contract = personal_dev_builder_contract(
+                registration,
+                platform="linux/arm64",
+                config=manifest_config,
+            )
+            return NativeBuilderGrantPolicy(
+                agent_instance_id=agent_instance_id,
+                agent_key_id=getattr(
+                    settings,
+                    "personal_dev_native_builder_agent_key_id",
+                    "",
+                ),
+                agent_image=getattr(
+                    settings,
+                    "personal_dev_native_builder_agent_image",
+                    "",
+                ),
+                builder_image=manifest_config.builder_image,
+                runtime_profile_sha256=(
+                    getattr(
+                        settings,
+                        "personal_dev_native_builder_runtime_profile_sha256",
+                        "",
+                    )
+                ),
+                contract_json=contract,
+                contract_sha256=hashlib.sha256(contract.encode("ascii")).hexdigest(),
+                artifact_max_bytes=manifest_config.max_artifact_bytes,
+                active_deadline_seconds=manifest_config.active_deadline_seconds,
+            )
+
+        executor: PersonalDevBuildExecutor = CompositePersonalDevBuildExecutor(
+            platform_executors={
+                "linux/amd64": KubectlPersonalDevPlatformBuildExecutor(
+                    cluster=kubectl,
+                    capabilities=capabilities,
+                    manifest_config=manifest_config,
+                    platform="linux/amd64",
+                ),
+                "linux/arm64": NativeAgentPersonalDevPlatformBuildExecutor(
+                    session_factory=session_factory,
+                    policy_factory=native_policy,
+                    wait_timeout_seconds=manifest_config.active_deadline_seconds,
+                    poll_interval_seconds=(
+                        getattr(
+                            settings,
+                            "personal_dev_native_builder_poll_interval_sec",
+                            1.0,
+                        )
+                    ),
+                ),
+            },
+            exporter=exporter,
+        )
+    else:
+        executor = KubectlPersonalDevBuildExecutor(
+            cluster=kubectl,
+            capabilities=capabilities,
+            exporter=exporter,
+            manifest_config=manifest_config,
+        )
     return PersonalDevBuilderRuntime(
         source=S3PersonalDevBuildSource(
             object_store=minio_client,

@@ -1,0 +1,10 @@
+[Unit]
+Description=Loom personal development native builder resource envelope
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=900%
+MemoryAccounting=yes
+MemoryMax=77309411328
+TasksAccounting=yes
+TasksMax=8192
