@@ -172,10 +172,12 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 		return b.token, nil
 	}
 	var response tokenResponse
-	if err := b.doJSON(ctx, http.MethodPost, b.endpoint("/token"), tokenRequest{
-		workloadIdentity: b.identity,
-		TTLSeconds:       480,
-	}, nil, &response); err != nil {
+	if err := retryOperation(ctx, func() error {
+		return b.doJSON(ctx, http.MethodPost, b.endpoint("/token"), tokenRequest{
+			workloadIdentity: b.identity,
+			TTLSeconds:       480,
+		}, nil, &response)
+	}); err != nil {
 		return "", err
 	}
 	if response.SchemaVersion != "loom.service-execution-token.v1" || response.Token == "" || !response.ExpiresAt.After(time.Now()) {
