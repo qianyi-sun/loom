@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -58,6 +59,24 @@ _MAX_ASSET_BYTES = 8 * 1024 * 1024
 _MAX_RECEIPT_BYTES = 64 * 1024
 _RENAME_NOREPLACE = 1
 _AT_FDCWD = -100
+_IN_CREATE = 0x00000100
+_IN_DELETE = 0x00000200
+_IN_MOVED_FROM = 0x00000040
+_IN_MOVED_TO = 0x00000080
+_IN_DELETE_SELF = 0x00000400
+_IN_MOVE_SELF = 0x00000800
+_IN_Q_OVERFLOW = 0x00004000
+_IN_ISDIR = 0x40000000
+_INOTIFY_MUTATIONS = (
+    _IN_CREATE
+    | _IN_DELETE
+    | _IN_MOVED_FROM
+    | _IN_MOVED_TO
+    | _IN_DELETE_SELF
+    | _IN_MOVE_SELF
+    | _IN_Q_OVERFLOW
+)
+_INOTIFY_EVENT = struct.Struct("iIII")
 _UNSAFE_ENVIRONMENT_NAMES = frozenset({"BASH_ENV", "CDPATH", "ENV", "IFS"})
 _UNSAFE_ENVIRONMENT_PREFIXES = (
     "DOCKER_",
@@ -493,6 +512,95 @@ def _created_object(path: Path, metadata: os.stat_result) -> _CreatedObject:
     )
 
 
+def _open_safe_directory(path: Path, *, exact_mode: int | None = None) -> int:
+    descriptor: int | None = None
+    try:
+        lexical = os.lstat(path)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | os.O_DIRECTORY
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        mode = stat.S_IMODE(opened.st_mode)
+        if (
+            not stat.S_ISDIR(lexical.st_mode)
+            or not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(lexical.st_mode)
+            or (lexical.st_dev, lexical.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_uid != ROOT_UID
+            or opened.st_gid != ROOT_GID
+            or (exact_mode is not None and mode != exact_mode)
+            or (exact_mode is None and mode & 0o002 and not mode & stat.S_ISVTX)
+        ):
+            raise BootstrapError("installed_drift")
+        result = descriptor
+        descriptor = None
+        return result
+    except BootstrapError:
+        raise
+    except OSError as exc:
+        raise BootstrapError("installed_drift") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _watch_directory(descriptor: int) -> int:
+    library = ctypes.CDLL(None, use_errno=True)
+    try:
+        initialize = library.inotify_init1
+        add_watch = library.inotify_add_watch
+    except AttributeError as exc:
+        raise BootstrapError("publication_failed") from exc
+    initialize.argtypes = [ctypes.c_int]
+    initialize.restype = ctypes.c_int
+    add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    add_watch.restype = ctypes.c_int
+    watch_descriptor = initialize(os.O_CLOEXEC | os.O_NONBLOCK)
+    if watch_descriptor < 0:
+        raise BootstrapError("publication_failed")
+    watched = add_watch(
+        watch_descriptor,
+        os.fsencode(f"/proc/self/fd/{descriptor}"),
+        _INOTIFY_MUTATIONS,
+    )
+    if watched < 0:
+        os.close(watch_descriptor)
+        raise BootstrapError("publication_failed")
+    return int(watch_descriptor)
+
+
+def _directory_events(descriptor: int) -> tuple[tuple[int, bytes], ...]:
+    payload = bytearray()
+    while True:
+        try:
+            chunk = os.read(descriptor, 64 * 1024)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        payload.extend(chunk)
+        if len(payload) > 1024 * 1024:
+            raise BootstrapError("publication_failed")
+    events: list[tuple[int, bytes]] = []
+    offset = 0
+    while offset < len(payload):
+        if len(payload) - offset < _INOTIFY_EVENT.size:
+            raise BootstrapError("publication_failed")
+        _watch, mask, _cookie, name_length = _INOTIFY_EVENT.unpack_from(payload, offset)
+        offset += _INOTIFY_EVENT.size
+        end = offset + name_length
+        if end > len(payload):
+            raise BootstrapError("publication_failed")
+        name = bytes(payload[offset:end]).split(b"\0", 1)[0]
+        offset = end
+        events.append((mask, name))
+    return tuple(events)
+
+
 def _remove_created_object(created: _CreatedObject) -> bool:
     parent_descriptor: int | None = None
     try:
@@ -535,31 +643,47 @@ def _ensure_directory(path: Path, mode: int, created: list[_CreatedObject]) -> b
     try:
         os.lstat(path)
     except FileNotFoundError:
-        _safe_directory(path.parent)
+        parent_descriptor: int | None = None
+        watch_descriptor: int | None = None
         descriptor: int | None = None
         try:
-            os.mkdir(path, 0o700)
-            lexical = os.lstat(path)
-            owned = _created_object(path, lexical)
-            created.append(owned)
+            parent_descriptor = _open_safe_directory(path.parent)
+            watch_descriptor = _watch_directory(parent_descriptor)
+            os.mkdir(path.name, 0o700, dir_fd=parent_descriptor)
             descriptor = os.open(
-                path,
+                path.name,
                 os.O_RDONLY
                 | os.O_CLOEXEC
                 | os.O_DIRECTORY
                 | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
             )
             opened = os.fstat(descriptor)
+            current = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            encoded_name = os.fsencode(path.name)
+            relevant_events = tuple(
+                event
+                for event in _directory_events(watch_descriptor)
+                if event[1] == encoded_name
+                or event[0] & (_IN_DELETE_SELF | _IN_MOVE_SELF | _IN_Q_OVERFLOW)
+            )
             if (
-                owned.file_type != stat.S_IFDIR
-                or (opened.st_dev, opened.st_ino) != (owned.device, owned.inode)
+                relevant_events != ((_IN_CREATE | _IN_ISDIR, encoded_name),)
                 or not stat.S_ISDIR(opened.st_mode)
+                or (opened.st_dev, opened.st_ino)
+                != (current.st_dev, current.st_ino)
             ):
                 raise BootstrapError("publication_failed")
+            owned = _created_object(path, opened)
+            created.append(owned)
             os.fchown(descriptor, ROOT_UID, ROOT_GID)
             os.fchmod(descriptor, mode)
             os.fsync(descriptor)
-            _fsync_parent(path)
+            os.fsync(parent_descriptor)
         except BootstrapError:
             raise
         except OSError as exc:
@@ -567,6 +691,10 @@ def _ensure_directory(path: Path, mode: int, created: list[_CreatedObject]) -> b
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+            if watch_descriptor is not None:
+                os.close(watch_descriptor)
+            if parent_descriptor is not None:
+                os.close(parent_descriptor)
         return True
     _safe_directory(path, exact_mode=mode)
     return False

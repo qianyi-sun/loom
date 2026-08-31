@@ -614,6 +614,52 @@ def test_rollback_preserves_a_created_directory_replacement(
     assert state_root.stat().st_ino != displaced.stat().st_ino
 
 
+def test_rollback_preserves_directory_replaced_before_identity_capture(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    state_root = _installed(
+        host_root,
+        "/var/lib/loom/personal-dev-native-builder-runtime-authority",
+    )
+    displaced = host_root / "displaced-before-directory-identity"
+    original_mkdir = module.os.mkdir
+    attacked = False
+
+    def replace_before_identity(
+        path: os.PathLike[str] | str,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal attacked
+        if dir_fd is None:
+            original_mkdir(path, mode)
+            created_path = Path(os.fspath(path))
+        else:
+            original_mkdir(path, mode, dir_fd=dir_fd)
+            created_path = Path(os.readlink(f"/proc/self/fd/{dir_fd}")) / Path(path)
+        if not attacked and created_path == state_root:
+            attacked = True
+            os.rename(state_root, displaced)
+            original_mkdir(state_root, 0o700)
+
+    def fail_after_creation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise module.BootstrapError("installed_validation_failed")
+
+    monkeypatch.setattr(module.os, "mkdir", replace_before_identity)
+    monkeypatch.setattr(module, "_validate_installed_policy", fail_after_creation)
+
+    with pytest.raises(module.BootstrapError, match="publication_failed"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert attacked is True
+    assert state_root.is_dir()
+    assert state_root.stat().st_ino != displaced.stat().st_ino
+
+
 def test_installed_policy_is_validated_against_staged_sudoers_before_publication(
     authority_install: tuple[ModuleType, Path, str, str],
     monkeypatch: pytest.MonkeyPatch,
