@@ -265,7 +265,7 @@ func allowedGatewayRequest(method, path string) bool {
 func trustedGatewayEnvironment(proxyURL string) map[string]string {
 	return map[string]string{
 		"LOOM_GATEWAY_URL":       proxyURL,
-		"OPENAI_BASE_URL":        proxyURL + "/openai/v1",
+		"OPENAI_BASE_URL":        proxyURL + "/v1",
 		"ANTHROPIC_BASE_URL":     proxyURL + "/anthropic/v1",
 		"GOOGLE_GEMINI_BASE_URL": proxyURL + "/google/v1beta",
 		"OPENAI_API_KEY":         "loom_workload_proxy",

@@ -101,7 +101,7 @@ _SUPPORTED_PROVIDERS = frozenset(
 
 
 class _LoomBlock(BaseModel):
-    """Required Loom attribution block on every chat request.
+    """Loom attribution block for callers without a step-scoped token.
 
     ``provider_connection_id`` opts the request into BYO routing
     (#178): the gateway looks up the team's connection, decrypts its
@@ -133,7 +133,7 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str = Field(min_length=1)
     messages: list[dict[str, Any]] = Field(min_length=1)
-    loom: _LoomBlock
+    loom: _LoomBlock | None = None
 
 
 @router.post("/v1/chat/completions")
@@ -184,7 +184,11 @@ async def chat_completions(
         # The token/JWT team is authoritative. A caller-supplied body team may
         # provide legacy attribution only for a team-less platform request; it
         # must never grant access to a BYO provider connection.
-        if ctx.team_id is not None and req.loom.team_id != str(ctx.team_id):
+        if (
+            ctx.team_id is not None
+            and req.loom is not None
+            and req.loom.team_id != str(ctx.team_id)
+        ):
             raise HTTPException(
                 status_code=403,
                 detail="loom.team_id does not match token's team",
@@ -193,7 +197,9 @@ async def chat_completions(
         conn_uuid = resolve_optional_provider_connection_id(
             ctx,
             header_value=x_loom_provider_connection_id,
-            body_value=req.loom.provider_connection_id,
+            body_value=(
+                req.loom.provider_connection_id if req.loom is not None else None
+            ),
         )
 
         # BYO routing (#178): resolve + decrypt now while the session is
@@ -213,26 +219,43 @@ async def chat_completions(
             )
             byo_api_key = await decrypt_facade_api_key(session, byo_row)
 
+    if req.loom is None and (
+        ctx.team_id is None or ctx.trial_id is None or ctx.step_id is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="loom attribution is required without a step-scoped token",
+        )
     try:
-        audit_team_id = ctx.team_id if ctx.team_id is not None else UUID(req.loom.team_id)
+        audit_team_id = (
+            ctx.team_id if ctx.team_id is not None else UUID(req.loom.team_id)  # type: ignore[union-attr]
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail=(f"loom.team_id is not a valid UUID: {exc}"),
         ) from exc
     try:
-        audit_trial_id = ctx.trial_id if ctx.trial_id is not None else UUID(req.loom.trial_id)
+        audit_trial_id = (
+            ctx.trial_id if ctx.trial_id is not None else UUID(req.loom.trial_id)  # type: ignore[union-attr]
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail=(f"loom.trial_id is not a valid UUID: {exc}"),
         ) from exc
-    audit_step_id = ctx.step_id if ctx.step_id is not None else req.loom.step_id
+    audit_step_id = (
+        ctx.step_id if ctx.step_id is not None else req.loom.step_id  # type: ignore[union-attr]
+    )
     # #672 PR-3: the caller may declare a non-default dialect string
     # so llm_calls audit rows attribute the spend correctly (e.g. the
     # family-run skill_patcher_llm adapter sends ``family_evolver``).
     # None → keep the historical ``openai_chat`` label.
-    audit_dialect = req.loom.dialect or "openai_chat"
+    audit_dialect = (
+        req.loom.dialect if req.loom is not None else None
+    ) or "openai_chat"
+    requested_tier = req.loom.tier if req.loom is not None else None
+    requested_region = req.loom.region if req.loom is not None else None
 
     # Provider extraction: "provider/name" or bare "name" (defaults openai).
     raw_model = req.model
@@ -311,8 +334,8 @@ async def chat_completions(
         spec = ModelSpec(
             provider=provider,
             name=model_name,
-            tier=req.loom.tier,
-            region=req.loom.region,
+            tier=requested_tier,
+            region=requested_region,
         )
         try:
             entry = lookup_entry(table, spec)
@@ -355,8 +378,8 @@ async def chat_completions(
         spec = ModelSpec(
             provider=provider,
             name=model_name,
-            tier=req.loom.tier,
-            region=req.loom.region,
+            tier=requested_tier,
+            region=requested_region,
         )
         try:
             entry = lookup_entry(table, spec)
