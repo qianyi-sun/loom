@@ -650,6 +650,7 @@ def test_verify_active_requires_exact_services_socket_runtime_and_empty_inventor
     socket = _mapped(installer, profile.docker_socket)
     socket.parent.mkdir(parents=True, exist_ok=True)
     socket.touch(mode=profile.socket_mode)
+    socket.chmod(profile.socket_mode)
 
     assert installer.verify_active()["state"] == "active"
 
@@ -679,6 +680,7 @@ def test_verify_active_requires_staged_agent_material(tmp_path: Path) -> None:
     socket = _mapped(installer, profile.docker_socket)
     socket.parent.mkdir(parents=True, exist_ok=True)
     socket.touch(mode=profile.socket_mode)
+    socket.chmod(profile.socket_mode)
 
     with pytest.raises(
         PersonalDevNativeBuilderRuntimeInstallError,
