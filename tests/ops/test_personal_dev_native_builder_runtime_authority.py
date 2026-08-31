@@ -3,10 +3,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import io
+import json
 import os
 import signal
 import stat
+import struct
 import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -57,6 +60,121 @@ SOURCE_SHA = "1" * 40
 SOURCE_TREE = "2" * 40
 PROFILE_SHA256 = "3" * 64
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _fnv1a_64(payload: bytes) -> int:
+    value = 14_695_981_039_346_656_037
+    for byte in payload:
+        value ^= byte
+        value = (value * 1_099_511_628_211) & 0xFFFF_FFFF_FFFF_FFFF
+    return value
+
+
+def _bbolt_leaf_page(
+    page_id: int,
+    entries: list[tuple[int, bytes, bytes]],
+    *,
+    page_size: int,
+) -> bytes:
+    page = bytearray(page_size)
+    struct.pack_into("<QHHI", page, 0, page_id, 0x02, len(entries), 0)
+    data_offset = 16 + (16 * len(entries))
+    for index, (flags, key, value) in enumerate(sorted(entries, key=lambda item: item[1])):
+        element_offset = 16 + (16 * index)
+        struct.pack_into(
+            "<IIII",
+            page,
+            element_offset,
+            flags,
+            data_offset - element_offset,
+            len(key),
+            len(value),
+        )
+        page[data_offset : data_offset + len(key)] = key
+        data_offset += len(key)
+        page[data_offset : data_offset + len(value)] = value
+        data_offset += len(value)
+    assert data_offset <= page_size
+    return bytes(page)
+
+
+def _bbolt_meta_page(
+    page_id: int,
+    *,
+    page_size: int,
+    root_page: int,
+    high_water_page: int,
+    transaction_id: int,
+) -> bytes:
+    page = bytearray(page_size)
+    struct.pack_into("<QHHI", page, 0, page_id, 0x04, 0, 0)
+    metadata = struct.pack(
+        "<IIIIQQQQQ",
+        0xED0CDAED,
+        2,
+        page_size,
+        0,
+        root_page,
+        0,
+        2,
+        high_water_page,
+        transaction_id,
+    )
+    page[16 : 16 + len(metadata)] = metadata
+    struct.pack_into("<Q", page, 16 + len(metadata), _fnv1a_64(metadata))
+    return bytes(page)
+
+
+def _bbolt_libnetwork_fixture(
+    records: list[tuple[str, str]],
+    *,
+    stale_network_id: str | None = None,
+) -> bytes:
+    page_size = 4096
+    network_prefix = b"docker/network/v1.0/network/"
+    network_entries: list[tuple[int, bytes, bytes]] = []
+    for index, (network_id, name) in enumerate(records, start=1):
+        key = network_prefix + network_id.encode("ascii") + b"/"
+        document = json.dumps(
+            {
+                "id": network_id,
+                "name": name,
+                "networkType": "null" if name == "none" else name,
+                "scope": "local",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        network_entries.append((0, key, struct.pack("<Q", index) + document))
+
+    pages = [
+        _bbolt_meta_page(
+            0,
+            page_size=page_size,
+            root_page=3,
+            high_water_page=5,
+            transaction_id=2,
+        ),
+        _bbolt_meta_page(
+            1,
+            page_size=page_size,
+            root_page=3,
+            high_water_page=5,
+            transaction_id=1,
+        ),
+        bytearray(page_size),
+        _bbolt_leaf_page(
+            3,
+            [(1, b"libnetwork", struct.pack("<QQ", 4, 0))],
+            page_size=page_size,
+        ),
+        _bbolt_leaf_page(4, network_entries, page_size=page_size),
+    ]
+    struct.pack_into("<QHHI", pages[2], 0, 2, 0x10, 0, 0)
+    if stale_network_id is not None:
+        stale_key = network_prefix + stale_network_id.encode("ascii") + b"/"
+        pages[2][32 : 32 + len(stale_key)] = stale_key
+    return b"".join(pages)
 
 
 class Unused:
@@ -550,6 +668,12 @@ def test_serve_dispatches_one_frame_and_writes_one_canonical_receipt(
     monkeypatch.setattr(authority_module, "verify_invocation", lambda **_values: events.append("verify"))
     monkeypatch.setattr(authority_module, "sanitize_environment", lambda _env: events.append("sanitize"))
     monkeypatch.setattr(authority_module, "load_policy", lambda: events.append("policy") or policy)
+    monkeypatch.setattr(
+        authority_module,
+        "_load_application_modules",
+        lambda: events.append("applications"),
+        raising=False,
+    )
     monkeypatch.setattr(authority_module, "authority_lock", locked)
     monkeypatch.setattr(authority_module, "parse_request", lambda _stream: events.append("parse") or request)
     monkeypatch.setattr(authority_module, "_build_runtime", build, raising=False)
@@ -562,6 +686,7 @@ def test_serve_dispatches_one_frame_and_writes_one_canonical_receipt(
         "verify",
         "sanitize",
         "policy",
+        "applications",
         "lock.enter",
         "parse",
         "build",
@@ -583,6 +708,56 @@ def test_bounded_runner_rejects_output_past_its_limit() -> None:
                 "import sys;sys.stdout.write('x'*17)",
             )
         )
+
+
+def test_bounded_runner_cleans_a_descendant_left_by_a_successful_parent(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "process-group"
+    program = (
+        "import os,pathlib,signal,subprocess,sys,time\n"
+        "child=subprocess.Popen([sys.executable,'-c',"
+        "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)'"
+        "],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        f"pathlib.Path({str(marker)!r}).write_text(str(os.getpgrp()),encoding='ascii')\n"
+    )
+    runner = authority_module.BoundedSubprocessRunner(
+        timeout_seconds=5.0,
+        maximum_output=1024,
+    )
+
+    with pytest.raises(AuthorityError, match="command_cleanup_failed"):
+        runner.run((sys.executable, "-c", program))
+
+    process_group = int(marker.read_text(encoding="ascii"))
+    assert not runner._group_exists(process_group)
+
+
+def test_bounded_runner_replays_termination_received_during_group_cleanup() -> None:
+    replayed: list[int] = []
+    previous = signal.signal(
+        signal.SIGTERM,
+        lambda signum, _frame: replayed.append(signum),
+    )
+    program = (
+        "import os,signal,time\n"
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+        "time.sleep(.1)\n"
+        "os.kill(os.getppid(),signal.SIGTERM)\n"
+        "time.sleep(.1)\n"
+        "os.kill(os.getppid(),signal.SIGTERM)\n"
+        "time.sleep(10)\n"
+    )
+    try:
+        with pytest.raises(AuthorityError, match="command_interrupted"):
+            authority_module.BoundedSubprocessRunner(
+                timeout_seconds=5.0,
+                maximum_output=1024,
+            ).run((sys.executable, "-c", program))
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert replayed == [signal.SIGTERM]
 
 
 def test_cleanup_defers_then_replays_the_first_termination_signal(
@@ -691,8 +866,6 @@ def test_system_host_adapter_uses_only_fixed_commands_and_validates_output(
             "--all",
             "--quiet",
             "--no-trunc",
-            "--filter",
-            "label=loom.personal-dev-native-builder.managed=true",
         ),
         (
             "/usr/bin/docker",
@@ -703,9 +876,192 @@ def test_system_host_adapter_uses_only_fixed_commands_and_validates_output(
             "--quiet",
             "--no-trunc",
             "--filter",
-            "label=loom.personal-dev-native-builder.managed=true",
+            "type=custom",
         ),
     ]
+
+
+def test_inactive_host_inventory_reads_runtime_metadata_but_ignores_image_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    docker_root = tmp_path / "docker"
+    container_id = "a" * 64
+    network_id = "b" * 64
+    (docker_root / "containers" / container_id).mkdir(parents=True)
+    (docker_root / "network" / "files").mkdir(parents=True)
+    (docker_root / "network" / "files" / "local-kv.db").write_bytes(
+        _bbolt_libnetwork_fixture([(network_id, "loom-runtime")])
+    )
+    (docker_root / "image").mkdir()
+    (docker_root / "image" / "retained-cache").write_bytes(b"image metadata")
+    (docker_root / "overlay2").mkdir()
+    (docker_root / "overlay2" / "retained-layer").write_bytes(b"layer metadata")
+    for directory in (
+        docker_root,
+        docker_root / "containers",
+        docker_root / "containers" / container_id,
+        docker_root / "network",
+        docker_root / "network" / "files",
+        docker_root / "image",
+        docker_root / "overlay2",
+    ):
+        directory.chmod(0o755)
+
+    class Runner:
+        def run(
+            self,
+            argv: tuple[str, ...] | list[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            del check, env
+            command = tuple(argv)
+            if command[0] == "/usr/bin/docker":
+                raise AssertionError("inactive inventory must not use a dead socket")
+            if command[0] == "/usr/bin/systemctl":
+                return CommandResult(3, "inactive\n", "")
+            return CommandResult(0, "", "")
+
+    monkeypatch.setattr(authority_module, "_DOCKER_DATA_ROOT", docker_root)
+    monkeypatch.setattr(
+        authority_module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="gx10-01c7", machine="aarch64"),
+    )
+
+    assert authority_module.SystemHostAdapter(
+        runner=Runner(),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ).status() == HostStatus(
+        host_name="gx10-01c7",
+        architecture="aarch64",
+        dockerd_active=False,
+        agent_active=False,
+        nft_present=False,
+        managed_containers=1,
+        managed_networks=1,
+    )
+
+
+def test_inactive_host_inventory_counts_only_active_custom_network_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    docker_root = tmp_path / "docker"
+    host_id = "a" * 64
+    none_id = "b" * 64
+    custom_id = "c" * 64
+    stale_id = "d" * 64
+    (docker_root / "containers").mkdir(parents=True)
+    (docker_root / "network" / "files").mkdir(parents=True)
+    (docker_root / "network" / "files" / "local-kv.db").write_bytes(
+        _bbolt_libnetwork_fixture(
+            [
+                (host_id, "host"),
+                (none_id, "none"),
+                (custom_id, "loom-runtime"),
+            ],
+            stale_network_id=stale_id,
+        )
+    )
+    for directory in (
+        docker_root,
+        docker_root / "containers",
+        docker_root / "network",
+        docker_root / "network" / "files",
+    ):
+        directory.chmod(0o755)
+
+    class Runner:
+        def run(
+            self,
+            argv: tuple[str, ...] | list[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            del check, env
+            if argv[0] == "/usr/bin/systemctl":
+                return CommandResult(3, "inactive\n", "")
+            return CommandResult(0, "", "")
+
+    monkeypatch.setattr(authority_module, "_DOCKER_DATA_ROOT", docker_root)
+    monkeypatch.setattr(
+        authority_module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="gx10-01c7", machine="aarch64"),
+    )
+
+    status = authority_module.SystemHostAdapter(
+        runner=Runner(),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ).status()
+
+    assert status.managed_networks == 1
+
+
+def test_dockerd_start_rejects_post_start_inventory_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    active = False
+
+    class Runner:
+        def run(
+            self,
+            argv: tuple[str, ...] | list[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            nonlocal active
+            del check, env
+            command = tuple(argv)
+            calls.append(command)
+            if command[0] == "/usr/bin/systemctl":
+                action = command[1]
+                if action == "is-active":
+                    return (
+                        CommandResult(0, "active\n", "")
+                        if active
+                        else CommandResult(3, "inactive\n", "")
+                    )
+                active = action == "start"
+                return CommandResult(0, "", "")
+            return CommandResult(0, "c" * 64 + "\n", "")
+
+    monkeypatch.setattr(authority_module, "_DOCKER_DATA_ROOT", tmp_path / "docker")
+    host = authority_module.SystemHostAdapter(
+        runner=Runner(),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+
+    with pytest.raises(AuthorityError, match="managed_objects_invalid"):
+        host.start_dockerd()
+
+    assert active is False
+    assert calls.index(
+        ("/usr/bin/systemctl", "start", "loom-personal-dev-builder-dockerd.service")
+    ) < calls.index(
+        (
+            "/usr/bin/docker",
+            "-H",
+            "unix:///run/loom-personal-dev-builder/docker.sock",
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+        )
+    ) < calls.index(
+        ("/usr/bin/systemctl", "stop", "loom-personal-dev-builder-dockerd.service")
+    )
 
 
 def test_system_host_adapter_mutates_only_exact_services_and_nft_table() -> None:
@@ -742,6 +1098,8 @@ def test_system_host_adapter_mutates_only_exact_services_and_nft_table() -> None
                 return CommandResult(0, "", "")
             if command[:3] == ("/usr/sbin/nft", "delete", "table"):
                 nft_present = False
+                return CommandResult(0, "", "")
+            if command[0] == "/usr/bin/docker":
                 return CommandResult(0, "", "")
             action = command[1]
             unit = command[2]
@@ -796,6 +1154,27 @@ def test_system_host_adapter_mutates_only_exact_services_and_nft_table() -> None
             "/usr/bin/systemctl",
             "is-active",
             "loom-personal-dev-builder-dockerd.service",
+        ),
+        (
+            "/usr/bin/docker",
+            "-H",
+            "unix:///run/loom-personal-dev-builder/docker.sock",
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+        ),
+        (
+            "/usr/bin/docker",
+            "-H",
+            "unix:///run/loom-personal-dev-builder/docker.sock",
+            "network",
+            "ls",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            "type=custom",
         ),
         (
             "/usr/bin/systemctl",
@@ -1592,6 +1971,49 @@ def test_file_state_store_atomically_fsyncs_mode_0600_and_reads_exact_hash(
     assert fsync_kinds.count("directory") >= 1
 
 
+def test_file_state_store_publishes_through_retained_directory_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "state"
+    displaced = tmp_path / "state-opened"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    store = FileStateStore(
+        root=root,
+        path=root / "state-v1.json",
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    )
+    real_replace = os.replace
+    swapped = False
+
+    def swap_then_replace(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        **arguments: object,
+    ) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            root.rename(displaced)
+            root.mkdir(mode=0o700)
+            root.chmod(0o700)
+        real_replace(source, destination, **arguments)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(authority_module.os, "replace", swap_then_replace)
+
+    published = store.publish(_prepared_state())
+
+    assert published.sha256 == hashlib.sha256(
+        encode_state(_prepared_state())
+    ).hexdigest()
+    assert (displaced / "state-v1.json").read_bytes() == encode_state(
+        _prepared_state()
+    )
+    assert list(root.iterdir()) == []
+
+
 def test_archive_copy_is_descriptor_bound_root_private_and_always_unlinked(
     tmp_path: Path,
 ) -> None:
@@ -1652,6 +2074,38 @@ def test_archive_copy_unlinks_partial_destination_when_digest_is_rejected(
         with copies.copy(source, expected_sha512="f" * 128, request_id=REQUEST_ID):
             raise AssertionError("unreachable")
 
+    assert list(root.iterdir()) == []
+
+
+def test_archive_copy_keeps_root_directory_fd_across_path_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "private"
+    displaced = tmp_path / "private-opened"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"fixed archive bytes")
+    source.chmod(0o600)
+    copies = RootArchiveCopies(
+        root=root,
+        operator_uid=os.getuid(),
+        operator_gid=os.getgid(),
+        root_uid=os.getuid(),
+        root_gid=os.getgid(),
+    )
+
+    with copies.copy(
+        source,
+        expected_sha512=hashlib.sha512(b"fixed archive bytes").hexdigest(),
+        request_id=REQUEST_ID,
+    ) as copied:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        assert copied.read_bytes() == b"fixed archive bytes"
+
+    assert list(displaced.iterdir()) == []
     assert list(root.iterdir()) == []
 
 
@@ -2052,6 +2506,28 @@ def test_remove_failure_after_each_mutation_still_compensates_exact_host_scope(
     assert states.snapshot == original
 
 
+def test_remove_retries_same_state_hash_after_state_deletion_failure() -> None:
+    runtime, events, _, states, _, _ = _transition_runtime(
+        _active_state(),
+        active_host=True,
+        state_remove_fail=True,
+    )
+    original = states.snapshot
+    assert original is not None
+    request = _state_request("remove", original.sha256)
+
+    with pytest.raises(AuthorityError):
+        runtime.dispatch(request)
+
+    assert states.snapshot == original
+    states.fail_remove = False
+    receipt = runtime.dispatch(request)
+
+    assert receipt["phase"] == "inert"
+    assert states.snapshot is None
+    assert events.count("installer.remove") == 2
+
+
 def test_ephemeral_secret_files_use_exclusive_fixed_modes_and_unlink_on_base_exception(
     tmp_path: Path,
 ) -> None:
@@ -2109,4 +2585,34 @@ def test_ephemeral_secret_files_unlink_a_file_when_its_write_fails(
         ):
             raise AssertionError("unreachable")
 
+    assert list(root.iterdir()) == []
+
+
+def test_ephemeral_secrets_keep_root_directory_fd_across_path_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "secrets"
+    displaced = tmp_path / "secrets-opened"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    files = EphemeralSecretFiles(
+        root=root,
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+        private_key_mode=0o400,
+    )
+
+    with files.files(
+        PRIVATE_SEED + SERVICE_CA,
+        private_key_length=len(PRIVATE_SEED),
+        service_ca_length=len(SERVICE_CA),
+        request_id=REQUEST_ID,
+    ) as paths:
+        root.rename(displaced)
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        assert paths.private_key.read_bytes() == PRIVATE_SEED
+        assert paths.ca_file.read_bytes() == SERVICE_CA
+
+    assert list(displaced.iterdir()) == []
     assert list(root.iterdir()) == []

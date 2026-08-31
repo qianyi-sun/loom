@@ -23,8 +23,6 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops.personal_dev_native_builder_runtime_profile import (
     NativeBuilderRuntimeArchiveMember,
     NativeBuilderRuntimeProfile,
@@ -523,18 +521,63 @@ def _normalized_nftables(payload: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
+_ED25519_FIELD = 2**255 - 19
+_ED25519_D = (
+    -121665 * pow(121666, _ED25519_FIELD - 2, _ED25519_FIELD)
+) % _ED25519_FIELD
+_ED25519_BASE = (
+    15112221349535400772501151409588531511454012693041857206046113283949847762202,
+    46316835694926478169428394003475163141307993866256225615783033603165251855960,
+    1,
+    46827403850823179245072216630277197565144205554125654976674165829533817101731,
+)
+
+
+def _ed25519_add(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    x1, y1, z1, t1 = left
+    x2, y2, z2, t2 = right
+    field = _ED25519_FIELD
+    a = (y1 - x1) * (y2 - x2) % field
+    b = (y1 + x1) * (y2 + x2) % field
+    c = 2 * _ED25519_D * t1 * t2 % field
+    d = 2 * z1 * z2 % field
+    e = b - a
+    f = d - c
+    g = d + c
+    h = b + a
+    return (e * f % field, g * h % field, f * g % field, e * h % field)
+
+
+def _derive_ed25519_public_key(private_seed: bytes) -> bytes:
+    """Derive the RFC 8032 compressed public key using only sealed stdlib."""
+    if not isinstance(private_seed, bytes) or len(private_seed) != 32:
+        raise PersonalDevNativeBuilderRuntimeInstallError("public_key_invalid")
+    expanded = hashlib.sha512(private_seed).digest()
+    scalar_bytes = bytearray(expanded[:32])
+    scalar_bytes[0] &= 248
+    scalar_bytes[31] &= 63
+    scalar_bytes[31] |= 64
+    scalar = int.from_bytes(scalar_bytes, "little")
+    result = (0, 1, 1, 0)
+    addend = _ED25519_BASE
+    while scalar:
+        if scalar & 1:
+            result = _ed25519_add(result, addend)
+        addend = _ed25519_add(addend, addend)
+        scalar >>= 1
+    x, y, z, _ = result
+    inverse_z = pow(z, _ED25519_FIELD - 2, _ED25519_FIELD)
+    affine_x = x * inverse_z % _ED25519_FIELD
+    affine_y = y * inverse_z % _ED25519_FIELD
+    encoded = affine_y | ((affine_x & 1) << 255)
+    return encoded.to_bytes(32, "little")
+
+
 def _public_key_sha256(private_seed: bytes) -> str:
-    try:
-        public_key = Ed25519PrivateKey.from_private_bytes(private_seed).public_key()
-        raw_public_key = public_key.public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    except (TypeError, ValueError) as exc:
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "public_key_invalid"
-        ) from exc
-    return hashlib.sha256(raw_public_key).hexdigest()
+    return hashlib.sha256(_derive_ed25519_public_key(private_seed)).hexdigest()
 
 
 class PersonalDevNativeBuilderRuntimeInstaller:
@@ -1681,55 +1724,81 @@ class PersonalDevNativeBuilderRuntimeInstaller:
     def discard_agent_stage(self) -> None:
         """Remove only exact inactive agent-stage files after broker rollback."""
         self._verify_services_inactive()
-        specifications = {
-            self.profile.agent_service_path: (
-                64 * 1024,
-                self.context.authority_uid,
-                self.context.authority_gid,
-                0o444,
-            ),
-            self.profile.private_key_path: (
-                32,
-                self._agent_uid,
-                self._agent_gid,
-                self.profile.private_key_mode,
-            ),
-            self.profile.ca_file_path: (
-                _MAX_CA_BYTES,
-                self.context.authority_uid,
-                self.context.authority_gid,
-                0o444,
-            ),
-            _AGENT_STAGE_MANIFEST: (
+        specifications = (
+            (
+                _AGENT_STAGE_MANIFEST,
                 16 * 1024,
                 self.context.authority_uid,
                 self.context.authority_gid,
                 0o444,
             ),
-        }
+            (
+                self.profile.agent_service_path,
+                64 * 1024,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            (
+                self.profile.ca_file_path,
+                _MAX_CA_BYTES,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            (
+                self.profile.private_key_path,
+                32,
+                self._agent_uid,
+                self._agent_gid,
+                self.profile.private_key_mode,
+            ),
+        )
+        first_failure: BaseException | None = None
         removed = False
-        for absolute in reversed(self._agent_paths()):
+        for absolute, maximum, uid, gid, mode in specifications:
             path = self._path(absolute)
             try:
                 os.lstat(path)
             except FileNotFoundError:
                 continue
-            except OSError as exc:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "agent_stage_invalid"
-                ) from exc
-            maximum, uid, gid, mode = specifications[absolute]
-            _read_regular(
-                path,
-                maximum=maximum,
-                uid=uid,
-                gid=gid,
-                mode=mode,
-            )
-            self._unlink(absolute)
-            removed = True
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            try:
+                _read_regular(
+                    path,
+                    maximum=maximum,
+                    uid=uid,
+                    gid=gid,
+                    mode=mode,
+                )
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            try:
+                removed = True
+                self._unlink(absolute)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
         if removed:
-            self._systemctl("daemon-reload")
+            try:
+                self._systemctl("daemon-reload")
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            if isinstance(
+                first_failure,
+                PersonalDevNativeBuilderRuntimeInstallError,
+            ):
+                raise first_failure
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "agent_stage_invalid"
+            ) from first_failure
 
     def verify_staged(self) -> dict[str, str]:
         self._verify_installed()
@@ -1928,7 +1997,78 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         else:
             _fsync_directory(directory.parent)
 
+    def _removed_installation_is_exact(self) -> bool:
+        managed_artifacts = (
+            self.profile.release_root,
+            *self._static_files().keys(),
+            *self._agent_paths(),
+        )
+        if any(
+            self._path(absolute).exists() or self._path(absolute).is_symlink()
+            for absolute in managed_artifacts
+        ):
+            return False
+        self._verify_context()
+        if self._service_active(
+            self.profile.agent_service_path.name
+        ) or self._service_active(self.profile.dockerd_service_path.name):
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "service_state_invalid"
+            )
+        self._verify_nft_table_absent()
+        if self.context.root == Path("/"):
+            self._verify_identity_inventory(require_present=True)
+        for absolute in (
+            self.profile.config_root,
+            self.profile.agent_state_path,
+            self.profile.exec_root,
+        ):
+            path = self._path(absolute)
+            if path.exists() or path.is_symlink():
+                raise PersonalDevNativeBuilderRuntimeInstallError(
+                    "removed_state_invalid"
+                )
+        data_root = self._path(self.profile.data_root)
+        if not data_root.exists() and not data_root.is_symlink():
+            return True
+        self._verify_directory(data_root, mode=0o750)
+        try:
+            children = tuple(data_root.iterdir())
+        except OSError as exc:
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "removed_state_invalid"
+            ) from exc
+        docker_root = data_root / "docker"
+        if children != (docker_root,):
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "removed_state_invalid"
+            )
+        try:
+            metadata = os.lstat(docker_root)
+        except OSError as exc:
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "removed_state_invalid"
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != self.context.authority_uid
+            or metadata.st_gid != self.context.authority_gid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "removed_state_invalid"
+            )
+        return True
+
+    def _removed_receipt(self) -> dict[str, str]:
+        receipt = self._receipt("remove", state="managed-files-absent")
+        receipt["retained"] = "dedicated-image-cache-and-system-identities"
+        return receipt
+
     def remove(self) -> dict[str, str]:
+        if self._removed_installation_is_exact():
+            return self._removed_receipt()
         self._verify_installed()
         agent_active = self._service_active(self.profile.agent_service_path.name)
         dockerd_active = self._service_active(self.profile.dockerd_service_path.name)
@@ -1979,9 +2119,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         ):
             self._remove_empty_directory(absolute)
         self._systemctl("daemon-reload")
-        receipt = self._receipt("remove", state="managed-files-absent")
-        receipt["retained"] = "dedicated-image-cache-and-system-identities"
-        return receipt
+        return self._removed_receipt()
 
 
 class _InstallerOperations(Protocol):

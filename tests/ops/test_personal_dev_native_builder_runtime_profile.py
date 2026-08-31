@@ -246,6 +246,8 @@ def test_generated_network_and_units_keep_authorities_separate() -> None:
     assert "ip6" not in nftables.casefold()
 
     assert "WantedBy=" not in dockerd
+    assert "Restart=no" in dockerd
+    assert "KillMode=control-group" in dockerd
     assert "Slice=loom-personal-dev-builder.slice" in dockerd
     assert str(profile.dockerd_config_path) in dockerd
     assert str(profile.primary_docker_socket) not in dockerd

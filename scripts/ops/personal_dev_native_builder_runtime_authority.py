@@ -13,7 +13,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
@@ -21,7 +20,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, NoReturn, Protocol, cast
 
 if __name__ == "__main__" and __package__ in {None, ""}:
     sys.dont_write_bytecode = True
@@ -30,31 +29,112 @@ if __name__ == "__main__" and __package__ in {None, ""}:
         "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority",
     )
 
-from scripts.ops.converge_personal_dev_native_builder_release import (
-    NativeBuilderReleaseConfig,
-    NativeBuilderReleaseImage,
-    create_broker_release_converger,
-)
-from scripts.ops.install_personal_dev_native_builder_runtime import (
-    NativeBuilderCommandResult,
-    NativeBuilderInstallContext,
-    PersonalDevNativeBuilderRuntimeInstaller,
-)
-from scripts.ops.personal_dev_native_builder_conformance import (
-    CommandResult,
-    ConformanceInputs,
-    Runner,
-    run_conformance,
-)
-from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
-    AuthorityRequest,
-    ProtocolError,
-    encode_request,
-    parse_request,
-)
-from scripts.ops.personal_dev_native_builder_runtime_profile import (
-    load_native_builder_runtime_profile,
-)
+if TYPE_CHECKING:
+    from scripts.ops.converge_personal_dev_native_builder_release import (
+        NativeBuilderReleaseConfig,
+        NativeBuilderReleaseImage,
+        create_broker_release_converger,
+    )
+    from scripts.ops.install_personal_dev_native_builder_runtime import (
+        NativeBuilderCommandResult,
+        NativeBuilderInstallContext,
+        PersonalDevNativeBuilderRuntimeInstaller,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        CommandResult,
+        ConformanceInputs,
+        Runner,
+        run_conformance,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
+        AuthorityRequest,
+        ProtocolError,
+        encode_request,
+        parse_request,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_profile import (
+        load_native_builder_runtime_profile,
+    )
+
+
+_APPLICATION_MODULES_LOADED = False
+
+
+def _load_application_modules() -> None:
+    """Import policy-bound application code only after bootstrap validation."""
+    global _APPLICATION_MODULES_LOADED
+    if _APPLICATION_MODULES_LOADED:
+        return
+    from scripts.ops.converge_personal_dev_native_builder_release import (
+        NativeBuilderReleaseConfig as _ReleaseConfig,
+    )
+    from scripts.ops.converge_personal_dev_native_builder_release import (
+        NativeBuilderReleaseImage as _ReleaseImage,
+    )
+    from scripts.ops.converge_personal_dev_native_builder_release import (
+        create_broker_release_converger as create_converger,
+    )
+    from scripts.ops.install_personal_dev_native_builder_runtime import (
+        NativeBuilderCommandResult as _InstallerResult,
+    )
+    from scripts.ops.install_personal_dev_native_builder_runtime import (
+        NativeBuilderInstallContext as _InstallContext,
+    )
+    from scripts.ops.install_personal_dev_native_builder_runtime import (
+        PersonalDevNativeBuilderRuntimeInstaller as _RuntimeInstaller,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        CommandResult as _CommandResult,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        ConformanceInputs as _ConformanceInputs,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        Runner as _Runner,
+    )
+    from scripts.ops.personal_dev_native_builder_conformance import (
+        run_conformance as conformance_operation,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
+        AuthorityRequest as _AuthorityRequest,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
+        ProtocolError as _ProtocolError,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
+        encode_request as encode_authority_request,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
+        parse_request as parse_authority_request,
+    )
+    from scripts.ops.personal_dev_native_builder_runtime_profile import (
+        load_native_builder_runtime_profile as load_runtime_profile,
+    )
+
+    globals().update(
+        {
+            "AuthorityRequest": _AuthorityRequest,
+            "CommandResult": _CommandResult,
+            "ConformanceInputs": _ConformanceInputs,
+            "NativeBuilderCommandResult": _InstallerResult,
+            "NativeBuilderInstallContext": _InstallContext,
+            "NativeBuilderReleaseConfig": _ReleaseConfig,
+            "NativeBuilderReleaseImage": _ReleaseImage,
+            "PersonalDevNativeBuilderRuntimeInstaller": _RuntimeInstaller,
+            "ProtocolError": _ProtocolError,
+            "Runner": _Runner,
+            "create_broker_release_converger": create_converger,
+            "encode_request": encode_authority_request,
+            "load_native_builder_runtime_profile": load_runtime_profile,
+            "parse_request": parse_authority_request,
+            "run_conformance": conformance_operation,
+        }
+    )
+    _APPLICATION_MODULES_LOADED = True
+
+
+if __name__ != "__main__":
+    _load_application_modules()
 
 LIBEXEC_PATH = Path(
     "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
@@ -95,11 +175,11 @@ _SYSTEM_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
 }
 _DOCKER_ENDPOINT = "unix:///run/loom-personal-dev-builder/docker.sock"
+_DOCKER_DATA_ROOT = Path("/var/lib/loom-personal-dev-builder/docker")
 _DOCKERD_UNIT = "loom-personal-dev-builder-dockerd.service"
 _AGENT_UNIT = "loom-personal-dev-native-builder-agent.service"
 _NFT_PATH = Path("/etc/loom/personal-dev-native-builder/provider-network.nft")
 _NFT_TABLE = "loom_personal_dev_builder"
-_MANAGED_LABEL = "loom.personal-dev-native-builder.managed=true"
 _INSTALLED_PROFILE_PATH = (
     LIBRARY_ROOT
     / "deploy"
@@ -147,7 +227,9 @@ class _CommandOutputLimitError(RuntimeError):
 
 
 class _CommandSignal(BaseException):
-    pass
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(signum)
 
 
 class BoundedSubprocessRunner:
@@ -269,6 +351,10 @@ class BoundedSubprocessRunner:
             raise AuthorityError("command_invalid")
         process: subprocess.Popen[bytes] | None = None
         previous_handlers: dict[int, object] = {}
+        pending_signal: int | None = None
+        caught: BaseException | None = None
+        stdout = b""
+        stderr = b""
         try:
             process = subprocess.Popen(
                 list(argv),
@@ -284,27 +370,66 @@ class BoundedSubprocessRunner:
                     os.killpg(process.pid, signum)
                 except ProcessLookupError:
                     pass
-                raise _CommandSignal()
+                raise _CommandSignal(signum)
 
             if threading.current_thread() is threading.main_thread():
                 for signum in (signal.SIGINT, signal.SIGTERM):
                     previous_handlers[signum] = signal.signal(signum, forward)
             stdout, stderr = self._drain(process)
         except BaseException as exc:
-            if process is not None:
-                self._terminate(process)
-            if isinstance(exc, subprocess.TimeoutExpired):
-                raise AuthorityError("command_timeout") from exc
-            if isinstance(exc, _CommandOutputLimitError):
-                raise AuthorityError("command_output_invalid") from exc
+            caught = exc
             if isinstance(exc, _CommandSignal):
-                raise AuthorityError("command_interrupted") from exc
-            if isinstance(exc, AuthorityError):
-                raise
-            raise AuthorityError("command_failed") from exc
-        finally:
+                pending_signal = exc.signum
+
+        group_leaked = (
+            process is not None
+            and caught is None
+            and self._group_exists(process.pid)
+        )
+        cleanup_failure: BaseException | None = None
+        if process is not None and (caught is not None or group_leaked):
+            if previous_handlers:
+                def defer(signum: int, _frame: object) -> None:
+                    nonlocal pending_signal
+                    if pending_signal is None:
+                        pending_signal = signum
+
+                for deferred_signum in previous_handlers:
+                    signal.signal(deferred_signum, defer)
+            try:
+                self._terminate(process)
+            except BaseException as exc:
+                cleanup_failure = exc
+
+        if previous_handlers:
             for restored_signum, handler in previous_handlers.items():
                 signal.signal(restored_signum, cast(signal.Handlers, handler))
+
+        if pending_signal is not None:
+            handler = previous_handlers[pending_signal]
+            if handler == signal.SIG_DFL:
+                signal.raise_signal(pending_signal)
+            elif handler != signal.SIG_IGN and callable(handler):
+                cast(Callable[[int, object], object], handler)(pending_signal, None)
+
+        if cleanup_failure is not None:
+            if isinstance(cleanup_failure, AuthorityError):
+                raise cleanup_failure
+            raise AuthorityError("command_cleanup_failed") from cleanup_failure
+        if group_leaked:
+            raise AuthorityError("command_cleanup_failed")
+        if caught is not None:
+            if isinstance(caught, subprocess.TimeoutExpired):
+                raise AuthorityError("command_timeout") from caught
+            if isinstance(caught, _CommandOutputLimitError):
+                raise AuthorityError("command_output_invalid") from caught
+            if isinstance(caught, _CommandSignal):
+                raise AuthorityError("command_interrupted") from caught
+            if isinstance(caught, AuthorityError):
+                raise caught
+            raise AuthorityError("command_failed") from caught
+        if process is None:
+            raise AuthorityError("command_failed")
         result = CommandResult(
             process.returncode,
             stdout.decode("utf-8", errors="replace"),
@@ -486,19 +611,44 @@ def _file_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _open_readonly_no_follow(path: Path) -> int:
+def _open_directory_no_follow(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+    expected_mode: int | None = None,
+) -> int:
     if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts:
         raise OSError("unsafe path")
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     directory_only = getattr(os, "O_DIRECTORY", 0)
-    if not no_follow or not directory_only or path == Path("/"):
+    if not no_follow or not directory_only:
         raise OSError("safe path traversal unavailable")
     directory = os.open(
         "/",
         os.O_RDONLY | os.O_CLOEXEC | directory_only | no_follow,
     )
     try:
-        for component in path.parts[1:-1]:
+        components = path.parts[1:]
+        root_metadata = os.fstat(directory)
+        root_mode = stat.S_IMODE(root_metadata.st_mode)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != 0
+            or root_metadata.st_gid != 0
+            or root_mode & 0o022
+            or (
+                not components
+                and expected_mode is not None
+                and (
+                    expected_uid != 0
+                    or expected_gid != 0
+                    or root_mode != expected_mode
+                )
+            )
+        ):
+            raise OSError("unsafe directory metadata")
+        for index, component in enumerate(components):
             child = os.open(
                 component,
                 os.O_RDONLY | os.O_CLOEXEC | directory_only | no_follow,
@@ -506,9 +656,55 @@ def _open_readonly_no_follow(path: Path) -> int:
             )
             os.close(directory)
             directory = child
+            metadata = os.fstat(directory)
+            mode = stat.S_IMODE(metadata.st_mode)
+            final = index == len(components) - 1
+            permitted_owner = metadata.st_uid in {0, expected_uid}
+            permitted_group = (
+                metadata.st_gid == (0 if metadata.st_uid == 0 else expected_gid)
+            )
+            sticky_root = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or not permitted_owner
+                or not permitted_group
+                or (mode & 0o022 and not sticky_root)
+                or (
+                    final
+                    and expected_mode is not None
+                    and (
+                        metadata.st_uid != expected_uid
+                        or metadata.st_gid != expected_gid
+                        or mode != expected_mode
+                    )
+                )
+            ):
+                raise OSError("unsafe directory metadata")
+        result = directory
+        directory = -1
+        return result
+    finally:
+        if directory >= 0:
+            os.close(directory)
+
+
+def _open_readonly_no_follow(
+    path: Path,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+) -> int:
+    if not isinstance(path, Path) or path == Path("/"):
+        raise OSError("unsafe path")
+    directory = _open_directory_no_follow(
+        path.parent,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+    )
+    try:
         return os.open(
             path.name,
-            os.O_RDONLY | os.O_CLOEXEC | no_follow,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=directory,
         )
     finally:
@@ -526,7 +722,11 @@ def _read_safe_file(
 ) -> bytes:
     descriptor: int | None = None
     try:
-        descriptor = _open_readonly_no_follow(path)
+        descriptor = _open_readonly_no_follow(
+            path,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+        )
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
@@ -706,8 +906,16 @@ class HostStatus:
 class SystemHostAdapter:
     """Expose only the compiled service, nftables, and managed-object scope."""
 
-    def __init__(self, *, runner: Runner) -> None:
+    def __init__(
+        self,
+        *,
+        runner: Runner,
+        expected_uid: int = 0,
+        expected_gid: int = 0,
+    ) -> None:
         self.runner = runner
+        self.expected_uid = expected_uid
+        self.expected_gid = expected_gid
 
     def _run(self, *argv: str) -> CommandResult:
         result = self.runner.run(
@@ -752,13 +960,13 @@ class SystemHostAdapter:
             if kind == "container"
             else ("network", "ls", "--quiet", "--no-trunc")
         )
+        filters = () if kind == "container" else ("--filter", "type=custom")
         result = self._run(
             "/usr/bin/docker",
             "-H",
             _DOCKER_ENDPOINT,
             *arguments,
-            "--filter",
-            f"label={_MANAGED_LABEL}",
+            *filters,
         )
         identifiers = tuple(line for line in result.stdout.splitlines() if line)
         if (
@@ -770,12 +978,143 @@ class SystemHostAdapter:
             raise AuthorityError("managed_objects_invalid")
         return len(identifiers)
 
+    def _open_inventory_directory(self, parent: int, name: str) -> int:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != self.expected_uid
+            or metadata.st_gid != self.expected_gid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            os.close(descriptor)
+            raise AuthorityError("managed_objects_invalid")
+        return descriptor
+
+    def _offline_inventory(self) -> tuple[int, int]:
+        try:
+            docker_descriptor = _open_directory_no_follow(
+                _DOCKER_DATA_ROOT,
+                expected_uid=self.expected_uid,
+                expected_gid=self.expected_gid,
+            )
+        except FileNotFoundError:
+            return 0, 0
+        except OSError as exc:
+            raise AuthorityError("managed_objects_invalid") from exc
+        container_ids: set[str] = set()
+        containers_descriptor: int | None = None
+        try:
+            containers_descriptor = self._open_inventory_directory(
+                docker_descriptor,
+                "containers",
+            )
+        except FileNotFoundError:
+            pass
+        except (AuthorityError, OSError) as exc:
+            os.close(docker_descriptor)
+            raise AuthorityError("managed_objects_invalid") from exc
+        else:
+            try:
+                entries = tuple(os.listdir(containers_descriptor))
+            except OSError as exc:
+                os.close(containers_descriptor)
+                os.close(docker_descriptor)
+                raise AuthorityError("managed_objects_invalid") from exc
+            for entry in entries:
+                try:
+                    metadata = os.stat(
+                        entry,
+                        dir_fd=containers_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    os.close(containers_descriptor)
+                    os.close(docker_descriptor)
+                    raise AuthorityError("managed_objects_invalid") from exc
+                if (
+                    _HEX_64.fullmatch(entry) is None
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != self.expected_uid
+                    or metadata.st_gid != self.expected_gid
+                ):
+                    os.close(containers_descriptor)
+                    os.close(docker_descriptor)
+                    raise AuthorityError("managed_objects_invalid")
+                container_ids.add(entry)
+            os.close(containers_descriptor)
+
+        network_ids: set[str] = set()
+        network_descriptor: int | None = None
+        files_descriptor: int | None = None
+        descriptor: int | None = None
+        try:
+            network_descriptor = self._open_inventory_directory(
+                docker_descriptor,
+                "network",
+            )
+            files_descriptor = self._open_inventory_directory(
+                network_descriptor,
+                "files",
+            )
+            descriptor = os.open(
+                "local-kv.db",
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=files_descriptor,
+            )
+        except FileNotFoundError:
+            pass
+        except (AuthorityError, OSError) as exc:
+            raise AuthorityError("managed_objects_invalid") from exc
+        else:
+            try:
+                metadata = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_nlink != 1
+                    or metadata.st_uid != self.expected_uid
+                    or metadata.st_gid != self.expected_gid
+                    or metadata.st_size > 64 * 1024 * 1024
+                ):
+                    raise AuthorityError("managed_objects_invalid")
+                payload = bytearray()
+                while len(payload) < metadata.st_size:
+                    chunk = os.read(descriptor, min(64 * 1024, metadata.st_size - len(payload)))
+                    if not chunk:
+                        raise AuthorityError("managed_objects_invalid")
+                    payload.extend(chunk)
+                marker = re.compile(
+                    rb"docker/network/v1\.0/network/([0-9a-f]{64})/"
+                )
+                network_ids.update(
+                    match.group(1).decode("ascii") for match in marker.finditer(payload)
+                )
+            finally:
+                os.close(descriptor)
+        finally:
+            if files_descriptor is not None:
+                os.close(files_descriptor)
+            if network_descriptor is not None:
+                os.close(network_descriptor)
+            os.close(docker_descriptor)
+        return len(container_ids), len(network_ids)
+
     def status(self) -> HostStatus:
         dockerd_active = self._service_active(_DOCKERD_UNIT)
         agent_active = self._service_active(_AGENT_UNIT)
         nft_present = self._nft_present()
-        containers = self._managed_count("container") if dockerd_active else 0
-        networks = self._managed_count("network") if dockerd_active else 0
+        if dockerd_active:
+            containers = self._managed_count("container")
+            networks = self._managed_count("network")
+        else:
+            containers, networks = self._offline_inventory()
         host = os.uname()
         return HostStatus(
             host_name=host.nodename,
@@ -834,7 +1173,15 @@ class SystemHostAdapter:
             raise AuthorityError("host_mutation_failed")
 
     def start_dockerd(self) -> None:
+        if any(self._offline_inventory()):
+            raise AuthorityError("managed_objects_invalid")
         self._service("start", _DOCKERD_UNIT, active=True)
+        try:
+            if self._managed_count("container") or self._managed_count("network"):
+                raise AuthorityError("managed_objects_invalid")
+        except BaseException:
+            self._service("stop", _DOCKERD_UNIT, active=False)
+            raise
 
     def stop_dockerd(self) -> None:
         self._service("stop", _DOCKERD_UNIT, active=False)
@@ -1069,29 +1416,19 @@ def _verify_directory(
     expected_mode: int,
     error: str,
 ) -> None:
+    descriptor: int | None = None
     try:
-        metadata = os.lstat(path)
+        descriptor = _open_directory_no_follow(
+            path,
+            expected_uid=expected_uid,
+            expected_gid=expected_gid,
+            expected_mode=expected_mode,
+        )
     except OSError as exc:
         raise AuthorityError(error) from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != expected_uid
-        or metadata.st_gid != expected_gid
-        or stat.S_IMODE(metadata.st_mode) != expected_mode
-    ):
-        raise AuthorityError(error)
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        os.fsync(descriptor)
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 class FileStateStore:
@@ -1112,129 +1449,214 @@ class FileStateStore:
         self.expected_uid = expected_uid
         self.expected_gid = expected_gid
 
-    def _verify_root(self) -> None:
-        _verify_directory(
-            self.root,
-            expected_uid=self.expected_uid,
-            expected_gid=self.expected_gid,
-            expected_mode=0o700,
-            error="state_invalid",
-        )
-
-    def read(self) -> StateSnapshot | None:
-        self._verify_root()
+    def _open_root(self) -> int:
         try:
-            os.lstat(self.path)
+            return _open_directory_no_follow(
+                self.root,
+                expected_uid=self.expected_uid,
+                expected_gid=self.expected_gid,
+                expected_mode=0o700,
+            )
+        except OSError as exc:
+            raise AuthorityError("state_invalid") from exc
+
+    def _read_at(self, root_descriptor: int) -> StateSnapshot | None:
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                self.path.name,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_descriptor,
+            )
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise AuthorityError("state_invalid") from exc
-        payload = _read_safe_file(
-            self.path,
-            maximum=_MAX_STATE_BYTES,
-            expected_uid=self.expected_uid,
-            expected_gid=self.expected_gid,
-            expected_mode=0o600,
-            error="state_invalid",
-        )
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != self.expected_uid
+                or metadata.st_gid != self.expected_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or not 0 < metadata.st_size <= _MAX_STATE_BYTES
+            ):
+                raise AuthorityError("state_invalid")
+            payload = bytearray()
+            while len(payload) < metadata.st_size:
+                chunk = os.read(descriptor, metadata.st_size - len(payload))
+                if not chunk:
+                    raise AuthorityError("state_invalid")
+                payload.extend(chunk)
+            if os.read(descriptor, 1) or _file_identity(metadata) != _file_identity(
+                os.fstat(descriptor)
+            ):
+                raise AuthorityError("state_invalid")
+            encoded = bytes(payload)
+        finally:
+            os.close(descriptor)
         try:
             loaded = json.loads(
-                payload.decode("ascii"),
+                encoded.decode("ascii"),
                 object_pairs_hook=_unique_object,
                 parse_constant=_reject_constant,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             raise AuthorityError("state_invalid") from exc
-        if not isinstance(loaded, dict) or payload != encode_state(loaded):
+        if not isinstance(loaded, dict) or encoded != encode_state(loaded):
             raise AuthorityError("state_invalid")
         return StateSnapshot(
             MappingProxyType(loaded),
-            hashlib.sha256(payload).hexdigest(),
+            hashlib.sha256(encoded).hexdigest(),
         )
 
-    def _write_temporary(self, payload: bytes) -> Path:
-        descriptor, raw_path = tempfile.mkstemp(prefix=".state-v1.", dir=self.root)
-        temporary = Path(raw_path)
-        descriptor_open = True
+    def read(self) -> StateSnapshot | None:
+        root_descriptor = self._open_root()
         try:
+            return self._read_at(root_descriptor)
+        finally:
+            os.close(root_descriptor)
+
+    def _write_temporary(self, root_descriptor: int, payload: bytes) -> str:
+        descriptor: int | None = None
+        temporary = ""
+        try:
+            for _ in range(100):
+                temporary = f".state-v1.{os.urandom(16).hex()}"
+                try:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_CLOEXEC
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=root_descriptor,
+                    )
+                    break
+                except FileExistsError:
+                    continue
+            if descriptor is None:
+                raise AuthorityError("state_publish_failed")
             os.fchmod(descriptor, 0o600)
             os.fchown(descriptor, self.expected_uid, self.expected_gid)
-            with os.fdopen(descriptor, "wb") as output:
-                descriptor_open = False
-                output.write(payload)
-                output.flush()
-                os.fsync(output.fileno())
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise AuthorityError("state_publish_failed")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
             return temporary
         except BaseException:
-            if descriptor_open:
+            if descriptor is not None:
                 os.close(descriptor)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+            if temporary:
+                try:
+                    os.unlink(temporary, dir_fd=root_descriptor)
+                except FileNotFoundError:
+                    pass
             raise
 
     def publish(self, value: Mapping[str, object]) -> StateSnapshot:
-        self._verify_root()
         payload = encode_state(value)
-        previous = self.read()
-        temporary = self._write_temporary(payload)
-        replaced = False
+        root_descriptor = self._open_root()
         try:
-            os.replace(temporary, self.path)
-            replaced = True
-            _fsync_directory(self.root)
-        except BaseException as primary:
+            previous = self._read_at(root_descriptor)
+            temporary = self._write_temporary(root_descriptor, payload)
+            replaced = False
             try:
-                if replaced:
-                    if previous is None:
-                        self.path.unlink()
+                os.replace(
+                    temporary,
+                    self.path.name,
+                    src_dir_fd=root_descriptor,
+                    dst_dir_fd=root_descriptor,
+                )
+                replaced = True
+                os.fsync(root_descriptor)
+            except BaseException as primary:
+                try:
+                    if replaced:
+                        if previous is None:
+                            os.unlink(self.path.name, dir_fd=root_descriptor)
+                        else:
+                            restored = self._write_temporary(
+                                root_descriptor,
+                                encode_state(previous.value),
+                            )
+                            os.replace(
+                                restored,
+                                self.path.name,
+                                src_dir_fd=root_descriptor,
+                                dst_dir_fd=root_descriptor,
+                            )
+                        os.fsync(root_descriptor)
                     else:
-                        restored = self._write_temporary(encode_state(previous.value))
-                        os.replace(restored, self.path)
-                    _fsync_directory(self.root)
-                elif temporary.exists() and not temporary.is_symlink():
-                    temporary.unlink()
-            except BaseException as cleanup:
-                raise AuthorityError("cleanup_failed") from cleanup
-            if isinstance(primary, AuthorityError):
-                raise
-            raise AuthorityError("state_publish_failed") from primary
-        return StateSnapshot(
-            MappingProxyType(dict(value)),
-            hashlib.sha256(payload).hexdigest(),
-        )
+                        os.unlink(temporary, dir_fd=root_descriptor)
+                except BaseException as cleanup:
+                    raise AuthorityError("cleanup_failed") from cleanup
+                if isinstance(primary, AuthorityError):
+                    raise
+                raise AuthorityError("state_publish_failed") from primary
+            return StateSnapshot(
+                MappingProxyType(dict(value)),
+                hashlib.sha256(payload).hexdigest(),
+            )
+        finally:
+            os.close(root_descriptor)
 
     def remove(self, *, expected_sha256: str) -> None:
-        self._verify_root()
-        current = self.read()
-        if current is None or current.sha256 != expected_sha256:
-            raise AuthorityError("state_changed")
-        payload = encode_state(current.value)
-        tombstone = self.root / ".state-v1.remove"
-        moved = False
-        removed = False
+        root_descriptor = self._open_root()
         try:
-            os.rename(self.path, tombstone)
-            moved = True
-            _fsync_directory(self.root)
-            tombstone.unlink()
-            removed = True
-            _fsync_directory(self.root)
-        except BaseException as primary:
+            current = self._read_at(root_descriptor)
+            if current is None or current.sha256 != expected_sha256:
+                raise AuthorityError("state_changed")
+            payload = encode_state(current.value)
+            tombstone = ".state-v1.remove"
+            moved = False
+            removed = False
             try:
-                if moved and not removed:
-                    os.rename(tombstone, self.path)
-                    _fsync_directory(self.root)
-                elif removed:
-                    restored = self._write_temporary(payload)
-                    os.replace(restored, self.path)
-                    _fsync_directory(self.root)
-            except BaseException as cleanup:
-                raise AuthorityError("cleanup_failed") from cleanup
-            if isinstance(primary, AuthorityError):
-                raise
-            raise AuthorityError("state_remove_failed") from primary
+                os.rename(
+                    self.path.name,
+                    tombstone,
+                    src_dir_fd=root_descriptor,
+                    dst_dir_fd=root_descriptor,
+                )
+                moved = True
+                os.fsync(root_descriptor)
+                os.unlink(tombstone, dir_fd=root_descriptor)
+                removed = True
+                os.fsync(root_descriptor)
+            except BaseException as primary:
+                try:
+                    if moved and not removed:
+                        os.rename(
+                            tombstone,
+                            self.path.name,
+                            src_dir_fd=root_descriptor,
+                            dst_dir_fd=root_descriptor,
+                        )
+                        os.fsync(root_descriptor)
+                    elif removed:
+                        restored = self._write_temporary(root_descriptor, payload)
+                        os.replace(
+                            restored,
+                            self.path.name,
+                            src_dir_fd=root_descriptor,
+                            dst_dir_fd=root_descriptor,
+                        )
+                        os.fsync(root_descriptor)
+                except BaseException as cleanup:
+                    raise AuthorityError("cleanup_failed") from cleanup
+                if isinstance(primary, AuthorityError):
+                    raise
+                raise AuthorityError("state_remove_failed") from primary
+        finally:
+            os.close(root_descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1259,18 +1681,25 @@ class EphemeralSecretFiles:
         self.expected_gid = expected_gid
         self.private_key_mode = private_key_mode
 
-    def _create(self, path: Path, payload: bytes, mode: int) -> tuple[int, ...]:
+    def _create(
+        self,
+        root_descriptor: int,
+        name: str,
+        payload: bytes,
+        mode: int,
+    ) -> tuple[int, ...]:
         descriptor: int | None = None
         created_inode: tuple[int, int] | None = None
         try:
             descriptor = os.open(
-                path,
+                name,
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
                 | os.O_CLOEXEC
                 | getattr(os, "O_NOFOLLOW", 0),
                 mode,
+                dir_fd=root_descriptor,
             )
             opened = os.fstat(descriptor)
             created_inode = (opened.st_dev, opened.st_ino)
@@ -1297,14 +1726,18 @@ class EphemeralSecretFiles:
         except BaseException as primary:
             if created_inode is not None:
                 try:
-                    metadata = os.lstat(path)
+                    metadata = os.stat(
+                        name,
+                        dir_fd=root_descriptor,
+                        follow_symlinks=False,
+                    )
                     if (
                         (metadata.st_dev, metadata.st_ino) != created_inode
                         or not stat.S_ISREG(metadata.st_mode)
                         or metadata.st_nlink != 1
                     ):
                         raise AuthorityError("secret_cleanup_failed")
-                    path.unlink()
+                    os.unlink(name, dir_fd=root_descriptor)
                 except BaseException as cleanup:
                     raise AuthorityError("secret_cleanup_failed") from cleanup
             if isinstance(primary, AuthorityError):
@@ -1330,37 +1763,48 @@ class EphemeralSecretFiles:
             or len(payload) != private_key_length + service_ca_length
         ):
             raise AuthorityError("secret_stage_invalid")
-        _verify_directory(
-            self.root,
-            expected_uid=self.expected_uid,
-            expected_gid=self.expected_gid,
-            expected_mode=0o700,
-            error="secret_stage_invalid",
-        )
-        paths = SecretPaths(
-            private_key=self.root / f".agent-key-{request_id}",
-            ca_file=self.root / f".service-ca-{request_id}",
-        )
-        identities: dict[Path, tuple[int, ...]] = {}
         try:
-            identities[paths.private_key] = self._create(
-                paths.private_key,
+            root_descriptor = _open_directory_no_follow(
+                self.root,
+                expected_uid=self.expected_uid,
+                expected_gid=self.expected_gid,
+                expected_mode=0o700,
+            )
+        except OSError as exc:
+            raise AuthorityError("secret_stage_invalid") from exc
+        private_key_name = f".agent-key-{request_id}"
+        ca_file_name = f".service-ca-{request_id}"
+        retained_root = Path(f"/proc/self/fd/{root_descriptor}")
+        paths = SecretPaths(
+            private_key=retained_root / private_key_name,
+            ca_file=retained_root / ca_file_name,
+        )
+        identities: dict[str, tuple[int, ...]] = {}
+        try:
+            identities[private_key_name] = self._create(
+                root_descriptor,
+                private_key_name,
                 payload[:private_key_length],
                 self.private_key_mode,
             )
-            identities[paths.ca_file] = self._create(
-                paths.ca_file,
+            identities[ca_file_name] = self._create(
+                root_descriptor,
+                ca_file_name,
                 payload[private_key_length:],
                 0o444,
             )
-            _fsync_directory(self.root)
+            os.fsync(root_descriptor)
             yield paths
         finally:
             cleanup_failure: BaseException | None = None
-            for path in (paths.ca_file, paths.private_key):
-                expected_identity = identities.get(path)
+            for name in (ca_file_name, private_key_name):
+                expected_identity = identities.get(name)
                 try:
-                    metadata = os.lstat(path)
+                    metadata = os.stat(
+                        name,
+                        dir_fd=root_descriptor,
+                        follow_symlinks=False,
+                    )
                 except FileNotFoundError:
                     if expected_identity is not None and cleanup_failure is None:
                         cleanup_failure = AuthorityError("secret_cleanup_failed")
@@ -1379,15 +1823,16 @@ class EphemeralSecretFiles:
                         cleanup_failure = AuthorityError("secret_cleanup_failed")
                     continue
                 try:
-                    path.unlink()
+                    os.unlink(name, dir_fd=root_descriptor)
                 except OSError as exc:
                     if cleanup_failure is None:
                         cleanup_failure = exc
             try:
-                _fsync_directory(self.root)
+                os.fsync(root_descriptor)
             except OSError as exc:
                 if cleanup_failure is None:
                     cleanup_failure = exc
+            os.close(root_descriptor)
             if cleanup_failure is not None:
                 raise AuthorityError("secret_cleanup_failed") from cleanup_failure
 
@@ -1420,28 +1865,34 @@ class RootArchiveCopies:
     ) -> Iterator[Path]:
         if _HEX_128.fullmatch(expected_sha512) is None:
             raise AuthorityError("archive_invalid")
-        _verify_directory(
-            self.root,
-            expected_uid=self.root_uid,
-            expected_gid=self.root_gid,
-            expected_mode=0o700,
-            error="archive_invalid",
-        )
-        destination = self.root / f".archive-{request_id}"
+        try:
+            root_descriptor = _open_directory_no_follow(
+                self.root,
+                expected_uid=self.root_uid,
+                expected_gid=self.root_gid,
+                expected_mode=0o700,
+            )
+        except OSError as exc:
+            raise AuthorityError("archive_invalid") from exc
+        destination_name = f".archive-{request_id}"
+        destination = Path(f"/proc/self/fd/{root_descriptor}") / destination_name
+        source_directory_descriptor: int | None = None
         source_descriptor: int | None = None
         destination_descriptor: int | None = None
         destination_inode: tuple[int, int] | None = None
         destination_identity: tuple[int, ...] | None = None
         try:
+            source_directory_descriptor = _open_directory_no_follow(
+                source.parent,
+                expected_uid=self.operator_uid,
+                expected_gid=self.operator_gid,
+            )
             source_descriptor = os.open(
-                source,
+                source.name,
                 os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=source_directory_descriptor,
             )
             before = os.fstat(source_descriptor)
-            try:
-                path_before = os.lstat(source)
-            except OSError as exc:
-                raise AuthorityError("archive_invalid") from exc
             if (
                 not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
@@ -1449,17 +1900,17 @@ class RootArchiveCopies:
                 or before.st_gid != self.operator_gid
                 or stat.S_IMODE(before.st_mode) != 0o600
                 or not 0 < before.st_size <= _MAX_ARCHIVE_BYTES
-                or _file_identity(before) != _file_identity(path_before)
             ):
                 raise AuthorityError("archive_invalid")
             destination_descriptor = os.open(
-                destination,
+                destination_name,
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
                 | os.O_CLOEXEC
                 | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
+                dir_fd=root_descriptor,
             )
             opened_destination = os.fstat(destination_descriptor)
             destination_inode = (
@@ -1485,21 +1936,16 @@ class RootArchiveCopies:
             if os.read(source_descriptor, 1):
                 raise AuthorityError("archive_invalid")
             after = os.fstat(source_descriptor)
-            try:
-                path_after = os.lstat(source)
-            except OSError as exc:
-                raise AuthorityError("archive_invalid") from exc
             if (
                 digest.hexdigest() != expected_sha512
                 or _file_identity(before) != _file_identity(after)
-                or _file_identity(before) != _file_identity(path_after)
             ):
                 raise AuthorityError("archive_invalid")
             os.fsync(destination_descriptor)
             destination_identity = _file_identity(os.fstat(destination_descriptor))
             os.close(destination_descriptor)
             destination_descriptor = None
-            _fsync_directory(self.root)
+            os.fsync(root_descriptor)
             yield destination
         except AuthorityError:
             raise
@@ -1508,10 +1954,16 @@ class RootArchiveCopies:
         finally:
             if source_descriptor is not None:
                 os.close(source_descriptor)
+            if source_directory_descriptor is not None:
+                os.close(source_directory_descriptor)
             if destination_descriptor is not None:
                 os.close(destination_descriptor)
             try:
-                metadata = os.lstat(destination)
+                metadata = os.stat(
+                    destination_name,
+                    dir_fd=root_descriptor,
+                    follow_symlinks=False,
+                )
             except FileNotFoundError:
                 pass
             except OSError as exc:
@@ -1532,10 +1984,12 @@ class RootArchiveCopies:
                 ):
                     raise AuthorityError("archive_cleanup_failed")
                 try:
-                    destination.unlink()
-                    _fsync_directory(self.root)
+                    os.unlink(destination_name, dir_fd=root_descriptor)
+                    os.fsync(root_descriptor)
                 except OSError as exc:
                     raise AuthorityError("archive_cleanup_failed") from exc
+            finally:
+                os.close(root_descriptor)
 
 
 class InstallerAdapter(Protocol):
@@ -1607,7 +2061,7 @@ class SecretAdapter(Protocol):
     ) -> AbstractContextManager[SecretPaths]: ...
 
 
-ConvergerFactory = Callable[[NativeBuilderReleaseConfig], ConvergerOperations]
+ConvergerFactory = Callable[["NativeBuilderReleaseConfig"], ConvergerOperations]
 
 
 @contextmanager
@@ -2197,6 +2651,7 @@ def _serve() -> None:
     )
     sanitize_environment(os.environ)
     policy = load_policy()
+    _load_application_modules()
     with authority_lock():
         request = parse_request(cast(BinaryIO, sys.stdin.buffer))
         runtime = _build_runtime(

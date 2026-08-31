@@ -32,6 +32,18 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE_PATH = _ROOT / "deploy/personal-dev-native-builder/runtime-profile-v1.json"
 
 
+def test_ed25519_public_key_derivation_matches_rfc_8032_vector_1() -> None:
+    seed = bytes.fromhex(
+        "9d61b19deffd5a60ba844af492ec2cc4"
+        "4449c5697b326919703bac031cae7f60"
+    )
+
+    assert runtime_installer._derive_ed25519_public_key(seed).hex() == (
+        "d75a980182b10ab7d54bfed3c964073a"
+        "0ee172f3daa62325af021a68f707511a"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ArchiveEntry:
     name: str
@@ -691,6 +703,66 @@ def test_broker_discard_removes_only_inactive_agent_stage_files(tmp_path: Path) 
     assert _mapped(installer, profile.release_root).is_dir()
 
 
+@pytest.mark.parametrize("failure_phase", ("validate", "unlink"))
+@pytest.mark.parametrize("failure_index", range(4))
+def test_broker_discard_attempts_manifest_unit_ca_key_after_each_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+    failure_index: int,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    installer.install(archive)
+    key, ca = _stage_inputs(tmp_path)
+    installer.stage_agent(
+        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+        + "a" * 64,
+        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
+        + "b" * 64,
+        service_url="https://loom.example.invalid",
+        agent_instance_id="00000000-0000-0000-0000-000000000001",
+        key_id="native-builder-v1",
+        private_key=key,
+        ca_file=ca,
+    )
+    ordered = (
+        Path("/etc/loom/personal-dev-native-builder/agent-stage-v1.json"),
+        profile.agent_service_path,
+        profile.ca_file_path,
+        profile.private_key_path,
+    )
+    observed: list[Path] = []
+    original_read = runtime_installer._read_regular
+    original_unlink = installer._unlink
+
+    def injected_read(path: Path, **arguments: object) -> bytes:
+        absolute = next(
+            item for item in ordered if _mapped(installer, item) == path
+        )
+        observed.append(absolute)
+        if failure_phase == "validate" and absolute == ordered[failure_index]:
+            raise PersonalDevNativeBuilderRuntimeInstallError("injected_failure")
+        return original_read(path, **arguments)  # type: ignore[arg-type]
+
+    def injected_unlink(absolute: Path) -> None:
+        original_unlink(absolute)
+        if failure_phase == "unlink" and absolute == ordered[failure_index]:
+            raise PersonalDevNativeBuilderRuntimeInstallError("injected_failure")
+
+    monkeypatch.setattr(runtime_installer, "_read_regular", injected_read)
+    monkeypatch.setattr(installer, "_unlink", injected_unlink)
+
+    with pytest.raises(PersonalDevNativeBuilderRuntimeInstallError):
+        installer.discard_agent_stage()
+
+    assert observed == list(ordered)
+    for index, absolute in enumerate(ordered):
+        assert _mapped(installer, absolute).exists() is (
+            failure_phase == "validate" and index == failure_index
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -851,6 +923,25 @@ def test_remove_temporarily_starts_only_dedicated_daemon_for_inventory(
         "--filter",
         "type=custom",
     ) in (runner.calls or [])
+
+
+def test_remove_retry_accepts_only_the_exact_already_absent_installation(
+    tmp_path: Path,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    installer.install(archive)
+
+    first = installer.remove()
+    second = installer.remove()
+
+    assert second == first
+    partial = _mapped(installer, profile.dockerd_config_path)
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(profile.dockerd_json)
+    partial.chmod(0o444)
+    with pytest.raises(PersonalDevNativeBuilderRuntimeInstallError):
+        installer.remove()
 
 
 def test_cli_emits_canonical_receipt_and_requires_operation_arguments(
