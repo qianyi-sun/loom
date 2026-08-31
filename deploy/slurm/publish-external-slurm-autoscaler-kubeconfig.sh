@@ -13,6 +13,47 @@ TARGET_SECRET="loom-external-slurm-autoscaler-db"
 TOKEN_SECRET="loom-external-slurm-autoscaler-token"
 API_SERVER="https://192.168.50.103:6443"
 
+validate_runtime_kubeconfig() {
+  local path="$1"
+  local metadata owner_uid owner_gid mode links size kind exec_allowed
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    echo "error: external supervisor credential metadata is unsafe" >&2
+    return 1
+  fi
+  metadata="$(stat -c '%u:%g:%a:%h:%s:%F' "$path")"
+  IFS=: read -r owner_uid owner_gid mode links size kind <<<"$metadata"
+  if [ "$owner_uid" != "$(id -u)" ] \
+    || [ "$owner_gid" != "$(id -g)" ] \
+    || [ "$mode" != 600 ] \
+    || [ "$links" != 1 ] \
+    || [ "$kind" != "regular file" ] \
+    || [[ ! "$size" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$size" -gt 1048576 ]; then
+    echo "error: external supervisor credential metadata is unsafe" >&2
+    return 1
+  fi
+  "$KUBECTL" --kubeconfig "$path" -n "$NAMESPACE" \
+    get secret "$TARGET_SECRET" -o name >/dev/null
+  "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
+    get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
+  exec_allowed="$(
+    "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
+      auth can-i create pods/exec 2>/dev/null || true
+  )"
+  if [ "$exec_allowed" != "no" ]; then
+    echo "error: external supervisor credential has unexpected pods/exec authority" >&2
+    return 1
+  fi
+}
+
+if [ "$#" -eq 2 ]; then
+  if [ "$1" = "--check" ]; then
+    validate_runtime_kubeconfig "$2"
+    exit 0
+  fi
+  echo "usage: $0 --check OUTPUT_KUBECONFIG" >&2
+  exit 2
+fi
 if [ "$#" -ne 1 ]; then
   echo "usage: KUBECONFIG=/path/to/admin-kubeconfig $0 OUTPUT_KUBECONFIG" >&2
   exit 2
@@ -98,18 +139,8 @@ printf '%s\n' \
   >"$temporary_dir/kubeconfig"
 chmod 0600 "$temporary_dir/kubeconfig"
 
-"$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$NAMESPACE" \
-  get secret "$TARGET_SECRET" -o name >/dev/null
-"$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$WITNESS_NAMESPACE" \
-  get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
-exec_allowed="$(
-  "$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$WITNESS_NAMESPACE" \
-    auth can-i create pods/exec 2>/dev/null || true
-)"
-if [ "$exec_allowed" != "no" ]; then
-  echo "error: external supervisor credential has unexpected pods/exec authority" >&2
-  exit 1
-fi
+validate_runtime_kubeconfig "$temporary_dir/kubeconfig"
 install -m 0600 "$temporary_dir/kubeconfig" "$output_path"
+validate_runtime_kubeconfig "$output_path"
 printf 'published namespace-scoped external Slurm autoscaler kubeconfig: %s\n' \
   "$output_path"

@@ -185,6 +185,33 @@ def test_broker_parses_only_canonical_typed_protocol_identity(tmp_path: Path) ->
             (json.dumps(non_integer_schema, sort_keys=True, separators=(",", ":")) + "\n").encode()
         )
 
+    for operation in ("observe_credential", "publish_credential"):
+        credential_request = _encode_helper_request(
+            operation=operation,
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+        )
+        assert set(json.loads(credential_request)) == {
+            "candidate_sha",
+            "candidate_tree",
+            "operation",
+            "schema_version",
+        }
+        assert broker.parse_request_identity(credential_request.encode()) == (
+            artifact.candidate_sha,
+            artifact.candidate_tree,
+        )
+        for forbidden in ("token", "certificate", "kubeconfig", "path", "command"):
+            changed = json.loads(credential_request)
+            changed[forbidden] = "forbidden"
+            with pytest.raises(broker.BrokerError, match="fields"):
+                broker.parse_request_identity(
+                    (
+                        json.dumps(changed, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                    ).encode()
+                )
+
 
 def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
     tmp_path: Path,

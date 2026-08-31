@@ -365,6 +365,8 @@ def _parse_request(payload: bytes) -> dict[str, object]:
             "transition_digest",
         },
         "reconcile_compensations": common,
+        "observe_credential": common,
+        "publish_credential": common,
         "accept_capacity": common | {"nodes", "profile_sha256"},
     }
     if (

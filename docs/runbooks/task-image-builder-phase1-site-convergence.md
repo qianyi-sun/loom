@@ -151,34 +151,43 @@ not refresh, or a reader rejects it. The publisher is the only workload token
 holder: the manager container retains `automountServiceAccountToken: false`;
 the publisher may only `get` and `patch` this ConfigMap.
 
-### 2. Publish and prove the dedicated supervisor credential
+### 2. Brokered publication and readback of the dedicated supervisor credential
 
-On each controller, publish the narrow credential at the fixed path using the
-rollout kubeconfig held only for this action. The publisher installs the scoped
-database Secret, database-port-forward authority, and ConfigMap `get`; it must
-not grant `pods/exec`.
+The protected apply in step 3 owns this convergence. It first publishes and
+checks the narrow credential locally on `gx10-01c7` through the fixed forced
+broker operation, then locally on `TRT-EAI-OLDLAB-1`, before either controller
+may write or start a supervisor unit. Do not invoke the publisher manually,
+copy `$ROLLOUT_KUBECONFIG`, or repair the output with `chown` or `chmod`: an
+absent fixed-path credential is repairable only by that protected path, while
+any present unsafe credential is drift and leaves scale-up closed.
+
+After the protected attempt in step 3 reports complete, run the non-mutating
+readback below on each controller as its local `loom-rollout` identity. The
+publisher's `--check` mode proves the dedicated database Secret, the exact
+witness ConfigMap, and `pods/exec` denial without receiving the rollout
+kubeconfig or emitting credential content.
 
 ```bash
-sudo env KUBECONFIG="$ROLLOUT_KUBECONFIG" \
+as_supervisor \
   "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
-  "$SUPERVISOR_KUBECONFIG"
-sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$SUPERVISOR_KUBECONFIG"
-sudo chmod 0600 "$SUPERVISOR_KUBECONFIG"
+  --check "$SUPERVISOR_KUBECONFIG"
 test ! -L "$SUPERVISOR_KUBECONFIG"
 test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
   "regular file:$SUPERVISOR_USER:$SUPERVISOR_GROUP:600"
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-staging \
+  get secret loom-external-slurm-autoscaler-db -o name
 as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
-  auth can-i create pods/exec
+test "$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+  auth can-i create pods/exec)" = no
 ```
 
 Accept only `directory:loom-rollout:loom-rollout:700` for the protected parent,
 `regular file:loom-rollout:loom-rollout:600` for the final file, the exact
-ConfigMap read, and `no` for `pods/exec`. `as_supervisor` starts from an empty
-environment, so these runtime readbacks have no ambient `KUBECONFIG` and never
-open `$ROLLOUT_KUBECONFIG`. Repeat the same commands on `gx10-01c7` and
-`TRT-EAI-OLDLAB-1`.
+database-Secret and ConfigMap reads, and `no` for `pods/exec`. `as_supervisor`
+starts from an empty environment, so these runtime readbacks have no ambient
+`KUBECONFIG` and never open `$ROLLOUT_KUBECONFIG`. Repeat the same commands on
+`gx10-01c7` and `TRT-EAI-OLDLAB-1`.
 
 ### 3. Apply the active Phase 1 profile and prove empty-queue reconciliation
 

@@ -133,6 +133,16 @@ def test_publisher_avoids_secret_values_in_process_arguments() -> None:
     assert "https://192.168.50.103:6443" in source
 
 
+def test_publisher_has_a_non_mutating_runtime_credential_check() -> None:
+    source = PUBLISHER.read_text(encoding="utf-8")
+
+    assert 'if [ "$1" = "--check" ]' in source
+    assert "validate_runtime_kubeconfig" in source
+    assert 'get configmap "$WITNESS_CONFIG_MAP"' in source
+    assert "auth can-i create pods/exec" in source
+    assert 'if [ "$exec_allowed" != "no" ]' in source
+
+
 def test_publisher_parses_as_bash() -> None:
     bash = shutil.which("bash")
     if bash is None:
