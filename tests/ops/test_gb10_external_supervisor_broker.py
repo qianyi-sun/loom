@@ -299,6 +299,95 @@ def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
     }
 
 
+def test_broker_capacity_preserves_only_a_canonical_authority_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    failure = {
+        "failure_code": "busy-accounting-unverified",
+        "node": "trt-gb10-1",
+        "schema_version": 1,
+        "status": "failed",
+    }
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            1,
+            json.dumps(failure, sort_keys=True, separators=(",", ":")) + "\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(broker.BrokerCapacityFailureError) as raised:
+        broker.accept_capacity(request)
+
+    assert json.loads(raised.value.response) == {
+        **failure,
+        "operation": "accept_capacity",
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        {
+            "failure_code": "raw-slurm-error",
+            "node": "trt-gb10-1",
+            "schema_version": 1,
+            "status": "failed",
+        },
+        {
+            "failure_code": "node-allocation-failed",
+            "node": "trt-gb10-2",
+            "schema_version": 1,
+            "status": "failed",
+        },
+    ),
+)
+def test_broker_capacity_rejects_unsafe_authority_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: dict[str, object],
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            1,
+            json.dumps(failure, sort_keys=True, separators=(",", ":")) + "\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="output is invalid"):
+        broker.accept_capacity(request)
+
+
 def test_broker_sanitized_environment_composes_fixed_authority_executables(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -766,6 +855,33 @@ def test_broker_timeout_cleans_exact_persisted_job_and_reads_back_empty(
         ],
     ]
     assert not state_path.exists()
+
+
+def test_contained_authority_preserves_a_nonzero_typed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    expected = subprocess.CompletedProcess(["authority"], 1, "typed\n", "")
+
+    def run(_argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(broker, "_write_persisted_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_run", run)
+    monkeypatch.setattr(broker, "_terminate_and_verify_containment", lambda **_kwargs: None)
+
+    result = broker._run_contained_authority(
+        candidate_sha="a" * 40,
+        unit_name=_TEST_UNIT_NAME,
+        job_state_path=tmp_path / "job.json",
+        cgroup_path=tmp_path / "cgroup",
+        timeout=1200,
+    )
+
+    assert result is expected
+    assert calls == [{"check": False, "timeout": 1110.0}]
 
 
 def test_contained_authority_reserves_cleanup_inside_absolute_hard_deadline(
@@ -1470,6 +1586,38 @@ def test_broker_main_dispatches_capacity_without_candidate_runtime(
     assert output.buffer.getvalue() == response
 
 
+def test_broker_main_returns_one_with_a_typed_capacity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    response = (
+        b'{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+        b'"operation":"accept_capacity","schema_version":1,"status":"failed"}\n'
+    )
+    output = SimpleNamespace(buffer=io.BytesIO())
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(
+        broker,
+        "accept_capacity",
+        lambda _payload: (_ for _ in ()).throw(broker.BrokerCapacityFailureError(response)),
+    )
+
+    assert broker.main([]) == 1
+    assert output.buffer.getvalue() == response
+
+
 def test_broker_main_dispatches_non_capacity_through_candidate_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1558,9 +1706,7 @@ def test_forced_key_render_migrates_exact_legacy_controller_key() -> None:
         + b" loom-gb10-external-supervisor\n"
     )
     expected = (
-        b"# preserve loom-staging-rollout\n"
-        + legacy_identity
-        + b" loom-staging-rollout\n"
+        b"# preserve loom-staging-rollout\n" + legacy_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + controller_identity
@@ -1591,8 +1737,7 @@ def test_forced_key_migration_rejects_foreign_rollout_marker() -> None:
     legacy_identity = b" ".join(legacy_public_key.split()[:2])
     foreign_identity = b" ".join(foreign_public_key.split()[:2])
     ambiguous = (
-        foreign_identity
-        + b" loom-staging-rollout\n"
+        foreign_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + legacy_identity
@@ -1620,8 +1765,7 @@ def test_forced_key_migration_installs_missing_predecessor_authority() -> None:
     )
 
     assert migrated == (
-        legacy_identity
-        + b" loom-staging-rollout\n"
+        legacy_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + controller_identity
@@ -1667,10 +1811,7 @@ def test_forced_key_migration_rejects_duplicate_predecessor_authority() -> None:
     legacy_identity = b" ".join(legacy_public_key.split()[:2])
     controller_identity = b" ".join(controller_public_key.split()[:2])
     duplicated = (
-        legacy_identity
-        + b" loom-staging-rollout\n"
-        + legacy_identity
-        + b" loom-staging-rollout\n"
+        legacy_identity + b" loom-staging-rollout\n" + legacy_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + controller_identity
@@ -1724,8 +1865,7 @@ def test_install_forced_key_migrates_predecessor_authority_atomically(
     )
 
     assert authorized_keys.read_bytes() == (
-        legacy_identity
-        + b" loom-staging-rollout\n"
+        legacy_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + controller_identity
@@ -1770,12 +1910,9 @@ def test_broker_install_authority_dispatches_exact_predecessor_migration(
         ),
     )
 
-    assert broker.main(
-        ["--install-authority", str(controller_path), str(legacy_path)]
-    ) == 0
+    assert broker.main(["--install-authority", str(controller_path), str(legacy_path)]) == 0
     assert authorized_keys.read_bytes() == (
-        legacy_identity
-        + b" loom-staging-rollout\n"
+        legacy_identity + b" loom-staging-rollout\n"
         b'restrict,command="/usr/bin/sudo -n -- '
         b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
         + controller_identity

@@ -139,13 +139,19 @@ def _observation(tmp_path: Path) -> tuple[object, ExternalSupervisorLiveObservat
 
 
 class _Run:
-    def __init__(self, response: str) -> None:
+    def __init__(self, response: str, *, returncode: int = 0, stderr: str = "") -> None:
         self.response = response
+        self.returncode = returncode
+        self.stderr = stderr
         self.calls: list[tuple[tuple[str, ...], str]] = []
 
     def __call__(self, argv, input_payload):
         self.calls.append((tuple(argv), input_payload))
-        return SimpleNamespace(returncode=0, stdout=self.response, stderr="")
+        return SimpleNamespace(
+            returncode=self.returncode,
+            stdout=self.response,
+            stderr=self.stderr,
+        )
 
 
 def _transport(artifact, run: _Run, identity: Path) -> remote.FixedGB10ExternalSupervisorTransport:
@@ -496,9 +502,7 @@ def test_candidate_helper_returns_only_a_typed_reconcile_failure(
     monkeypatch.setattr(
         remote,
         "_handle_helper_request",
-        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(
-            error
-        ),
+        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(error),
     )
     stdin = SimpleNamespace(buffer=io.BytesIO(request.encode()))
     stdout = io.StringIO()
@@ -539,9 +543,7 @@ def test_candidate_helper_returns_only_a_typed_apply_failure(
     monkeypatch.setattr(
         remote,
         "_handle_helper_request",
-        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(
-            error
-        ),
+        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(error),
     )
     stdin = SimpleNamespace(buffer=io.BytesIO(request.encode()))
     stdout = io.StringIO()
@@ -581,6 +583,43 @@ def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
         "profile_sha256": "c" * 64,
         "schema_version": 1,
     }
+
+
+def test_remote_capacity_preserves_a_canonical_failure_classification(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    run = _Run(
+        '{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+        '"operation":"accept_capacity","schema_version":1,"status":"failed"}\n',
+        returncode=1,
+    )
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(remote.ExternalSupervisorCapacityError) as raised:
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
+        )
+
+    assert raised.value.failure_code == "busy-accounting-unverified"
+    assert raised.value.node == "trt-gb10-1"
+
+
+def test_remote_capacity_rejects_an_unapproved_failure_code(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    run = _Run(
+        '{"failure_code":"raw-slurm-error","node":"trt-gb10-1",'
+        '"operation":"accept_capacity","schema_version":1,"status":"failed"}\n',
+        returncode=1,
+    )
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(RuntimeError, match="failed safely"):
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
+        )
 
 
 @pytest.mark.parametrize(
