@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +19,101 @@ def _shell(document: str) -> str:
 
 def _normalized(document: str) -> str:
     return " ".join(document.split())
+
+
+def _shell_function(document: str, name: str) -> str:
+    shell = _shell(document)
+    marker = f"{name}() {{\n"
+    start = shell.index(marker)
+    end = shell.index("\n}\n", start) + 2
+    return shell[start:end]
+
+
+def test_native_builder_runtime_preserves_remote_shell_argv(tmp_path: Path) -> None:
+    runbook = _read(RUNTIME)
+    capture_host = _shell_function(runbook, "capture_host")
+    try:
+        ssh_run = _shell_function(runbook, "ssh_run")
+    except ValueError:
+        ssh_run = ""
+
+    output = tmp_path / "host.json"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(output)],
+        input=(
+            "ssh_options=()\n"
+            "gb10_target=gb10\n"
+            "ssh() {\n"
+            '  test "$#" -eq 3\n'
+            '  test "$1" = gb10\n'
+            '  test "$2" = --\n'
+            '  /bin/sh -c "$3"\n'
+            "}\n"
+            + ssh_run
+            + "\n"
+            + capture_host
+            + "\n"
+            + 'capture_host "$1"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    observed = subprocess.run(
+        [
+            "jq",
+            "-e",
+            '.architecture != "" and .boot_id != "" and .hostname != "" '
+            'and has("agent") and has("dedicated_daemon") '
+            'and has("primary_docker")',
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert observed.returncode == 0, observed.stderr
+
+
+def test_native_builder_ssh_boundary_preserves_stdin_and_quoted_arguments() -> None:
+    ssh_run = _shell_function(_read(RUNTIME), "ssh_run")
+    behavior = subprocess.run(
+        ["bash", "-seu"],
+        input=(
+            "ssh_options=()\n"
+            "ssh() {\n"
+            '  test "$#" -eq 3\n'
+            '  test "$1" = gb10\n'
+            '  test "$2" = --\n'
+            '  /bin/sh -c "$3"\n'
+            "}\n"
+            + ssh_run
+            + "\n"
+            + "printf 'payload\\n' | ssh_run gb10 /bin/sh -euc "
+            + "'read -r payload; printf \"%s|%s\\n\" \"$1\" \"$payload\"' "
+            + "sh \"owner's branch\"\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert behavior.stdout == "owner's branch|payload\n"
+
+
+def test_native_builder_runbooks_route_ssh_through_argv_boundary() -> None:
+    runtime = _read(RUNTIME)
+    acceptance = _read(ACCEPTANCE)
+
+    assert _shell_function(runtime, "ssh_run") == _shell_function(
+        acceptance, "ssh_run"
+    )
+    for runbook in (runtime, acceptance):
+        shell = _shell(runbook)
+        assert shell.count('ssh "${ssh_options[@]}"') == 1
 
 
 def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() -> None:

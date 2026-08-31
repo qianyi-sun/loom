@@ -51,6 +51,22 @@ evidence_root='<absolute-existing-owner-only-evidence-root-outside-repository>'
 gb10_target='<ssh-user>@gx10-01c7'
 slurm_observer='<read-only-slurm-observer-ssh-target>'
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
+ssh_run() {
+  local target="$1"
+  local remote_command
+  shift
+  remote_command="$(python3 - "$@" <<'PY'
+import shlex
+import sys
+
+if len(sys.argv) < 2:
+    raise SystemExit(1)
+sys.stdout.write(shlex.join(sys.argv[1:]))
+PY
+)"
+  test -n "$remote_command"
+  ssh "${ssh_options[@]}" "$target" -- "$remote_command"
+}
 loom_cli="$repository_root/.venv/bin/loom"
 trusted_launcher_profile='<absolute-owner-only-trusted-launcher-profile.json>'
 scanner_finding_policy='<absolute-owner-only-scanner-finding-policy.json>'
@@ -189,8 +205,8 @@ capture_namespaces() {
 }
 capture_slurm() {
   local output="$1" queue="$1.queue"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- scontrol show nodes --json | jq -cS . > "$output"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- squeue --json | jq -cS . > "$queue"
+  ssh_run "$slurm_observer" scontrol show nodes --json | jq -cS . > "$output"
+  ssh_run "$slurm_observer" squeue --json | jq -cS . > "$queue"
   jq -cnS --slurpfile nodes "$output" --slurpfile jobs "$queue" \
     '{nodes:$nodes[0],queue:$jobs[0]}' > "$output.merged"
   mv "$output.merged" "$output" && rm -f "$queue" && chmod 0600 "$output"
@@ -244,7 +260,7 @@ jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
 ## 3. Apply only the expiring schema-3 acceptance plane
 
 ```bash
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   jq -cnS \
     --arg activestate "$(systemctl show loom-personal-dev-native-builder-agent.service --property=ActiveState --value)" \
     --arg fragmentpath "$(systemctl show loom-personal-dev-native-builder-agent.service --property=FragmentPath --value)" \
@@ -379,7 +395,7 @@ while true; do
   test "$SECONDS" -lt "$overlap_deadline"
   sleep 1
 done
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   endpoint=unix:///run/loom-personal-dev-builder/docker.sock
   ids="$(docker -H "$endpoint" ps -q --filter label=loom.personal-dev-native-builder.managed=true)"
   test "$(printf "%s\n" "$ids" | sed "/^$/d" | wc -l)" = 4

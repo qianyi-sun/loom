@@ -71,6 +71,22 @@ repository_root="$(pwd -P)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-${merged_source_sha}"
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
+ssh_run() {
+  local target="$1"
+  local remote_command
+  shift
+  remote_command="$(python3 - "$@" <<'PY'
+import shlex
+import sys
+
+if len(sys.argv) < 2:
+    raise SystemExit(1)
+sys.stdout.write(shlex.join(sys.argv[1:]))
+PY
+)"
+  test -n "$remote_command"
+  ssh "${ssh_options[@]}" "$target" -- "$remote_command"
+}
 
 test "$merged_source_sha" != '<merged-40-lowercase-hex>'
 test "$trusted_release_sha256" != '<trusted-release-64-lowercase-hex>'
@@ -316,7 +332,7 @@ test "$(sha256sum "$reviewed_kubeconfig" | awk '{print $1}')" = \
 
 capture_host() {
   local output="$1"
-  ssh "${ssh_options[@]}" "$gb10_target" -- /bin/sh -euc '
+  ssh_run "$gb10_target" /bin/sh -euc '
     jq -cnS \
       --arg architecture "$(uname -m)" \
       --arg boot_id "$(sed -n "1p" /proc/sys/kernel/random/boot_id)" \
@@ -334,9 +350,9 @@ capture_host() {
 capture_slurm() {
   local output="$1"
   local temporary="$output.tmp"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- scontrol show nodes --json \
+  ssh_run "$slurm_observer" scontrol show nodes --json \
     | jq -cS . > "$output"
-  ssh "${ssh_options[@]}" "$slurm_observer" -- squeue --json \
+  ssh_run "$slurm_observer" squeue --json \
     | jq -cS . > "$temporary"
   chmod 0600 "$output" "$temporary"
   jq -cnS \
@@ -437,8 +453,8 @@ PY
 
 dns_raw="$evidence_dir/public-store-dns.raw"
 {
-  ssh "${ssh_options[@]}" "$gb10_target" -- getent ahostsv4 "$public_store_host" || true
-  ssh "${ssh_options[@]}" "$gb10_target" -- getent ahostsv6 "$public_store_host" || true
+  ssh_run "$gb10_target" getent ahostsv4 "$public_store_host" || true
+  ssh_run "$gb10_target" getent ahostsv6 "$public_store_host" || true
 } > "$dns_raw"
 chmod 0600 "$dns_raw"
 
@@ -485,7 +501,7 @@ test "$(sha512sum "$archive_part" | awk '{print $1}')" = "$archive_sha512"
 mv -T "$archive_part" "$archive"
 
 host_stage="/var/tmp/loom-native-builder-$merged_source_sha"
-ssh "${ssh_options[@]}" "$gb10_target" -- /bin/sh -euc \
+ssh_run "$gb10_target" /bin/sh -euc \
   'test ! -e "$1"; install -d -m 0700 "$1" "$1/scripts/ops" "$1/deploy/personal-dev-native-builder"' \
   sh "$host_stage"
 scp "${ssh_options[@]}" \
@@ -496,7 +512,7 @@ scp "${ssh_options[@]}" deploy/personal-dev-native-builder/* \
   "$gb10_target:$host_stage/deploy/personal-dev-native-builder/"
 scp "${ssh_options[@]}" "$archive" "$gb10_target:$host_stage/archive.tar.bz2"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   root_stage="$1"
   chown -R 0:0 "$root_stage"
   chmod 0700 "$root_stage" "$root_stage/scripts" "$root_stage/scripts/ops" "$root_stage/deploy" "$root_stage/deploy/personal-dev-native-builder"
@@ -505,27 +521,27 @@ ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
   test "$(systemctl is-active loom-personal-dev-native-builder-agent.service 2>/dev/null || true)" != active
 ' sh "$host_stage"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" preflight \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   --archive "$host_stage/archive.tar.bz2" \
   > "$evidence_dir/runtime-preflight.json"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" install \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   --archive "$host_stage/archive.tar.bz2" \
   > "$evidence_dir/runtime-install.json"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" verify-staged \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   > "$evidence_dir/runtime-verify-staged.json"
 
 for service in loom-personal-dev-builder-dockerd.service \
   loom-personal-dev-native-builder-agent.service; do
-  ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl is-active --quiet "$service" && exit 1
-  test "$(ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl is-enabled "$service" 2>/dev/null || true)" = disabled
+  ssh_run "$gb10_target" sudo systemctl is-active --quiet "$service" && exit 1
+  test "$(ssh_run "$gb10_target" sudo systemctl is-enabled "$service" 2>/dev/null || true)" = disabled
 done
 chmod 0600 "$evidence_dir"/runtime-*.json
 ```
@@ -539,9 +555,9 @@ uses repository, label, digest, platform, revision, and zero-container checks,
 never daemon-wide garbage collection.
 
 ```bash
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo nft --file \
+ssh_run "$gb10_target" sudo nft --file \
   /etc/loom/personal-dev-native-builder/provider-network.nft
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl start \
+ssh_run "$gb10_target" sudo systemctl start \
   loom-personal-dev-builder-dockerd.service
 
 release_args=(
@@ -551,18 +567,18 @@ release_args=(
   "${previous_args[@]}"
 )
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo python3 \
+ssh_run "$gb10_target" sudo python3 \
   "$host_stage/scripts/ops/converge_personal_dev_native_builder_release.py" plan \
   "${release_args[@]}" > "$evidence_dir/image-convergence.plan.json"
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo python3 \
+ssh_run "$gb10_target" sudo python3 \
   "$host_stage/scripts/ops/converge_personal_dev_native_builder_release.py" plan \
   "${release_args[@]}" > "$evidence_dir/image-convergence.recheck.json"
 cmp -s "$evidence_dir/image-convergence.plan.json" \
   "$evidence_dir/image-convergence.recheck.json"
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo python3 \
+ssh_run "$gb10_target" sudo python3 \
   "$host_stage/scripts/ops/converge_personal_dev_native_builder_release.py" apply \
   "${release_args[@]}" > "$evidence_dir/image-convergence.apply.json"
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo python3 \
+ssh_run "$gb10_target" sudo python3 \
   "$host_stage/scripts/ops/converge_personal_dev_native_builder_release.py" verify \
   "${release_args[@]}" > "$evidence_dir/image-convergence.verify.json"
 chmod 0600 "$evidence_dir"/image-convergence.*.json
@@ -578,7 +594,7 @@ dedicated-provider bridge are all denied. Candidate source is not used in this
 host-only probe; the acceptance runbook proves actual source builds.
 
 ```bash
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/bash -seu -- \
+ssh_run "$gb10_target" sudo /bin/bash -seu -- \
   "$current_builder" "$current_agent" "$reviewed_public_store_origin" <<'REMOTE' \
   > "$evidence_dir/two-container-conformance.txt"
 builder_image="$1"
@@ -756,7 +772,7 @@ printf 'Runtime=runsc-personal-dev-native buildkit=%s client=%s architecture=arm
 REMOTE
 chmod 0600 "$evidence_dir/two-container-conformance.txt"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   endpoint=unix:///run/loom-personal-dev-builder/docker.sock
   test -z "$(docker -H "$endpoint" ps -aq --filter label=loom.personal-dev-native-builder.managed=true)"
   test -z "$(docker -H "$endpoint" network ls -q --filter label=loom.personal-dev-native-builder.managed=true)"
@@ -771,11 +787,11 @@ private material through SSH stdin. The path passed to the installer is a
 root-owned host file; no secret value is an argument.
 
 ```bash
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl stop \
+ssh_run "$gb10_target" sudo systemctl stop \
   loom-personal-dev-builder-dockerd.service
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo nft delete table inet \
+ssh_run "$gb10_target" sudo nft delete table inet \
   loom_personal_dev_builder
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   systemctl is-active --quiet loom-personal-dev-builder-dockerd.service && exit 1
   systemctl is-active --quiet loom-personal-dev-native-builder-agent.service && exit 1
 '
@@ -783,15 +799,15 @@ ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
 host_private_key="$host_stage/agent-ed25519"
 host_service_ca="$host_stage/service-ca.pem"
 sudo dd if="$agent_private_key" bs=32 count=1 status=none \
-  | ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc \
+  | ssh_run "$gb10_target" sudo /bin/sh -euc \
   'umask 077; test ! -e "$1"; install -o 0 -g 0 -m 0400 /dev/stdin "$1"' \
   sh "$host_private_key"
 sudo dd if="$service_ca" status=none \
-  | ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc \
+  | ssh_run "$gb10_target" sudo /bin/sh -euc \
   'test ! -e "$1"; install -o 0 -g 0 -m 0444 /dev/stdin "$1"' \
   sh "$host_service_ca"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" stage-agent \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   --agent-image "$current_agent" \
@@ -802,7 +818,7 @@ ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
   --private-key "$host_private_key" \
   --ca-file "$host_service_ca" \
   > "$evidence_dir/agent-stage.json"
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo rm -f -- \
+ssh_run "$gb10_target" sudo rm -f -- \
   "$host_private_key" "$host_service_ca"
 
 emit_public_key() {
@@ -836,25 +852,25 @@ test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get secret \
   public-key
 chmod 0600 "$evidence_dir/native-builder-public-key.apply.txt"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" verify-staged \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   > "$evidence_dir/agent-verify-staged.json"
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo /bin/sh -euc '
+ssh_run "$gb10_target" sudo /bin/sh -euc '
   systemctl is-active --quiet loom-personal-dev-builder-dockerd.service && exit 1
   systemctl is-active --quiet loom-personal-dev-native-builder-agent.service && exit 1
 '
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo nft --file \
+ssh_run "$gb10_target" sudo nft --file \
   /etc/loom/personal-dev-native-builder/provider-network.nft
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl start \
+ssh_run "$gb10_target" sudo systemctl start \
   loom-personal-dev-builder-dockerd.service
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl start \
+ssh_run "$gb10_target" sudo systemctl start \
   loom-personal-dev-native-builder-agent.service
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl is-active --quiet \
+ssh_run "$gb10_target" sudo systemctl is-active --quiet \
   loom-personal-dev-native-builder-agent.service
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" verify-active \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   > "$evidence_dir/runtime-verify-active.json"
@@ -943,13 +959,13 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
   -f "$rollback_shadow_manifest" \
   > "$evidence_dir/rollback-shadow.apply.txt"
 
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl stop \
+ssh_run "$gb10_target" sudo systemctl stop \
   loom-personal-dev-native-builder-agent.service
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo systemctl stop \
+ssh_run "$gb10_target" sudo systemctl stop \
   loom-personal-dev-builder-dockerd.service
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo nft delete table inet \
+ssh_run "$gb10_target" sudo nft delete table inet \
   loom_personal_dev_builder
-ssh "${ssh_options[@]}" "$gb10_target" -- sudo env PYTHONPATH="$host_stage" \
+ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   python3 "$host_stage/scripts/ops/install_personal_dev_native_builder_runtime.py" remove \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   > "$evidence_dir/runtime-remove.json"
