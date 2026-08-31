@@ -182,13 +182,21 @@ Install and enable `loom-ci-runner-route-controller.service` and
 service and timer. The pool unit must contain only the pool reconcile command;
 the route unit must contain only the route controller. During rollout, fail the
 preflight if either unit contains both commands or if the route timer is not
-active with a fifteen-second interval. A no-work pass performs five GitHub read
-requests (the trusted branch plus four bounded workflow inventories), keeping
-the steady-state budget at approximately 1,200 requests per hour while still
-leaving half of the 30-second freshness window for normal API and service
-latency. A transient malformed or count-inconsistent active-run inventory is
-re-read at most three times within that pass; the scan bound still fails
-immediately, and persistent inconsistency fails closed without routing work.
+active with a thirty-second interval. Each process may make at most 30 GitHub
+core requests, so even a continuously saturated timer is bounded to 3,600
+requests per hour, below the installation's 5,000-request budget. The
+controller records the core `limit`, `remaining`, and `reset` response headers
+in the existing SQLite metadata after every request. A new oneshot process
+therefore inherits the previous process's budget and stops before the final 250
+requests until the recorded reset time; it never turns a local restart into a
+rate-limit bypass. A no-work pass performs five GitHub read requests (the
+trusted branch plus four bounded workflow inventories), keeping steady-state
+use near 600 requests per hour. The route freshness window is 90 seconds and
+the workflow-side bounded wait remains 180 seconds, leaving one full timer
+interval for ordinary API, artifact-publication, and service latency. A
+transient malformed or count-inconsistent active-run inventory is re-read at
+most three times within that pass; the scan bound still fails immediately, and
+persistent inconsistency fails closed without routing work.
 
 Store the App's unencrypted PEM private key at
 `/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem`, owned by root
