@@ -44,6 +44,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.models.batch import Combination
+from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
@@ -111,7 +112,12 @@ from loom_service.usage_accounting import (
     summarize_usage_counts,
     usage_status_filter,
 )
-from loom_service.worker_backends import get_active_backends
+from loom_service.worker_backends import (
+    compatible_cold_start_pool_names,
+    get_active_backends,
+    get_cold_start_pools,
+    runtime_environment,
+)
 
 router = APIRouter()
 
@@ -340,26 +346,6 @@ def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
     return pools
 
 
-async def _all_tasks_use_service_execution(
-    session: Any,
-    task_ids: Sequence[str],
-) -> bool:
-    """Return whether every materialized task uses the service scheduler."""
-    if not task_ids:
-        return False
-    rows = (
-        await session.execute(
-            select(Task.id, Task.config).where(Task.id.in_(task_ids)),
-        )
-    ).all()
-    configs_by_id = {str(task_id): config for task_id, config in rows}
-    return all(
-        isinstance(configs_by_id.get(task_id), dict)
-        and configs_by_id[task_id].get("service_execution") is not None
-        for task_id in task_ids
-    )
-
-
 def _reject_if_k8s_worker_unavailable(
     request: Request,
     required_worker_pools: Sequence[str],
@@ -395,6 +381,63 @@ def _reject_submission(
 ) -> NoReturn:
     SUBMISSION_REJECTS_TOTAL.labels(reason=reason).inc()
     raise HTTPException(status_code=status_code, detail=detail)
+
+
+async def _reject_if_backend_cannot_execute_or_cold_start(
+    session: Any,
+    *,
+    backend: str,
+    task_ids: Sequence[str],
+) -> None:
+    """Require fresh execution capacity or a compatible cold-start policy.
+
+    A healthy autoscaler policy only authorizes persisting queued demand.  It
+    remains distinct from a fresh worker and therefore never changes the
+    backend catalog's ``available`` truth value.
+    """
+    active_backends = await get_active_backends(session)
+    if backend in active_backends:
+        return
+
+    task_rows = (
+        await session.execute(
+            select(Task.id, Task.config).where(Task.id.in_(list(task_ids))),
+        )
+    ).all()
+    configs_by_id = {
+        str(task_id): TaskConfig.model_validate(config) for task_id, config in task_rows
+    }
+    task_configs = tuple(configs_by_id[task_id] for task_id in task_ids if task_id in configs_by_id)
+    legacy_task_configs = tuple(
+        task_config
+        for task_config in task_configs
+        if task_config.service_execution is None
+    )
+    if len(task_configs) == len(task_ids) and not legacy_task_configs:
+        return
+    cold_start_pools = await get_cold_start_pools(session)
+    compatible_pools = compatible_cold_start_pool_names(
+        cold_start_pools,
+        backend=backend,
+        task_configs=legacy_task_configs,
+    )
+    if len(task_configs) == len(task_ids) and compatible_pools:
+        return
+
+    available_str = (
+        ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
+    )
+    environment = runtime_environment()
+    _reject_submission(
+        reason="no_workers",
+        status_code=400,
+        detail=(
+            f"no active worker advertises backend {backend!r}. "
+            f"Currently available: {available_str}; no healthy autoscaled "
+            f"pool in environment {environment!r} can cold-start all selected "
+            "tasks for that backend. See `GET /api/v1/backends`."
+        ),
+    )
 
 
 async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
@@ -1084,28 +1127,14 @@ async def _create_batch_record(
             detail=invalid_task_config_detail(invalid_tasks),
         )
 
-    # Legacy tasks still need a fresh worker advertising the selected
-    # backend. Converted service-execution tasks are instead claimed by the
-    # environment scheduler and materialized as Kubernetes Jobs; requiring a
-    # legacy worker heartbeat for an all-service batch would make the normal
-    # user path impossible on a service-only deployment.
-    if not await _all_tasks_use_service_execution(s, valid_task_ids):
-        active_backends = await get_active_backends(s)
-        if payload.backend not in active_backends:
-            available_str = (
-                ", ".join(sorted(active_backends))
-                if active_backends
-                else "(none — no active workers)"
-            )
-            _reject_submission(
-                reason="no_workers",
-                status_code=400,
-                detail=(
-                    f"no active worker advertises backend "
-                    f"{payload.backend!r}. Currently available: "
-                    f"{available_str}. See `GET /api/v1/backends`."
-                ),
-            )
+    # A live worker is immediately executable. A fresh compatible pool policy
+    # is only cold-start authority, but it must be allowed to observe the queued
+    # trials created below; otherwise min_slots=0 can never scale up.
+    await _reject_if_backend_cannot_execute_or_cold_start(
+        s,
+        backend=payload.backend,
+        task_ids=valid_task_ids,
+    )
 
     # Reject structurally incompatible agent/task pairs instead of fanning
     # out trials that cannot satisfy the task's execution contract.
@@ -2511,22 +2540,21 @@ async def rerun_failed_batch(
             status_code=400,
             detail="rerun target tasks are missing or no longer runnable",
         )
-    if not await _all_tasks_use_service_execution(s, task_ids):
-        active_backends = await get_active_backends(s)
-        if b.backend not in active_backends:
-            available_str = (
-                ", ".join(sorted(active_backends))
-                if active_backends
-                else "(none -- no active workers)"
-            )
-            _reject_submission(
-                reason="no_workers",
-                status_code=400,
-                detail=(
-                    f"no active worker advertises backend {b.backend!r}. "
-                    f"Currently available: {available_str}."
-                ),
-            )
+    valid_rerun_task_ids, invalid_rerun_tasks = await split_valid_task_configs(
+        s,
+        rerun_task_result.task_ids,
+    )
+    if invalid_rerun_tasks:
+        _reject_submission(
+            reason="invalid_task_config",
+            status_code=400,
+            detail=invalid_task_config_detail(invalid_rerun_tasks),
+        )
+    await _reject_if_backend_cannot_execute_or_cold_start(
+        s,
+        backend=b.backend,
+        task_ids=valid_rerun_task_ids,
+    )
     agent_task_pairs: list[tuple[str, str]] = []
     combinations = list(b.combinations or [])
     for target in targets:

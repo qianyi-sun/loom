@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -41,6 +41,7 @@ from loom.db.schema import (
     Trial,
     User,
     Worker,
+    WorkerPoolAutoscalerPolicy,
 )
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
@@ -2192,7 +2193,7 @@ async def test_post_accepts_service_execution_task_without_legacy_worker(
     postgres_url: str,
 ) -> None:
     """A converted task is claimed by the service scheduler, not a worker."""
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     task_id = "local/service-execution"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -2228,9 +2229,296 @@ async def test_post_accepts_service_execution_task_without_legacy_worker(
             },
         )
 
-    sync_engine.dispose()
     assert response.status_code == 201, response.text
     assert response.json()["expected_trial_count"] == 1
+
+    batch_id = UUID(response.json()["batch_id"])
+    with sl() as s:
+        s.execute(
+            Batch.__table__.update()
+            .where(Batch.id == batch_id)
+            .values(
+                state="finished",
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        s.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id=task_id,
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="gateway 503",
+                config={},
+                requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+            )
+        )
+        s.commit()
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        rerun = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    sync_engine.dispose()
+    assert rerun.status_code == 201, rerun.text
+    assert rerun.json()["rerun_target_count"] == 1
+
+
+async def test_post_rejects_mixed_service_and_legacy_without_capacity(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """One service task must not hide a legacy task's capacity requirement."""
+    app, raw, _team_id = camp_setup
+    service_task_id = "local/mixed-service-execution"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.execute(
+            insert(Task).values(
+                id=service_task_id,
+                checksum="6" * 64,
+                config=_service_execution_task_config(service_task_id),
+                source="local",
+                license="MIT",
+            )
+        )
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "mixed-service-legacy",
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": [service_task_id, "local/mit-0"],
+                },
+                "trial_config": {},
+                "backend": "docker",
+            },
+        )
+
+    sync_engine.dispose()
+    assert response.status_code == 400, response.text
+    assert "no healthy autoscaled pool" in response.json()["detail"]
+
+
+async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy autoscaled pool must be able to observe newly queued demand.
+
+    Requiring a fresh worker before persisting the batch creates a deadlock at
+    ``min_slots=0``: no batch means no demand, so the pool never starts.
+    """
+    app, raw, team_id = camp_setup
+    monkeypatch.setenv("LOOM_ENV", "development")
+    policy_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.execute(
+            insert(WorkerPoolAutoscalerPolicy).values(
+                id=policy_id,
+                environment="development",
+                pool_name="oldlab",
+                actuator="slurm",
+                enabled=True,
+                min_slots=0,
+                max_slots=18,
+                actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
+                last_decision="noop",
+                last_decision_reason="at_min_capacity",
+                last_desired_slots=0,
+                last_actual_slots=0,
+                last_pending_slots=0,
+                last_occupied_slots=0,
+                last_queued_slots=0,
+                last_decision_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            catalog = await ac.get(
+                "/api/v1/backends",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+            response = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "name": "cold-start-oldlab",
+                    "task_filter": {
+                        "subset_kind": "explicit",
+                        "task_ids": ["local/mit-0"],
+                    },
+                    "trial_config": {},
+                    "backend": "docker",
+                },
+            )
+        assert catalog.status_code == 200, catalog.text
+        docker = next(
+            item for item in catalog.json()["items"] if item["name"] == "docker"
+        )
+        assert docker == {
+            "name": "docker",
+            "description": "Local docker on the worker host.",
+            "available": False,
+            "cold_start_available": True,
+            "cold_start_pools": ["oldlab"],
+        }
+        assert response.status_code == 201, response.text
+        assert response.json()["expected_trial_count"] == 1
+
+        batch_id = UUID(response.json()["batch_id"])
+        with sl() as s:
+            s.execute(
+                Batch.__table__.update()
+                .where(Batch.id == batch_id)
+                .values(
+                    state="finished",
+                    result_status="all_failed",
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    task_id="local/mit-0",
+                    team_id=team_id,
+                    state="failed",
+                    failure_reason="gateway_error",
+                    failure_message="gateway 503",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                    submitted_at=datetime.now(UTC),
+                    batch_id=batch_id,
+                    sample_idx=0,
+                    combination_idx=0,
+                )
+            )
+            s.commit()
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            rerun = await ac.post(
+                f"/api/v1/batches/{batch_id}/rerun-failed",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        assert rerun.status_code == 201, rerun.text
+        assert rerun.json()["rerun_target_count"] == 1
+    finally:
+        with sl() as s:
+            s.execute(
+                delete(WorkerPoolAutoscalerPolicy).where(
+                    WorkerPoolAutoscalerPolicy.id == policy_id,
+                )
+            )
+            s.commit()
+        sync_engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("policy_values", "task_cpu_arch"),
+    [
+        ({"last_decision_at": datetime.now(UTC) - timedelta(minutes=5)}, "x86_64"),
+        ({"last_blocked_reason": "no_safe_node"}, "x86_64"),
+        ({"last_error": "squeue failed"}, "x86_64"),
+        ({"disabled_reason": "maintenance"}, "x86_64"),
+        ({"enabled": False}, "x86_64"),
+        ({"max_slots": 0}, "x86_64"),
+        ({"environment": "production"}, "x86_64"),
+        ({"prod_pressure_state": {"state": "draining"}}, "x86_64"),
+        ({"last_decision_reason": "global_execution_fence_stale"}, "x86_64"),
+        ({"actuator_config": {"backend": "modal", "cpu_arch": "x86_64"}}, "x86_64"),
+        ({"actuator_config": {"backend": "docker", "cpu_arch": "arm64"}}, "x86_64"),
+    ],
+)
+async def test_post_rejects_unusable_scale_from_zero_pool(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_values: dict[str, object],
+    task_cpu_arch: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    monkeypatch.setenv("LOOM_ENV", "development")
+    policy_id = uuid4()
+    task_id = "local/mit-0"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    values: dict[str, object] = {
+        "id": policy_id,
+        "environment": "development",
+        "pool_name": "oldlab",
+        "actuator": "slurm",
+        "enabled": True,
+        "min_slots": 0,
+        "max_slots": 18,
+        "actuator_config": {"backend": "docker", "cpu_arch": "x86_64"},
+        "last_decision": "noop",
+        "last_decision_reason": "at_min_capacity",
+        "last_desired_slots": 0,
+        "last_actual_slots": 0,
+        "last_pending_slots": 0,
+        "last_occupied_slots": 0,
+        "last_queued_slots": 0,
+        "last_decision_at": datetime.now(UTC),
+    }
+    values.update(policy_values)
+    with sl() as s:
+        s.execute(delete(Worker))
+        config = _valid_task_config(task_id)
+        config["environment"] = {
+            "os": "linux",
+            "docker_image": "alpine",
+            "cpu_arch": task_cpu_arch,
+        }
+        s.execute(Task.__table__.update().where(Task.id == task_id).values(config=config))
+        s.execute(insert(WorkerPoolAutoscalerPolicy).values(**values))
+        s.commit()
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            response = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "name": "unusable-cold-start",
+                    "task_filter": {
+                        "subset_kind": "explicit",
+                        "task_ids": [task_id],
+                    },
+                    "trial_config": {},
+                    "backend": "docker",
+                },
+            )
+        assert response.status_code == 400, response.text
+        assert "no healthy autoscaled pool" in response.json()["detail"]
+    finally:
+        with sl() as s:
+            s.execute(
+                delete(WorkerPoolAutoscalerPolicy).where(
+                    WorkerPoolAutoscalerPolicy.id == policy_id,
+                )
+            )
+            s.commit()
+        sync_engine.dispose()
 
 
 async def test_post_rejects_when_no_worker_serves_specific_backend(
