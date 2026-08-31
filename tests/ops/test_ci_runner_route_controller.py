@@ -920,6 +920,37 @@ def test_github_api_records_core_headers_from_real_request_path(
     assert broker.github_rate_limit_budget().remaining == 4998
 
 
+def test_github_api_reuses_validated_snapshots_within_one_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    requested_paths: list[str] = []
+
+    def request(method: str, path: str, *, payload: object | None = None) -> object:
+        assert method == "GET"
+        assert payload is None
+        requested_paths.append(path)
+        if path == "/actions/runs/30000":
+            return {"id": 30000}
+        if path.startswith("/contents/"):
+            return {"sha": WORKFLOW_BLOB_SHA}
+        if "/check-runs?" in path:
+            return {"check_runs": [{"id": 70000}]}
+        if path.endswith("/attempts/1/jobs?filter=all&per_page=100"):
+            return {"jobs": [{"id": 80000}]}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", request)
+
+    for _ in range(2):
+        assert api.workflow_run(30000) == {"id": 30000}
+        assert api.content_blob_sha(routes.WORKFLOW_PATHS["CI"], HEAD_SHA) == WORKFLOW_BLOB_SHA
+        assert api.check_runs(HEAD_SHA, "repository-checks") == ({"id": 70000},)
+        assert api.workflow_jobs(30000, 1) == ({"id": 80000},)
+
+    assert len(requested_paths) == 4
+
+
 def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1309,8 +1340,8 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
     assert "OnUnitActiveSec=30s" in timer
-    assert routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * (3600 // 30) == 3600
-    assert 3600 + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
+    assert routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * (3600 // 30) == 4200
+    assert 4200 + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
     assert routes.OLDLAB_REQUEST_MAX_AGE_SECONDS < 180
     assert "Unit=loom-ci-runner-route-controller.service" in timer
     assert "loom-ci-runner-route-controller" not in pool_service

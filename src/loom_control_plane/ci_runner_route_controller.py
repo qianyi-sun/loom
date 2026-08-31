@@ -48,7 +48,7 @@ GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20
-MAX_GITHUB_REQUESTS_PER_RECONCILE = 30
+MAX_GITHUB_REQUESTS_PER_RECONCILE = 35
 MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
 ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS = 3
 PUBLISHER_RETRY_SECONDS = 15
@@ -231,6 +231,10 @@ class GitHubRouteAPI:
         self.repository = repository
         self._token_provider = token_provider or (lambda: cast(str, token))
         self._rate_limit_governor = rate_limit_governor
+        self._workflow_run_cache: dict[int, Mapping[str, object]] = {}
+        self._content_blob_cache: dict[tuple[str, str], str] = {}
+        self._check_run_cache: dict[tuple[str, str], tuple[Mapping[str, object], ...]] = {}
+        self._workflow_jobs_cache: dict[tuple[int, int], tuple[Mapping[str, object], ...]] = {}
 
     def _token(self) -> str:
         token = self._token_provider()
@@ -436,21 +440,34 @@ class GitHubRouteAPI:
         return raw
 
     def workflow_run(self, run_id: int) -> Mapping[str, object]:
+        cached = self._workflow_run_cache.get(run_id)
+        if cached is not None:
+            return cached
         payload = self._request("GET", f"/actions/runs/{run_id}")
         if not isinstance(payload, dict):
             raise RouteControllerError("GitHub workflow run is malformed")
+        self._workflow_run_cache[run_id] = payload
         return payload
 
     def content_blob_sha(self, path: str, ref: str) -> str:
+        cache_key = (path, ref)
+        cached = self._content_blob_cache.get(cache_key)
+        if cached is not None:
+            return cached
         encoded_path = urllib.parse.quote(path, safe="/")
         encoded_ref = urllib.parse.quote(ref, safe="")
         payload = self._request("GET", f"/contents/{encoded_path}?ref={encoded_ref}")
         sha = payload.get("sha") if isinstance(payload, dict) else None
         if not isinstance(sha, str) or _SHA_RE.fullmatch(sha) is None:
             raise RouteControllerError("GitHub workflow blob identity is malformed")
+        self._content_blob_cache[cache_key] = sha
         return sha
 
     def check_runs(self, head_sha: str, name: str) -> Sequence[Mapping[str, object]]:
+        cache_key = (head_sha, name)
+        cached = self._check_run_cache.get(cache_key)
+        if cached is not None:
+            return cached
         encoded_name = urllib.parse.quote(name, safe="")
         payload = self._request(
             "GET",
@@ -459,16 +476,24 @@ class GitHubRouteAPI:
         checks = payload.get("check_runs") if isinstance(payload, dict) else None
         if not isinstance(checks, list):
             raise RouteControllerError("GitHub check-run inventory is malformed")
-        return [item for item in checks if isinstance(item, dict)]
+        result = tuple(item for item in checks if isinstance(item, dict))
+        self._check_run_cache[cache_key] = result
+        return result
 
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]:
+        cache_key = (run_id, attempt)
+        cached = self._workflow_jobs_cache.get(cache_key)
+        if cached is not None:
+            return cached
         payload = self._request(
             "GET", f"/actions/runs/{run_id}/attempts/{attempt}/jobs?filter=all&per_page=100"
         )
         jobs = payload.get("jobs") if isinstance(payload, dict) else None
         if not isinstance(jobs, list):
             raise RouteControllerError("GitHub workflow jobs are malformed")
-        return [item for item in jobs if isinstance(item, dict)]
+        result = tuple(item for item in jobs if isinstance(item, dict))
+        self._workflow_jobs_cache[cache_key] = result
+        return result
 
 
 class GitHubAppRouteCheckPublisher:
