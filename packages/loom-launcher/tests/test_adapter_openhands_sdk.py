@@ -38,6 +38,18 @@ def test_build_invocation_argv() -> None:
     ]
 
 
+def test_build_invocation_argv_terminus_style_env() -> None:
+    adapter = get_adapter("openhands-sdk")
+    assert adapter is not None
+    argv = adapter.build_invocation(
+        instruction="do the thing",
+        workdir=PurePosixPath("/workspace"),
+        model=ModelSpec(provider="openai", name="gpt-5"),
+        env={"LOOM_OPENHANDS_TERMINUS_STYLE": "1"},
+    )
+    assert argv[-1] == "--terminus-style"
+
+
 def test_install_script_uses_managed_python312_venv() -> None:
     adapter = get_adapter("openhands-sdk")
     assert adapter is not None
