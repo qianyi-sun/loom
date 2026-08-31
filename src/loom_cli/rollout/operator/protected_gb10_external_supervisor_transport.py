@@ -58,6 +58,15 @@ _REMOTE_COMMAND = "loom-external-supervisor-v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_WIRE_BYTES = 4 * 1024 * 1024
+CAPACITY_ACCEPTANCE_FAILURE_CODES = frozenset(
+    {
+        "acceptance-failed",
+        "busy-accounting-unverified",
+        "busy-node-state-unverified",
+        "node-allocation-failed",
+        "node-evidence-invalid",
+    }
+)
 
 
 class CommandResult(Protocol):
@@ -67,6 +76,20 @@ class CommandResult(Protocol):
 
 
 CommandRunner = Callable[[Sequence[str], str], CommandResult]
+
+
+class ExternalSupervisorCapacityError(RuntimeError):
+    """Secret-safe GB10 capacity failure classification."""
+
+    def __init__(self, failure_code: str, *, node: str) -> None:
+        if (
+            failure_code not in CAPACITY_ACCEPTANCE_FAILURE_CODES
+            or node not in GB10_SLURM_WORKER_HOSTS
+        ):
+            raise ValueError("GB10 capacity failure is invalid")
+        self.failure_code = failure_code
+        self.node = node
+        super().__init__("GB10 capacity acceptance failed safely")
 
 
 def _canonical_json(value: object) -> str:
@@ -433,6 +456,25 @@ def _decode_helper_failure_response(payload: str, *, operation: str) -> str:
     return failure_code
 
 
+def _decode_capacity_failure_response(payload: str) -> tuple[str, str]:
+    value = _strict_json(payload, label="GB10 capacity failure response")
+    failure_code = value.get("failure_code")
+    node = value.get("node")
+    if (
+        set(value) != {"failure_code", "node", "operation", "schema_version", "status"}
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("operation") != "accept_capacity"
+        or value.get("status") != "failed"
+        or type(failure_code) is not str
+        or failure_code not in CAPACITY_ACCEPTANCE_FAILURE_CODES
+        or type(node) is not str
+        or node not in GB10_SLURM_WORKER_HOSTS
+    ):
+        raise ValueError("GB10 capacity failure response drifted")
+    return failure_code, node
+
+
 def _encode_helper_apply_failure_response(error: ExternalSupervisorApplyError) -> str:
     return _canonical_json(
         {
@@ -605,6 +647,12 @@ class FixedGB10ExternalSupervisorTransport:
                 failure_code,
                 compensation_failure_code=compensation_failure_code,
             )
+        if result.returncode == 1 and operation == "accept_capacity":
+            try:
+                failure_code, node = _decode_capacity_failure_response(result.stdout)
+            except ValueError as exc:
+                raise RuntimeError("GB10 controller operation failed safely") from exc
+            raise ExternalSupervisorCapacityError(failure_code, node=node)
         if result.returncode != 0:
             raise RuntimeError("GB10 controller operation failed safely")
         return result.stdout
@@ -796,9 +844,11 @@ if __name__ == "__main__":  # pragma: no cover - exercised through installed bro
 
 
 __all__ = [
+    "CAPACITY_ACCEPTANCE_FAILURE_CODES",
     "GB10_CONTROLLER_EXECUTION_HOST",
     "GB10_CONTROLLER_HOME",
     "GB10_CONTROLLER_UNIT_DIR",
+    "ExternalSupervisorCapacityError",
     "FixedGB10ExternalSupervisorTransport",
     "build_fixed_gb10_external_supervisor_transport",
 ]
