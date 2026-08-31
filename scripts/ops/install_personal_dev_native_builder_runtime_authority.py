@@ -43,9 +43,6 @@ _TMPFILES_RELATIVE = Path(
     "deploy/personal-dev-native-builder/"
     "loom-personal-dev-native-builder-runtime-authority.tmpfiles"
 )
-_RUNTIME_EPHEMERAL_ROOT = Path(
-    "/run/loom/personal-dev-native-builder-runtime-authority"
-)
 _SUDOERS_PAYLOAD = (
     b'qianyi ALL=(root) NOPASSWD:NOSETENV: '
     b'/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority ""\n'
@@ -54,7 +51,7 @@ _TMPFILES_PAYLOAD = (
     b"d /var/lib/loom/personal-dev-native-builder-runtime-authority 0700 root root -\n"
     b"f /run/lock/loom-personal-dev-native-builder-runtime-authority.lock "
     b"0600 root root -\n"
-    b"d /run/loom/personal-dev-native-builder-runtime-authority 0700 root root -\n"
+    b"d /run/loom-personal-dev-native-builder-runtime-authority 0700 root root -\n"
 )
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -859,7 +856,7 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
         state_path = _host_path(broker.STATE_PATH)
         if state_path.exists() or state_path.is_symlink():
             raise BootstrapError("installed_drift")
-        for logical in (broker.STATE_ROOT, _RUNTIME_EPHEMERAL_ROOT):
+        for logical in (broker.STATE_ROOT, broker.EPHEMERAL_SECRET_ROOT):
             path = _host_path(logical)
             _ensure_parents(path.parent, created_directories)
             changed = _ensure_directory(path, 0o700, created_directories) or changed

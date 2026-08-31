@@ -42,7 +42,7 @@ TMPFILES = (
     b"d /var/lib/loom/personal-dev-native-builder-runtime-authority 0700 root root -\n"
     b"f /run/lock/loom-personal-dev-native-builder-runtime-authority.lock "
     b"0600 root root -\n"
-    b"d /run/loom/personal-dev-native-builder-runtime-authority 0700 root root -\n"
+    b"d /run/loom-personal-dev-native-builder-runtime-authority 0700 root root -\n"
 )
 
 
@@ -305,7 +305,7 @@ def test_bootstrap_installs_the_authoritative_inventory_and_is_idempotent(
     assert stat.S_IMODE(
         _installed(
             host_root,
-            "/run/loom/personal-dev-native-builder-runtime-authority",
+            "/run/loom-personal-dev-native-builder-runtime-authority",
         ).stat().st_mode
     ) == 0o700
     assert not _installed(
