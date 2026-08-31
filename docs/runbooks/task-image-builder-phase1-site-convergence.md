@@ -379,38 +379,80 @@ before a retry. Do not manually shorten or bypass this cooldown.
 ### 5. Remove transitional exec authority only after proof
 
 After both controllers have successfully read and validated the stable
-ConfigMap, delete the temporary exact-pod `pods/exec` Role and RoleBinding
-using the rollout credential. First discover exactly one namespaced Role that
-has a `pods/exec` resource rule, then exactly one RoleBinding whose `roleRef`
-is that Role. This discovery is read-only and fails on zero or multiple
-matches; it does not select by pod name, label, or a guessed resource name.
+ConfigMap, remove #1679's temporary exact-pod manager-export authority using
+the rollout credential. The valid starting states are the complete four-object
+transition set or complete absence; a partial set is a hard failure. Discovery
+also rejects any `pods/exec` Role other than the exact reviewed transition
+identity. Revoke the namespaced RoleBinding and Role before removing the
+now-inert admission binding and policy.
 
 ```bash
-TRANSITION_WITNESS_EXEC_ROLE="$({
+TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"
+TRANSITION_EXEC_ROLES="$({
   kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get role -o json \
-    | jq -er '[.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))
-      | .metadata.name] | if length == 1 then .[0] else error("expected exactly one pods/exec Role") end'
+    | jq -cer --arg name "$TRANSITION_WITNESS_EXEC_NAME" '
+      [.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))
+        | .metadata.name]
+      | if (. == [] or . == [$name]) then .
+        else error("unexpected pods/exec Role is present")
+        end'
 } )"
-TRANSITION_WITNESS_EXEC_ROLEBINDING="$({
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get rolebinding -o json \
-    | jq -er --arg role "$TRANSITION_WITNESS_EXEC_ROLE" '[.items[]
-      | select(.roleRef.apiGroup == "rbac.authorization.k8s.io"
-          and .roleRef.kind == "Role" and .roleRef.name == $role)
-      | .metadata.name] | if length == 1 then .[0] else error("expected exactly one pods/exec RoleBinding") end'
-} )"
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get role "$TRANSITION_WITNESS_EXEC_ROLE" -o json
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get rolebinding "$TRANSITION_WITNESS_EXEC_ROLEBINDING" -o json
-printf 'Delete exact transition RBAC %s / %s? Type the full pair: ' \
-  "$TRANSITION_WITNESS_EXEC_ROLE" "$TRANSITION_WITNESS_EXEC_ROLEBINDING"
-read -r TRANSITION_DELETE_CONFIRMATION
-test "$TRANSITION_DELETE_CONFIRMATION" = \
-  "$TRANSITION_WITNESS_EXEC_ROLE/$TRANSITION_WITNESS_EXEC_ROLEBINDING"
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  delete rolebinding "$TRANSITION_WITNESS_EXEC_ROLEBINDING"
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  delete role "$TRANSITION_WITNESS_EXEC_ROLE"
+TRANSITION_PRESENT_COUNT=0
+if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  get role "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
+  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
+fi
+if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
+  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
+fi
+if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+  get validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
+  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
+fi
+if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+  get validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
+  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
+fi
+test "$TRANSITION_PRESENT_COUNT" -eq 0 || test "$TRANSITION_PRESENT_COUNT" -eq 4
+
+if [ "$TRANSITION_PRESENT_COUNT" -eq 4 ]; then
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+    get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o json \
+    | jq -e --arg name "$TRANSITION_WITNESS_EXEC_NAME" '
+      .roleRef == {
+        apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: $name
+      }
+      and .subjects == [{
+        kind: "ServiceAccount",
+        name: "loom-external-slurm-autoscaler",
+        namespace: "loom-staging"
+      }]'
+  TRANSITION_DELETE_IDENTITY="role/$TRANSITION_WITNESS_EXEC_NAME/rolebinding/$TRANSITION_WITNESS_EXEC_NAME/validatingadmissionpolicybinding/$TRANSITION_WITNESS_EXEC_NAME/validatingadmissionpolicy/$TRANSITION_WITNESS_EXEC_NAME"
+  printf 'Delete exact transition authority? Type %s: ' "$TRANSITION_DELETE_IDENTITY"
+  read -r TRANSITION_DELETE_CONFIRMATION
+  test "$TRANSITION_DELETE_CONFIRMATION" = "$TRANSITION_DELETE_IDENTITY"
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+    delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+    delete role "$TRANSITION_WITNESS_EXEC_NAME"
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+    delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+    delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"
+fi
+
+! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  get role "$TRANSITION_WITNESS_EXEC_NAME" -o name
+! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o name
+! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+  get validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME" -o name
+! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
+  get validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME" -o name
+kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get role -o json \
+  | jq -e '[.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))]
+    | if length == 0 then true else error("unexpected pods/exec Role remains") end'
 as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
@@ -428,8 +470,9 @@ submission assertions before proceeding.
 
 Capture the prior reviewed immutable capacity manifest, protected rollout
 request/status evidence, supervisor profile/unit artifact, dedicated
-kubeconfig, and any transition Role/RoleBinding JSON before each mutation. A
-rollback may restore only these recorded prior artifacts; it must never
+kubeconfig, and any transition authority JSON before each mutation. The
+transition objects are removal evidence only and must never be restored. A
+rollback may restore only the other recorded prior artifacts; it must never
 construct an ad hoc profile, credential, RBAC rule, or exec fallback.
 
 1. Close scale-up first on both controllers. Stop all four timers and active
@@ -442,10 +485,10 @@ construct an ad hoc profile, credential, RBAC rule, or exec fallback.
    dry-run bind to it, then use a new `loom-staging-rollout --env staging start`
    request. `start` accepts no ref or SHA argument; do not use `loom admin
    environment-state apply` or write user-systemd units directly.
-3. Restore only the captured immutable capacity manifest, dedicated
-   supervisor-kubeconfig artifact, and, where separately reviewed and required,
-   the exact transition RBAC artifact. A witness failure remains fail-closed;
-   restoring a ConfigMap transport never restores `pods/exec` automatically.
+3. Restore only the captured immutable capacity manifest and dedicated
+   supervisor-kubeconfig artifact. Never restore transition exec RBAC or its
+   admission objects. A witness failure remains fail-closed; restoring a
+   ConfigMap transport never restores `pods/exec`.
 4. Read back file ownership, ConfigMap access, exec denial, protected rollout
    status, and all four controller-local units before reopening scale-up.
 

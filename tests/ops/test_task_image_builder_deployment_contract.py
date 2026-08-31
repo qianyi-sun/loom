@@ -226,3 +226,30 @@ def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None
     assert "does not block the active native Phase 1 builder" in phase2_boundary
     assert "rerun task `4139e767`" in phase2_boundary
     assert "must still wait for every active Phase 1 convergence gate above" in phase2_boundary
+
+
+def test_phase1_runbook_removes_complete_or_absent_transition_exec_set() -> None:
+    runbook = Path(
+        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(runbook.split())
+
+    assert (
+        'TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"'
+        in runbook
+    )
+    assert (
+        'test "$TRANSITION_PRESENT_COUNT" -eq 0 || '
+        'test "$TRANSITION_PRESENT_COUNT" -eq 4'
+    ) in normalized
+    assert 'delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
+    assert 'delete role "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
+    assert (
+        'delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"'
+        in normalized
+    )
+    assert (
+        'delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"'
+        in normalized
+    )
+    assert 'error("unexpected pods/exec Role remains")' in normalized

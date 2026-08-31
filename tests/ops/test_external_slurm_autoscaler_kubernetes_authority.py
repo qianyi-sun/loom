@@ -11,6 +11,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+TRANSITION_BINDING = (
+    ROOT / "deploy/k8s/external-slurm-autoscaler-manager-export-binding.yaml"
+)
 PUBLISHER = ROOT / "deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"
 
 
@@ -105,6 +108,16 @@ def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
         for document in documents
         for rule in document.get("rules", [])  # type: ignore[union-attr]
     )
+
+
+def test_publisher_cannot_recreate_transitional_manager_exec_authority() -> None:
+    source = PUBLISHER.read_text(encoding="utf-8")
+
+    assert not TRANSITION_BINDING.exists()
+    assert "MANAGER_BINDING_MANIFEST" not in source
+    assert "manager_pod_identity" not in source
+    assert "--subresource=exec" not in source
+    assert "loom-external-slurm-autoscaler-manager-export" not in source
 
 
 def test_publisher_avoids_secret_values_in_process_arguments() -> None:
