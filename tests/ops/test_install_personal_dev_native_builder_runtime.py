@@ -13,6 +13,8 @@ from types import MappingProxyType
 
 import pytest
 import scripts.ops.install_personal_dev_native_builder_runtime as runtime_installer
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops.install_personal_dev_native_builder_runtime import (
     NativeBuilderCommandResult,
     NativeBuilderInstallContext,
@@ -589,6 +591,104 @@ def test_stage_agent_renders_exact_inactive_secret_free_unit(tmp_path: Path) -> 
     assert stat.S_IMODE(installed_key.stat().st_mode) == profile.private_key_mode
     assert installed_ca.read_text(encoding="ascii") == "test CA\n"
     assert stat.S_IMODE(installed_ca.stat().st_mode) == 0o444
+    manifest_path = _mapped(
+        installer,
+        Path("/etc/loom/personal-dev-native-builder/agent-stage-v1.json"),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    public_key = (
+        Ed25519PrivateKey.from_private_bytes(b"k" * 32)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    assert manifest["public_key_sha256"] == hashlib.sha256(public_key).hexdigest()
+    assert set(manifest) == {
+        "agent_image",
+        "agent_instance_id",
+        "builder_image",
+        "key_id",
+        "profile_sha256",
+        "public_key_sha256",
+        "schema",
+        "service_url",
+        "unit_sha256",
+    }
+
+
+def test_broker_stage_requires_expected_raw_ed25519_public_fingerprint(
+    tmp_path: Path,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    installer.install(archive)
+    key, ca = _stage_inputs(tmp_path)
+    arguments = {
+        "agent_image": "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+        + "a" * 64,
+        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
+        + "b" * 64,
+        "service_url": "https://loom.example.invalid",
+        "agent_instance_id": "00000000-0000-0000-0000-000000000001",
+        "key_id": "native-builder-v1",
+        "private_key": key,
+        "ca_file": ca,
+    }
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="public_key_invalid",
+    ):
+        installer.stage_agent_authorized(
+            **arguments,
+            expected_public_key_sha256="f" * 64,
+        )
+
+    public_key = (
+        Ed25519PrivateKey.from_private_bytes(b"k" * 32)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    expected = hashlib.sha256(public_key).hexdigest()
+    assert installer.stage_agent_authorized(
+        **arguments,
+        expected_public_key_sha256=expected,
+    )["state"] == "staged"
+
+
+def test_broker_discard_removes_only_inactive_agent_stage_files(tmp_path: Path) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    installer.install(archive)
+    key, ca = _stage_inputs(tmp_path)
+    installer.stage_agent(
+        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
+        + "a" * 64,
+        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
+        + "b" * 64,
+        service_url="https://loom.example.invalid",
+        agent_instance_id="00000000-0000-0000-0000-000000000001",
+        key_id="native-builder-v1",
+        private_key=key,
+        ca_file=ca,
+    )
+
+    installer.discard_agent_stage()
+    installer.discard_agent_stage()
+
+    for path in (
+        profile.agent_service_path,
+        profile.private_key_path,
+        profile.ca_file_path,
+        Path("/etc/loom/personal-dev-native-builder/agent-stage-v1.json"),
+    ):
+        assert not _mapped(installer, path).exists()
+    assert _mapped(installer, profile.release_root).is_dir()
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,8 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops.personal_dev_native_builder_runtime_profile import (
     NativeBuilderRuntimeArchiveMember,
     NativeBuilderRuntimeProfile,
@@ -46,6 +48,7 @@ _IMAGE_REFERENCE = re.compile(
     r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
 )
 _KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _AGENT_STAGE_MANIFEST = Path(
     "/etc/loom/personal-dev-native-builder/agent-stage-v1.json"
 )
@@ -518,6 +521,20 @@ def _normalized_nftables(payload: str) -> tuple[str, ...]:
         )
         lines.append(" ".join(line.split()))
     return tuple(lines)
+
+
+def _public_key_sha256(private_seed: bytes) -> str:
+    try:
+        public_key = Ed25519PrivateKey.from_private_bytes(private_seed).public_key()
+        raw_public_key = public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PersonalDevNativeBuilderRuntimeInstallError(
+            "public_key_invalid"
+        ) from exc
+    return hashlib.sha256(raw_public_key).hexdigest()
 
 
 class PersonalDevNativeBuilderRuntimeInstaller:
@@ -1174,10 +1191,9 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "agent_image",
             "agent_instance_id",
             "builder_image",
-            "ca_sha256",
             "key_id",
-            "private_key_sha256",
             "profile_sha256",
+            "public_key_sha256",
             "schema",
             "service_url",
             "unit_sha256",
@@ -1228,10 +1244,8 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         self._verify_file(self.profile.agent_service_path, unit, mode=0o444)
         if (
             len(key) != 32
-            or hashlib.sha256(key).hexdigest()
-            != manifest["private_key_sha256"]
+            or _public_key_sha256(key) != manifest["public_key_sha256"]
             or not ca
-            or hashlib.sha256(ca).hexdigest() != manifest["ca_sha256"]
             or hashlib.sha256(unit).hexdigest() != manifest["unit_sha256"]
         ):
             raise PersonalDevNativeBuilderRuntimeInstallError(
@@ -1534,7 +1548,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             )
         return payload
 
-    def stage_agent(
+    def _stage_agent(
         self,
         *,
         agent_image: str,
@@ -1544,6 +1558,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         key_id: str,
         private_key: Path,
         ca_file: Path,
+        expected_public_key_sha256: str | None,
     ) -> dict[str, str]:
         self._verify_installed()
         self._verify_services_inactive()
@@ -1572,6 +1587,17 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             raise PersonalDevNativeBuilderRuntimeInstallError(
                 "agent_material_invalid"
             )
+        public_key_sha256 = _public_key_sha256(key)
+        if (
+            expected_public_key_sha256 is not None
+            and (
+                _SHA256.fullmatch(expected_public_key_sha256) is None
+                or public_key_sha256 != expected_public_key_sha256
+            )
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "public_key_invalid"
+            )
         unit = self._render_agent_unit(
             agent_image=agent_image,
             builder_image=builder_image,
@@ -1584,10 +1610,9 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 "agent_image": agent_image,
                 "agent_instance_id": agent_instance_id,
                 "builder_image": builder_image,
-                "ca_sha256": hashlib.sha256(ca).hexdigest(),
                 "key_id": key_id,
-                "private_key_sha256": hashlib.sha256(key).hexdigest(),
                 "profile_sha256": self.profile.sha256,
+                "public_key_sha256": public_key_sha256,
                 "schema": "loom.personal-dev-native-builder-agent-stage.v1",
                 "service_url": service_url,
                 "unit_sha256": hashlib.sha256(unit).hexdigest(),
@@ -1606,6 +1631,105 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         self._systemctl("daemon-reload")
         self._verify_agent_staged()
         return self._receipt("stage-agent", state="staged")
+
+    def stage_agent(
+        self,
+        *,
+        agent_image: str,
+        builder_image: str,
+        service_url: str,
+        agent_instance_id: str,
+        key_id: str,
+        private_key: Path,
+        ca_file: Path,
+    ) -> dict[str, str]:
+        return self._stage_agent(
+            agent_image=agent_image,
+            builder_image=builder_image,
+            service_url=service_url,
+            agent_instance_id=agent_instance_id,
+            key_id=key_id,
+            private_key=private_key,
+            ca_file=ca_file,
+            expected_public_key_sha256=None,
+        )
+
+    def stage_agent_authorized(
+        self,
+        *,
+        agent_image: str,
+        builder_image: str,
+        service_url: str,
+        agent_instance_id: str,
+        key_id: str,
+        private_key: Path,
+        ca_file: Path,
+        expected_public_key_sha256: str,
+    ) -> dict[str, str]:
+        """Stage material only when its raw Ed25519 public identity is approved."""
+        return self._stage_agent(
+            agent_image=agent_image,
+            builder_image=builder_image,
+            service_url=service_url,
+            agent_instance_id=agent_instance_id,
+            key_id=key_id,
+            private_key=private_key,
+            ca_file=ca_file,
+            expected_public_key_sha256=expected_public_key_sha256,
+        )
+
+    def discard_agent_stage(self) -> None:
+        """Remove only exact inactive agent-stage files after broker rollback."""
+        self._verify_services_inactive()
+        specifications = {
+            self.profile.agent_service_path: (
+                64 * 1024,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            self.profile.private_key_path: (
+                32,
+                self._agent_uid,
+                self._agent_gid,
+                self.profile.private_key_mode,
+            ),
+            self.profile.ca_file_path: (
+                _MAX_CA_BYTES,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            _AGENT_STAGE_MANIFEST: (
+                16 * 1024,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+        }
+        removed = False
+        for absolute in reversed(self._agent_paths()):
+            path = self._path(absolute)
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise PersonalDevNativeBuilderRuntimeInstallError(
+                    "agent_stage_invalid"
+                ) from exc
+            maximum, uid, gid, mode = specifications[absolute]
+            _read_regular(
+                path,
+                maximum=maximum,
+                uid=uid,
+                gid=gid,
+                mode=mode,
+            )
+            self._unlink(absolute)
+            removed = True
+        if removed:
+            self._systemctl("daemon-reload")
 
     def verify_staged(self) -> dict[str, str]:
         self._verify_installed()
