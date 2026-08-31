@@ -295,7 +295,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         b"loom-personal-dev-scanner-cache-v1\0" + _canonical(scanner_without_identity)
     ).hexdigest()
     assert cache_identity_sha256 == (
-            "ed207b0168c99be685d5d00fdb70a21adcbc4e570d06cf13e777efb454624596"
+        "ed207b0168c99be685d5d00fdb70a21adcbc4e570d06cf13e777efb454624596"
     )
     scanner = {
         **scanner_without_identity,

@@ -30,7 +30,7 @@ class _StrictContract(BaseModel):
 
 
 class IsolationLevel(StrEnum):
-    """Minimum hostile-code isolation supplied by an execution class."""
+    """Container isolation supplied by an execution class."""
 
     SHARED_KERNEL = "shared_kernel"
     SANDBOXED_RUNTIME = "sandboxed_runtime"
@@ -152,13 +152,7 @@ class ExecutionClassV1(_StrictContract):
     permits_host_devices: bool
 
     @model_validator(mode="after")
-    def _hostile_code_must_not_use_shared_kernel(self) -> ExecutionClassV1:
-        if self.isolation_level == IsolationLevel.SHARED_KERNEL:
-            raise ValueError(
-                "service execution classes must use a sandboxed runtime or "
-                "a dedicated ephemeral node; shared-kernel Pods are not an "
-                "accepted hostile-code boundary",
-            )
+    def _forbid_host_escape_capabilities(self) -> ExecutionClassV1:
         forbidden = {
             "permits_privileged": self.permits_privileged,
             "permits_host_path": self.permits_host_path,
@@ -176,12 +170,19 @@ class ExecutionClassV1(_StrictContract):
 
 
 class ExecutionTargetV1(_StrictContract):
-    """Provider-bound regional target kept outside trial requirements."""
+    """Environment binding onto one provider-bound physical cluster scope."""
 
     schema_version: Literal["loom.execution-target.v1"] = "loom.execution-target.v1"
     target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    # Optional at the standalone V1 parsing boundary so already-persisted
+    # regional records remain readable. A current ExecutionTopologyV1 requires
+    # every binding to set the one accepted physical cluster scope.
+    cluster_scope_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9-]{0,79}$",
+    )
     environment: Literal["development", "staging", "production"]
     provider: Literal["nebius"]
     region: str = Field(min_length=1, max_length=80)
@@ -203,16 +204,16 @@ class ExecutionTargetV1(_StrictContract):
 
 
 class ExecutionTopologyV1(_StrictContract):
-    """Checked environment and regional bindings for one logical pool."""
+    """Checked environment bindings for one shared physical cluster."""
 
     schema_version: Literal["loom.execution-topology.v1"] = "loom.execution-topology.v1"
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     placement_policy: Literal["environment-local-health-first"]
-    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=4)
+    targets: tuple[ExecutionTargetV1, ...] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
-    def _targets_form_an_isolated_multi_region_topology(self) -> ExecutionTopologyV1:
+    def _targets_form_one_shared_cluster_topology(self) -> ExecutionTopologyV1:
         target_ids = [target.target_id for target in self.targets]
         health_ids = [target.health_check_id for target in self.targets]
         namespaces = [target.namespace_name for target in self.targets]
@@ -228,21 +229,20 @@ class ExecutionTopologyV1(_StrictContract):
             if target.execution_class_id != self.execution_class_id:
                 raise ValueError("every target must bind the declared execution class")
 
-        by_environment = {
-            environment: [target for target in self.targets if target.environment == environment]
-            for environment in ("development", "staging", "production")
-        }
-        if not by_environment["development"] or not by_environment["staging"]:
-            raise ValueError("development and staging require isolated targets")
-        production = by_environment["production"]
-        if len(production) < 2:
-            raise ValueError("production requires at least two regional targets")
-        if {target.health_role for target in production} != {"primary", "secondary"}:
-            raise ValueError("production requires primary and secondary health roles")
-        if len({target.region for target in production}) < 2:
-            raise ValueError("production targets must use distinct regions")
-        if len({target.failure_domain for target in production}) < 2:
-            raise ValueError("production targets must use distinct failure domains")
+        environments = [target.environment for target in self.targets]
+        if set(environments) != {"development", "staging", "production"}:
+            raise ValueError("the shared cluster requires one binding per environment")
+        if len(environments) != len(set(environments)):
+            raise ValueError("every environment needs exactly one shared-cluster binding")
+        cluster_scope_ids = {target.cluster_scope_id for target in self.targets}
+        if None in cluster_scope_ids or len(cluster_scope_ids) != 1:
+            raise ValueError("every target must bind the same physical cluster scope")
+        if len({target.region for target in self.targets}) != 1:
+            raise ValueError("baseline shared-cluster bindings must use one region")
+        if len({target.failure_domain for target in self.targets}) != 1:
+            raise ValueError("shared-cluster bindings must expose one failure domain")
+        if {target.health_role for target in self.targets} != {"primary"}:
+            raise ValueError("baseline shared-cluster bindings must all be primary")
         return self
 
 
@@ -458,6 +458,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
     policy_kind = env.baseline_network_policy.kind
     network_access = {
         "no-network": NetworkAccess.NONE,
+        "gateway-only": NetworkAccess.GATEWAY_ONLY,
         "allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
@@ -474,7 +475,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         cpu_millis=round(env.cpus * 1000) if env.cpus is not None else None,
         memory_mib=env.memory_mb,
         ephemeral_storage_mib=env.storage_mb,
-        isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+        isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=network_access,
         image_materialization=materialization,
         image_ref=image_ref,
@@ -585,7 +586,7 @@ NEBIUS_CPU_EXECUTION_CLASS_V1 = ExecutionClassV1(
     operating_system="linux",
     cpu_architecture="x86_64",
     gpu_vendor="none",
-    isolation_level=IsolationLevel.SANDBOXED_RUNTIME,
+    isolation_level=IsolationLevel.SHARED_KERNEL,
     network_access=frozenset(
         {
             NetworkAccess.NONE,

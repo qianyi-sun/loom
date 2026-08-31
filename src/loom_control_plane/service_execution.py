@@ -347,6 +347,7 @@ def _bind_kubernetes_execution_route(
     target: ServiceExecutionTarget,
     execution_class_id: str,
     requirements_digest: str,
+    routing_reason: ExecutionRoutingReason,
     current_time: datetime,
 ) -> tuple[ExecutionRoutingDecisionV1, str]:
     """Bind or validate the trial's sole physical execution route."""
@@ -361,7 +362,7 @@ def _bind_kubernetes_execution_route(
             selected_adapter_kind=ExecutionAdapterKind.KUBERNETES_JOB,
             selected_target_id=target.id,
             selected_execution_class_id=execution_class_id,
-            reason=ExecutionRoutingReason.ADMIN_TARGET_BINDING,
+            reason=routing_reason,
             decided_at=current_time,
             candidates=(
                 ExecutionRouteCandidateV1(
@@ -429,6 +430,7 @@ async def reserve_trial_execution(
     requirements: WorkloadRequirementsV1,
     runtime_contract: ExecutionRuntimePlanV1,
     image_admission_keyring: ImageAdmissionKeyring,
+    routing_reason: ExecutionRoutingReason = ExecutionRoutingReason.ADMIN_TARGET_BINDING,
     parent_lease_id: UUID | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
@@ -568,6 +570,7 @@ async def reserve_trial_execution(
         target=target,
         execution_class_id=execution_class_id,
         requirements_digest=requirements_digest,
+        routing_reason=routing_reason,
         current_time=current_time,
     )
     if parent_lease is not None and (
@@ -1377,6 +1380,139 @@ async def record_kubernetes_observation(
     )
 
 
+async def record_committed_runtime_result(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    generation: int,
+    runtime_result: ExecutionRuntimeResultV1,
+    observed_at: datetime,
+) -> ServiceExecutionEvent:
+    """Advance a committed runtime result to the durable finalize intent."""
+
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+    if lease is None or lease.generation != generation:
+        raise ServiceExecutionFenceError("execution generation is stale")
+    if lease.output_commit_state != "committed":
+        raise ServiceExecutionConflict("runtime result is not durably committed")
+    result_payload = runtime_result.model_dump(mode="json")
+    existing = (
+        await session.execute(
+            select(ServiceExecutionEvent)
+            .where(
+                ServiceExecutionEvent.lease_id == lease.id,
+                ServiceExecutionEvent.generation == lease.generation,
+                ServiceExecutionEvent.event_kind == "result_reported",
+            )
+            .order_by(ServiceExecutionEvent.ordinal.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.payload_sha256 != canonical_digest(result_payload):
+            raise ServiceExecutionConflict("committed runtime result identity drift")
+        return existing
+    if lease.desired_state == "create":
+        await enqueue_execution_transition(
+            session,
+            lease_id=lease.id,
+            expected_generation=lease.generation,
+            desired_state="start",
+            now=observed_at,
+        )
+    if lease.desired_state == "start":
+        await enqueue_execution_transition(
+            session,
+            lease_id=lease.id,
+            expected_generation=lease.generation,
+            desired_state="finalize",
+            now=observed_at,
+        )
+    if lease.desired_state != "finalize":
+        raise ServiceExecutionConflict("runtime result cannot enter finalize state")
+    event, _ = await record_execution_event(
+        session,
+        lease_id=lease.id,
+        generation=lease.generation,
+        ordinal=lease.last_event_ordinal + 1,
+        event_kind="result_reported",
+        payload=result_payload,
+        observed_at=observed_at,
+    )
+    return event
+
+
+async def finalize_committed_service_execution(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    observed_at: datetime,
+) -> bool:
+    """Finalize and enqueue cleanup after Kubernetes confirms termination."""
+
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    if (
+        lease.desired_state != "finalize"
+        or lease.observed_state != "finalizing"
+        or lease.output_commit_state != "committed"
+    ):
+        return False
+    result_event = (
+        await session.execute(
+            select(ServiceExecutionEvent)
+            .where(
+                ServiceExecutionEvent.lease_id == lease.id,
+                ServiceExecutionEvent.generation == lease.generation,
+                ServiceExecutionEvent.event_kind == "result_reported",
+            )
+            .order_by(ServiceExecutionEvent.ordinal.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if result_event is None:
+        raise ServiceExecutionConflict("finalizing execution has no committed runtime result")
+    runtime_result = ExecutionRuntimeResultV1.model_validate(result_event.payload_json)
+    if runtime_result.status == "succeeded":
+        trial_state = "succeeded"
+        result: dict[str, Any] | None = {
+            "schema_version": "loom.service-execution-trial-result.v1",
+            "runtime_result": runtime_result.model_dump(mode="json"),
+            "output_manifest_sha256": lease.output_manifest_sha256,
+            "output_marker_sha256": lease.output_marker_sha256,
+        }
+        failure_reason = None
+        failure_message = None
+    else:
+        trial_state = "cancelled" if runtime_result.status == "cancelled" else "failed"
+        result = None
+        failure_reason = runtime_result.status
+        failure_message = f"service execution runtime reported {runtime_result.status}"
+    await record_execution_event(
+        session,
+        lease_id=lease.id,
+        generation=lease.generation,
+        ordinal=lease.last_event_ordinal + 1,
+        event_kind="finalized",
+        payload={
+            "trial_state": trial_state,
+            "result": result,
+            "failure_reason": failure_reason,
+            "failure_message": failure_message,
+        },
+        observed_at=observed_at,
+    )
+    await enqueue_execution_transition(
+        session,
+        lease_id=lease.id,
+        expected_generation=lease.generation,
+        desired_state="delete_pending",
+        now=observed_at,
+    )
+    return True
+
+
 async def refresh_service_execution_metrics(
     session: AsyncSession,
     *,
@@ -1537,8 +1673,10 @@ __all__ = [
     "defer_execution_command",
     "enqueue_execution_transition",
     "execution_lease_projection",
+    "finalize_committed_service_execution",
     "mark_execution_output_unavailable",
     "persist_execution_catalog",
+    "record_committed_runtime_result",
     "record_execution_event",
     "record_kubernetes_observation",
     "refresh_service_execution_metrics",

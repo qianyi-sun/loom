@@ -137,7 +137,7 @@ func TestRunPlanHidesBrokerIdentityAndOwnsGatewayEnvironment(t *testing.T) {
 		Argv: []string{
 			"/bin/sh",
 			"-c",
-			`test -z "$LOOM_EXECUTION_LEASE_ID" && test "$OPENAI_BASE_URL" = "http://127.0.0.1:43123/openai/v1"`,
+			`test -z "$LOOM_EXECUTION_LEASE_ID" && test "$OPENAI_BASE_URL" = "http://127.0.0.1:43123/v1"`,
 		},
 		WorkingDirectory: workspace,
 		TimeoutSeconds:   5,
@@ -151,7 +151,7 @@ func TestRunPlanHidesBrokerIdentityAndOwnsGatewayEnvironment(t *testing.T) {
 		testPlan(workspace, agent),
 		workspace,
 		output,
-		map[string]string{"OPENAI_BASE_URL": "http://127.0.0.1:43123/openai/v1"},
+		map[string]string{"OPENAI_BASE_URL": "http://127.0.0.1:43123/v1"},
 	)
 	if err != nil || result.Status != "succeeded" {
 		t.Fatalf("runtime-owned environment was not enforced: result=%#v err=%v", result, err)

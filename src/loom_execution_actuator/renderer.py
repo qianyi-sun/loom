@@ -31,15 +31,17 @@ _DIGEST_IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 class ExecutionTargetRuntime:
     target_id: str
     namespace: str
-    runtime_class_name: str
+    runtime_class_name: str | None = None
+    node_selector: dict[str, str] | None = None
+    tolerations: tuple[dict[str, str], ...] = ()
     service_account_name: str = "loom-execution-attempt"
     credential_broker_url: str = (
         "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution"
     )
 
     def __post_init__(self) -> None:
-        if not self.target_id or not self.namespace or not self.runtime_class_name:
-            raise ValueError("target, namespace, and sandbox runtime class are required")
+        if not self.target_id or not self.namespace:
+            raise ValueError("target and namespace are required")
         if not self.credential_broker_url.startswith(("http://", "https://")):
             raise ValueError("credential broker URL must be HTTP(S)")
 
@@ -227,7 +229,7 @@ def render_execution_job(
         1,
         (plan.max_artifact_bytes + 2 * plan.max_log_bytes_per_stream + 1_048_575) // 1_048_576,
     )
-    return {
+    job: dict[str, Any] = {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
@@ -249,6 +251,8 @@ def render_execution_job(
                     "enableServiceLinks": False,
                     "serviceAccountName": target.service_account_name,
                     "runtimeClassName": target.runtime_class_name,
+                    "nodeSelector": dict(target.node_selector or {}),
+                    "tolerations": [dict(item) for item in target.tolerations],
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": plan.run_as_user,
@@ -314,6 +318,13 @@ def render_execution_job(
             },
         },
     }
+    if target.runtime_class_name is None:
+        del job["spec"]["template"]["spec"]["runtimeClassName"]
+    if not target.node_selector:
+        del job["spec"]["template"]["spec"]["nodeSelector"]
+    if not target.tolerations:
+        del job["spec"]["template"]["spec"]["tolerations"]
+    return job
 
 
 __all__ = ["ExecutionTargetRuntime", "render_execution_job"]

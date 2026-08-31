@@ -260,6 +260,20 @@ async def submit_trial(
     if trial_config.multi_model is not None and trial_config.multi_model.enabled:
         requires_caps_json["terminus2_model_switch"] = True
     required_worker_pool = _required_worker_pool(payload)
+    task_service_execution = task_config.service_execution
+    if task_service_execution is not None:
+        if (
+            required_worker_pool is not None
+            and required_worker_pool != task_service_execution.logical_pool_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "required_worker_pool conflicts with the task's immutable "
+                    "service-execution binding"
+                ),
+            )
+        required_worker_pool = task_service_execution.logical_pool_id
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool
 

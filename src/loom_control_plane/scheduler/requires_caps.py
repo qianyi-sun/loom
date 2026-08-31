@@ -7,7 +7,7 @@ Plane derives them on POST /trials.
 from __future__ import annotations
 
 from loom.models.capabilities import RequiredCapabilities
-from loom.models.networking import Allowlist, NetworkPolicy, NoNetwork, Public
+from loom.models.networking import Allowlist, GatewayOnly, NetworkPolicy, NoNetwork, Public
 from loom.models.task import TaskConfig
 from loom.models.types import NetworkPolicyKind
 
@@ -40,6 +40,8 @@ def _kind(policy: NetworkPolicy) -> NetworkPolicyKind:
         return "public"
     if isinstance(policy, NoNetwork):
         return "no-network"
+    if isinstance(policy, GatewayOnly):
+        return "gateway-only"
     if isinstance(policy, Allowlist):
         return "allowlist"
     raise ValueError(f"unknown NetworkPolicy: {policy!r}")

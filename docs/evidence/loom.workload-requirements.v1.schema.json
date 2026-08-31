@@ -11,7 +11,7 @@
       "type": "string"
     },
     "IsolationLevel": {
-      "description": "Minimum hostile-code isolation supplied by an execution class.",
+      "description": "Container isolation supplied by an execution class.",
       "enum": [
         "shared_kernel",
         "sandboxed_runtime",

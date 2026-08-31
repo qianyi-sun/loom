@@ -79,11 +79,13 @@ provider, region, target, worker, pool, or reusable-slot field. A valid service
 class cannot permit privileged mode, hostPath, host networking, nested
 containers, host devices, or a shared-kernel isolation boundary.
 
-`ExecutionTargetV1` is the later binding point for provider, environment,
-region, failure domain, residency, and a target-specific health check. The
-checked `ExecutionTopologyV1` requires isolated development and staging
-targets, at least two production regions and failure domains, primary and
-secondary roles, and unique health checks.
+`ExecutionTargetV1` is the later environment binding point for provider,
+physical `cluster_scope_id`, region, failure domain, residency, namespace, and
+a binding-specific health check. The checked `ExecutionTopologyV1` requires
+exactly one development, staging, and production binding on the same physical
+cluster scope, region, and failure domain, with unique namespaces and health
+identities. Another cluster or region requires a separately accepted SLO and
+owner decision.
 
 Admission compares the immutable requirement record with the selected class
 and returns all structured rejection codes. It runs before a batch is persisted
@@ -108,17 +110,21 @@ The accepted service pool identities and adapter boundaries are:
 | `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
 | `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
 
-Normal scheduling evaluates all compatible candidates without exposing a
-physical-pool selector to users. It records candidate health, draining state,
-configured/active/occupied/pending/assigned slots, capacity observation time,
-adapter identity, environment/region/residency, budget eligibility, estimated
-per-slot cost, operator weight, selected reason, and a canonical digest in
-`ExecutionRoutingDecisionV1`. Fresh executable capacity is preferred over
-configured scale headroom; within the same operator weight, lower known cost is
-preferred. A budget-ineligible candidate is blocked. An operator-only weight
-may order otherwise eligible candidates; it cannot override capability,
-security, health, residency, budget, drain, or capacity blockers. An explicit
-admin target binding is audited and is not a normal user workflow.
+Converted tasks opt into normal Kubernetes scheduling with an immutable
+`service_execution` binding in `TaskConfig`. The binding selects the logical
+pool and carries a validated runtime template. It deliberately omits the task
+revision digest because that digest covers the complete task directory; after
+materialization the scheduler binds the published `Task.checksum` into the
+final runtime plan. Trial submission derives the required pool from that task
+binding, so ordinary users do not select a physical target.
+
+When the environment scheduler is enabled, it fairly selects one queued,
+converted Trial, requires a fresh healthy target in the bound environment,
+and records a `preexisting_assignment` routing decision before creating the
+lease. The later provisioning boundary still requires fresh executable target
+capacity before a Kubernetes create. Tasks without the explicit binding retain
+the legacy worker path. An explicit admin target binding remains audited and is
+not the normal workflow.
 
 `Trial.execution_route_generation` advances while the Trial is queued. The
 selected pool, adapter, target/class when applicable, reason, candidate
@@ -174,17 +180,18 @@ effective; other pools are not changed by this provider-specific requirement.
 The preflight estimate prices the complete requested Pod envelope for its full
 deadline: execution container, native sidecars, runtime materializer,
 workspace/runtime/output volumes, CPU, memory, and ephemeral storage. It is a
-conservative reservation, not a provider bill. Both an enabled pool policy and
-an enabled target policy must admit the estimate. Each policy independently
-enforces per-attempt, daily, monthly, and maximum-duration limits plus an
-emergency stop. Matching policy rows are locked before their current-period
-counters and debit ledger are updated, so concurrent control-plane replicas
-cannot overspend the same remaining budget. Policy mutation takes an exclusive
-transaction lock while reservations, terminal release, and billing ingestion
-take the shared form; routine paid reservations remain concurrent after that
-brief shared acquisition. Reservations that cross midnight are split into UTC
-daily debit rows, and status reads reconcile the current UTC day/month directly
-from the debit and provider-bill ledgers instead of trusting cached counters.
+conservative cost-attribution reservation, not a provider bill. Budget policies
+are opt-in: absence of a pool or target policy does not create an implicit
+spend cap. Every enabled matching policy independently enforces per-attempt,
+daily, monthly, and maximum-duration limits plus an emergency stop. Matching
+policy rows are locked before their current-period counters and debit ledger
+are updated, so concurrent control-plane replicas cannot overspend the same
+remaining budget. Policy mutation takes an exclusive transaction lock while
+reservations, terminal release, and billing ingestion take the shared form;
+routine paid reservations remain concurrent after that brief shared
+acquisition. Reservations that cross midnight are split into UTC daily debit
+rows, and status reads reconcile the current UTC day/month directly from the
+debit and provider-bill ledgers instead of trusting cached counters.
 
 Terminal leases that never started a Pod release the estimate immediately.
 Started leases retain it as `awaiting_settlement` until provider billing covers
@@ -338,21 +345,19 @@ Kubernetes, routing, profile, or traffic mutation.
 `config/service-execution-topology.json` is the machine-validated target
 topology for the `nebius-cpu` adapter:
 
-| Environment | Target | Role | Residency |
+| Environment | Logical target | Namespace | Physical cluster scope |
 | --- | --- | --- | --- |
-| development | `nebius-eu-north1-development` | primary | EU |
-| staging | `nebius-eu-north1-staging` | primary | EU |
-| production | `nebius-eu-north1-production` | primary | EU |
-| production | `nebius-eu-west1-production` | secondary | EU |
+| development | `nebius-eu-north1-development` | `loom-nebius-development` | `nebius-eu-north1-shared` |
+| staging | `nebius-eu-north1-staging` | `loom-nebius-staging` | `nebius-eu-north1-shared` |
+| production | `nebius-eu-north1-production` | `loom-nebius-production` | `nebius-eu-north1-shared` |
 
-Development, staging, and production cannot share a target identity or health
-observation. Every target is probed independently; a target becomes ineligible
-when its observation is older than its declared stale threshold. Nebius target
-placement is environment-local and health-first. Production prefers
-`eu-north1` and may
-fail over to `eu-west1` only when the secondary target is independently healthy
-and the durable lease policy permits the transition. Queued work does not
-cross environments or leave EU residency to recover capacity.
+Development, staging, and production cannot share a logical target identity,
+namespace, health observation, service identity, policy, or evidence prefix.
+They deliberately share one physical cluster/failure domain. Every binding is
+probed independently; a binding becomes ineligible when its observation is
+older than its declared stale threshold. Placement remains environment-local
+and health-first. Queued work does not cross environments or leave EU residency
+to recover capacity, and there is no implicit secondary-region fallback.
 
 These target records are desired logical bindings, not evidence that any
 Nebius project, cluster, node group, runtime class, or capacity exists.
@@ -362,7 +367,8 @@ Nebius project, cluster, node group, runtime class, or capacity exists.
 Migrations `0113` through `0120` persist the complete provider-neutral
 desired/observed state without making a Nebius or Kubernetes call:
 
-- immutable `execution_classes` and environment/regional `execution_targets`;
+- immutable `execution_classes` and environment-local `execution_targets`
+  bound to one shared physical cluster scope;
 - one canonical routing decision and monotonically increasing routing
   generation on each Trial, with the selected pool/reason/digest frozen into
   every Kubernetes lease and its history;
@@ -379,6 +385,9 @@ The reservation transaction locks a queued Trial, creates or verifies its
 Kubernetes route, increments its attempt, creates the lease, and appends the
 `create` command. A crash before commit leaves every effect absent. A Trial
 already routed to a legacy worker pool cannot also reserve a Kubernetes lease.
+The opt-in service-execution scheduler performs this transaction for ordinary
+queued Trials; the admin reservation endpoint remains available for audited
+operator recovery and diagnostics.
 Command consumers use bounded delivery leases;
 an expired claim redelivers the same command and idempotency key. Exact event
 and acknowledgement replay is accepted, while changed replay is rejected.
@@ -432,27 +441,17 @@ and Batch metadata after object deletion has been verified. Operators must not
 manually delete an outbox or provider object to force convergence. See the
 [operator runbook](../runbooks/operator-runbook.md#service-execution-recovery-and-retention).
 
-## Hostile-code isolation
+## Container isolation baseline
 
-The accepted class requires `sandboxed_runtime`. A normal shared-kernel Pod,
-Pod Security admission, NetworkPolicy, a namespace, or a dedicated node group
-alone is not an accepted hostile-code boundary. The runtime-validation issue
-#1551 must prove an available Nebius Kubernetes `RuntimeClass` based on Kata,
-gVisor, or another reviewed sandbox implementation, including escape,
-network, secret, cleanup, and performance tests. No ordinary-Pod fallback is
-allowed when that runtime is missing or unhealthy.
+The accepted class uses the managed Kubernetes shared-kernel runtime with a
+restricted non-root Pod shape, immutable images, explicit limits, private
+execution nodes, and no service-account token. A custom gVisor, Kata, or
+dedicated-node runtime is optional defense in depth for a future workload with
+a demonstrated need; it is not a normal Nebius admission requirement.
 
-One-attempt-per-node may be proposed later as a distinct
-`dedicated_ephemeral_node` class. It needs its own lifecycle, wipe, fencing,
-capacity, and cost acceptance and is not silently equivalent to
-`sandboxed_runtime`.
-
-Nebius documentation currently confirms managed Kubernetes node groups,
-autoscaling, taints, security groups, and CPU-d3 availability in the selected
-EU regions. As of 2026-08-25, the official documentation review did not find a
-documented supported Kata/gVisor/custom RuntimeClass contract. That absence is
-why runtime support remains fail-closed empirical work under #1551 rather than
-an architecture assumption. References:
+Nebius documentation confirms managed Kubernetes node groups, autoscaling,
+taints, security groups, and CPU-d3 availability in the selected EU regions.
+References:
 
 - <https://docs.nebius.com/kubernetes/node-groups/manage>
 - <https://docs.nebius.com/kubernetes/node-groups/node-group-autoscaling>
@@ -466,9 +465,12 @@ an architecture assumption. References:
 The #1549 actuator consumes the durable command outbox through database-backed
 delivery leases. It renders one deterministic `batch/v1` Job per execution
 unit, requires an immutable image digest, exact CPU/RAM/ephemeral-storage
-requests and limits, a non-root restricted security context, an explicit
-sandbox `RuntimeClass`, and an attempt service account with token automount
-disabled. It never receives Nebius credentials and its Kubernetes service
+requests and limits, a non-root restricted security context, and an attempt
+service account with token automount disabled. A custom `RuntimeClass` may be
+configured but is not required. The target-local actuator configuration also
+supplies the exact node selector and tolerations copied into every Job, so an
+execution lease cannot fall back to a system node when the execution group is
+at zero. It never receives Nebius credentials and its Kubernetes service
 account has namespace-only Job create/get/list/watch/delete plus Pod
 get/list/watch permissions. There is no Secret read, Pod exec, log, node,
 namespace, CRD, or cluster-wide permission.
@@ -525,14 +527,12 @@ and marker digest in both the lease and termination summary. Cancellation and
 retry fence model calls immediately while allowing only the old resource
 generation to flush output until the cleanup deadline. The actuator defers Job
 deletion during that window; at expiry it records explicit output
-unavailability before UID-preconditioned deletion. Live target evidence for
-this repository path remains part of #1551 acceptance.
+unavailability before UID-preconditioned deletion. Live target behavior is
+validated by the owning end-to-end canary.
 
-The #1551 repository security controls and exact remaining live gates are in
-[Nebius hostile-workload security](nebius-execution-security.md). Operators
-must use the corresponding
-[security acceptance and incident runbook](../runbooks/nebius-execution-security.md);
-merge or manifest rendering is not target acceptance.
+The proportionate baseline is documented in
+[Nebius execution security](nebius-execution-security.md) and the matching
+[operator check](../runbooks/nebius-execution-security.md).
 
 `deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
 replicas. Repository merge cannot scale it or create its referenced database
@@ -665,7 +665,7 @@ traffic routing, or retirement.
   reconciliation; implemented and held at zero replicas in this change.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
-- #1551: sandbox runtime and hostile-workload empirical acceptance.
+- #1551: proportionate Kubernetes execution security baseline.
 - Later #1536 children: infrastructure, workload conversion, canary, and
   independently authorized production routing. No child implicitly owns
   OLDLAB/GB10 retirement.

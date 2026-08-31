@@ -114,6 +114,31 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "service_execution_scheduler_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
+  "service_execution_scheduler_environment": {
+    "annotation": "<class 'str'>",
+    "default": "'development'",
+    "required": false
+  },
+  "service_execution_scheduler_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "2.0",
+    "required": false
+  },
+  "service_execution_scheduler_max_deadline_sec": {
+    "annotation": "<class 'int'>",
+    "default": "7200",
+    "required": false
+  },
+  "service_execution_scheduler_pool_id": {
+    "annotation": "<class 'str'>",
+    "default": "'nebius-cpu'",
+    "required": false
+  },
   "signed_url_expiry_sec": {
     "annotation": "<class 'int'>",
     "default": "3600",
