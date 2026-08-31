@@ -1076,7 +1076,9 @@ def test_artifact_redirect_never_forwards_github_authorization(
     monkeypatch.setattr(routes.urllib.request, "build_opener", lambda *_: RedirectOpener())
     monkeypatch.setattr(routes.urllib.request, "urlopen", urlopen)
 
-    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="top-secret")
+    api = routes.GitHubRouteAPI(
+        repository="qianyi-sun/loom", token_provider=lambda: "top-secret"
+    )
     assert api.download_artifact(71) == payload
 
 
@@ -1120,7 +1122,12 @@ def test_github_app_publisher_mints_least_privilege_token_and_creates_check(
         if request.full_url.endswith("/app/installations/777/access_tokens"):
             assert body == {
                 "repositories": ["loom"],
-                "permissions": {"checks": "write"},
+                "permissions": {
+                    "actions": "read",
+                    "checks": "write",
+                    "contents": "read",
+                    "pull_requests": "read",
+                },
             }
             assert authorization.startswith("Bearer ")
             claims = jwt.decode(
@@ -1132,7 +1139,13 @@ def test_github_app_publisher_mints_least_privilege_token_and_creates_check(
                 {
                     "token": "ghs_test-installation-token",
                     "expires_at": "2026-08-20T19:00:00Z",
-                    "permissions": {"checks": "write", "metadata": "read"},
+                    "permissions": {
+                        "actions": "read",
+                        "checks": "write",
+                        "contents": "read",
+                        "metadata": "read",
+                        "pull_requests": "read",
+                    },
                 }
             )
         assert request.full_url.endswith("/repos/qianyi-sun/loom/check-runs")
@@ -1155,15 +1168,6 @@ def test_github_app_publisher_mints_least_privilege_token_and_creates_check(
 
 
 def test_root_owned_credential_files_fail_closed(tmp_path: Path) -> None:
-    token = tmp_path / "github-token"
-    token.write_text("opaque-token\n", encoding="utf-8")
-    token.chmod(0o600)
-    assert routes._read_token(token) == "opaque-token"
-
-    token.chmod(0o644)
-    with pytest.raises(routes.RouteControllerError, match="group or other"):
-        routes._read_token(token)
-
     publisher_key = tmp_path / "route-publisher-app-private-key.pem"
     publisher_key.write_bytes(b"test-private-key")
     publisher_key.chmod(0o600)
@@ -1185,7 +1189,8 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
         "ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python "
         "-m loom_control_plane.ci_runner_route_controller"
     ) in service
-    assert "--token-file ${CREDENTIALS_DIRECTORY}/github-token" in service
+    assert "LoadCredential=github-token:" not in service
+    assert "--token-file" not in service
     assert "LoadCredential=route-publisher-app-private-key:" in service
     assert "--publisher-app-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_APP_ID}" in service
     assert (

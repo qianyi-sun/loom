@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import re
 import sqlite3
 import stat
@@ -94,9 +93,14 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_JOB_URL_RE = re.compile(
     r"^https://github\.com/qianyi-sun/loom/actions/runs/[1-9][0-9]*/job/[1-9][0-9]*$"
 )
-MAX_TOKEN_BYTES = 4096
 MAX_APP_PRIVATE_KEY_BYTES = 64 * 1024
 MAX_INSTALLATION_TOKEN_BYTES = 4096
+APP_INSTALLATION_PERMISSIONS = {
+    "actions": "read",
+    "checks": "write",
+    "contents": "read",
+    "pull_requests": "read",
+}
 
 
 class RouteControllerError(RuntimeError):
@@ -151,11 +155,25 @@ class RouteCheckPublisher(Protocol):
 class GitHubRouteAPI:
     """Minimal outbound-only GitHub API used by the root-owned controller."""
 
-    def __init__(self, *, repository: str, token: str) -> None:
-        if repository != EXPECTED_REPOSITORY or not token:
+    def __init__(
+        self,
+        *,
+        repository: str,
+        token: str | None = None,
+        token_provider: Callable[[], str] | None = None,
+    ) -> None:
+        if repository != EXPECTED_REPOSITORY or (token is None) == (token_provider is None):
+            raise RouteControllerError("GitHub route API configuration is invalid")
+        if token is not None and not token:
             raise RouteControllerError("GitHub route API configuration is invalid")
         self.repository = repository
-        self._token = token
+        self._token_provider = token_provider or (lambda: cast(str, token))
+
+    def _token(self) -> str:
+        token = self._token_provider()
+        if not token or len(token.encode()) > MAX_INSTALLATION_TOKEN_BYTES:
+            raise RouteControllerError("GitHub route API token is invalid")
+        return token
 
     def _request(
         self,
@@ -164,6 +182,7 @@ class GitHubRouteAPI:
         *,
         payload: Mapping[str, object] | None = None,
     ) -> Any:
+        token = self._token()
         body = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else None
         request = urllib.request.Request(
             f"https://api.github.com/repos/{self.repository}{path}",
@@ -171,7 +190,7 @@ class GitHubRouteAPI:
             method=method,
             headers={
                 "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self._token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "User-Agent": "loom-ci-route-controller/1",
                 "X-GitHub-Api-Version": "2022-11-28",
@@ -286,7 +305,7 @@ class GitHubRouteAPI:
             method="GET",
             headers={
                 "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self._token}",
+                "Authorization": f"Bearer {self._token()}",
                 "User-Agent": "loom-ci-route-controller/1",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
@@ -449,7 +468,7 @@ class GitHubAppRouteCheckPublisher:
             raise RouteControllerError("GitHub route publisher response is malformed")
         return value
 
-    def _installation_token(self) -> str:
+    def installation_token(self) -> str:
         observed_at = self.now()
         if observed_at.tzinfo is None:
             raise RouteControllerError("route publisher clock is invalid")
@@ -479,7 +498,7 @@ class GitHubAppRouteCheckPublisher:
             token=app_jwt,
             payload={
                 "repositories": ["loom"],
-                "permissions": {"checks": "write"},
+                "permissions": APP_INSTALLATION_PERMISSIONS,
             },
         )
         token = response.get("token")
@@ -496,7 +515,10 @@ class GitHubAppRouteCheckPublisher:
             or len(token.encode()) > MAX_INSTALLATION_TOKEN_BYTES
             or any(character.isspace() for character in token)
             or not isinstance(permissions, dict)
-            or permissions.get("checks") != "write"
+            or any(
+                permissions.get(name) != level
+                for name, level in APP_INSTALLATION_PERMISSIONS.items()
+            )
             or parsed_expiry is None
             or parsed_expiry <= observed_at + timedelta(minutes=1)
         ):
@@ -509,7 +531,7 @@ class GitHubAppRouteCheckPublisher:
         return self._request(
             "POST",
             f"https://api.github.com/repos/{self.repository}/check-runs",
-            token=self._installation_token(),
+            token=self.installation_token(),
             payload=payload,
         )
 
@@ -593,27 +615,6 @@ def _route_request_from_zip(raw: bytes) -> RouteRequest:
         return RouteRequest.from_mapping(value)
     except LeaseBrokerError as exc:
         raise RouteControllerError(str(exc)) from exc
-
-
-def _read_token(path: Path) -> str:
-    try:
-        metadata = path.lstat()
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise RouteControllerError("could not read GitHub token file") from exc
-    if not stat.S_ISREG(metadata.st_mode):
-        raise RouteControllerError("GitHub token source must be a regular file")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise RouteControllerError("GitHub token file grants group or other access")
-    if not raw or len(raw) > MAX_TOKEN_BYTES or b"\x00" in raw:
-        raise RouteControllerError("GitHub token file has an invalid size or encoding")
-    try:
-        token = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise RouteControllerError("GitHub token file is not UTF-8") from exc
-    if not token or any(character.isspace() for character in token):
-        raise RouteControllerError("GitHub token file must contain one opaque token")
-    return token
 
 
 def _read_app_private_key(path: Path) -> bytes:
@@ -1301,8 +1302,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repository", default=EXPECTED_REPOSITORY)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--token-file", type=Path)
-    parser.add_argument("--token-env", default="GH_TOKEN")
     parser.add_argument("--publisher-app-id", type=int, required=True)
     parser.add_argument("--publisher-installation-id", type=int, required=True)
     parser.add_argument("--publisher-app-private-key-file", type=Path, required=True)
@@ -1312,22 +1311,18 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        token = (
-            _read_token(args.token_file)
-            if args.token_file is not None
-            else os.environ.get(args.token_env, "")
-        )
-        if not token:
-            raise RouteControllerError("GitHub token environment variable is absent")
         publisher_private_key = _read_app_private_key(args.publisher_app_private_key_file)
         config = LeaseBrokerConfig.from_profile(args.profile)
         broker = CiRunnerLeaseBroker(args.state_db, config)
-        api = GitHubRouteAPI(repository=args.repository, token=token)
         publisher = GitHubAppRouteCheckPublisher(
             repository=args.repository,
             app_id=args.publisher_app_id,
             installation_id=args.publisher_installation_id,
             private_key_pem=publisher_private_key,
+        )
+        api = GitHubRouteAPI(
+            repository=args.repository,
+            token_provider=publisher.installation_token,
         )
         controller = CiRunnerRouteController(
             api=api,
