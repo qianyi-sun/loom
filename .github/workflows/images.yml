@@ -873,12 +873,19 @@ jobs:
           python3 scripts/write_trivy_release_policy.py \
             --config-file /tmp/loom-stage1-trivy.yaml \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
+          set +e
           "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
             --timeout "$STAGE1_TRIVY_TIMEOUT" \
             --format json --output "$EVIDENCE_ROOT/scan.json" \
             --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
             --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" \
             "$LOCAL_IMAGE"
+          scan_status=$?
+          set -e
+          if (( scan_status != 0 )); then
+            python3 scripts/summarize_trivy_report.py "$EVIDENCE_ROOT/scan.json" || true
+            exit "$scan_status"
+          fi
           python3 scripts/validate_trivy_release_report.py \
             --component "$IMAGE" --architecture amd64 \
             --report "$EVIDENCE_ROOT/scan.json" \
@@ -1924,11 +1931,18 @@ jobs:
           python3 scripts/write_trivy_release_policy.py \
             --config-file /tmp/loom-stage1-trivy.yaml \
             --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
+          set +e
           "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
             --timeout "$STAGE1_TRIVY_TIMEOUT" \
             --format json --output "$evidence_root/scan.json" \
             --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
             --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
+          scan_status=$?
+          set -e
+          if (( scan_status != 0 )); then
+            python3 scripts/summarize_trivy_report.py "$evidence_root/scan.json" || true
+            exit "$scan_status"
+          fi
           python3 scripts/validate_trivy_release_report.py \
             --component "$IMAGE" --architecture amd64 \
             --report "$evidence_root/scan.json" \
