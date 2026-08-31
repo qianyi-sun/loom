@@ -25,8 +25,31 @@ controllers.
 CANDIDATE_ROOT=/opt/loom-staging-runner/candidates/REVIEWED_GIT_SHA/repo
 ROLLOUT_KUBECONFIG=/var/lib/loom-staging-rollout/kubeconfig
 SUPERVISOR_KUBECONFIG=/var/lib/loom-staging-rollout/external-supervisor.kubeconfig
+SUPERVISOR_USER=loom-rollout
+SUPERVISOR_GROUP=sharedwork
+SUPERVISOR_UID=995
+SUPERVISOR_GID=2007
+SUPERVISOR_XDG_RUNTIME_DIR=/run/user/995
+EVIDENCE_ROOT=/var/lib/loom-staging-rollout/evidence/task-image-builder-phase1
+CAPACITY_PROFILE="$CANDIDATE_ROOT/deploy/dev-fleet/capacity-control-plane.toml"
 MANAGER_IMAGE=REGISTRY/loom-capacity-manager@sha256:IMMUTABLE_DIGEST
 AUTHORITY_INCARNATION=REVIEWED_NON_NIL_UUID
+```
+
+On each controller, confirm that `loom-rollout` resolves to exactly UID 995 and
+primary GID 2007 before using the runtime commands below. The parent rollout
+directory remains root-owned but group-traversable only; its rollout kubeconfig
+stays root-readable. The final supervisor kubeconfig is owner-readable only by
+`loom-rollout`.
+
+```bash
+getent passwd "$SUPERVISOR_USER"
+test "$(id -u "$SUPERVISOR_USER")" = "$SUPERVISOR_UID"
+test "$(id -g "$SUPERVISOR_USER")" = "$SUPERVISOR_GID"
+sudo install -d -o root -g "$SUPERVISOR_GROUP" -m 0710 \
+  /var/lib/loom-staging-rollout
+sudo install -d -o "$SUPERVISOR_USER" -g "$SUPERVISOR_GROUP" -m 0700 \
+  "$EVIDENCE_ROOT"
 ```
 
 The only storage floor for an active builder is
@@ -45,19 +68,32 @@ declarative object is safe, but never skip forward after a failure.
 
 ### 1. Publish the stable witness transport
 
-Render the reviewed capacity control plane and apply it with the rollout
-credential. `CAPACITY_EXECUTION_POLICY` and its SHA-256, when the deployment
-uses an execution policy, must be the reviewed matched pair; use no execution
-policy arguments only when both are deliberately absent.
+Render the reviewed capacity control plane through `loom admin` and apply it
+with the rollout credential. Choose exactly one command below. The no-policy
+form must not receive policy or CIDR arguments. The policy form binds the
+reviewed policy bytes, its exact SHA-256, and every reviewed external-manager
+controller CIDR.
 
 ```bash
-uv run --no-sync loom capacity-control-plane render \
-  --file "$CANDIDATE_ROOT/deploy/dev-fleet/capacity-control-plane.toml" \
+loom admin capacity-control-plane render \
+  --file "$CAPACITY_PROFILE" \
+  --manager-image "$MANAGER_IMAGE" \
+  --authority-incarnation "$AUTHORITY_INCARNATION" \
+  | kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev apply -f -
+```
+
+```bash
+CAPACITY_EXECUTION_POLICY=/secure/reviewed/execution-policy.json
+CAPACITY_EXECUTION_POLICY_SHA256=REVIEWED_64_HEX_SHA256
+CAPACITY_EXTERNAL_MANAGER_CIDR=REVIEWED_CONTROLLER_CIDR
+
+loom admin capacity-control-plane render \
+  --file "$CAPACITY_PROFILE" \
   --manager-image "$MANAGER_IMAGE" \
   --authority-incarnation "$AUTHORITY_INCARNATION" \
   --execution-policy-file "$CAPACITY_EXECUTION_POLICY" \
   --execution-policy-sha256 "$CAPACITY_EXECUTION_POLICY_SHA256" \
-  --external-manager-client-cidr REVIEWED_CONTROLLER_CIDR \
+  --external-manager-client-cidr "$CAPACITY_EXTERNAL_MANAGER_CIDR" \
   | kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev apply -f -
 ```
 
@@ -69,16 +105,25 @@ execution-state, ceiling, and expiry validation; a successful readback is not
 trust in the ConfigMap alone.
 
 ```bash
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get configmap loom-global-execution-witness-v1 -o json \
-  | jq -e '(.data["gb10.json"] | length > 0) and (.data["oldlab.json"] | length > 0)'
+for SAMPLE in 1 2 3; do
+  SAMPLE_PATH="$EVIDENCE_ROOT/witness-sample-$SAMPLE.json"
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+    get configmap loom-global-execution-witness-v1 -o json >"$SAMPLE_PATH"
+  jq -er '(.data["gb10.json"] | length > 0) and (.data["oldlab.json"] | length > 0)' \
+    "$SAMPLE_PATH"
+  jq -er '.metadata.resourceVersion' "$SAMPLE_PATH"
+  jq -er '.data["gb10.json"]' "$SAMPLE_PATH" | sha256sum
+  jq -er '.data["oldlab.json"]' "$SAMPLE_PATH" | sha256sum
+  if [ "$SAMPLE" -lt 3 ]; then sleep 31; fi
+done
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   get deploy loom-capacity-manager -o jsonpath='{.spec.template.spec.containers[?(@.name=="witness-publisher")].name}{"\\n"}'
 ```
 
-Record `metadata.resourceVersion` and SHA-256 digests of both values at all
-three samples. Stop if either key is empty, either signed value does not
-refresh, or a reader rejects it. The publisher is the only workload token
+Retain all three JSON objects, resourceVersions, and two key digests per
+sample. The first-to-third interval is 62 seconds, spanning more than two
+30-second witness TTLs. Stop if either key is empty, either signed value does
+not refresh, or a reader rejects it. The publisher is the only workload token
 holder: the manager container retains `automountServiceAccountToken: false`;
 the publisher may only `get` and `patch` this ConfigMap.
 
@@ -90,49 +135,128 @@ database Secret, database-port-forward authority, and ConfigMap `get`; it must
 not grant `pods/exec`.
 
 ```bash
-sudo install -d -m 0700 /var/lib/loom-staging-rollout
 sudo env KUBECONFIG="$ROLLOUT_KUBECONFIG" \
   "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
   "$SUPERVISOR_KUBECONFIG"
-sudo stat -c '%a %U:%G %n' "$SUPERVISOR_KUBECONFIG"
-kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$SUPERVISOR_KUBECONFIG"
+sudo chmod 0600 "$SUPERVISOR_KUBECONFIG"
+sudo stat -c '%a %U:%G %n' /var/lib/loom-staging-rollout "$SUPERVISOR_KUBECONFIG"
+sudo -u "$SUPERVISOR_USER" env \
+  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+sudo -u "$SUPERVISOR_USER" env \
+  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
 
-Accept only mode `600`, the exact ConfigMap read, and `no` for `pods/exec`.
-Do not use `/var/lib/loom-staging-rollout/kubeconfig` in a runtime command or
-unit. Repeat the same commands on `gx10-01c7` and `TRT-EAI-OLDLAB-1`.
+Accept only `710 root:sharedwork` for the parent directory,
+`600 loom-rollout:sharedwork` for the final file, the exact ConfigMap read, and
+`no` for `pods/exec`. The runtime readbacks run without `KUBECONFIG` in their
+environment and never open `/var/lib/loom-staging-rollout/kubeconfig`. Repeat
+the same commands on `gx10-01c7` and `TRT-EAI-OLDLAB-1`.
 
 ### 3. Apply the active Phase 1 profile and prove empty-queue reconciliation
 
-Use the protected staging rollout to install the reviewed environment state.
-All four active supervisors must name the stable ConfigMap source and the
-dedicated supervisor credential: GB10 and OLDLAB trial supervisors, plus GB10
-and OLDLAB task-image-builder supervisors. No active argument may contain
+`loom-staging-rollout --env staging start` is the only staging mutation path.
+It creates the broker-owned request envelope and applies the reviewed profile
+to both controllers; do not invoke `loom admin environment-state apply` for
+staging. All four active supervisors must name the stable ConfigMap source and
+the dedicated supervisor credential: GB10 and OLDLAB trial supervisors, plus
+GB10 and OLDLAB task-image-builder supervisors. No active argument may contain
 `--global-execution-manager-export` or the rollout kubeconfig path.
 
 ```bash
-loom admin environment-state apply --environment staging \
-  --file "$CANDIDATE_ROOT/deploy/environment-state/staging.toml" \
-  --var IMAGE_TAG="$IMAGE_TAG" --var ENV_CONFIG_VERSION="$ENV_CONFIG_VERSION" \
-  --var GIT_SHA="$GIT_SHA"
-
-systemctl --user status loom-autoscaler-gb10-staging.timer \
-  loom-autoscaler-oldlab-staging.timer \
-  loom-task-image-builder-gb10-staging.timer \
-  loom-task-image-builder-oldlab-staging.timer --no-pager
+loom-staging-rollout --env staging preflight
+loom-staging-rollout --env staging start --dry-run
+START_RESPONSE="$(loom-staging-rollout --env staging start)"
+printf '%s\n' "$START_RESPONSE" | tee "$EVIDENCE_ROOT/staging-rollout-start.json"
+ROLL_OUT_REQUEST_ID="$(printf '%s\n' "$START_RESPONSE" | jq -er '.request_id')"
+loom-staging-rollout --env staging status "$ROLL_OUT_REQUEST_ID" \
+  | tee "$EVIDENCE_ROOT/staging-rollout-status.json"
+loom-staging-rollout --env staging logs "$ROLL_OUT_REQUEST_ID" \
+  | tee "$EVIDENCE_ROOT/staging-rollout-logs.txt"
 ```
 
-With an empty queue, trigger or wait for one reconciliation on each controller
-and retain the JSON results. Accept only a successful signed ConfigMap read,
-the exact local Slurm authority, no submitted builder job, and no active
-builder job. Verify the fixed Phase 1 allocation shape without submitting a
-task: GB10 is `trt-gb10-2`, 19 CPUs, 110000 MiB, `gb10`, `04:00:00`; OLDLAB is
-`trt-eai-oldlab-6`, 12 CPUs, 49152 MiB, `all`, `04:00:00`; both are exclusive,
-concurrency one, account `loom-staging`, QoS and reservation
-`loom-task-image-builder`.
+After `status` reports the protected attempt complete, run the next block
+locally on the named controller. It starts each existing oneshot exactly once,
+then retains that invocation's journal JSON. `systemctl show` must report
+`Result=success` and `ExecMainStatus=0`; each timer must be `enabled` and
+`active`. The trial result is a JSON list with no queued slots or `scale_up`;
+the builder result is a JSON object with a zero queue and no submitted or
+cancelled builder IDs. A ConfigMap/signature failure is an acceptance failure,
+not a reason to retry through exec.
+
+On `gx10-01c7`:
+
+```bash
+for UNIT in loom-autoscaler-gb10-staging.service loom-task-image-builder-gb10-staging.service; do
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user start "$UNIT"
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user show "$UNIT" --property=Result --property=ExecMainStatus
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    sh -c 'systemctl --user cat "$1" > "$2"' sh \
+    "$UNIT" "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--global-execution-witness-config-map loom-global-execution-witness-v1' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--global-execution-witness-kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
+  ! rg -F -- '--global-execution-manager-export' "$EVIDENCE_ROOT/$UNIT.unit"
+  ! rg -F -- '/var/lib/loom-staging-rollout/kubeconfig' "$EVIDENCE_ROOT/$UNIT.unit"
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    sh -c 'journalctl --user --unit="$1" --output=cat --lines=1 > "$2"' sh \
+    "$UNIT" "$EVIDENCE_ROOT/$UNIT.json"
+done
+sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  systemctl --user show loom-autoscaler-gb10-staging.timer \
+  loom-task-image-builder-gb10-staging.timer \
+  --property=UnitFileState --property=ActiveState
+jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
+  "$EVIDENCE_ROOT/loom-autoscaler-gb10-staging.service.json"
+jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
+  "$EVIDENCE_ROOT/loom-task-image-builder-gb10-staging.service.json"
+```
+
+On `TRT-EAI-OLDLAB-1`:
+
+```bash
+for UNIT in loom-autoscaler-oldlab-staging.service loom-task-image-builder-oldlab-staging.service; do
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user start "$UNIT"
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user show "$UNIT" --property=Result --property=ExecMainStatus
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    sh -c 'systemctl --user cat "$1" > "$2"' sh \
+    "$UNIT" "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--global-execution-witness-config-map loom-global-execution-witness-v1' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
+  rg -F -- '--global-execution-witness-kubeconfig /var/lib/loom-staging-rollout/external-supervisor.kubeconfig' \
+    "$EVIDENCE_ROOT/$UNIT.unit"
+  ! rg -F -- '--global-execution-manager-export' "$EVIDENCE_ROOT/$UNIT.unit"
+  ! rg -F -- '/var/lib/loom-staging-rollout/kubeconfig' "$EVIDENCE_ROOT/$UNIT.unit"
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    sh -c 'journalctl --user --unit="$1" --output=cat --lines=1 > "$2"' sh \
+    "$UNIT" "$EVIDENCE_ROOT/$UNIT.json"
+done
+sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  systemctl --user show loom-autoscaler-oldlab-staging.timer \
+  loom-task-image-builder-oldlab-staging.timer \
+  --property=UnitFileState --property=ActiveState
+jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
+  "$EVIDENCE_ROOT/loom-autoscaler-oldlab-staging.service.json"
+jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
+  "$EVIDENCE_ROOT/loom-task-image-builder-oldlab-staging.service.json"
+```
+
+Accept only these four successful signed ConfigMap reconciliations, the exact
+local Slurm authority, and zero active builder jobs with an empty
+materialization queue. Verify the fixed Phase 1 allocation shape without
+submitting a task: GB10 is `trt-gb10-2`, 19 CPUs, 110000 MiB, `gb10`,
+`04:00:00`; OLDLAB is `trt-eai-oldlab-6`, 12 CPUs, 49152 MiB, `all`,
+`04:00:00`; both are exclusive, concurrency one, account `loom-staging`, QoS
+and reservation `loom-task-image-builder`.
 
 ```bash
 squeue --name=loom-task-image-builder --format='%i %T %P %N %a %q' --noheader
@@ -178,16 +302,40 @@ before a retry. Do not manually shorten or bypass this cooldown.
 
 After both controllers have successfully read and validated the stable
 ConfigMap, delete the temporary exact-pod `pods/exec` Role and RoleBinding
-using the rollout credential. Resolve their real names from the previously
-applied transition manifest; do not delete a broader RBAC object by label or
-guess a pod name. Then prove denial with the dedicated credential.
+using the rollout credential. First discover exactly one namespaced Role that
+has a `pods/exec` resource rule, then exactly one RoleBinding whose `roleRef`
+is that Role. This discovery is read-only and fails on zero or multiple
+matches; it does not select by pod name, label, or a guessed resource name.
 
 ```bash
+TRANSITION_WITNESS_EXEC_ROLE="$({
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get role -o json \
+    | jq -er '[.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))
+      | .metadata.name] | if length == 1 then .[0] else error("expected exactly one pods/exec Role") end'
+} )"
+TRANSITION_WITNESS_EXEC_ROLEBINDING="$({
+  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get rolebinding -o json \
+    | jq -er --arg role "$TRANSITION_WITNESS_EXEC_ROLE" '[.items[]
+      | select(.roleRef.apiGroup == "rbac.authorization.k8s.io"
+          and .roleRef.kind == "Role" and .roleRef.name == $role)
+      | .metadata.name] | if length == 1 then .[0] else error("expected exactly one pods/exec RoleBinding") end'
+} )"
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  delete role TRANSITION_WITNESS_EXEC_ROLE
+  get role "$TRANSITION_WITNESS_EXEC_ROLE" -o json
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  delete rolebinding TRANSITION_WITNESS_EXEC_ROLEBINDING
-kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+  get rolebinding "$TRANSITION_WITNESS_EXEC_ROLEBINDING" -o json
+printf 'Delete exact transition RBAC %s / %s? Type the full pair: ' \
+  "$TRANSITION_WITNESS_EXEC_ROLE" "$TRANSITION_WITNESS_EXEC_ROLEBINDING"
+read -r TRANSITION_DELETE_CONFIRMATION
+test "$TRANSITION_DELETE_CONFIRMATION" = \
+  "$TRANSITION_WITNESS_EXEC_ROLE/$TRANSITION_WITNESS_EXEC_ROLEBINDING"
+kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  delete rolebinding "$TRANSITION_WITNESS_EXEC_ROLEBINDING"
+kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  delete role "$TRANSITION_WITNESS_EXEC_ROLE"
+sudo -u "$SUPERVISOR_USER" env \
+  XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   auth can-i create pods/exec
 ```
 
@@ -195,6 +343,92 @@ Acceptance is `no`, with all four supervisors still reconciling from
 `loom-global-execution-witness-v1`. Do not restore exec as a response to a
 read failure: an unavailable witness must leave scale-up closed and drain
 legacy-supervisor-owned capacity.
+
+Re-run the two controller-local reconciliation blocks from step 3 after the
+deletion. Retain the four new JSON files and require the same empty-queue/no-
+submission assertions before proceeding.
+
+## Rollback order
+
+Capture the prior reviewed immutable capacity manifest, protected rollout
+request/status evidence, supervisor profile/unit artifact, dedicated
+kubeconfig, and any transition Role/RoleBinding JSON before each mutation. A
+rollback may restore only these recorded prior artifacts; it must never
+construct an ad hoc profile, credential, RBAC rule, or exec fallback.
+
+1. Close scale-up first on both controllers. Stop all four timers and active
+   oneshots as `loom-rollout`; do not start another reconciliation while rollback
+   is in progress.
+2. If the staging profile or units must be restored, use a reviewed rollback
+   commit through a new `loom-staging-rollout --env staging start` request. Do
+   not use `loom admin environment-state apply` or write user-systemd units
+   directly.
+3. Restore only the captured immutable capacity manifest, dedicated
+   supervisor-kubeconfig artifact, and, where separately reviewed and required,
+   the exact transition RBAC artifact. A witness failure remains fail-closed;
+   restoring a ConfigMap transport never restores `pods/exec` automatically.
+4. Read back file ownership, ConfigMap access, exec denial, protected rollout
+   status, and all four controller-local units before reopening scale-up.
+
+On `gx10-01c7`, close the GB10 pair:
+
+```bash
+for UNIT in loom-autoscaler-gb10-staging.timer \
+  loom-task-image-builder-gb10-staging.timer \
+  loom-autoscaler-gb10-staging.service \
+  loom-task-image-builder-gb10-staging.service; do
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user stop "$UNIT"
+done
+```
+
+On `TRT-EAI-OLDLAB-1`, close the OLDLAB pair:
+
+```bash
+for UNIT in loom-autoscaler-oldlab-staging.timer \
+  loom-task-image-builder-oldlab-staging.timer \
+  loom-autoscaler-oldlab-staging.service \
+  loom-task-image-builder-oldlab-staging.service; do
+  sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+    systemctl --user stop "$UNIT"
+done
+```
+
+From the protected staging rollout host, apply the reviewed rollback release,
+then restore only the two recorded non-staging artifacts:
+
+```bash
+PREVIOUS_REVIEWED_CAPACITY_MANIFEST=/secure/rollback/REVIEWED_CAPACITY_MANIFEST.yaml
+PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG=/secure/rollback/REVIEWED_EXTERNAL_SUPERVISOR.kubeconfig
+
+loom-staging-rollout --env staging preflight
+ROLLBACK_START_RESPONSE="$(loom-staging-rollout --env staging start)"
+printf '%s\n' "$ROLLBACK_START_RESPONSE" \
+  | tee "$EVIDENCE_ROOT/staging-rollback-start.json"
+ROLLBACK_REQUEST_ID="$(printf '%s\n' "$ROLLBACK_START_RESPONSE" | jq -er '.request_id')"
+loom-staging-rollout --env staging status "$ROLLBACK_REQUEST_ID" \
+  | tee "$EVIDENCE_ROOT/staging-rollback-status.json"
+
+kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
+  apply -f "$PREVIOUS_REVIEWED_CAPACITY_MANIFEST"
+sudo install -o "$SUPERVISOR_USER" -g "$SUPERVISOR_GROUP" -m 0600 \
+  "$PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" "$SUPERVISOR_KUBECONFIG"
+sudo stat -c '%a %U:%G %n' /var/lib/loom-staging-rollout "$SUPERVISOR_KUBECONFIG"
+sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+  get configmap loom-global-execution-witness-v1 -o name
+sudo -u "$SUPERVISOR_USER" env XDG_RUNTIME_DIR="$SUPERVISOR_XDG_RUNTIME_DIR" \
+  kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+  auth can-i create pods/exec
+```
+
+Define `PREVIOUS_REVIEWED_CAPACITY_MANIFEST` and
+`PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG` only from the captured immutable,
+review-approved rollback record. The final readback must remain
+`710 root:sharedwork`, `600 loom-rollout:sharedwork`, ConfigMap `get` success,
+and `pods/exec` `no`. Then run the step 3 controller-local status/log/JSON
+readbacks; only their successful empty-queue results permit timers to be
+re-enabled by the protected staging rollout.
 
 ## Disabled Phase 2 prerequisites: inputs, staging, and read-only preflight
 

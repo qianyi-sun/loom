@@ -121,6 +121,13 @@ Role and RoleBinding are removed only after both controllers have demonstrated
 successful ConfigMap reads. A later failure remains closed rather than falling
 back to exec.
 
+Staging profile and supervisor activation is a protected, broker-owned rollout:
+`loom-staging-rollout --env staging start` creates the required rollout
+envelope and converges both controllers. Direct `loom admin environment-state
+apply` is not a valid staging mutation path. Rollback first closes supervisor
+scale-up, then uses only recorded immutable prior profile, credential, manifest,
+and RBAC artifacts; it never restores exec automatically.
+
 ## Hard local-storage admission
 
 Before it constructs a control-plane client or requests a materialization
