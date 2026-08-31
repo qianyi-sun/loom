@@ -108,14 +108,18 @@ protected-merge evidence, canonical digest, and acceptance time.
 On each reconcile, the controller compares the current generation with `dev`
 and advances at most one first-parent commit. The successor must be an exact
 same-repository squash merge into `dev` with one associated merged PR. That PR's
-head must have exactly one terminal-successful direct `repository-checks`,
+head must have one authoritative current terminal-successful direct `repository-checks`,
 `images-gate`, `cluster-smoke-gate`, and `staging-smoke-gate` CheckRun from the
 GitHub Actions app (`app.id=15368`), each linked to its source Actions job. A
-direct push, rollback, non-linear successor, wrong-app or same-name status,
-missing or ambiguous check, malformed API response, or incomplete merge
-identity preserves the previous generation. Multiple protected merges converge
-one generation per timer pass, including after an API interruption or service
-restart.
+same-head retry may leave older direct source CheckRuns in GitHub's
+`filter=latest` inventory, so the controller accepts only the unique newest
+run by `started_at` after verifying that every same-name candidate comes from
+app 15368 and a direct source-job URL. An older failure cannot override a newer
+success, while a newer failure, tied newest run, wrong-app duplicate,
+same-name status, missing or malformed check, direct push, rollback,
+non-linear successor, or incomplete merge identity preserves the previous
+generation. Multiple protected merges converge one generation per timer pass,
+including after an API interruption or service restart.
 
 Every route decision records the exact trusted generation and structured
 eligibility reason used to freeze it. Publisher retries replay that stored

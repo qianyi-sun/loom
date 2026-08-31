@@ -109,10 +109,7 @@ class FakeRouteAPI:
         workflow_path = routes.WORKFLOW_PATHS[request.workflow_name]
         self.blobs = {
             (workflow_path, request.head_sha): WORKFLOW_BLOB_SHA,
-            **{
-                (path, RUNTIME_SHA): WORKFLOW_BLOB_SHA
-                for path in routes.WORKFLOW_PATHS.values()
-            },
+            **{(path, RUNTIME_SHA): WORKFLOW_BLOB_SHA for path in routes.WORKFLOW_PATHS.values()},
         }
         self.dev_head = RUNTIME_SHA
         self.commits: dict[str, dict[str, object]] = {
@@ -155,9 +152,7 @@ class FakeRouteAPI:
     def route_artifact(
         self, *, workflow_id: int, workflow_run_id: int, run_attempt: int
     ) -> dict[str, object] | None:
-        expected = (
-            f"{routes.ARTIFACT_PREFIX}{workflow_id}-{workflow_run_id}-{run_attempt}"
-        )
+        expected = f"{routes.ARTIFACT_PREFIX}{workflow_id}-{workflow_run_id}-{run_attempt}"
         matches = [
             artifact
             for artifact in self.artifacts
@@ -240,6 +235,10 @@ def _configure_protected_merge(
                 "head_sha": pull_head_sha,
                 "status": "completed",
                 "conclusion": "success",
+                "started_at": (NOW + timedelta(seconds=index)).isoformat().replace("+00:00", "Z"),
+                "completed_at": (NOW + timedelta(seconds=index, milliseconds=500))
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "app": {"id": routes.GITHUB_ACTIONS_APP_ID},
                 "details_url": (
                     f"https://github.com/qianyi-sun/loom/actions/runs/{20_000 + index}"
@@ -306,9 +305,7 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     status = broker.status(now=NOW)
     assert status["route_generation_healthy"] is True
     assert status["trusted_workflow_observation"]["publisher_app_id"] == PUBLISHER_APP_ID
-    assert status["metrics"]["route_decisions_by_eligibility_reason"][
-        "trusted_workflow_match"
-    ] == 1
+    assert status["metrics"]["route_decisions_by_eligibility_reason"]["trusted_workflow_match"] == 1
     assert len(api.dispatches) == 1
 
 
@@ -343,9 +340,7 @@ def test_protected_merge_advances_workflow_generation_without_runtime_rollout(
     request = _request(workflow_name="images", job_count=2)
     controller, api, broker = _controller(tmp_path, request)
     _configure_protected_merge(api)
-    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
-        CHANGED_WORKFLOW_BLOB_SHA
-    )
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = CHANGED_WORKFLOW_BLOB_SHA
 
     result = controller.reconcile()
 
@@ -372,9 +367,7 @@ def test_wrong_app_source_check_preserves_generation_and_forces_hosted(
     controller, api, broker = _controller(tmp_path, request)
     _configure_protected_merge(api)
     api.checks[(PR_HEAD_SHA, "images-gate")][0]["app"] = {"id": 999}
-    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
-        CHANGED_WORKFLOW_BLOB_SHA
-    )
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = CHANGED_WORKFLOW_BLOB_SHA
 
     result = controller.reconcile()
 
@@ -391,9 +384,7 @@ def test_wrong_app_source_check_preserves_generation_and_forces_hosted(
     assert result.generation_blocker == (
         "protected source check images-gate is missing or ambiguous"
     )
-    assert [item.candidate_sha for item in broker.trusted_workflow_generations()] == [
-        RUNTIME_SHA
-    ]
+    assert [item.candidate_sha for item in broker.trusted_workflow_generations()] == [RUNTIME_SHA]
     summary = json.loads(api.created_checks[0]["output"]["summary"])
     assert summary["oldlab_eligible"] is False
     assert summary["assignments"][0]["target"] == "github_hosted"
@@ -426,15 +417,11 @@ def test_unassociated_dev_commit_preserves_last_trusted_generation(
     controller, api, broker = _controller(tmp_path, request)
     _configure_protected_merge(api)
     api.pulls[MERGE_SHA] = []
-    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
-        CHANGED_WORKFLOW_BLOB_SHA
-    )
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = CHANGED_WORKFLOW_BLOB_SHA
 
     result = controller.reconcile()
 
-    assert result.generation_blocker == (
-        "trusted dev commit has ambiguous merge ownership"
-    )
+    assert result.generation_blocker == ("trusted dev commit has ambiguous merge ownership")
     assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
     decision = broker.route_decisions()[0]
     assert decision.oldlab_eligible is False
@@ -457,6 +444,135 @@ def test_same_name_wrong_app_duplicate_cannot_hide_beside_authoritative_check(
     assert result.generation_promoted is False
     assert result.generation_blocker == (
         "protected source check images-gate is missing or ambiguous"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+
+
+def test_same_app_non_source_duplicate_cannot_hide_beside_authoritative_check(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    duplicate = dict(api.checks[(PR_HEAD_SHA, "images-gate")][0])
+    duplicate.update(
+        {
+            "id": 99_999,
+            "details_url": "https://example.invalid/not-a-source-job",
+            "started_at": (NOW + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        }
+    )
+    api.checks[(PR_HEAD_SHA, "images-gate")].append(duplicate)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.generation_blocker == (
+        "protected source check images-gate is missing or ambiguous"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+
+
+def test_same_app_retry_uses_unique_newest_successful_source_check(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    original = api.checks[(PR_HEAD_SHA, "repository-checks")][0]
+    original["conclusion"] = "failure"
+    retry = dict(original)
+    retry.update(
+        {
+            "id": 99_999,
+            "conclusion": "success",
+            "started_at": (NOW + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "completed_at": (NOW + timedelta(minutes=1, seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+    )
+    api.checks[(PR_HEAD_SHA, "repository-checks")].append(retry)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is True
+    assert result.generation_blocker is None
+    generation = broker.current_trusted_workflow_generation()
+    assert generation.candidate_sha == MERGE_SHA
+    assert generation.evidence()["checks"]["repository-checks"]["id"] == 99_999
+
+
+def test_same_app_retry_with_newest_failure_preserves_generation(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    retry = dict(api.checks[(PR_HEAD_SHA, "repository-checks")][0])
+    retry.update(
+        {
+            "id": 99_999,
+            "conclusion": "failure",
+            "started_at": (NOW + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "completed_at": (NOW + timedelta(minutes=1, seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+    )
+    api.checks[(PR_HEAD_SHA, "repository-checks")].append(retry)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.generation_blocker == (
+        "protected source check repository-checks is missing or ambiguous"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+
+
+def test_same_app_retry_with_newest_incomplete_run_preserves_generation(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    retry = dict(api.checks[(PR_HEAD_SHA, "repository-checks")][0])
+    retry.update(
+        {
+            "id": 99_999,
+            "status": "in_progress",
+            "conclusion": None,
+            "started_at": (NOW + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "completed_at": None,
+        }
+    )
+    api.checks[(PR_HEAD_SHA, "repository-checks")].append(retry)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.generation_blocker == (
+        "protected source check repository-checks is missing or ambiguous"
+    )
+    assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
+
+
+def test_same_app_retry_with_tied_start_time_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    request = _request(workflow_name="images", job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    _configure_protected_merge(api)
+    retry = dict(api.checks[(PR_HEAD_SHA, "repository-checks")][0])
+    retry["id"] = 99_999
+    api.checks[(PR_HEAD_SHA, "repository-checks")].append(retry)
+
+    result = controller.reconcile()
+
+    assert result.generation_promoted is False
+    assert result.generation_blocker == (
+        "protected source check repository-checks is missing or ambiguous"
     )
     assert broker.current_trusted_workflow_generation().candidate_sha == RUNTIME_SHA
 
@@ -560,9 +676,7 @@ def test_github_interruption_preserves_generation_then_recovers_automatically(
     monkeypatch.setattr(api, "compare_commits", original_compare)
     api.artifacts = artifacts
     api.runs = runs
-    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = (
-        CHANGED_WORKFLOW_BLOB_SHA
-    )
+    api.blobs[(routes.WORKFLOW_PATHS["images"], request.head_sha)] = CHANGED_WORKFLOW_BLOB_SHA
 
     recovered = controller.reconcile()
 
@@ -572,9 +686,7 @@ def test_github_interruption_preserves_generation_then_recovers_automatically(
     assert interrupted.generation_blocker == "GitHub compare temporarily unavailable"
     assert recovered.generation_promoted is True
     assert recovered.generation_lag_commits == 0
-    assert broker.status(now=NOW)["trusted_workflow_observation"][
-        "promotion_result"
-    ] == "promoted"
+    assert broker.status(now=NOW)["trusted_workflow_observation"]["promotion_result"] == "promoted"
     summary = json.loads(api.created_checks[0]["output"]["summary"])
     assert summary["oldlab_eligible"] is True
 
@@ -739,9 +851,7 @@ def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
             "artifacts": [
                 {
                     "id": 71,
-                    "name": (
-                        f"{routes.ARTIFACT_PREFIX}{workflow_id}-30000-1"
-                    ),
+                    "name": (f"{routes.ARTIFACT_PREFIX}{workflow_id}-30000-1"),
                     "expired": False,
                 }
             ],
@@ -1024,12 +1134,8 @@ def test_root_owned_credential_files_fail_closed(tmp_path: Path) -> None:
 def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     unit_root = repo_root / "deploy/ci-runners"
-    service = (unit_root / "loom-ci-runner-route-controller.service").read_text(
-        encoding="utf-8"
-    )
-    timer = (unit_root / "loom-ci-runner-route-controller.timer").read_text(
-        encoding="utf-8"
-    )
+    service = (unit_root / "loom-ci-runner-route-controller.service").read_text(encoding="utf-8")
+    timer = (unit_root / "loom-ci-runner-route-controller.timer").read_text(encoding="utf-8")
     pool_service = (unit_root / "loom-ci-runner-pool.service").read_text(encoding="utf-8")
 
     assert (
@@ -1040,19 +1146,15 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
     assert "LoadCredential=route-publisher-app-private-key:" in service
     assert "--publisher-app-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_APP_ID}" in service
     assert (
-        "--publisher-installation-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_INSTALLATION_ID}"
-        in service
+        "--publisher-installation-id ${LOOM_CI_RUNNER_ROUTE_PUBLISHER_INSTALLATION_ID}" in service
     )
     assert (
-        "--publisher-app-private-key-file "
-        "${CREDENTIALS_DIRECTORY}/route-publisher-app-private-key"
+        "--publisher-app-private-key-file ${CREDENTIALS_DIRECTORY}/route-publisher-app-private-key"
     ) in service
     route_command = next(
         line
         for line in service.splitlines()
-        if line.startswith(
-            "ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python "
-        )
+        if line.startswith("ExecStart=/usr/local/lib/loom-ci-runner-controller/.venv/bin/python ")
     )
     assert "--runtime-sha ${LOOM_CI_RUNNER_ROUTE_RUNTIME_SHA}" in route_command
     assert "LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA" not in service
