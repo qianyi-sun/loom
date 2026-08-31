@@ -281,6 +281,56 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "tests/unit/test_metrics_enumeration.py",
+        "tests/loom_cli/test_config.py",
+        "tests/ops/test_release_runbook.py",
+    ],
+)
+def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.docs_only is False
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set()
+
+
+def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> None:
+    plan = plan_validations(
+        changed_paths=["docs/user-guide.md", "tests/unit/test_metrics_enumeration.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.docs_only is False
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("tests/contract/test_driver_contract.py", {"integration"}),
+        (
+            "tests/integration/test_docker_driver_exec.py",
+            {"integration", "integration_docker"},
+        ),
+        ("tests/cluster/test_staging_k3s_render_contract.py", {"cluster_smoke"}),
+        ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),
+    ],
+)
+def test_manifest_owned_heavy_tests_select_their_required_lanes(
+    path: str,
+    expected: set[str],
+) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "config/component-ownership.toml",
         "scripts/component_ownership.py",
         "tests/ops/test_component_ownership_manifest.py",

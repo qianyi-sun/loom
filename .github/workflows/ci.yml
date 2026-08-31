@@ -50,7 +50,9 @@ run-name: >-
 
 on:
   push:
-    branches: [dev, main]
+    # PR heads already passed the protected four-gate admission path before
+    # they reach dev. Keep the push safety net only for production promotion.
+    branches: [main]
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
@@ -100,13 +102,6 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
-    # Skip on push to dev: every squash-merge to dev carries the same
-    # content the PR CI just validated, so re-running burns minutes
-    # for no signal. Push to main still runs (release-branch safety
-    # net). All PRs still run.
-    if: >-
-      github.event_name != 'push' ||
-      github.ref != 'refs/heads/dev'
     steps:
       - name: Classify draft event before checkout
         id: event
@@ -667,7 +662,6 @@ jobs:
     timeout-minutes: 10
     if: >-
       always() &&
-      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -1085,7 +1079,7 @@ jobs:
             combined_pct=$(uv run --no-sync coverage report --format=total)
             combined_block="**Combined (fast + integration): ${combined_pct} %** (no gate yet — Phase 3 baseline)."
           elif [ "$INTEGRATION_RESULT" = "skipped" ]; then
-            combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label (or merge to dev) to run the integration tier._"
+            combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label to run the integration tier._"
           else
             combined_block="_Combined coverage **not measured** — integration job result: \`${INTEGRATION_RESULT}\`._"
           fi
@@ -1113,7 +1107,6 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       always() &&
-      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan

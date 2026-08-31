@@ -4,7 +4,13 @@ import argparse
 import json
 from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
+
+if __package__:
+    from scripts.component_ownership import Manifest, load_manifest
+else:
+    from component_ownership import Manifest, load_manifest
 
 HEAVY_CHECKS = (
     "integration",
@@ -83,6 +89,9 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "tests/loom_cli/rollout/operator/",
     "tests/ops/test_staging_rollout_",
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMPONENT_OWNERSHIP_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
 
 
 @dataclass(frozen=True)
@@ -164,6 +173,16 @@ def _is_protected_staging_rollout_path(path: str) -> bool:
     )
 
 
+@lru_cache(maxsize=512)
+def _test_owner_lanes(path: str) -> tuple[str, ...]:
+    return tuple(owner.lane for owner in _component_ownership_manifest().test_owners_for_path(path))
+
+
+@lru_cache(maxsize=1)
+def _component_ownership_manifest() -> Manifest:
+    return load_manifest(COMPONENT_OWNERSHIP_MANIFEST)
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -188,9 +207,7 @@ def plan_validations(
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
     docs_only = bool(paths) and all(_is_documentation_path(path) for path in paths)
     unowned_runtime = False
-    selected = {
-        name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")
-    }
+    selected = {name: False for name in (*HEAVY_CHECKS, "coverage_summary", "web_checks")}
     reasons: dict[str, list[str]] = {name: [] for name in selected}
 
     def select(name: str, reason: str) -> None:
@@ -332,11 +349,26 @@ def plan_validations(
     for path in paths:
         if _is_documentation_path(path):
             continue
+        test_owner_lanes = _test_owner_lanes(path)
         matched_owner = (
             path in PLANNER_PATHS
             or path in OWNERSHIP_AUTHORITY_PATHS
             or _is_protected_staging_rollout_path(path)
+            or bool(test_owner_lanes)
         )
+        for lane in test_owner_lanes:
+            reason = f"test-owner:{lane}:{path}"
+            if lane == "integration":
+                select("integration", reason)
+            elif lane == "integration-docker":
+                # Retain the existing tests/integration contract: changes to a
+                # Docker-owned module exercise both integration tiers.
+                select("integration", reason)
+                select("integration_docker", reason)
+            elif lane == "cluster-smoke":
+                select("cluster_smoke", reason)
+            elif lane == "system-smoke":
+                select("staging_smoke", reason)
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
@@ -344,7 +376,7 @@ def plan_validations(
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True
-        else:
+        elif not test_owner_lanes:
             select("integration", f"non-doc-path:{path}")
         if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
             select("integration_docker", f"path:{path}")

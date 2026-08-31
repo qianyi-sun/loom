@@ -535,6 +535,16 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert push_trigger == {"branches": ["dev", "main"]}
 
 
+def test_ci_push_safety_net_excludes_already_admitted_dev_merges() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+
+    assert _workflow_on(workflow)["push"] == {"branches": ["main"]}
+    assert "refs/heads/dev" not in jobs["workflow-plan"].get("if", "")
+    assert "refs/heads/dev" not in jobs["fast-checks"]["if"]
+    assert "refs/heads/dev" not in jobs["repository-checks"]["if"]
+
+
 def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() -> None:
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
     candidate = jobs["stage1-build"]
