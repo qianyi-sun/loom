@@ -253,3 +253,18 @@ def test_phase1_runbook_removes_complete_or_absent_transition_exec_set() -> None
         in normalized
     )
     assert 'error("unexpected pods/exec Role remains")' in normalized
+
+
+def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:
+    runbook = Path(
+        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(runbook.split())
+
+    assert "as_supervisor journalctl" not in normalized
+    assert "sudo journalctl --lines=0 --show-cursor --no-pager" in normalized
+    assert '_UID="$SUPERVISOR_UID"' in runbook
+    assert '_SYSTEMD_USER_UNIT="$UNIT"' in runbook
+    assert 'JOURNAL_PIPE_STATUS=("${PIPESTATUS[@]}")' in normalized
+    assert 'sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$JOURNAL_PATH"' in normalized
+    assert 'sudo chmod 0600 "$JOURNAL_PATH"' in normalized

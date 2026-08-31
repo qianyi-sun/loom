@@ -216,9 +216,16 @@ with a zero queue and no submitted or cancelled builder IDs. A
 ConfigMap/signature failure is an acceptance failure, not a reason to retry
 through exec.
 
+The supervisor identity is deliberately not a member of `systemd-journal`.
+The authorized operator therefore reads the system journal with `sudo`, bounded
+by the pre-start cursor and the conjunction of the exact supervisor UID and
+exact user-unit field. The captured journal and parsed result are then returned
+to `loom-rollout:loom-rollout` with mode `0600`; do not broaden journal group
+membership to make this evidence step work.
+
 ```bash
 journal_cursor() {
-  as_supervisor journalctl --user --lines=0 --show-cursor --no-pager \
+  sudo journalctl --lines=0 --show-cursor --no-pager \
     | sed -n 's/^-- cursor: //p'
 }
 
@@ -230,9 +237,15 @@ capture_one_json_result() {
   RESULT_PATH="$EVIDENCE_ROOT/$UNIT.json"
 
   test -n "$START_CURSOR"
-  as_supervisor journalctl --user --unit="$UNIT" \
-    "--after-cursor=$START_CURSOR" --output=json --no-pager >"$JOURNAL_PATH"
-  jq -s -e --arg kind "$RESULT_KIND" '
+  sudo journalctl _UID="$SUPERVISOR_UID" _SYSTEMD_USER_UNIT="$UNIT" \
+    "--after-cursor=$START_CURSOR" --output=json --no-pager \
+    | sudo tee "$JOURNAL_PATH" >/dev/null
+  JOURNAL_PIPE_STATUS=("${PIPESTATUS[@]}")
+  test "${JOURNAL_PIPE_STATUS[0]}" -eq 0
+  test "${JOURNAL_PIPE_STATUS[1]}" -eq 0
+  sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$JOURNAL_PATH"
+  sudo chmod 0600 "$JOURNAL_PATH"
+  sudo jq -s -e --arg kind "$RESULT_KIND" '
     [ .[]
       | .MESSAGE?
       | select(type == "string")
@@ -254,7 +267,12 @@ capture_one_json_result() {
     | if ($results | length) == 1 then $results[0]
       else error("expected exactly one acceptable JSON result after start cursor")
       end
-  ' "$JOURNAL_PATH" >"$RESULT_PATH"
+  ' "$JOURNAL_PATH" | sudo tee "$RESULT_PATH" >/dev/null
+  RESULT_PIPE_STATUS=("${PIPESTATUS[@]}")
+  test "${RESULT_PIPE_STATUS[0]}" -eq 0
+  test "${RESULT_PIPE_STATUS[1]}" -eq 0
+  sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$RESULT_PATH"
+  sudo chmod 0600 "$RESULT_PATH"
 }
 ```
 
@@ -287,9 +305,9 @@ done
 as_supervisor systemctl --user show loom-autoscaler-gb10-staging.timer \
   loom-task-image-builder-gb10-staging.timer \
   --property=UnitFileState --property=ActiveState
-jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
+as_supervisor jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
   "$EVIDENCE_ROOT/loom-autoscaler-gb10-staging.service.json"
-jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
+as_supervisor jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
   "$EVIDENCE_ROOT/loom-task-image-builder-gb10-staging.service.json"
 ```
 
@@ -322,9 +340,9 @@ done
 as_supervisor systemctl --user show loom-autoscaler-oldlab-staging.timer \
   loom-task-image-builder-oldlab-staging.timer \
   --property=UnitFileState --property=ActiveState
-jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
+as_supervisor jq -e 'type == "array" and all(.[]; .queued_slots == 0 and .action != "scale_up")' \
   "$EVIDENCE_ROOT/loom-autoscaler-oldlab-staging.service.json"
-jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
+as_supervisor jq -e '.queued_materializations == 0 and .submitted_job_ids == [] and .cancelled_job_ids == []' \
   "$EVIDENCE_ROOT/loom-task-image-builder-oldlab-staging.service.json"
 ```
 
