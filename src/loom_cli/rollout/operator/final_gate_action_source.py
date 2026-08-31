@@ -36,6 +36,7 @@ from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from .final_gate_store import FinalGateExecutionStore
 from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
+from .protected_apply_recovery import find_advanced_epoch_attempt
 
 
 class FinalGateRehearsalStore(Protocol):
@@ -151,7 +152,11 @@ class FinalGateActionSource:
             )
 
         def action(check_id: str) -> FinalGateAction:
-            selected_runner = convergence_runner if check_id == "final.convergence" else runner
+            selected_runner = (
+                convergence_runner
+                if check_id in {"final.protected-apply", "final.convergence"}
+                else runner
+            )
 
             def execute(operation: CheckOperation) -> FinalGateResult:
                 return selected_runner(
@@ -231,6 +236,23 @@ class FinalGateActionSource:
                 service_uid=self.service_uid,
             ).read()
             break
+        if predecessor is None:
+            recovery_attempt = find_advanced_epoch_attempt(
+                self.state_root,
+                request_id=envelope.request_id,
+                through_attempt=envelope.attempt_number - 1,
+                candidate_sha=plan.candidate_sha,
+                attestation_digest=plan.attestation_digest,
+                starting_mutation_epoch=plan.starting_mutation_epoch,
+                service_uid=self.service_uid,
+            )
+            if recovery_attempt is not None:
+                predecessor = FinalGatePlanStore(
+                    self.state_root,
+                    request_id=envelope.request_id,
+                    attempt_number=recovery_attempt,
+                    service_uid=self.service_uid,
+                ).read()
         if predecessor is None:
             return None
 

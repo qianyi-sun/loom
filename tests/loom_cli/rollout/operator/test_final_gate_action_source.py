@@ -21,6 +21,12 @@ from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.final_gate_store import FinalGateExecutionStore
+from loom_cli.rollout.operator.protected_apply_journal import (
+    ComponentObservation,
+    ComponentState,
+    ProtectedApplyComponent,
+    ProtectedApplyJournal,
+)
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -395,6 +401,65 @@ def test_resumed_convergence_uses_the_protected_apply_plan(tmp_path: Path) -> No
     assert convergence[convergence.index("--plan-sha256") + 1] == first_plan.plan_digest
     assert smoke[smoke.index("--plan") + 1] == str(attempt2 / "final-gate-plan.json")
     assert smoke[smoke.index("--plan-sha256") + 1] == resumed_plan.plan_digest
+
+
+def test_advanced_epoch_resume_finishes_protected_apply_with_original_plan(
+    tmp_path: Path,
+) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    first = _envelope(attestation)
+    admission = _admission(attestation)
+    source(first, attestation, 7, admission)
+    first_store = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    )
+    first_plan = first_store.read()
+    observed_epoch = 7
+
+    def classify(_plan):
+        return ComponentObservation(
+            state=(ComponentState.READY if observed_epoch == 7 else ComponentState.EXACT),
+            evidence_digest="d" * 64,
+            observed_epoch=observed_epoch,
+        )
+
+    def apply(_plan):
+        nonlocal observed_epoch
+        observed_epoch = 8
+
+    ProtectedApplyJournal(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).execute(
+        first_plan,
+        (
+            ProtectedApplyComponent(
+                component_id="mutation-epoch-claim",
+                implementation_digest="e" * 64,
+                input_fingerprint="f" * 64,
+                classify=classify,
+                apply=apply,
+            ),
+        ),
+    )
+    attempt2 = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt2.mkdir(mode=0o700)
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    source(resumed, attestation, 7, admission)["final.protected-apply"](CheckOperation.APPLY)
+
+    protected_apply = calls[-1]
+    assert protected_apply[protected_apply.index("--plan") + 1] == str(first_store.path)
+    assert protected_apply[protected_apply.index("--plan-sha256") + 1] == first_plan.plan_digest
 
 
 def test_repeated_resume_convergence_uses_the_original_apply_plan(tmp_path: Path) -> None:
