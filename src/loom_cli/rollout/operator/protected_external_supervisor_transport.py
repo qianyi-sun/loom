@@ -50,6 +50,75 @@ _MAX_PROTECTED_BYTES = 10 * 1024 * 1024
 _MAX_SYSTEMCTL_OUTPUT = 64 * 1024
 _SYSTEMCTL_TIMEOUT_SECONDS = 30.0
 _RECONCILIATION_SERVICE_TIMEOUT_SECONDS = 7215.0
+COMPENSATION_RECONCILIATION_FAILURE_CODES = frozenset(
+    {
+        "blocker-inventory-failed",
+        "journal-inventory-failed",
+        "terminal-publication-failed",
+        "transition-conflict",
+        "transition-operation-failed",
+        "transition-reconciliation-failed",
+        "transition-validation-failed",
+        "transition-verification-failed",
+        "unresolved-blockers",
+    }
+)
+EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES = frozenset(
+    {
+        "activated-terminal-publication-failed",
+        "activation-verification-failed",
+        "canonical-promotion-failed",
+        "canonical-terminal-publication-failed",
+        "canonical-verification-failed",
+        "daemon-reload-failed",
+        "disabled-service-convergence-failed",
+        "loaded-definition-verification-failed",
+        "preapply-observation-failed",
+        "preapply-state-drifted",
+        "service-activation-failed",
+        "timer-enable-failed",
+        "timer-start-failed",
+        "transition-publication-failed",
+        "unit-byte-verification-failed",
+    }
+)
+
+
+class ExternalSupervisorCompensationError(RuntimeError):
+    """Secret-safe stage classification for typed compensation recovery."""
+
+    def __init__(self, failure_code: str) -> None:
+        if failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES:
+            raise ValueError("protected external supervisor compensation failure code is invalid")
+        self.failure_code = failure_code
+        super().__init__("protected external supervisor compensation reconciliation failed safely")
+
+
+class ExternalSupervisorApplyError(RuntimeError):
+    """Secret-safe apply stage and compensation outcome."""
+
+    def __init__(
+        self,
+        failure_code: str,
+        *,
+        compensation_failure_code: str | None,
+    ) -> None:
+        if failure_code not in EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES or (
+            compensation_failure_code is not None
+            and compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+        ):
+            raise ValueError("protected external supervisor apply failure code is invalid")
+        self.failure_code = failure_code
+        self.compensation_failure_code = compensation_failure_code
+        if failure_code == "preapply-state-drifted":
+            message = "protected external supervisor state changed before apply"
+        elif failure_code == "preapply-observation-failed":
+            message = "protected external supervisor pre-apply observation failed safely"
+        elif compensation_failure_code is None:
+            message = "protected external supervisor transition was safely compensated"
+        else:
+            message = "protected external supervisor transition compensation failed safely"
+        super().__init__(message)
 
 
 def _hash_json(value: object) -> str:
@@ -1703,22 +1772,31 @@ class FixedExternalSupervisorTransport:
     def reconcile_compensations(self) -> None:
         """Converge crash prefixes to the identity selected by canonical authority."""
 
-        reconciliation_failed = False
-        pending = self.store.pending_compensations()
+        try:
+            pending = self.store.pending_compensations()
+        except Exception as exc:
+            raise ExternalSupervisorCompensationError("journal-inventory-failed") from exc
         groups: dict[tuple[str, ...], list[TimerCompensationEvidence]] = {}
         for intent in pending:
             groups.setdefault(_transition_group_key(intent), []).append(intent)
         if len(groups) > 1:
-            raise RuntimeError("protected external supervisor pending transitions conflict safely")
+            raise ExternalSupervisorCompensationError("transition-conflict")
+        reconciliation_failure: str | None = None
         for intents in groups.values():
             try:
                 self._reconcile_persisted_transition(tuple(intents))
+            except ExternalSupervisorCompensationError as exc:
+                reconciliation_failure = exc.failure_code
             except Exception:
-                reconciliation_failed = True
-        if reconciliation_failed or self.store.compensation_blockers():
-            raise RuntimeError(
-                "protected external supervisor compensation reconciliation failed safely"
-            )
+                reconciliation_failure = "transition-reconciliation-failed"
+        try:
+            blockers = self.store.compensation_blockers()
+        except Exception as exc:
+            raise ExternalSupervisorCompensationError("blocker-inventory-failed") from exc
+        if reconciliation_failure is not None:
+            raise ExternalSupervisorCompensationError(reconciliation_failure)
+        if blockers:
+            raise ExternalSupervisorCompensationError("unresolved-blockers")
 
     def apply(
         self,
@@ -1729,16 +1807,25 @@ class FixedExternalSupervisorTransport:
         attestation_digest: str,
         transition_digest: str,
     ) -> None:
-        current = self.observe(artifact, expected.predecessor_authority)
-        live_state = classify_external_supervisor_live_state(
-            artifact,
-            current,
-            unit_dir=self.unit_dir,
-        )
+        try:
+            current = self.observe(artifact, expected.predecessor_authority)
+            live_state = classify_external_supervisor_live_state(
+                artifact,
+                current,
+                unit_dir=self.unit_dir,
+            )
+        except Exception as exc:
+            raise ExternalSupervisorApplyError(
+                "preapply-observation-failed",
+                compensation_failure_code=None,
+            ) from exc
         # A verified caller may re-attest an already exact canonical
         # predecessor to a new request-bound plan without changing unit bytes.
         if current != expected or live_state not in {"exact", "ready", "repairable"}:
-            raise RuntimeError("protected external supervisor state changed before apply")
+            raise ExternalSupervisorApplyError(
+                "preapply-state-drifted",
+                compensation_failure_code=None,
+            )
         transition_group_id = uuid4().hex
         target = ExternalSupervisorCanonicalIdentity.build(
             artifact,
@@ -1791,31 +1878,41 @@ class FixedExternalSupervisorTransport:
                 (supervisor.timer_name, supervisor.timer_unit.encode("utf-8")),
             )
         }
+        failure_code = "transition-publication-failed"
         try:
             # One global transition lock writes and fsyncs every self-contained
             # intent before it performs the first byte CAS.
             self.store.publish_transition(intents, publications)
+            failure_code = "unit-byte-verification-failed"
             self._verify_unit_bytes(target)
+            failure_code = "daemon-reload-failed"
             self.control.daemon_reload()
+            failure_code = "loaded-definition-verification-failed"
             self._verify_loaded_definitions(artifact)
             for supervisor in artifact.supervisors:
                 if _supervisor_desired_active(supervisor):
+                    failure_code = "service-activation-failed"
                     self.control.start_service(
                         supervisor.service_name,
                         timeout_seconds=float(supervisor.service_timeout_sec) + 15.0,
                     )
                 else:
+                    failure_code = "disabled-service-convergence-failed"
                     self.control.stop_timer(supervisor.timer_name)
                     self.control.disable_timer(supervisor.timer_name)
                     self.control.stop_service(supervisor.service_name)
                     self.control.reset_service_failure(supervisor.service_name)
             for supervisor in artifact.supervisors:
                 if _supervisor_desired_active(supervisor):
+                    failure_code = "timer-enable-failed"
                     self.control.enable_timer(supervisor.timer_name)
             for supervisor in artifact.supervisors:
                 if _supervisor_desired_active(supervisor):
+                    failure_code = "timer-start-failed"
                     self.control.start_timer(supervisor.timer_name)
+            failure_code = "activation-verification-failed"
             self._verify_activated(artifact, target)
+            failure_code = "activated-terminal-publication-failed"
             for identity in identities:
                 self._record_compensation_terminal(
                     identity,
@@ -1830,15 +1927,18 @@ class FixedExternalSupervisorTransport:
                         else "timer-disabled"
                     ),
                 )
+            failure_code = "canonical-promotion-failed"
             self.store.promote_canonical(
                 target,
                 expected_current=(predecessor if authority.kind == "canonical" else None),
             )
+            failure_code = "canonical-verification-failed"
             if self.store.read_canonical() != target:
                 raise RuntimeError("protected external supervisor canonical promotion drifted")
             # Promotion is only authoritative while the exact runtime proof is
             # still current.  The immutable canonical terminals close intents.
             self._verify_activated(artifact, target)
+            failure_code = "canonical-terminal-publication-failed"
             for identity in identities:
                 self._record_compensation_terminal(
                     identity,
@@ -1846,14 +1946,16 @@ class FixedExternalSupervisorTransport:
                     reason="canonical-promoted",
                 )
         except Exception as exc:
+            compensation_failure_code: str | None = None
             try:
                 self.reconcile_compensations()
+            except ExternalSupervisorCompensationError as compensation_exc:
+                compensation_failure_code = compensation_exc.failure_code
             except Exception:
-                raise RuntimeError(
-                    "protected external supervisor transition compensation failed safely"
-                ) from exc
-            raise RuntimeError(
-                "protected external supervisor transition was safely compensated"
+                compensation_failure_code = "transition-reconciliation-failed"
+            raise ExternalSupervisorApplyError(
+                failure_code,
+                compensation_failure_code=compensation_failure_code,
             ) from exc
 
     def _reconcile_persisted_transition(
@@ -1914,13 +2016,13 @@ class FixedExternalSupervisorTransport:
                 raise RuntimeError(
                     "protected external supervisor persisted transition bytes drifted"
                 )
-        except Exception:
+        except Exception as exc:
             self._record_group_terminal(
                 identities,
                 phase="failed",
                 reason="identity-drift",
             )
-            raise
+            raise ExternalSupervisorCompensationError("transition-validation-failed") from exc
 
         try:
             if desired is not None:
@@ -1980,40 +2082,44 @@ class FixedExternalSupervisorTransport:
                     {name: (current[name], desired_payloads[name]) for name in target.unit_payloads}
                 )
                 self.control.daemon_reload()
-        except Exception:
+        except Exception as exc:
             self._record_group_terminal(
                 identities,
                 phase="failed",
                 reason="operation-failed",
             )
-            raise
+            raise ExternalSupervisorCompensationError("transition-operation-failed") from exc
 
-        if desired is not None:
-            verified = self._verify_reactivated_identity(
-                desired,
-                require_bound_runtime=(desired.record_kind == "activation"),
-                allowed_failed_services=allowed_failed_services,
-            ) and all(
-                self._verify_reconciled_runtime(
-                    service_name,
-                    f"{service_name.removesuffix('.service')}.timer",
-                    None,
-                    None,
+        try:
+            if desired is not None:
+                verified = self._verify_reactivated_identity(
+                    desired,
+                    require_bound_runtime=(desired.record_kind == "activation"),
+                    allowed_failed_services=allowed_failed_services,
+                ) and all(
+                    self._verify_reconciled_runtime(
+                        service_name,
+                        f"{service_name.removesuffix('.service')}.timer",
+                        None,
+                        None,
+                    )
+                    for service_name in target.unit_payloads
+                    if service_name.endswith(".service")
+                    and service_name not in desired.unit_payloads
                 )
-                for service_name in target.unit_payloads
-                if service_name.endswith(".service") and service_name not in desired.unit_payloads
-            )
-        else:
-            verified = all(
-                self._verify_reconciled_runtime(
-                    service_name,
-                    f"{service_name.removesuffix('.service')}.timer",
-                    None,
-                    None,
+            else:
+                verified = all(
+                    self._verify_reconciled_runtime(
+                        service_name,
+                        f"{service_name.removesuffix('.service')}.timer",
+                        None,
+                        None,
+                    )
+                    for service_name in target.unit_payloads
+                    if service_name.endswith(".service")
                 )
-                for service_name in target.unit_payloads
-                if service_name.endswith(".service")
-            )
+        except Exception as exc:
+            raise ExternalSupervisorCompensationError("transition-verification-failed") from exc
         if target_is_active:
             phase = "recovered"
             reason = "target-reactivated"
@@ -2029,9 +2135,7 @@ class FixedExternalSupervisorTransport:
                 phase="failed",
                 reason="verification-failed",
             )
-            raise RuntimeError(
-                "protected external supervisor persisted transition verification failed"
-            )
+            raise ExternalSupervisorCompensationError("transition-verification-failed")
         self._record_group_terminal(identities, phase=phase, reason=reason)
 
     @staticmethod
@@ -2094,9 +2198,7 @@ class FixedExternalSupervisorTransport:
             except Exception:
                 failed = True
         if failed:
-            raise RuntimeError(
-                "protected external supervisor transition terminal publication failed"
-            )
+            raise ExternalSupervisorCompensationError("terminal-publication-failed")
 
     @staticmethod
     def _activation_identity(
@@ -2942,9 +3044,13 @@ def build_fixed_external_supervisor_transport(
 
 
 __all__ = [
+    "COMPENSATION_RECONCILIATION_FAILURE_CODES",
+    "EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES",
     "PROTECTED_USER_UNIT_ANCHOR",
     "PROTECTED_USER_UNIT_DIR",
     "AtomicUserUnitStore",
+    "ExternalSupervisorApplyError",
+    "ExternalSupervisorCompensationError",
     "ExternalSupervisorLiveObservation",
     "FixedExternalSupervisorTransport",
     "FixedUserSystemdControl",

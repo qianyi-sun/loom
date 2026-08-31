@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -23,6 +24,8 @@ from loom_cli.rollout.operator.protected_external_supervisor_credential_transpor
     ExternalSupervisorCredentialEvidence,
 )
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
+    ExternalSupervisorApplyError,
+    ExternalSupervisorCompensationError,
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
     ServiceRuntimeStatus,
@@ -396,6 +399,163 @@ def test_remote_credential_operations_carry_only_non_secret_fixed_evidence(
     wire = json.dumps([observe_request, publish_request, evidence.to_dict()], sort_keys=True)
     for forbidden in ("token", "certificate", "kubeconfig_bytes", "path", "command"):
         assert forbidden not in wire
+
+
+def test_remote_reconcile_preserves_only_a_canonical_failure_code(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    response = (
+        json.dumps(
+            {
+                "failure_code": "transition-operation-failed",
+                "operation": "reconcile_compensations",
+                "schema_version": 1,
+                "status": "failed",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+    def run(_argv, _input_payload):
+        return SimpleNamespace(returncode=1, stdout=response, stderr="")
+
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(ExternalSupervisorCompensationError) as raised:
+        transport.reconcile_compensations()
+
+    assert raised.value.failure_code == "transition-operation-failed"
+
+
+def test_remote_reconcile_rejects_an_unapproved_failure_code(tmp_path: Path) -> None:
+    artifact = _controller_artifact(tmp_path)
+    response = (
+        '{"failure_code":"raw-remote-exception","operation":'
+        '"reconcile_compensations","schema_version":1,"status":"failed"}\n'
+    )
+
+    def run(_argv, _input_payload):
+        return SimpleNamespace(returncode=1, stdout=response, stderr="")
+
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(RuntimeError, match="operation failed safely"):
+        transport.reconcile_compensations()
+
+
+def test_remote_apply_preserves_only_typed_failure_and_compensation_status(
+    tmp_path: Path,
+) -> None:
+    artifact, observation = _observation(tmp_path)
+    response = (
+        json.dumps(
+            {
+                "compensation_failure_code": None,
+                "failure_code": "service-activation-failed",
+                "operation": "apply",
+                "schema_version": 1,
+                "status": "failed",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+    def run(_argv, _input_payload):
+        return SimpleNamespace(returncode=1, stdout=response, stderr="")
+
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises(ExternalSupervisorApplyError) as raised:
+        transport.apply(
+            artifact,
+            observation,
+            plan_digest="a" * 64,
+            attestation_digest="b" * 64,
+            transition_digest="c" * 64,
+        )
+
+    assert raised.value.failure_code == "service-activation-failed"
+    assert raised.value.compensation_failure_code is None
+
+
+def test_candidate_helper_returns_only_a_typed_reconcile_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = remote._encode_helper_request(
+        operation="reconcile_compensations",
+        candidate_sha="a" * 40,
+        candidate_tree="b" * 40,
+    )
+    error = ExternalSupervisorCompensationError("transition-operation-failed")
+    monkeypatch.setattr(remote, "_helper_runtime_matches", lambda _sha: True)
+    monkeypatch.setattr(remote, "_fixed_local_transport", object)
+    monkeypatch.setattr(remote, "_fixed_local_credential_transport", lambda _sha: object())
+    monkeypatch.setattr(
+        remote,
+        "_handle_helper_request",
+        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(
+            error
+        ),
+    )
+    stdin = SimpleNamespace(buffer=io.BytesIO(request.encode()))
+    stdout = io.StringIO()
+    monkeypatch.setattr(remote.sys, "stdin", stdin)
+    monkeypatch.setattr(remote.sys, "stdout", stdout)
+
+    assert remote.main() == 1
+    assert json.loads(stdout.getvalue()) == {
+        "failure_code": "transition-operation-failed",
+        "operation": "reconcile_compensations",
+        "schema_version": 1,
+        "status": "failed",
+    }
+
+
+def test_candidate_helper_returns_only_a_typed_apply_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, observation = _observation(tmp_path)
+    request = remote._encode_helper_request(
+        operation="apply",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        artifact=artifact,
+        expected=observation,
+        plan_digest="c" * 64,
+        attestation_digest="d" * 64,
+        transition_digest="e" * 64,
+    )
+    error = ExternalSupervisorApplyError(
+        "service-activation-failed",
+        compensation_failure_code=None,
+    )
+    monkeypatch.setattr(remote, "_helper_runtime_matches", lambda _sha: True)
+    monkeypatch.setattr(remote, "_fixed_local_transport", object)
+    monkeypatch.setattr(remote, "_fixed_local_credential_transport", lambda _sha: object())
+    monkeypatch.setattr(
+        remote,
+        "_handle_helper_request",
+        lambda _payload, *, transport, credential_transport=None: (_ for _ in ()).throw(
+            error
+        ),
+    )
+    stdin = SimpleNamespace(buffer=io.BytesIO(request.encode()))
+    stdout = io.StringIO()
+    monkeypatch.setattr(remote.sys, "stdin", stdin)
+    monkeypatch.setattr(remote.sys, "stdout", stdout)
+
+    assert remote.main() == 1
+    assert json.loads(stdout.getvalue()) == {
+        "compensation_failure_code": None,
+        "failure_code": "service-activation-failed",
+        "operation": "apply",
+        "schema_version": 1,
+        "status": "failed",
+    }
 
 
 def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
