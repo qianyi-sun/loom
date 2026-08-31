@@ -364,10 +364,11 @@ predicate binds the scanner identity, release URL and architecture archive
 digest, complete policy-file identities, explicit exception metadata, and scan
 report. Its only publication mode is `trusted-rebuild`, bound to the protected
 release head, tree, ref, and current
-run. PR candidate archives remain untrusted CI evidence only: the publisher
-never downloads, loads, scans as release, attests, or publishes those bytes.
-Each architecture push contributes its emitted digest directly to a canonical
-post-verification record, rather than allowing a later mutable-tag lookup.
+run. PR build archives remain local to their untrusted scan jobs and are not
+uploaded; the publisher never downloads, loads, scans as release, attests, or
+publishes those bytes. Each architecture push contributes its emitted digest
+directly to a canonical post-verification record, rather than allowing a later
+mutable-tag lookup.
 
 The manifest job accepts exactly the current image's AMD64 and ARM64 records,
 validates their release and mode identities, verifies the registry

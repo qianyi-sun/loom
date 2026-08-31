@@ -1,5 +1,11 @@
 # BEHAVIOR Stage 1 smoke authority
 
+> Status: Behavior Stage 1 image support is temporarily disabled. CI does not
+> select, build, scan, attest, publish, or index `behavior-stage1-sim`, and
+> Behavior-specific tests are excluded from CI lanes. The runtime, source, and
+> deployment implementation remains in the repository as dormant code and is
+> not release evidence while support is disabled.
+
 The Stage 1 smoke is an internal, single-run acceptance path for one real
 BEHAVIOR rollout. It is not an ordinary Recipe and it is not part of the final
 `matrix|soak` acceptance protocol. The public Recipe catalog and public run

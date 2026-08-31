@@ -36,6 +36,7 @@ class Component:
     platforms: tuple[str, ...]
     runtime_policy: str
     rollout_role: str
+    ci_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class TestSuite:
     exclude_paths: tuple[str, ...]
     lane: str
     execution_policy: str | None
+    ci_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,7 @@ class ExecutionCase:
 class Manifest:
     schema_version: int
     ci_lanes: tuple[str, ...]
+    ci_ignored_paths: tuple[str, ...]
     execution_policies: tuple[ExecutionPolicy, ...]
     execution_cases: tuple[ExecutionCase, ...]
     smoke_owners: tuple[str, ...]
@@ -82,6 +85,10 @@ class Manifest:
     attestation_owners: tuple[str, ...]
     components: tuple[Component, ...]
     test_suites: tuple[TestSuite, ...]
+
+    def ci_ignores_path(self, path: str) -> bool:
+        normalized = _safe_path(path, context="query path")
+        return any(matches_path(normalized, pattern) for pattern in self.ci_ignored_paths)
 
     def execution_policy(self, policy_id: str) -> ExecutionPolicy:
         matches = tuple(policy for policy in self.execution_policies if policy.id == policy_id)
@@ -126,7 +133,9 @@ class Manifest:
         """Return the ordered release-image authority."""
 
         return tuple(
-            component for component in self.components if component.kind == "release-image"
+            component
+            for component in self.components
+            if component.kind == "release-image" and component.ci_enabled
         )
 
 
@@ -248,6 +257,7 @@ def _component(raw: dict[str, Any]) -> Component:
             "platforms",
             "runtime_policy",
             "rollout_role",
+            "ci_enabled",
         },
         context,
     )
@@ -270,11 +280,11 @@ def _component(raw: dict[str, Any]) -> Component:
         _required_string(raw, "release_digest", context) if "release_digest" in raw else None
     )
     publisher = raw.get("publisher", "images")
-    if not isinstance(publisher, str) or publisher not in {
-        "behavior-stage1",
-        "images",
-    }:
+    if publisher != "images":
         raise ManifestError(f"{context}.publisher is invalid")
+    ci_enabled = raw.get("ci_enabled", True)
+    if type(ci_enabled) is not bool:
+        raise ManifestError(f"{context}.ci_enabled must be a boolean")
     raw_platforms = raw.get("platforms", ["linux/amd64", "linux/arm64"])
     if (
         not isinstance(raw_platforms, list)
@@ -283,10 +293,8 @@ def _component(raw: dict[str, Any]) -> Component:
     ):
         raise ManifestError(f"{context}.platforms must be a non-empty string array")
     platforms = tuple(raw_platforms)
-    if publisher == "images" and platforms != ("linux/amd64", "linux/arm64"):
+    if ci_enabled and platforms != ("linux/amd64", "linux/arm64"):
         raise ManifestError(f"{context}.platforms must retain the native two-platform contract")
-    if publisher == "behavior-stage1" and platforms != ("linux/amd64",):
-        raise ManifestError(f"{context}.platforms must be exactly linux/amd64")
     rollout_role = raw.get("rollout_role", "none")
     if not isinstance(rollout_role, str) or rollout_role not in {
         "none",
@@ -332,6 +340,7 @@ def _component(raw: dict[str, Any]) -> Component:
         platforms=platforms,
         runtime_policy=runtime_policy,
         rollout_role=rollout_role,
+        ci_enabled=ci_enabled,
     )
 
 
@@ -346,6 +355,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
             "include_paths",
             "exclude_paths",
             "execution_policy",
+            "ci_enabled",
         },
         context,
     )
@@ -373,6 +383,9 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
     language = _required_string(raw, "language", context)
     if language not in {"python", "go", "web"}:
         raise ManifestError(f"{context}.language must be one of python, go, web")
+    ci_enabled = raw.get("ci_enabled", True)
+    if type(ci_enabled) is not bool:
+        raise ManifestError(f"{context}.ci_enabled must be a boolean")
     return TestSuite(
         id=_required_slug(raw, "id", context),
         language=language,
@@ -380,6 +393,7 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
         exclude_paths=exclude_paths,
         lane=lane,
         execution_policy=execution_policy,
+        ci_enabled=ci_enabled,
     )
 
 
@@ -478,6 +492,7 @@ def load_manifest(path: Path) -> Manifest:
         {
             "schema_version",
             "ci_lanes",
+            "ci_ignored_paths",
             "execution_policies",
             "execution_cases",
             "smoke_owners",
@@ -504,6 +519,15 @@ def load_manifest(path: Path) -> Manifest:
     for lane in ci_lanes:
         if re.fullmatch(r"[a-z0-9][a-z0-9-]*", lane) is None:
             raise ManifestError(f"invalid CI lane slug: {lane!r}")
+    raw_ci_ignored_paths = raw.get("ci_ignored_paths", [])
+    if not isinstance(raw_ci_ignored_paths, list) or not all(
+        isinstance(item, str) for item in raw_ci_ignored_paths
+    ):
+        raise ManifestError("manifest.ci_ignored_paths must be a string array")
+    ci_ignored_paths = tuple(
+        _safe_path(item, context="manifest.ci_ignored_paths", allow_glob=True)
+        for item in raw_ci_ignored_paths
+    )
     if not isinstance(raw_components, list) or not all(
         isinstance(item, dict) for item in raw_components
     ):
@@ -562,6 +586,7 @@ def load_manifest(path: Path) -> Manifest:
     return Manifest(
         schema_version=2,
         ci_lanes=ci_lanes,
+        ci_ignored_paths=ci_ignored_paths,
         execution_policies=execution_policies,
         execution_cases=execution_cases,
         smoke_owners=_slug_registry(raw, "smoke_owners"),
@@ -627,6 +652,9 @@ def validate_manifest(
     """Return deterministic authority errors for tracked repository inputs."""
 
     errors: list[str] = []
+    for pattern in manifest.ci_ignored_paths:
+        if not any(matches_path(path, pattern) for path in tracked_paths):
+            errors.append(f"CI ignored path pattern matches no tracked path: {pattern}")
     component_ids = Counter(component.id for component in manifest.components)
     for component_id, count in sorted(component_ids.items()):
         if count > 1:
@@ -850,23 +878,6 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
     )
 
 
-def release_image_matrix_for_publisher(
-    manifest: Manifest,
-    *,
-    publisher: str,
-) -> tuple[dict[str, str], ...]:
-    """Render one publisher's closed image matrix without workflow allowlists."""
-
-    if publisher not in {"behavior-stage1", "images"}:
-        raise ManifestError(f"unsupported image publisher: {publisher}")
-    selected = {
-        component.id
-        for component in manifest.release_components()
-        if component.publisher == publisher
-    }
-    return tuple(entry for entry in release_image_matrix(manifest) if entry["image"] in selected)
-
-
 def native_release_image_matrix(
     images: tuple[dict[str, str], ...],
 ) -> tuple[dict[str, str], ...]:
@@ -936,7 +947,7 @@ def select_release_image_matrix(
             component.id
             for path in changed_paths
             for component in manifest.component_owners_for_path(path)
-            if component.kind == "release-image"
+            if component.kind == "release-image" and component.ci_enabled
         }
         if any(
             path
@@ -999,6 +1010,7 @@ def test_paths_for_lane(
         for path in sorted(tracked_paths)
         if _is_runnable_test_path(path)
         and len(owners := manifest.test_owners_for_path(path)) == 1
+        and owners[0].ci_enabled
         and owners[0].lane == lane
     )
 
@@ -1211,27 +1223,16 @@ def main(argv: list[str] | None = None) -> int:
                 force_all=args.force_all,
                 fallback_all=args.fallback_all,
             )
-            publisher_by_image = {
-                component.id: component.publisher for component in manifest.release_components()
-            }
-            standard_matrix = tuple(
-                entry for entry in matrix if publisher_by_image[entry["image"]] == "images"
-            )
-            stage1_matrix = tuple(
-                entry for entry in matrix if publisher_by_image[entry["image"]] == "behavior-stage1"
-            )
-            payload = json.dumps(standard_matrix, separators=(",", ":"))
-            stage1_payload = json.dumps(stage1_matrix, separators=(",", ":"))
+            payload = json.dumps(matrix, separators=(",", ":"))
             native_payload = json.dumps(
-                native_release_image_matrix(standard_matrix),
+                native_release_image_matrix(matrix),
                 separators=(",", ":"),
             )
             with args.github_output.open("a", encoding="utf-8") as handle:
                 handle.write(f"images={payload}\n")
                 handle.write(f"native_builds={native_payload}\n")
-                handle.write(f"stage1_images={stage1_payload}\n")
                 handle.write(f"required={str(bool(matrix)).lower()}\n")
-            print(f"selected_images={payload} stage1_images={stage1_payload}")
+            print(f"selected_images={payload}")
             return 0
         if args.command == "validate-image":
             errors = validate_release_image_pair(

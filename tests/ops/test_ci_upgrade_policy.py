@@ -61,10 +61,6 @@ def test_image_supply_chain_upgrade_has_real_previous_release_rollbacks() -> Non
         "actionlint .github/workflows/images.yml",
     ]
     assert image_batch["rollback"] == {
-        "actions/attest": {
-            "sha": "508db95dd578ae2727ebd6217d5ba78e4fbda05d",
-            "version": "v4.2.1",
-        },
         "actions/attest-build-provenance": {
             "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
             "version": "v4.1.1",

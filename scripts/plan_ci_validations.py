@@ -400,6 +400,8 @@ def plan_validations(
     }
 
     for path in paths:
+        if _component_ownership_manifest().ci_ignores_path(path):
+            continue
         if _is_documentation_path(path):
             continue
         test_owner_lanes = _test_owner_lanes(path)
@@ -424,6 +426,9 @@ def plan_validations(
                 select("cluster_smoke", reason)
             elif lane == "system-smoke":
                 select("staging_smoke", reason)
+        if _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES):
+            select("integration", f"nebius-iac:{path}")
+            matched_owner = True
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")

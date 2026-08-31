@@ -76,6 +76,30 @@ def test_docs_only_selects_no_heavy_validation() -> None:
     assert plan.selected_heavy_checks() == set()
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "deploy/Dockerfile.behavior-stage1-sim",
+        "src/loom/integrations/behavior/contracts.py",
+        "src/loom/pipeline/stage1_smoke.py",
+        "src/loom_service/behavior_pipeline_adapter.py",
+        "tests/integrations/behavior/test_contracts.py",
+        "third_party/behavior-stage1/omnigibson/omnigibson/__init__.py",
+        "web/src/components/artifacts/BehaviorRolloutViewer.tsx",
+        "web/src/components/artifacts/useBoundedJson.ts",
+    ],
+)
+def test_disabled_behavior_paths_select_no_heavy_validation(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set()
+
+
 def test_labels_add_corresponding_checks() -> None:
     plan = plan_validations(
         changed_paths=["docs/user-guide.md"],

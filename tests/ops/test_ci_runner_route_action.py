@@ -146,12 +146,9 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
         action.validate_assignment(request_value, response)
 
 
-@pytest.mark.parametrize(
-    "job_key",
-    ("pipeline-orchestrator", "behavior-stage1-sim"),
-)
-def test_images_contract_allows_manifest_owned_jobs(job_key: str) -> None:
+def test_images_contract_allows_active_manifest_owned_jobs() -> None:
     action = _module()
+    job_key = "pipeline-orchestrator"
     request, mode = action.build_request(
         {
             "ROUTE_MODE": "disabled",

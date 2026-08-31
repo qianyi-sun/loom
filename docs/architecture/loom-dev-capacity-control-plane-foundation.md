@@ -246,16 +246,16 @@ fixed executable and fixed credential paths in the manager container.
 runtime and `capacity_migrations`. It runs the manager as UID/GID 65532 and is
 registered as the `loom-capacity-manager` release image in the typed component
 ownership manifest. Existing image planning, native AMD64/ARM64 builds,
-untrusted PR candidate evidence, and trusted push publication are therefore
+job-local untrusted PR scanning, and trusted push publication are therefore
 inherited without a new workflow-owned image allowlist. Official publication
 never reuses candidate bytes: each hosted `publish` architecture rebuilds its
 Docker archive from the protected release commit, scans that source-fresh
-archive, and only then loads and pushes it. PR candidate archives may be
-retained for untrusted CI evidence, but the publisher never downloads, loads,
-scans as release, attests, or publishes them. Both untrusted validation and the
-trusted release scan use pinned Trivy v0.74.0 with scan type `image`, OS and
-library vulnerability types, a `20m0s` timeout, `CRITICAL` severity, exit code
-1, unfixed findings included, the `vuln` scanner only, and caching disabled.
+archive, and only then loads and pushes it. PR build archives remain local to
+their untrusted jobs and are not uploaded; the publisher never downloads,
+loads, scans as release, attests, or publishes them. Both untrusted validation
+and the trusted release scan use pinned Trivy v0.74.0 with scan type `image`, OS
+and library vulnerability types, a `20m0s` timeout, `CRITICAL` severity, exit
+code 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
 The trusted scan selects fixed config and a reviewed ignore file generated
 outside the checkout. Fixable findings are remediated in their images first.
 The temporary policy covers the three unfixed CRITICAL Perl CVEs
