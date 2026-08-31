@@ -85,6 +85,7 @@ GUEST_BASE_IMAGES = (
     "envoyproxy/envoy:v1.30-latest",
     "golang:1.23-alpine",
     "golang:1.25.7-alpine",
+    "golang:1.26-alpine3.23",
     "minio/minio:RELEASE.2022-12-02T19-19-22Z",
     "minio/minio:latest",
     "moby/buildkit:buildx-stable-1",
