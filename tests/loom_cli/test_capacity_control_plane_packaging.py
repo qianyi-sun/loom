@@ -128,10 +128,7 @@ def test_capacity_manager_sources_do_not_import_unpackaged_loom_modules() -> Non
                 for module in modules
                 if module == "loom"
                 or module.startswith("loom.")
-                or (
-                    module.startswith("loom_")
-                    and not module.startswith("loom_capacity_manager")
-                )
+                or (module.startswith("loom_") and not module.startswith("loom_capacity_manager"))
             )
 
     assert unpackaged == []
@@ -243,10 +240,22 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
 
     assert completed.returncode == 0, completed.stderr
     documents = [document for document in yaml.safe_load_all(completed.stdout) if document]
-    assert [document["kind"] for document in documents[:4]] == [
-        "Namespace",
-        "Service",
-        "StatefulSet",
-        "Job",
-    ]
-    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0014-")
+    namespace = next(document for document in documents if document["kind"] == "Namespace")
+    postgres_service = next(
+        document
+        for document in documents
+        if document["kind"] == "Service"
+        and document["metadata"]["name"] == "loom-capacity-postgres"
+    )
+    postgres_statefulset = next(
+        document
+        for document in documents
+        if document["kind"] == "StatefulSet"
+        and document["metadata"]["name"] == "loom-capacity-postgres"
+    )
+    migration_jobs = [document for document in documents if document["kind"] == "Job"]
+    assert namespace["metadata"]["name"] == "loom-dev"
+    assert postgres_service["metadata"]["name"] == "loom-capacity-postgres"
+    assert postgres_statefulset["metadata"]["name"] == "loom-capacity-postgres"
+    assert len(migration_jobs) == 1
+    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0014-")

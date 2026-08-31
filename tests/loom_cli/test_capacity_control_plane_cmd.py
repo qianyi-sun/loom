@@ -38,12 +38,17 @@ def test_admin_render_writes_only_the_exact_manifest(
 
     captured = capsys.readouterr()
     documents = [document for document in yaml.safe_load_all(captured.out) if document]
+    namespace = next(document for document in documents if document["kind"] == "Namespace")
+    manager = next(
+        document
+        for document in documents
+        if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager"
+    )
     assert result == 0
     assert captured.err == ""
-    assert documents[0]["kind"] == "Namespace"
-    assert documents[0]["metadata"]["name"] == "loom-dev"
-    assert documents[5]["kind"] == "Deployment"
-    assert documents[5]["spec"]["template"]["spec"]["containers"][0]["image"] == (_MANAGER_IMAGE)
+    assert namespace["metadata"]["name"] == "loom-dev"
+    assert manager["spec"]["template"]["spec"]["containers"][0]["image"] == _MANAGER_IMAGE
 
 
 def test_admin_render_rejects_invalid_release_without_partial_yaml(
@@ -158,17 +163,27 @@ def test_admin_render_loads_exact_execution_policy_without_partial_output(
 
     captured = capsys.readouterr()
     documents = [document for document in yaml.safe_load_all(captured.out) if document]
-    config_map = next(document for document in documents if document["kind"] == "ConfigMap")
-    manager = next(document for document in documents if document["kind"] == "Deployment")
+    policy_config_maps = [
+        document
+        for document in documents
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"] == f"loom-capacity-execution-policy-{digest[:32]}"
+    ]
+    manager = next(
+        document
+        for document in documents
+        if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager"
+    )
     assert result == 0
     assert captured.err == ""
-    assert config_map["metadata"]["name"].endswith(digest[:32])
+    assert len(policy_config_maps) == 1
     policy_source = next(
         volume
         for volume in manager["spec"]["template"]["spec"]["volumes"]
         if volume["name"] == "execution-policy-projected"
     )
-    assert policy_source["configMap"]["name"] == config_map["metadata"]["name"]
+    assert policy_source["configMap"]["name"] == policy_config_maps[0]["metadata"]["name"]
 
 
 def test_admin_render_rejects_execution_policy_without_external_client_ingress(
