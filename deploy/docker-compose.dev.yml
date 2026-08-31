@@ -243,6 +243,7 @@ services:
       # task in tests/fixtures/tasks/ runs end-to-end without a bundle
       # upload to MinIO.
       LOOM_WORKER_FIXTURES_ROOT: /app/tests/fixtures/tasks
+      LOOM_OPENHANDS_TERMINUS_STYLE: "${LOOM_OPENHANDS_TERMINUS_STYLE:-}"
       # Host Docker daemon pulls/pushes via the published loopback registry
       # port. Same contract as tests/system: the socket is on the host, so
       # localhost:<port> is the laptop, not the worker container.

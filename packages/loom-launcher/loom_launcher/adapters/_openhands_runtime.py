@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 OPENHANDS_SDK_VERSION = "1.34.0"
-LOOM_LAUNCHER_REF = "1ed7a8558c491b406bd5109638d33b258e6c3c5c"
-LOOM_LAUNCHER_REQUIREMENT = "git+https://github.com/qianyi-sun/loom.git@1ed7a8558c491b406bd5109638d33b258e6c3c5c#subdirectory=packages/loom-launcher"
+LOOM_LAUNCHER_REF = "c5a5d5c073af12a51dc327b33b5132636da29917"
+LOOM_LAUNCHER_REQUIREMENT = "git+https://github.com/qianyi-sun/loom.git@c5a5d5c073af12a51dc327b33b5132636da29917#subdirectory=packages/loom-launcher"
 UV_VERSION = "0.11.21"
 OPENHANDS_SDK_VENV = "/opt/loom-agents/openhands-sdk"
 OPENHANDS_SDK_PYTHON = "/opt/loom-agents/openhands-sdk/bin/python"
