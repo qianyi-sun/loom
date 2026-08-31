@@ -46,14 +46,14 @@ def _scanner_value() -> dict[str, str]:
         "binary_platform": "linux/amd64",
         "binary_sha256": "b" * 64,
         "cache_identity_sha256": (
-            "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+            "35f7d0f279b656552b1eb362a0599938ff112e5103590dcfc0eece25e8326082"
         ),
         "database_metadata_sha256": "c" * 64,
         "database_sha256": "d" * 64,
         "java_database_metadata_sha256": "e" * 64,
         "java_database_sha256": "f" * 64,
         "lock_sha256": "1" * 64,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
 
 
