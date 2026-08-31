@@ -243,9 +243,9 @@ OpenSSH, sudoers, pytest, Ruff, mypy.
 - Reuses `staging_rollout_sealed_source.SealedSource` and
   `validate_sealed_source(...)` with the exact authority source and approved
   base.
-- Installs the fixed broker at
+- Installs the fixed pre-import launcher at
   `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority` and
-  dependencies under
+  the broker plus its dependencies under
   `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/`.
 
 - [ ] **Step 1: Write failing bootstrap/sudoers tests**
@@ -407,4 +407,3 @@ fixed commands.
   Task/Worker/Slurm counts, no managed conformance objects, exact intended
   service/runtime state, no QEMU/runc evidence, and capacity status exactly
   `{"executable_new_capacity_ceiling":0,"status":"ready"}`.
-
