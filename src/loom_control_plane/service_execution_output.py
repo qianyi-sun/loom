@@ -32,6 +32,7 @@ from loom.pipeline.artifact_commit import (
     UploadFilePlanV1,
 )
 from loom.pipeline.keys import canonical_digest
+from loom_control_plane.service_execution import record_committed_runtime_result
 
 _MAX_FILES = 133
 _MAX_TOKEN_TTL_SECONDS = 600
@@ -552,6 +553,13 @@ class ServiceExecutionOutputRouteService:
             current.output_marker_sha256 = marker_sha256
             current.output_committed_at = datetime.now(UTC)
             current.updated_at = current.output_committed_at
+            await record_committed_runtime_result(
+                session,
+                lease_id=current.id,
+                generation=current.generation,
+                runtime_result=runtime_result,
+                observed_at=current.output_committed_at,
+            )
             await session.commit()
         return {
             **result.model_dump(mode="json"),

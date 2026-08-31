@@ -340,6 +340,26 @@ def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
     return pools
 
 
+async def _all_tasks_use_service_execution(
+    session: Any,
+    task_ids: Sequence[str],
+) -> bool:
+    """Return whether every materialized task uses the service scheduler."""
+    if not task_ids:
+        return False
+    rows = (
+        await session.execute(
+            select(Task.id, Task.config).where(Task.id.in_(task_ids)),
+        )
+    ).all()
+    configs_by_id = {str(task_id): config for task_id, config in rows}
+    return all(
+        isinstance(configs_by_id.get(task_id), dict)
+        and configs_by_id[task_id].get("service_execution") is not None
+        for task_id in task_ids
+    )
+
+
 def _reject_if_k8s_worker_unavailable(
     request: Request,
     required_worker_pools: Sequence[str],
@@ -872,27 +892,6 @@ async def _create_batch_record(
                     detail=f"trial_config: {err}",
                 )
 
-    # cluster-deploy.md §POST /batches: reject when no live worker
-    # advertises the requested backend. Saves operators from creating
-    # batches that would stall in 'submitted' forever (no worker will
-    # ever claim them). Backend catalog is owned by /api/v1/backends;
-    # this check uses the same predicate so a backend that shows
-    # `available=false` there also rejects here.
-    active_backends = await get_active_backends(s)
-    if payload.backend not in active_backends:
-        available_str = (
-            ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
-        )
-        _reject_submission(
-            reason="no_workers",
-            status_code=400,
-            detail=(
-                f"no active worker advertises backend "
-                f"{payload.backend!r}. Currently available: "
-                f"{available_str}. See `GET /api/v1/backends`."
-            ),
-        )
-
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
     # Combination-level provider fields override the batch-level value; the
@@ -1084,6 +1083,29 @@ async def _create_batch_record(
             status_code=400,
             detail=invalid_task_config_detail(invalid_tasks),
         )
+
+    # Legacy tasks still need a fresh worker advertising the selected
+    # backend. Converted service-execution tasks are instead claimed by the
+    # environment scheduler and materialized as Kubernetes Jobs; requiring a
+    # legacy worker heartbeat for an all-service batch would make the normal
+    # user path impossible on a service-only deployment.
+    if not await _all_tasks_use_service_execution(s, valid_task_ids):
+        active_backends = await get_active_backends(s)
+        if payload.backend not in active_backends:
+            available_str = (
+                ", ".join(sorted(active_backends))
+                if active_backends
+                else "(none — no active workers)"
+            )
+            _reject_submission(
+                reason="no_workers",
+                status_code=400,
+                detail=(
+                    f"no active worker advertises backend "
+                    f"{payload.backend!r}. Currently available: "
+                    f"{available_str}. See `GET /api/v1/backends`."
+                ),
+            )
 
     # Reject structurally incompatible agent/task pairs instead of fanning
     # out trials that cannot satisfy the task's execution contract.
@@ -2425,20 +2447,6 @@ async def rerun_failed_batch(
     await _reject_if_team_paused(s, b.team_id)
     _reject_if_k8s_worker_unavailable(request, b.required_worker_pools or [])
 
-    active_backends = await get_active_backends(s)
-    if b.backend not in active_backends:
-        available_str = (
-            ", ".join(sorted(active_backends)) if active_backends else "(none -- no active workers)"
-        )
-        _reject_submission(
-            reason="no_workers",
-            status_code=400,
-            detail=(
-                f"no active worker advertises backend {b.backend!r}. "
-                f"Currently available: {available_str}."
-            ),
-        )
-
     original_trials = await _trial_projections_for_batch(s, batch_id)
     child_batch_ids = (
         (
@@ -2503,6 +2511,22 @@ async def rerun_failed_batch(
             status_code=400,
             detail="rerun target tasks are missing or no longer runnable",
         )
+    if not await _all_tasks_use_service_execution(s, task_ids):
+        active_backends = await get_active_backends(s)
+        if b.backend not in active_backends:
+            available_str = (
+                ", ".join(sorted(active_backends))
+                if active_backends
+                else "(none -- no active workers)"
+            )
+            _reject_submission(
+                reason="no_workers",
+                status_code=400,
+                detail=(
+                    f"no active worker advertises backend {b.backend!r}. "
+                    f"Currently available: {available_str}."
+                ),
+            )
     agent_task_pairs: list[tuple[str, str]] = []
     combinations = list(b.combinations or [])
     for target in targets:

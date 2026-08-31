@@ -1,0 +1,42 @@
+{
+  "nebius_profile": "loom-development-eu-north1",
+  "tenant_id": "tenant-REPLACE",
+  "project_id": "project-REPLACE-DEVELOPMENT-EU-NORTH1",
+  "evidence_bucket_name": "loom-nebius-development-eu-north1-REPLACE",
+  "evidence_bucket_max_bytes": 107374182400,
+  "target": {
+    "target_id": "nebius-eu-north1-development",
+    "cluster_scope_id": "nebius-eu-north1-shared",
+    "region": "eu-north1",
+    "failure_domain": "nebius-eu-north1-shared",
+    "environment_bindings": {
+      "development": {
+        "target_id": "nebius-eu-north1-development",
+        "namespace_name": "loom-nebius-development",
+        "evidence_prefix": "nebius-eu-north1-development"
+      },
+      "staging": {
+        "target_id": "nebius-eu-north1-staging",
+        "namespace_name": "loom-nebius-staging",
+        "evidence_prefix": "nebius-eu-north1-staging"
+      },
+      "production": {
+        "target_id": "nebius-eu-north1-production",
+        "namespace_name": "loom-nebius-production",
+        "evidence_prefix": "nebius-eu-north1-production"
+      }
+    },
+    "network_cidr": "10.0.0.0/16",
+    "service_cidr": "172.20.0.0/16",
+    "kubernetes_version": "1.35",
+    "control_plane_etcd_size": 1,
+    "public_control_plane_cidrs": [],
+    "system_node_count": 1,
+    "execution_min_nodes": 0,
+    "execution_max_nodes": 1,
+    "system_preset": "2vcpu-8gb",
+    "execution_preset": "2vcpu-8gb",
+    "system_disk_gib": 64,
+    "execution_disk_gib": 64
+  }
+}

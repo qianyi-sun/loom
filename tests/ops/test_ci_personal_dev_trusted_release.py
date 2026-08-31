@@ -21,8 +21,8 @@ _SOURCE_SHA = "a" * 40
 _SOURCE_TREE = "b" * 40
 _RUN_ID = 123
 _RUN_ATTEMPT = 2
-_TRIVY_AMD64 = b"trivy-linux-amd64-v0.70.0"
-_TRIVY_ARM64 = b"trivy-linux-arm64-v0.70.0"
+_TRIVY_AMD64 = b"trivy-linux-amd64-v0.74.0"
+_TRIVY_ARM64 = b"trivy-linux-arm64-v0.74.0"
 _DATABASE = b"fixture-vulnerability-database"
 _DATABASE_METADATA = b'{"DownloadedAt":"2026-08-18T00:00:00Z","NextUpdate":"2026-08-19T00:00:00Z","UpdatedAt":"2026-08-18T00:00:00Z","Version":2}'
 _JAVA_DATABASE = b"fixture-java-database"
@@ -126,7 +126,7 @@ def _write_scanner_inputs(root: Path) -> dict[str, object]:
             "layer_sha256": ("bcc9ee0a8aa79524502cf892eda69e2180b54a3c7bd54c874b564201d2bdfc10"),
         },
         "schema_version": 1,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     lock_bytes = _canonical(lock)
     paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
@@ -149,7 +149,7 @@ def _write_scanner_inputs(root: Path) -> dict[str, object]:
         },
         "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
         "schema_version": 1,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     paths["scanner_cache_evidence_file"].write_bytes(_canonical(evidence) + b"\n")
     paths["scanner_binary_amd64_file"].write_bytes(_TRIVY_AMD64)
@@ -289,13 +289,13 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "lock_sha256": hashlib.sha256(
             _scanner_paths(tmp_path)["scanner_cache_lock_file"].read_bytes()
         ).hexdigest(),
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     cache_identity_sha256 = hashlib.sha256(
         b"loom-personal-dev-scanner-cache-v1\0" + _canonical(scanner_without_identity)
     ).hexdigest()
     assert cache_identity_sha256 == (
-        "65d47d7144c565e8d0f5c0c28a2e21e502b8a0ce3f062a22cc870895f84af28d"
+        "ed207b0168c99be685d5d00fdb70a21adcbc4e570d06cf13e777efb454624596"
     )
     scanner = {
         **scanner_without_identity,
@@ -333,7 +333,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
             (_scanner_paths(tmp_path)["scanner_cache_evidence_file"]).read_bytes()
         )["java_database"],
         "lock_sha256": scanner_without_identity["lock_sha256"],
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     for item in evidence["internal_images"].values():
         assert set(item["platforms"]) == {"linux/amd64", "linux/arm64"}

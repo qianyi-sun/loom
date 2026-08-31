@@ -24,7 +24,7 @@ PyYAML, pytest, Ruff, and mypy.
   remain server-derived `loom-dev-OWNER` identities.
 - Global executable new-capacity ceiling remains exactly `0`; this work never
   queries or mutates Slurm and never creates a worker.
-- Trivy is exactly `v0.70.0`; upstream DB sources are the two immutable OCI
+- Trivy is exactly `v0.74.0`; upstream DB sources are the two immutable OCI
   manifests in `deploy/dev-fleet/personal-dev-scanner-cache-lock.json`.
 - Runtime preparation performs no network operation and has no Secret,
   service-account token, hostPath, node path, `kubectl cp`, or mutable image.
@@ -72,9 +72,9 @@ PyYAML, pytest, Ruff, and mypy.
   ```python
   def test_checked_in_scanner_cache_lock_is_exact() -> None:
       lock = load_personal_dev_scanner_cache_lock(_LOCK)
-      assert lock.trivy_version == "v0.70.0"
+      assert lock.trivy_version == "v0.74.0"
       assert lock.binary_sha256["linux/amd64"] == (
-          "379d59f24a4a828c55de5f0b91b6805cc35d13580180b658820e648611256166"
+          "d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791"
       )
       assert lock.database.image.endswith(
           "@sha256:01edd081af12fd613776b0db66ac23ce62c9d25802d8ee57671394c10ca3530b"
@@ -324,14 +324,14 @@ PyYAML, pytest, Ruff, and mypy.
   entrypoint, no curl/wget/package install, exact component ownership, asset-job
   permissions `actions: read` and `contents: read`, one-day artifact retention, and conditional
   named context in both candidate and protected publish builds. Also assert the
-  service Dockerfile's Trivy stage is exactly the version-0.70.0 index digest:
+  service Dockerfile's Trivy stage is exactly the version-0.74.0 index digest:
 
   ```python
   assert component.release_digest == "loom-personal-dev-scanner-cache"
   assert job["permissions"] == {"actions": "read", "contents": "read"}
   assert service_dockerfile.splitlines()[0] == (
-      "FROM aquasec/trivy@sha256:"
-      "be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e AS trivy"
+      "FROM aquasec/trivy:0.74.0@sha256:"
+      "62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 AS trivy"
   )
   assert "--build-context" in candidate_build_script
   assert "personal-dev-scanner-cache=/tmp/loom-personal-dev-scanner-cache" in (
@@ -376,7 +376,7 @@ PyYAML, pytest, Ruff, and mypy.
   ```
 
   Replace only the first stage digest in `deploy/Dockerfile.service` with the
-  exact version-0.70.0 index digest asserted in Step 1.
+  exact version-0.74.0 index digest asserted in Step 1.
 
 - [ ] **Step 4: Wire asset preparation and both build paths**
 
@@ -466,7 +466,7 @@ PyYAML, pytest, Ruff, and mypy.
   Add the fourth internal image to both platform record/manifests fixtures.
   Assert exact scanner object, deterministic repeat, and rejection of missing
   cache image, wrong platform files, changed binary, binary hash not present in
-  the version-0.70.0 lock, lock mismatch, metadata
+  the version-0.74.0 lock, lock mismatch, metadata
   mismatch, cache identity mismatch, unknown field, and schema version 1:
 
   ```python
@@ -582,7 +582,7 @@ PyYAML, pytest, Ruff, and mypy.
 - [ ] **Step 4: Implement strict dataclasses, models, and equality checks**
 
   Use one `_TrustedScannerInput` with `extra="forbid"`, nonzero lowercase
-  digests, literal platform `linux/amd64`, literal version `v0.70.0`, and a model
+  digests, literal platform `linux/amd64`, literal version `v0.74.0`, and a model
   validator that recomputes the cache identity. Include scanner data in release
   canonical bytes and acceptance canonical bytes.
 

@@ -29,6 +29,10 @@ func TestWorkloadBrokerRefreshProxyAndDurableOutputCommit(t *testing.T) {
 		switch {
 		case request.URL.Path == "/internal/service-execution/token":
 			tokenCalls++
+			if tokenCalls == 1 {
+				http.Error(writer, `{"detail":"workload_identity_not_observed"}`, http.StatusServiceUnavailable)
+				return
+			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"schema_version": "loom.service-execution-token.v1",
 				"token":          "step-token",
@@ -119,8 +123,8 @@ func TestWorkloadBrokerRefreshProxyAndDurableOutputCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || tokenCalls != 1 {
-		t.Fatalf("proxy did not inject one refreshed token: status=%d calls=%d", response.StatusCode, tokenCalls)
+	if response.StatusCode != http.StatusOK || tokenCalls != 2 {
+		t.Fatalf("proxy did not retry and inject one refreshed token: status=%d calls=%d", response.StatusCode, tokenCalls)
 	}
 	denied, err := http.Post( // #nosec G107 -- local test listener
 		proxyURL+"/internal/service-execution/token", "application/json", strings.NewReader("{}"),
@@ -129,7 +133,7 @@ func TestWorkloadBrokerRefreshProxyAndDurableOutputCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = denied.Body.Close()
-	if denied.StatusCode != http.StatusForbidden || tokenCalls != 1 {
+	if denied.StatusCode != http.StatusForbidden || tokenCalls != 2 {
 		t.Fatalf("proxy exposed a non-model Gateway route: status=%d calls=%d", denied.StatusCode, tokenCalls)
 	}
 

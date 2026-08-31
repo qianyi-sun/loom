@@ -936,9 +936,9 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
     ownership = _read("config/component-ownership.toml")
 
-    assert "rootlesskit version 3.0.1" in dockerfile
-    assert "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc" in dockerfile
-    assert "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce" in dockerfile
+    assert "rootlesskit version 3.1.0" in dockerfile
+    assert "go mod edit -require=golang.org/x/crypto@v0.55.0" in dockerfile
+    assert "rootlesskit.sha256" in dockerfile
     assert "ARG TARGETARCH" in dockerfile
     assert "/usr/bin/buildctl" in dockerfile
     assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile

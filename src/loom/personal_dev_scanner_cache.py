@@ -17,7 +17,7 @@ _LOCK_KEYS = frozenset(
 )
 _BINARY_KEYS = frozenset({"linux/amd64", "linux/arm64"})
 _SOURCE_KEYS = frozenset({"image", "layer_sha256"})
-_TRIVY_VERSION = "v0.70.0"
+_TRIVY_VERSION = "v0.74.0"
 _DATABASE_REPOSITORY = "ghcr.io/aquasecurity/trivy-db"
 _JAVA_DATABASE_REPOSITORY = "ghcr.io/aquasecurity/trivy-java-db"
 

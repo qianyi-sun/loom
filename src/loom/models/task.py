@@ -7,9 +7,16 @@ metadata + environment + per-step config + multi-step aggregation strategy.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
@@ -24,6 +31,11 @@ from loom.models.types import (
     RequiredCPUArch,
     VerifierEnvMode,
 )
+
+if TYPE_CHECKING:
+    from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+
+_SERVICE_EXECUTION_REVISION_SENTINEL = "sha256:" + "0" * 64
 
 
 class TaskMetadata(BaseModel):
@@ -101,6 +113,7 @@ class VerifierDefaults(BaseModel):
 
 class AgentOverrides(BaseModel):
     """Per-step partial override of AgentDefaults. None fields inherit task default."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     model: ModelSpec | None = None
     timeout_sec: float | None = None
@@ -110,6 +123,7 @@ class AgentOverrides(BaseModel):
 
 class VerifierOverrides(BaseModel):
     """Per-step partial override of VerifierDefaults."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     name: str | None = None
     args: dict[str, Any] | None = None
@@ -130,8 +144,8 @@ class StepConfig(BaseModel):
     instruction_file: PurePosixPath = PurePosixPath("instruction.md")
     agent: AgentOverrides | None = None
     verifier: VerifierOverrides | None = None
-    artifacts: list[str] = []                                       # POSIX globs
-    required_artifacts: list[str] = []                              # verifier-required POSIX globs
+    artifacts: list[str] = []  # POSIX globs
+    required_artifacts: list[str] = []  # verifier-required POSIX globs
     min_reward: dict[str, float] | float | None = None
     network: StepNetworkPlan | None = None
     healthcheck: HealthcheckSpec | None = None
@@ -151,6 +165,51 @@ class MultiStepConfig(BaseModel):
         return self
 
 
+class TaskServiceExecutionV1(BaseModel):
+    """Opt-in, immutable service-execution binding carried by a task revision.
+
+    The runtime template deliberately omits ``task_revision_sha256`` because
+    that digest covers the complete task directory, including task.toml. The
+    scheduler binds the published Task checksum after materialization, avoiding
+    an impossible self-referential digest while retaining strict validation.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["loom.task-service-execution.v1"] = "loom.task-service-execution.v1"
+    logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    runtime_template: dict[str, Any]
+
+    @field_validator("runtime_template")
+    @classmethod
+    def _runtime_template_is_canonical(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if "task_revision_sha256" in value:
+            raise ValueError("runtime template cannot contain its enclosing task revision")
+        plan = bind_service_execution_runtime_plan(
+            value,
+            task_revision_sha256=_SERVICE_EXECUTION_REVISION_SENTINEL,
+        )
+        if plan.execution_role != "attempt":
+            raise ValueError("task service execution requires an attempt runtime plan")
+        payload = plan.canonical_payload()
+        del payload["task_revision_sha256"]
+        return payload
+
+
+def bind_service_execution_runtime_plan(
+    runtime_template: dict[str, Any],
+    *,
+    task_revision_sha256: str,
+) -> ExecutionRuntimePlanV1:
+    """Bind a published task revision to its immutable runtime template."""
+
+    from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+
+    return ExecutionRuntimePlanV1.model_validate(
+        {**runtime_template, "task_revision_sha256": task_revision_sha256}
+    )
+
+
 class TaskConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1"] = "1"
@@ -159,6 +218,7 @@ class TaskConfig(BaseModel):
     environment: EnvironmentConfig
     agent: AgentDefaults
     verifier: VerifierDefaults
+    service_execution: TaskServiceExecutionV1 | None = None
     steps: list[StepConfig] = []
     multi_step: MultiStepConfig | None = None
 
@@ -168,6 +228,22 @@ class TaskConfig(BaseModel):
         value: frozenset[str],
     ) -> list[str]:
         return sorted(value)
+
+    @model_validator(mode="after")
+    def _service_execution_matches_task(self) -> TaskConfig:
+        if self.service_execution is None:
+            return self
+
+        from loom.execution_contract import workload_requirements_from_task
+        from loom.execution_runtime_contract import validate_runtime_plan_requirements
+
+        plan = bind_service_execution_runtime_plan(
+            self.service_execution.runtime_template,
+            task_revision_sha256=_SERVICE_EXECUTION_REVISION_SENTINEL,
+        )
+        requirements = workload_requirements_from_task(self)
+        validate_runtime_plan_requirements(plan, requirements)
+        return self
 
 
 def normalize_steps(cfg: TaskConfig) -> TaskConfig:

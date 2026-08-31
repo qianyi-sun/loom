@@ -42,10 +42,16 @@ from loom.db.schema import (
     User,
     Worker,
 )
+from loom.execution_runtime_contract import (
+    ContainerResourcesV1,
+    ExecutionRuntimePlanV1,
+    ProcessPhaseV1,
+)
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
 
@@ -57,6 +63,67 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
         "environment": {"os": "linux", "docker_image": "alpine"},
         "agent": {"name": "oracle"},
         "verifier": {"name": "pytest"},
+        "steps": [{"name": "main"}],
+    }
+
+
+def _service_execution_task_config(task_id: str) -> dict[str, object]:
+    task_image = "registry.example/task@sha256:" + "a" * 64
+    runtime_image = "registry.example/runtime@sha256:" + "b" * 64
+    resources = ContainerResourcesV1(
+        cpu_millis=1000,
+        memory_mib=1024,
+        ephemeral_storage_mib=2048,
+    )
+    plan = ExecutionRuntimePlanV1(
+        candidate_sha="1" * 40,
+        task_revision_sha256="sha256:" + "2" * 64,
+        command_identity_sha256="sha256:" + "3" * 64,
+        execution_class_id="linux-amd64-cpu-pod-v1",
+        composition="init_payload",
+        task_image_ref=task_image,
+        runtime_image_ref=runtime_image,
+        runtime_binary_sha256="sha256:" + "4" * 64,
+        image_admission=signed_image_admission_bundle((task_image, runtime_image)),
+        task_resources=resources,
+        workspace_mib=1024,
+        runtime_volume_mib=32,
+        main=ProcessPhaseV1(
+            role="agent",
+            argv=("/bin/true",),
+            working_directory="/workspace",
+            timeout_seconds=60,
+        ),
+        verifier_execution="in_attempt",
+        verifier=ProcessPhaseV1(
+            role="verifier",
+            argv=("/bin/true",),
+            working_directory="/workspace",
+            timeout_seconds=60,
+        ),
+    )
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {
+            "os": "linux",
+            "docker_image": task_image,
+            "cpus": 1,
+            "memory_mb": 1024,
+            "storage_mb": 2048,
+            "baseline_network_policy": {"kind": "gateway-only"},
+            "network_policies_supported": ["gateway-only"],
+        },
+        "agent": {"name": "direct-completion"},
+        "verifier": {"name": "script"},
+        "service_execution": {
+            "schema_version": "loom.task-service-execution.v1",
+            "logical_pool_id": "nebius-cpu",
+            "runtime_template": plan.model_dump(
+                mode="json",
+                exclude={"task_revision_sha256"},
+            ),
+        },
         "steps": [{"name": "main"}],
     }
 
@@ -2118,6 +2185,52 @@ async def test_post_rejects_when_no_worker_advertises_backend(
     detail = r.json()["detail"]
     assert "no active worker advertises backend 'docker'" in detail
     assert "no active workers" in detail
+
+
+async def test_post_accepts_service_execution_task_without_legacy_worker(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """A converted task is claimed by the service scheduler, not a worker."""
+    app, raw, _team_id = camp_setup
+    task_id = "local/service-execution"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="5" * 64,
+                config=_service_execution_task_config(task_id),
+                source="local",
+                license="MIT",
+            )
+        )
+        s.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "service-only",
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": [task_id],
+                },
+                "trial_config": {},
+                "backend": "docker",
+            },
+        )
+
+    sync_engine.dispose()
+    assert response.status_code == 201, response.text
+    assert response.json()["expected_trial_count"] == 1
 
 
 async def test_post_rejects_when_no_worker_serves_specific_backend(

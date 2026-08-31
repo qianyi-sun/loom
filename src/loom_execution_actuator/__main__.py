@@ -122,6 +122,8 @@ async def _run() -> None:
             target_id=settings.target_id,
             namespace=settings.namespace,
             runtime_class_name=settings.runtime_class_name,
+            node_selector=settings.node_selector,
+            tolerations=settings.tolerations,
             service_account_name=settings.service_account_name,
             credential_broker_url=settings.credential_broker_url,
         ),

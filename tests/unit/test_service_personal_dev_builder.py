@@ -20,6 +20,10 @@ from loom.personal_dev_builder_runtime import (
     KubectlPersonalDevBuildExecutor,
     KubectlPersonalDevPlatformBuildExecutor,
 )
+from loom.personal_dev_builder_tools import (
+    AsyncBoundedCommandRunner,
+    SkopeoDockerManifestPersonalDevRegistryPublisher,
+)
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
 from loom.personal_dev_native_builder_executor import (
     NativeAgentPersonalDevPlatformBuildExecutor,
@@ -76,7 +80,7 @@ def _settings(tmp_path: Path, **overrides):
         "java_database_metadata_sha256": java_database_metadata_sha256,
         "java_database_sha256": java_database_sha256,
         "lock_sha256": "1" * 64,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     cache_identity_sha256 = hashlib.sha256(
         b"loom-personal-dev-scanner-cache-v1\0"
@@ -203,6 +207,35 @@ def test_builder_runtime_wires_one_exact_bounded_authority(tmp_path: Path) -> No
     assert runtime.capabilities.max_artifact_bytes == 8 * 1024 * 1024
     assert runtime.exporter.registry_prefix == "registry.example/personal-dev"
     assert isinstance(runtime.executor, KubectlPersonalDevBuildExecutor)
+
+
+def test_builder_runtime_keeps_docker_state_outside_read_only_registry_secret(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    registry_auth = settings.personal_dev_builder_registry_auth_file
+    registry_auth.parent.chmod(0o550)
+
+    try:
+        runtime = build_personal_dev_builder_runtime(
+            settings,  # type: ignore[arg-type]
+            minio_client=object(),
+        )
+    finally:
+        registry_auth.parent.chmod(0o750)
+
+    assert runtime is not None
+    publisher = runtime.exporter.publisher
+    assert isinstance(publisher, SkopeoDockerManifestPersonalDevRegistryPublisher)
+    assert isinstance(publisher.runner, AsyncBoundedCommandRunner)
+    assert publisher.runner.environment is not None
+    docker_config = Path(publisher.runner.environment["DOCKER_CONFIG"])
+    assert docker_config != registry_auth.parent
+    assert docker_config.stat().st_mode & 0o777 == 0o700
+    docker_auth = docker_config / "config.json"
+    assert docker_auth.is_symlink()
+    assert docker_auth.readlink() == registry_auth
+    (docker_config / "manifests").mkdir()
 
 
 def test_builder_runtime_native_mode_binds_each_architecture_to_exact_provider(

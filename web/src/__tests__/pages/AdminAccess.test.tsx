@@ -396,7 +396,7 @@ describe("AdminAccess", () => {
       "true",
     );
     expect(await screen.findByText("Account requests")).toBeInTheDocument();
-    expect(screen.getByText("Ada")).toBeInTheDocument();
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
     expect(screen.getByText("Dev")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve account Ada" })).toBeInTheDocument();
     expect(screen.getByText("Legacy team registrations")).toBeInTheDocument();

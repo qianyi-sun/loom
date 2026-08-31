@@ -245,18 +245,19 @@ through the Unix socket. Kubernetes does not start the regular client until
 the native sidecar startup probe succeeds. When the client exits, Job-sidecar
 semantics terminate the sidecar without keeping the Job alive.
 
-The trusted image build fails unless the base still supplies the expected
-RootlessKit version and binary plus the exact `newuidmap`/`newgidmap` file
-capabilities and the executable foreign-architecture QEMU helper:
+The trusted image build fails unless the base still supplies BuildKit
+`v0.33.0-rc1`, the exact `newuidmap`/`newgidmap` file capabilities, and the
+executable foreign-architecture QEMU helper:
 `buildkit-qemu-aarch64` in the amd64 image and `buildkit-qemu-x86_64` in the
 arm64 image. The fail-closed sidecar launcher is a checked-in trusted-image
 source and its preflight marker is captured in bounded sidecar logs. These are
 part of trusted image publication evidence, not mutable node prerequisites.
-The RootlessKit binary binding is architecture-specific: SHA-256
-`79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc`
-for amd64 and
-`27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce`
-for arm64 in the pinned multi-platform base.
+The image rebuilds RootlessKit `3.1.0` from reviewed commit
+`62d2101fbbe4f79bc845a337c4e868d27ff602c9`, pins its source archive by
+SHA-256, raises only `golang.org/x/crypto` to `v0.55.0`, records the generated
+binary digest inside the image, and verifies that digest before publication.
+This keeps all three shipped Go tools past CVE-2026-56854 without accepting an
+unfixed upstream RootlessKit binary or a mutable download.
 
 ## Data and authority flow
 
