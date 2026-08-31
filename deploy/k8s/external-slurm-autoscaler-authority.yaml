@@ -50,3 +50,28 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: loom-external-slurm-autoscaler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["loom-global-execution-witness-v1"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+subjects:
+  - kind: ServiceAccount
+    name: loom-external-slurm-autoscaler
+    namespace: loom-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loom-external-slurm-autoscaler-witness

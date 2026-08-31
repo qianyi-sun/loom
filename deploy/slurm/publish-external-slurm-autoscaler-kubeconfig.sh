@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTHORITY_MANIFEST="$SCRIPT_DIR/../k8s/external-slurm-autoscaler-authority.yaml"
 KUBECTL="${KUBECTL:-/usr/local/bin/kubectl}"
 NAMESPACE="loom-staging"
+WITNESS_NAMESPACE="loom-dev"
+WITNESS_CONFIG_MAP="loom-global-execution-witness-v1"
 SOURCE_SECRET="loom-secrets"
 TARGET_SECRET="loom-external-slurm-autoscaler-db"
 TOKEN_SECRET="loom-external-slurm-autoscaler-token"
@@ -98,6 +100,16 @@ chmod 0600 "$temporary_dir/kubeconfig"
 
 "$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$NAMESPACE" \
   get secret "$TARGET_SECRET" -o name >/dev/null
+"$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$WITNESS_NAMESPACE" \
+  get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
+exec_allowed="$(
+  "$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$WITNESS_NAMESPACE" \
+    auth can-i create pods/exec 2>/dev/null || true
+)"
+if [ "$exec_allowed" != "no" ]; then
+  echo "error: external supervisor credential has unexpected pods/exec authority" >&2
+  exit 1
+fi
 install -m 0600 "$temporary_dir/kubeconfig" "$output_path"
 printf 'published namespace-scoped external Slurm autoscaler kubeconfig: %s\n' \
   "$output_path"

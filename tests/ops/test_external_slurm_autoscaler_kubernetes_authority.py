@@ -29,11 +29,17 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
         "Secret",
         "Role",
         "RoleBinding",
+        "Role",
+        "RoleBinding",
     ]
-    assert all(
-        document["metadata"]["namespace"] == "loom-staging"  # type: ignore[index]
-        for document in documents
-    )
+    assert [document["metadata"]["namespace"] for document in documents] == [  # type: ignore[index]
+        "loom-staging",
+        "loom-staging",
+        "loom-staging",
+        "loom-staging",
+        "loom-dev",
+        "loom-dev",
+    ]
     token = documents[1]
     assert token["type"] == "kubernetes.io/service-account-token"
     assert token["metadata"]["annotations"] == {  # type: ignore[index]
@@ -70,6 +76,35 @@ def test_authority_has_only_the_reads_and_port_forward_needed_for_postgres() -> 
     } in rules
     verbs = {verb for rule in rules for verb in rule["verbs"]}
     assert verbs <= {"get", "list", "create"}
+
+
+def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
+    documents = _documents()
+    witness_role = documents[4]
+    assert witness_role["metadata"]["name"] == (  # type: ignore[index]
+        "loom-external-slurm-autoscaler-witness"
+    )
+    assert witness_role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["configmaps"],
+            "resourceNames": ["loom-global-execution-witness-v1"],
+            "verbs": ["get"],
+        }
+    ]
+    binding = documents[5]
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-external-slurm-autoscaler",
+            "namespace": "loom-staging",
+        }
+    ]
+    assert all(
+        "pods/exec" not in rule["resources"]
+        for document in documents
+        for rule in document.get("rules", [])  # type: ignore[union-attr]
+    )
 
 
 def test_publisher_avoids_secret_values_in_process_arguments() -> None:

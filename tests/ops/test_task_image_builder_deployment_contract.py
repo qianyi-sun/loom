@@ -103,13 +103,15 @@ def test_staging_builder_supervisors_match_native_activation() -> None:
         assert args.global_execution_witness_json is None
         assert args.manager_public_key is None
         assert args.expected_manager_public_key_sha256_file is None
-        assert args.global_execution_manager_export == (
-            "deployment/loom-capacity-manager"
+        assert args.global_execution_witness_config_map == ("loom-global-execution-witness-v1")
+        assert args.global_execution_witness_namespace == "loom-dev"
+        assert args.global_execution_witness_kubeconfig == (
+            "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
         )
-        assert args.global_execution_manager_namespace == "loom-dev"
-        assert args.global_execution_manager_kubeconfig == (
-            "/var/lib/loom-staging-rollout/kubeconfig"
-        )
+        assert args.global_execution_manager_export is None
+        assert args.global_execution_manager_namespace is None
+        assert args.global_execution_manager_kubeconfig is None
+        assert args.kubeconfig == ("/var/lib/loom-staging-rollout/external-supervisor.kubeconfig")
         assert args.expected_manager_public_key_sha256 == (
             "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd"
         )
