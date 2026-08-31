@@ -68,6 +68,29 @@ rollback_shadow_manifest='<absolute-byte-reviewed-schema-4-shadow-manifest>'
 rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 
 repository_root="$(pwd -P)"
+loom_python="$repository_root/.venv/bin/python"
+loom_cli() {
+  env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+    PYTHONPATH="$repository_root/src" "$loom_python" -m loom_cli "$@"
+}
+verify_loom_cli_source() {
+  env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+    PYTHONPATH="$repository_root/src" "$loom_python" - "$repository_root" <<'PY'
+import sys
+from pathlib import Path
+
+import loom
+import loom_cli
+
+root = Path(sys.argv[1]).resolve(strict=True)
+expected_loom = root / "src" / "loom" / "__init__.py"
+expected_loom_cli = root / "src" / "loom_cli" / "__init__.py"
+observed_loom = Path(loom.__file__).resolve(strict=True)
+observed_loom_cli = Path(loom_cli.__file__).resolve(strict=True)
+if observed_loom != expected_loom or observed_loom_cli != expected_loom_cli:
+    raise SystemExit(1)
+PY
+}
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-${merged_source_sha}"
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
@@ -94,6 +117,8 @@ test "$runtime_window_id" != '<authorized-native-runtime-window-id>'
 test "$(git rev-parse --show-toplevel)" = "$repository_root"
 test "$(git rev-parse HEAD)" = "$merged_source_sha"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test -x "$loom_python"
+verify_loom_cli_source
 test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = \
   "$runtime_profile_sha256"
 
@@ -410,7 +435,7 @@ capture_slurm "$evidence_dir/before-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/before-slurm.json"
 capture_database_counts "$evidence_dir/before-database-counts.json"
 capture_namespaces "$evidence_dir/before-namespaces.json"
-"$repository_root/.venv/bin/loom" admin capacity-control-plane status \
+loom_cli admin capacity-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   > "$evidence_dir/before-capacity.status.json"
 chmod 0600 "$evidence_dir/before-capacity.status.json"
@@ -898,7 +923,7 @@ capture_slurm "$evidence_dir/after-slurm.json"
 assert_no_loom_slurm_jobs "$evidence_dir/after-slurm.json"
 capture_database_counts "$evidence_dir/after-database-counts.json"
 capture_namespaces "$evidence_dir/after-namespaces.json"
-"$repository_root/.venv/bin/loom" admin capacity-control-plane status \
+loom_cli admin capacity-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   > "$evidence_dir/after-capacity.status.json"
 chmod 0600 "$evidence_dir/after-capacity.status.json"
@@ -970,7 +995,7 @@ ssh_run "$gb10_target" sudo env PYTHONPATH="$host_stage" \
   --profile "$host_stage/deploy/personal-dev-native-builder/runtime-profile-v1.json" \
   > "$evidence_dir/runtime-remove.json"
 
-"$repository_root/.venv/bin/loom" admin personal-dev-control-plane status \
+loom_cli admin personal-dev-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig" \
   --file deploy/dev-fleet/personal-dev-control-plane.toml \
   --trusted-release-file "$trusted_release" \

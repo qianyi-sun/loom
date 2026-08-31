@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,6 +115,96 @@ def test_native_builder_runbooks_route_ssh_through_argv_boundary() -> None:
     for runbook in (runtime, acceptance):
         shell = _shell(runbook)
         assert shell.count('ssh "${ssh_options[@]}"') == 1
+
+
+def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> None:
+    runtime = _read(RUNTIME)
+    acceptance = _read(ACCEPTANCE)
+    runtime_cli = _shell_function(runtime, "loom_cli")
+    acceptance_cli = _shell_function(acceptance, "loom_cli")
+    assert runtime_cli == acceptance_cli
+
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|%s|' \"$PYTHONPATH\" \"$PYTHONNOUSERSITE\"\n"
+        "printf '<%s>' \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o700)
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(fake_python)],
+        input=(
+            'repository_root="/exact/release"\n'
+            'loom_python="$1"\n'
+            + runtime_cli
+            + "\n"
+            + "loom_cli admin personal-dev-control-plane status\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert behavior.stdout == (
+        "/exact/release/src|1|<-m><loom_cli><admin>"
+        "<personal-dev-control-plane><status>"
+    )
+    for runbook in (runtime, acceptance):
+        assert "/.venv/bin/loom" not in _shell(runbook)
+
+
+def test_native_builder_runbooks_reject_cli_module_provenance_drift(
+    tmp_path: Path,
+) -> None:
+    verify_source = _shell_function(_read(RUNTIME), "verify_loom_cli_source")
+    assert verify_source == _shell_function(
+        _read(ACCEPTANCE), "verify_loom_cli_source"
+    )
+    release = tmp_path / "release"
+    poison = tmp_path / "poison"
+    for root in (release, poison):
+        for package in ("loom", "loom_cli"):
+            package_root = root / "src" / package
+            package_root.mkdir(parents=True, exist_ok=True)
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+
+    accepted = subprocess.run(
+        ["bash", "-seu", "--", str(release), str(poison)],
+        input=(
+            'repository_root="$1"\n'
+            f'loom_python="{sys.executable}"\n'
+            'export PYTHONPATH="$2/src"\n'
+            + verify_source
+            + "\nverify_loom_cli_source\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("", encoding="utf-8")
+    (release / "src" / "loom_cli" / "__init__.py").unlink()
+    (release / "src" / "loom_cli" / "__init__.py").symlink_to(
+        outside / "__init__.py"
+    )
+    rejected = subprocess.run(
+        ["bash", "-seu", "--", str(release)],
+        input=(
+            'repository_root="$1"\n'
+            f'loom_python="{sys.executable}"\n'
+            + verify_source
+            + "\nverify_loom_cli_source\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected.returncode != 0
 
 
 def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() -> None:
@@ -308,8 +399,8 @@ def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_o
     management_apply = runbook.index('kubectl --kubeconfig "$kubeconfig" apply --server-side')
     readiness = runbook.index("signed-zero-grant-readiness")
     assert agent_active < management_apply < readiness
-    assert 'XDG_CONFIG_HOME="$owner_0_xdg" "$loom_cli" dev destroy "$owner_0_name"' in normalized
-    assert 'XDG_CONFIG_HOME="$owner_1_xdg" "$loom_cli" dev destroy "$owner_1_name"' in normalized
+    assert 'XDG_CONFIG_HOME="$owner_0_xdg" loom_cli dev destroy "$owner_0_name"' in normalized
+    assert 'XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev destroy "$owner_1_name"' in normalized
     assert "--format json" in normalized
     assert 'cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"' in runbook
     assert runbook.index('cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"') < (
