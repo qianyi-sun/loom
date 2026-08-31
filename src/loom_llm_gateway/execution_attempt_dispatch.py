@@ -155,7 +155,7 @@ async def authorize_trial_execution_dispatch(
             and lease.revoked_at is None
             and lease.deleted_at is None
             and lease.desired_state in {"create", "start", "finalize"}
-            and lease.observed_state in {"created", "running", "finalizing"}
+            and lease.observed_state in {"creating", "created", "running", "finalizing"}
             and trial.state in {"claimed", "running"}
         )
     except (TypeError, ValueError):

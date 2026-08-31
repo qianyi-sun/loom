@@ -25,7 +25,7 @@ class TrivyException(NamedTuple):
 
 
 TRIVY_SCANNER_NAME = "Trivy"
-TRIVY_VERSION = "v0.70.0"
+TRIVY_VERSION = "v0.74.0"
 _PERL_PURLS = (
     "pkg:deb/debian/libperl5.36",
     "pkg:deb/debian/libperl5.40",

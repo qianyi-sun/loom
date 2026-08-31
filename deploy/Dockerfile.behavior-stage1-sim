@@ -1,5 +1,26 @@
 # syntax=docker/dockerfile:1.7
 
+FROM golang:1.26.4-alpine@sha256:3ad57304ad93bbec8548a0437ad9e06a455660655d9af011d58b993f6f615648 AS wandb-core-builder
+
+ADD --checksum=sha256:4caf50a768c1aa2f364bb9f36e25c0602db9c32c606ac052d08571e6cd158800 \
+    "https://codeload.github.com/wandb/wandb/tar.gz/c532a96c739b1e7526003fa5c159c4458c611633" \
+    /tmp/wandb.tar.gz
+RUN mkdir /wandb \
+    && tar -xzf /tmp/wandb.tar.gz --strip-components=1 -C /wandb \
+    && rm /tmp/wandb.tar.gz
+WORKDIR /wandb/core
+RUN go mod download golang.org/x/crypto@v0.55.0 \
+    && crypto_dir="$(go env GOPATH)/pkg/mod/golang.org/x/crypto@v0.55.0" \
+    && rm -rf vendor/golang.org/x/crypto \
+    && cp -R "$crypto_dir" vendor/golang.org/x/crypto \
+    && sed -i 's/golang.org\/x\/crypto v0.52.0/golang.org\/x\/crypto v0.55.0/g' \
+      go.mod vendor/modules.txt \
+    && CGO_ENABLED=0 go build -mod=vendor -trimpath -buildvcs=false \
+      -tags 'disable_grpc_modules parquet_read_only' \
+      -ldflags '-s -w -X main.commit=c532a96c739b1e7526003fa5c159c4458c611633' \
+      -o /wandb-core-fixed ./cmd/wandb-core/main.go \
+    && test "$(go version -m /wandb-core-fixed | awk '$2 == "golang.org/x/crypto" {print $3}')" = "v0.55.0"
+
 # OLDLAB Stage 1 is intentionally single-platform.  The graph pins the final
 # Loom OCI index while the runtime contract pins the linux/amd64 child built
 # from this exact Isaac Sim platform manifest.
@@ -80,6 +101,8 @@ COPY --chmod=0555 src/loom_worker/__init__.py \
     src/loom_worker/pipeline_attempt_workspace.py \
     src/loom_worker/pipeline_live_preview.py \
     /opt/loom/python/loom_worker/
+COPY --from=wandb-core-builder --chmod=0555 /wandb-core-fixed \
+    /opt/loom/bin/wandb-core-fixed
 
 # `stage1-sources` is produced by prepare_behavior_stage1_image_sources.py.
 # Public sources are exact commit/tree archives.  The authorized OmniGibson
@@ -121,6 +144,8 @@ RUN set -eux; \
     uv pip install --python /opt/loom/venv-vla/bin/python --no-deps --require-hashes \
       --requirement /opt/loom/locks/loom-runtime.requirements.lock.txt; \
     vla_site=$(/opt/loom/venv-vla/bin/python -I -c 'import site; print(site.getsitepackages()[0])'); \
+    install -m 0555 /opt/loom/bin/wandb-core-fixed \
+      "${vla_site}/wandb/bin/wandb-core"; \
     printf '%s\n' \
       /opt/loom/python \
       /opt/loom/sources/bddl \

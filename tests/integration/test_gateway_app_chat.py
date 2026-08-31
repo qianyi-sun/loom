@@ -208,10 +208,36 @@ def test_chat_rejects_missing_loom_block(app, seed_data):  # type: ignore[no-unt
             },
         )
         assert r.status_code == 400
-        # detail is now a structured Pydantic error list — the loom field
-        # missing shows up in one of the error locations.
-        detail = r.json()["detail"]
-        assert any("loom" in str(err.get("loc", [])).lower() for err in detail)
+        assert r.json()["detail"] == (
+            "loom attribution is required without a step-scoped token"
+        )
+
+
+def test_chat_step_token_supplies_loom_attribution(
+    app,
+    seed_data,
+    seeded_trial_id,
+):  # type: ignore[no-untyped-def]
+    team_id, _ = seed_data
+    with TestClient(app) as client:
+        settings: GatewaySettings = app.state.settings
+        step_jwt = mint_step_jwt(
+            team_id=team_id,
+            trial_id=seeded_trial_id,
+            step_id="main",
+            ttl_sec=60,
+            signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={
+                "model": "anthropic/claude-opus-4-7",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["choices"][0]["message"]["content"] == "stubbed"
 
 
 def test_chat_rejects_bad_token(app, seed_data):  # type: ignore[no-untyped-def]

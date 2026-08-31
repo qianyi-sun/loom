@@ -624,6 +624,9 @@ def test_stage1_scans_have_bounded_large_image_timeout() -> None:
         assert job.get("timeout-minutes") == 120
         assert job.get("env", {}).get("STAGE1_TRIVY_TIMEOUT") == "45m0s"
         assert scan_script.count('--timeout "$STAGE1_TRIVY_TIMEOUT"') == 2
+        assert "set +e" in scan_script
+        assert "scan_status=$?" in scan_script
+        assert "scripts/summarize_trivy_report.py" in scan_script
 
 
 @pytest.mark.parametrize(
@@ -1874,6 +1877,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "locked-environments",
         "lint-and-static",
         "runtime-payload",
+        "nebius-iac",
         "tests-root",
         "tests-packages",
     }

@@ -81,7 +81,7 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
 
     assert result.errors == ()
     assert result.workflow_count == 11
-    assert result.reference_count == 112
+    assert result.reference_count == 113
     assert set(result.remote_actions) == {
         "actions/attest",
         "actions/attest-build-provenance",
@@ -144,10 +144,10 @@ def test_release_evidence_trivy_identity_matches_repository_owned_installer() ->
     assert all(
         "/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in script for script in scan_scripts
     )
-    assert TRIVY_RELEASE_URL.endswith("/v0.70.0")
+    assert TRIVY_RELEASE_URL.endswith("/v0.74.0")
     assert TRIVY_ARCHIVE_SHA256 == {
-        "amd64": "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9",
-        "arm64": "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d",
+        "amd64": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+        "arm64": "b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5",
     }
 
 

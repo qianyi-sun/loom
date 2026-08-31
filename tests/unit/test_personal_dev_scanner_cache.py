@@ -41,10 +41,10 @@ def test_checked_in_scanner_cache_lock_is_exact() -> None:
     lock = load_personal_dev_scanner_cache_lock(_LOCK)
 
     assert lock.schema_version == 1
-    assert lock.trivy_version == "v0.70.0"
+    assert lock.trivy_version == "v0.74.0"
     assert lock.binary_sha256 == {
-        "linux/amd64": "379d59f24a4a828c55de5f0b91b6805cc35d13580180b658820e648611256166",
-        "linux/arm64": "5bf6066f08c972e0575660eaeb87b4f1bac0e527076dcbf88184bc9baa353f65",
+        "linux/amd64": "d89bcc6510a267f11b773398cbf1be5520ce39f9e8b6633178c4487f05b7d791",
+        "linux/arm64": "fed2c9ca7d27191ada34524b5eaf5216a845c6d6f3246143c3b475552ffe5358",
     }
     assert lock.database.image == (
         "ghcr.io/aquasecurity/trivy-db@sha256:"

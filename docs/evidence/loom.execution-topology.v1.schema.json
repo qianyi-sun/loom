@@ -2,8 +2,21 @@
   "$defs": {
     "ExecutionTargetV1": {
       "additionalProperties": false,
-      "description": "Provider-bound regional target kept outside trial requirements.",
+      "description": "Environment binding onto one provider-bound physical cluster scope.",
       "properties": {
+        "cluster_scope_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cluster Scope Id"
+        },
         "data_residency": {
           "const": "eu",
           "title": "Data Residency",
@@ -107,7 +120,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Checked environment and regional bindings for one logical pool.",
+  "description": "Checked environment bindings for one shared physical cluster.",
   "properties": {
     "execution_class_id": {
       "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
@@ -134,7 +147,8 @@
       "items": {
         "$ref": "#/$defs/ExecutionTargetV1"
       },
-      "minItems": 4,
+      "maxItems": 3,
+      "minItems": 3,
       "title": "Targets",
       "type": "array"
     }

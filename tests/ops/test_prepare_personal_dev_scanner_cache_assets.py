@@ -309,7 +309,7 @@ def test_materializer_publishes_exact_verified_inventory(
         },
         "lock_sha256": hashlib.sha256(case.lock.read_bytes()).hexdigest(),
         "schema_version": 1,
-        "trivy_version": "v0.70.0",
+        "trivy_version": "v0.74.0",
     }
     assert (case.output / "scanner-cache-evidence.json").read_bytes() == (
         _canonical(evidence) + b"\n"

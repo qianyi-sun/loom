@@ -61,7 +61,7 @@ def _binding(source: Path) -> PersonalDevScannerCacheBinding:
             (source / "java-db/metadata.json").read_bytes()
         ),
     )
-    binary_sha256 = _sha256(b"trivy-v0.70.0")
+    binary_sha256 = _sha256(b"trivy-v0.74.0")
     identity_sha256 = hashlib.sha256(
         b"test-personal-dev-scanner-cache-v1\0"
         + binary_sha256.encode("ascii")
