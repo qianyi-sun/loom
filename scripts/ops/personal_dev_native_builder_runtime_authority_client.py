@@ -73,10 +73,10 @@ def _add_state_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _parser() -> _Parser:
-    parser = _Parser(add_help=True)
+    parser = _Parser(add_help=False)
     commands = parser.add_subparsers(dest="operation", required=True)
     for operation in ("status", "prepare", "stage-agent", "activate", "remove"):
-        command = commands.add_parser(operation)
+        command = commands.add_parser(operation, add_help=False)
         _common_arguments(command)
         if operation == "prepare":
             _add_prepare_arguments(command)

@@ -18,6 +18,7 @@ from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+CLIENT_FAILURE = b"native runtime authority request failed\n"
 REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000"
 INSTANCE_ID = "123e4567-e89b-42d3-a456-426614174001"
 AGENT_REPOSITORY = "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent"
@@ -236,6 +237,81 @@ def test_client_status_emits_exactly_one_frame() -> None:
     assert parse_request(BytesIO(result.stdout)).header.operation == "status"
 
 
+def _stage_agent_command(private_key_fd: int, service_ca_fd: int) -> list[str]:
+    return [
+        sys.executable, str(CLIENT), "stage-agent",
+        "--authority-source-sha", "a" * 40,
+        "--authority-source-tree", "b" * 40,
+        "--request-id", REQUEST_ID,
+        "--runtime-profile-sha256", "c" * 64,
+        "--schema-version", "1",
+        "--expected-state-sha256", "d" * 64,
+        "--agent-image", _image(AGENT_REPOSITORY, "e"),
+        "--builder-image", _image(BUILDER_REPOSITORY, "f"),
+        "--service-origin", "https://agent.example",
+        "--agent-instance-id", INSTANCE_ID,
+        "--agent-key-id", "gb10-native-builder-v1",
+        "--expected-public-key-sha256", "e" * 64,
+        "--private-key-fd", str(private_key_fd),
+        "--service-ca-fd", str(service_ca_fd),
+    ]
+
+
+@pytest.mark.parametrize("arguments", [["--help"], ["status", "--help"]])
+def test_client_help_is_a_secret_free_failure_without_stdout(arguments: list[str]) -> None:
+    """Catches argparse help escaping the binary-only client boundary."""
+    result = subprocess.run(
+        [sys.executable, str(CLIENT), *arguments], cwd=ROOT, check=False, capture_output=True
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == CLIENT_FAILURE
+
+
+def test_client_rejects_non_distinct_stage_agent_descriptors_without_stdout() -> None:
+    """Catches a client that lets one descriptor provide both secrets."""
+    result = subprocess.run(
+        _stage_agent_command(3, 3), cwd=ROOT, check=False, capture_output=True
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == CLIENT_FAILURE
+
+
+@pytest.mark.parametrize(
+    ("key", "ca"),
+    [(b"k" * 33, b"ca"), (b"k" * 32, b"c" * (1024 * 1024 + 1))],
+    ids=["over-bound-key", "over-bound-ca"],
+)
+def test_client_rejects_over_bound_stage_secrets_without_stdout(
+    tmp_path: Path, key: bytes, ca: bytes
+) -> None:
+    """Catches descriptor reads that silently truncate over-bound secret input."""
+    key_path = tmp_path / "key"
+    ca_path = tmp_path / "ca"
+    key_path.write_bytes(key)
+    ca_path.write_bytes(ca)
+    key_fd = os.open(key_path, os.O_RDONLY)
+    ca_fd = os.open(ca_path, os.O_RDONLY)
+    try:
+        result = subprocess.run(
+            _stage_agent_command(key_fd, ca_fd),
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            pass_fds=(key_fd, ca_fd),
+        )
+    finally:
+        os.close(key_fd)
+        os.close(ca_fd)
+
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == CLIENT_FAILURE
+
+
 def test_client_stage_agent_reads_only_open_file_descriptors(tmp_path: Path) -> None:
     """Catches secret path arguments or a client that leaks descriptor metadata."""
     key_path = tmp_path / "key"
@@ -247,25 +323,12 @@ def test_client_stage_agent_reads_only_open_file_descriptors(tmp_path: Path) -> 
     key_fd = os.open(key_path, os.O_RDONLY)
     ca_fd = os.open(ca_path, os.O_RDONLY)
     try:
-        command = [
-            sys.executable, str(CLIENT), "stage-agent",
-            "--authority-source-sha", "a" * 40,
-            "--authority-source-tree", "b" * 40,
-            "--request-id", REQUEST_ID,
-            "--runtime-profile-sha256", "c" * 64,
-            "--schema-version", "1",
-            "--expected-state-sha256", "d" * 64,
-            "--agent-image", _image(AGENT_REPOSITORY, "e"),
-            "--builder-image", _image(BUILDER_REPOSITORY, "f"),
-            "--service-origin", "https://agent.example",
-            "--agent-instance-id", INSTANCE_ID,
-            "--agent-key-id", "gb10-native-builder-v1",
-            "--expected-public-key-sha256", "e" * 64,
-            "--private-key-fd", str(key_fd),
-            "--service-ca-fd", str(ca_fd),
-        ]
         result = subprocess.run(
-            command, cwd=ROOT, check=False, capture_output=True, pass_fds=(key_fd, ca_fd)
+            _stage_agent_command(key_fd, ca_fd),
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            pass_fds=(key_fd, ca_fd),
         )
     finally:
         os.close(key_fd)
