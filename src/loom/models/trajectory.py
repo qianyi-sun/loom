@@ -257,12 +257,20 @@ class ToolUseEvent(_EventBase):
     result: dict[str, Any] | None = None
     error: str | None = None
     duration_sec: float = Field(ge=0)
+    reasoning_content: str | None = None
+    thought: str | None = None
+    summary: str | None = None
 
 
 class AgentThoughtEvent(_EventBase):
     kind: Literal[EventKind.AGENT_THOUGHT] = EventKind.AGENT_THOUGHT
     content: str
     tokens: int | None = None
+    sdk_event_type: str | None = None
+    reasoning_content: str | None = None
+    thought: str | None = None
+    summary: str | None = None
+    tool_call_id: str | None = None
 
 
 class AgentRetryEvent(_EventBase):
@@ -497,6 +505,7 @@ class OpenHandsSdkRuntimeProvenanceEvent(_EventBase):
     sdk_version: str
     openhands_tools_version: str
     loom_bridge_revision: str
+    terminus_style: bool = False
 
 
 class OpenHandsSdkArtifactRefEvent(_EventBase):

@@ -24,9 +24,10 @@ def test_runner_invokes_openhands_sdk_and_emits_jsonl(monkeypatch, tmp_path, cap
             calls["llm"] = kwargs
 
     class FakeAgent:
-        def __init__(self, *, llm: FakeLLM, tools: list[FakeTool]) -> None:
+        def __init__(self, *, llm: FakeLLM, tools: list[FakeTool], **kwargs: object) -> None:
             calls["agent_llm"] = llm
             calls["agent_tools"] = tools
+            calls["agent_kwargs"] = kwargs
 
     class FakeConversation:
         def __init__(self, agent: FakeAgent, **kwargs: object) -> None:
@@ -93,6 +94,7 @@ def test_runner_invokes_openhands_sdk_and_emits_jsonl(monkeypatch, tmp_path, cap
     assert calls["conversation"]["max_iteration_per_run"] == 3
     assert calls["conversation"]["visualizer"] is None
     assert calls["message"] == "solve it"
+    assert calls["agent_kwargs"] == {}
 
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert lines[0]["kind"] == "agent_thought"
@@ -110,6 +112,82 @@ def test_runner_invokes_openhands_sdk_and_emits_jsonl(monkeypatch, tmp_path, cap
     assert artifact_refs[0]["sandbox_path"] == ".loom/agent/openhands_sdk_events.json"
     native_path = tmp_path / ".loom" / "agent" / "openhands_sdk_events.json"
     assert native_path.exists()
+
+
+def test_runner_terminus_style_passes_agent_kwargs_and_provenance(
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeTool:
+        def __init__(self, *, name: str) -> None:
+            self.name = name
+
+    class FakeLLM:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+    class FakeAgent:
+        def __init__(self, *, llm: FakeLLM, tools: list[FakeTool], **kwargs: object) -> None:
+            calls["agent_kwargs"] = kwargs
+
+    class FakeConversation:
+        def __init__(self, agent: FakeAgent, **kwargs: object) -> None:
+            self.state = SimpleNamespace(events=[])
+
+        def send_message(self, message: str) -> None:
+            pass
+
+        def run(self) -> None:
+            pass
+
+    terminus_kwargs = {
+        "include_default_tools": ["FinishTool"],
+        "agent_context": {"system_message_suffix": "analysis/plan"},
+    }
+    monkeypatch.setenv("LLM_API_KEY", "step-token")
+    monkeypatch.setenv("LOOM_TRIAL_ID", "00000000-0000-4000-8000-000000000099")
+    monkeypatch.setenv("LOOM_STEP_ID", "main")
+    monkeypatch.setattr(
+        openhands_sdk_runner,
+        "_load_sdk_types",
+        lambda: (FakeLLM, FakeAgent, FakeConversation, FakeTool),
+    )
+    monkeypatch.setattr(
+        openhands_sdk_runner,
+        "_load_default_tools",
+        lambda tool_type: [tool_type(name="terminal")],
+    )
+    monkeypatch.setattr(
+        openhands_sdk_runner,
+        "build_terminus_style_agent_kwargs",
+        lambda: terminus_kwargs,
+    )
+
+    rc = openhands_sdk_runner.main(
+        [
+            "--model",
+            "openai/test-model",
+            "--workdir",
+            str(tmp_path),
+            "--output",
+            "jsonl",
+            "--task",
+            "solve it",
+            "--terminus-style",
+        ]
+    )
+
+    assert rc == 0
+    assert calls["agent_kwargs"] == terminus_kwargs
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines[1]["content"] == "status: terminus-style enabled"
+    provenance = next(
+        line for line in lines if line["kind"] == "openhands_sdk_runtime_provenance"
+    )
+    assert provenance["terminus_style"] is True
 
 
 def test_runner_requires_jsonl_output(monkeypatch, tmp_path, capsys) -> None:
@@ -167,7 +245,7 @@ def test_runner_reports_missing_openhands_tools(monkeypatch, tmp_path, capsys) -
             pass
 
     class FakeAgent:
-        def __init__(self, *, llm: FakeLLM, tools: list[FakeTool]) -> None:
+        def __init__(self, *, llm: FakeLLM, tools: list[FakeTool], **kwargs: object) -> None:
             pass
 
     class FakeConversation:

@@ -54,6 +54,16 @@ def test_capture_envelope_shapes() -> None:
     )
     assert provenance["kind"] == "openhands_sdk_runtime_provenance"
     assert provenance["sdk_version"] == "1.34.0"
+    assert provenance["terminus_style"] is False
+
+    terminus_provenance = build_runtime_provenance_payload(
+        envelope=envelope,
+        sdk_version="1.34.0",
+        openhands_tools_version="1.34.0",
+        loom_bridge_revision="1.0",
+        terminus_style=True,
+    )
+    assert terminus_provenance["terminus_style"] is True
 
     artifact_ref = build_artifact_ref_payload(
         envelope=envelope,
