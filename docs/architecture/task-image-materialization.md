@@ -91,6 +91,63 @@ node temporarily and never overlaps packed trial work. A missing global
 execution witness disables scale-up and drains both pending and running builder
 allocations.
 
+## Reliable witness transport and supervisor authority
+
+The capacity-manager `witness-publisher` sidecar makes a database-backed,
+Ed25519-signed export for `gb10` and `oldlab` together every ten seconds. It
+atomically patches `gb10.json` and `oldlab.json` in the stable
+`loom-dev/loom-global-execution-witness-v1` ConfigMap. The ConfigMap is only a
+durable transport name, never a trust authority: each reader still checks the
+pinned public-key fingerprint, signature, canonical digest, authority, pool,
+epoch, execution state, ceiling, and expiry. A missing, malformed, stale, or
+wrongly scoped export therefore fails closed; the 30-second expiry closes
+scale-up and drains capacity owned by the legacy supervisor.
+
+The manager container does not receive the publisher token. Only the sidecar
+mounts a projected token, and its `loom-capacity-witness-publisher` service
+account can only `get` and `patch` that one ConfigMap in `loom-dev`. External
+trial and builder supervisors read the architecture-specific key through a bounded,
+shell-free `kubectl get configmap ... -o json`, then give those bytes to the
+existing cryptographic parser. Their dedicated runtime credential is
+`/var/lib/loom-staging-rollout/external-supervisor.kubeconfig`; it may read the
+dedicated staging database Secret, perform the scoped database port-forward,
+and `get` that exact ConfigMap. It has no `pods/exec` authority. The protected
+rollout credential at `/var/lib/loom-staging-rollout/kubeconfig` is used only
+by the rollout publisher and is never referenced by a supervisor unit.
+
+The old `deployment/loom-capacity-manager` exec source is transition-only. It
+is absent from every active profile and the temporary exact-pod `pods/exec`
+Role and RoleBinding are removed only after both controllers have demonstrated
+successful ConfigMap reads. A later failure remains closed rather than falling
+back to exec.
+
+## Hard local-storage admission
+
+Before it constructs a control-plane client or requests a materialization
+claim, an exclusive builder performs owned cleanup and records structured
+evidence: Docker root, final free bytes, required free bytes, probe
+availability, and cleanup error count. A missing probe or free space below
+`LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB` is a fatal storage-admission error. The
+allocation exits nonzero without consuming a lease, so the materialization
+remains queued. The same preparation and admission check runs again after each
+claim is processed, before another claim can be requested.
+
+Cleanup first removes only stopped (`created`, `dead`, or `exited`) containers
+where the container itself or its referenced image carries one of
+`loom.task-image=true`, `loom.task-sidecar=true`, or
+`loom.trial-cache=true`. It never removes running containers, container
+volumes, or any unlabelled resource. TTL pruning and oldest-first pressure
+eviction then apply only to managed images, followed by a fresh filesystem
+probe. In particular, Docker system prune, broad container prune, and ownership
+inference from a repository or tag spelling are outside Loom's authority.
+
+The autoscaler retains queued demand, but after the latest failed allocation in
+the same `(environment, pool_name)` it waits exactly five minutes before
+submitting again. The cooldown is neither global nor per architecture: a
+failure in one environment or builder pool does not delay another. This avoids
+one failed storage/runtime allocation every supervisor tick while allowing an
+automatic retry when the cooldown ends.
+
 ## Retention
 
 Local builder and execution-node copies are caches. Loom labels all managed task
@@ -129,6 +186,10 @@ policy in this increment cannot submit or release a Slurm job.
 Tests cover deterministic per-architecture keys, idempotent enqueue, lease
 fencing and recovery, trial architecture gating, registry publication, contained
 worker pull-only behavior, exclusive Slurm request rendering, autoscaler demand,
-and bounded local eviction. Integration tests prove that a trial cannot be
-claimed before readiness and becomes claimable immediately after the matching
-architecture variant is committed.
+and bounded local eviction. They additionally cover bounded atomic ConfigMap
+publication, reader validation, the absence of active `pods/exec` authority,
+the dedicated supervisor kubeconfig, stopped managed-container cleanup, hard
+pre-claim rejection and successful storage admission, and the exact
+five-minute failed-allocation cooldown. Integration tests prove that a trial
+cannot be claimed before readiness and becomes claimable immediately after the
+matching architecture variant is committed.
