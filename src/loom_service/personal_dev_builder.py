@@ -38,6 +38,7 @@ from loom.personal_dev_builder_runtime import (
 )
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
+    EphemeralDockerManifestState,
     SkopeoDockerManifestPersonalDevRegistryPublisher,
     TrivyPersonalDevImageScanner,
 )
@@ -529,9 +530,10 @@ def build_personal_dev_builder_runtime(
     registry_auth_file = _required_registry_auth_file(
         settings.personal_dev_builder_registry_auth_file
     )
+    docker_manifest_state = EphemeralDockerManifestState(registry_auth_file)
     publisher_runner = AsyncBoundedCommandRunner(
         environment={
-            "DOCKER_CONFIG": str(registry_auth_file.parent),
+            "DOCKER_CONFIG": str(docker_manifest_state.directory),
             "HOME": "/tmp",
             "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "TMPDIR": "/tmp",
@@ -548,6 +550,7 @@ def build_personal_dev_builder_runtime(
             label="docker",
         ),
         registry_auth_file=registry_auth_file,
+        docker_manifest_state=docker_manifest_state,
     )
     capabilities = S3PersonalDevBuildCapabilityProvider(
         object_store=minio_client,

@@ -10,6 +10,7 @@ import pytest
 from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
 from loom.personal_dev_builder_tools import (
     AsyncBoundedCommandRunner,
+    EphemeralDockerManifestState,
     ExternalToolError,
     SkopeoDockerManifestPersonalDevRegistryPublisher,
     SkopeoPersonalDevRegistryArtifactCollector,
@@ -129,11 +130,13 @@ async def test_registry_publisher_preserves_platform_digest_and_verifies_joined_
         separators=(",", ":"),
     ).encode()
     runner = _Runner([b"", manifest, b"", b"", index])
+    registry_auth_file = tmp_path / "registry" / "config.json"
     publisher = SkopeoDockerManifestPersonalDevRegistryPublisher(
         runner=runner,  # type: ignore[arg-type]
         skopeo_executable="/usr/bin/skopeo",
         docker_executable="/usr/bin/docker",
-        registry_auth_file=tmp_path / "registry" / "config.json",
+        registry_auth_file=registry_auth_file,
+        docker_manifest_state=EphemeralDockerManifestState(registry_auth_file),
     )
     registration = _running_registration()
     repository = "registry.example/personal-dev/loom-service"
