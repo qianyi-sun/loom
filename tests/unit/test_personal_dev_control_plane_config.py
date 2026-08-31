@@ -251,14 +251,22 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     )
 
 
-def test_profile_rejects_out_of_range_native_public_store_port(
+@pytest.mark.parametrize(
+    "public_store_origin",
+    [
+        "https://objects.dev.yylx.world:8443",
+        "https://objects.dev.yylx.world:99999",
+    ],
+)
+def test_profile_rejects_unmanaged_native_public_store_port(
     tmp_path: Path,
+    public_store_origin: str,
 ) -> None:
     path = _write_profile(
         tmp_path,
         lambda text: _prepared_native_profile(
             text,
-            public_store_origin="https://objects.dev.yylx.world:99999",
+            public_store_origin=public_store_origin,
         ),
     )
 
@@ -281,6 +289,21 @@ def test_prepared_profile_binds_exact_public_store_host_cidrs(tmp_path: Path) ->
     assert profile.native_builder.public_store_endpoint_cidrs == (
         "207.35.188.227/32",
     )
+
+
+def test_prepared_profile_rejects_management_public_store_host_collision(
+    tmp_path: Path,
+) -> None:
+    path = _write_profile(
+        tmp_path,
+        lambda text: _prepared_native_profile(
+            text,
+            public_store_origin="https://loom-service.dev.yylx.world",
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="public store host conflicts"):
+        load_personal_dev_control_plane_profile(path)
 
 
 @pytest.mark.parametrize(

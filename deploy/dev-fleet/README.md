@@ -51,7 +51,11 @@ The native arm64 half has a distinct
 [GB10 runtime rollout](../../docs/runbooks/personal-dev-native-builder-runtime.md).
 It stages a dedicated Docker daemon and KVM gVisor runtime on `gx10-01c7`,
 retains only exact current/previous release images without daemon-wide prune,
-and starts the signed agent before native management activation. The follow-on
+and starts the signed agent before native management activation. A prepared
+shadow owns the public object-store TLS hostname but routes it to a
+selectorless Service; acceptance and operational renders alone switch that
+route to MinIO S3 port 9000, and shadow rollback closes it again without
+exposing the port-9001 console. The follow-on
 [two-owner native acceptance](../../docs/runbooks/personal-dev-native-builder-acceptance.md)
 requires overlapping GB10 arm64 grants and OLDLAB amd64 Jobs, immutable
 multi-platform candidates, authenticated owner teardown, zero dynamic

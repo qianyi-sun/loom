@@ -967,7 +967,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 35, "ready": True},
+            {"name": "namespaced-resources", "observed": 37, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "native-builder", "observed": 1, "ready": True},
             {"name": "personal-workers", "observed": 0, "ready": True},

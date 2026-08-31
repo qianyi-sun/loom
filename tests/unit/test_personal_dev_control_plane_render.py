@@ -648,7 +648,7 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
             + plan.canonical_bytes()
         ).hexdigest()
     )
-    assert rendered.resource_count == shadow.resource_count == 38
+    assert rendered.resource_count == shadow.resource_count == 40
     assert rendered.runtime_class_name == plan.builder.runtime_class_name
     assert rendered.runtime_handler == plan.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == plan.builder.runtime_profile_sha256
@@ -715,16 +715,22 @@ def test_acceptance_plan_v2_rejects_native_identity_extension(tmp_path: Path) ->
         load_personal_dev_acceptance_plan(path, hashlib.sha256(payload).hexdigest())
 
 
-def test_acceptance_plan_rejects_out_of_range_native_public_store_port(
+@pytest.mark.parametrize(
+    "public_store_origin",
+    [
+        "https://objects.dev.yylx.world:8443",
+        "https://objects.dev.yylx.world:99999",
+    ],
+)
+def test_acceptance_plan_rejects_unmanaged_native_public_store_port(
     tmp_path: Path,
+    public_store_origin: str,
 ) -> None:
     _profile, _release, native_plan, _shadow, _rendered, _documents = _acceptance_render(
         tmp_path
     )
     value = native_plan.canonical_value()
-    value["native_builder"]["public_store_origin"] = (
-        "https://objects.dev.yylx.world:99999"
-    )
+    value["native_builder"]["public_store_origin"] = public_store_origin
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
     path = tmp_path / "acceptance-plan-invalid-public-store.json"
     path.write_bytes(payload)
@@ -1196,7 +1202,8 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         acceptance_documents,
     ) = _acceptance_render(tmp_path)
 
-    assert shadow_render.resource_count == acceptance_render.resource_count == 38
+    assert shadow_render.resource_count == 38
+    assert acceptance_render.resource_count == 40
     for profile, release, plan, documents in (
         (shadow_profile, shadow_release, None, shadow_documents),
         (
@@ -1644,6 +1651,133 @@ def test_storage_ingress_separates_postgres_and_minio_callers(tmp_path: Path) ->
     assert "loom-dev-instance-controller" in minio_sources
     assert "loom-personal-dev-builder-controller" in minio_sources
     assert "loom-personal-dev-migration" not in minio_sources
+
+
+def test_prepared_shadow_public_store_is_tls_bound_but_inert(tmp_path: Path) -> None:
+    _checked_in_profile, release = _inputs(tmp_path)
+    profile = _prepared_profile(tmp_path)
+    rendered = render_shadow_personal_dev_control_plane(profile, release)
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+
+    disabled_service = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("Service", "loom-dev", "loom-personal-dev-object-store-disabled")
+    )
+    object_store_ingress = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+    )
+    minio_policy = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+    )
+
+    assert rendered.resource_count == 40
+    assert disabled_service["spec"] == {
+        "ports": [{"name": "s3", "port": 9000, "targetPort": 9000}],
+    }
+    assert {
+        "cert-manager.io/cluster-issuer": profile.network.ingress_cluster_issuer,
+        "nginx.ingress.kubernetes.io/proxy-body-size": "0",
+        "nginx.ingress.kubernetes.io/proxy-buffering": "off",
+        "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
+        "nginx.ingress.kubernetes.io/proxy-request-buffering": "off",
+        "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+    }.items() <= object_store_ingress["metadata"]["annotations"].items()
+    assert object_store_ingress["spec"] == {
+        "ingressClassName": profile.network.ingress_class_name,
+        "tls": [
+            {
+                "hosts": ["objects.dev.yylx.world"],
+                "secretName": "loom-personal-dev-object-store-tls",
+            }
+        ],
+        "rules": [
+            {
+                "host": "objects.dev.yylx.world",
+                "http": {
+                    "paths": [
+                        {
+                            "path": "/",
+                            "pathType": "Prefix",
+                            "backend": {
+                                "service": {
+                                    "name": "loom-personal-dev-object-store-disabled",
+                                    "port": {"number": 9000},
+                                }
+                            },
+                        }
+                    ]
+                },
+            }
+        ],
+    }
+    assert len(minio_policy["spec"]["ingress"]) == 1
+    assert all("from" in rule for rule in minio_policy["spec"]["ingress"])
+
+
+@pytest.mark.parametrize("mode", ["acceptance", "operational"])
+def test_enabled_public_store_routes_only_s3_and_shadow_reapply_closes_it(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    render = _acceptance_render if mode == "acceptance" else _operational_render
+    profile, _release, _plan, shadow, rendered, documents = render(tmp_path)
+    shadow_documents = [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
+
+    enabled_ingress = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+    )
+    shadow_ingress = next(
+        item
+        for item in shadow_documents
+        if _identity(item)
+        == ("Ingress", "loom-dev", "loom-personal-dev-object-store")
+    )
+    enabled_minio_policy = next(
+        item
+        for item in documents
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+    )
+    shadow_minio_policy = next(
+        item
+        for item in shadow_documents
+        if _identity(item)
+        == ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress")
+    )
+
+    assert rendered.resource_count == shadow.resource_count == 40
+    enabled_backend = enabled_ingress["spec"]["rules"][0]["http"]["paths"][0][
+        "backend"
+    ]["service"]
+    shadow_backend = shadow_ingress["spec"]["rules"][0]["http"]["paths"][0][
+        "backend"
+    ]["service"]
+    assert enabled_backend == {"name": "loom-dev-minio", "port": {"number": 9000}}
+    assert shadow_backend == {
+        "name": "loom-personal-dev-object-store-disabled",
+        "port": {"number": 9000},
+    }
+    assert enabled_minio_policy["spec"]["ingress"][-1] == {
+        "ports": [{"protocol": "TCP", "port": 9000}]
+    }
+    assert len(shadow_minio_policy["spec"]["ingress"]) == 1
+    assert all("from" in rule for rule in shadow_minio_policy["spec"]["ingress"])
+    assert "9001" not in yaml.safe_dump(enabled_ingress)
+    assert "9001" not in yaml.safe_dump(enabled_minio_policy)
+    assert enabled_ingress["spec"]["rules"][0]["host"] == (
+        profile.native_builder.public_store_origin.removeprefix("https://")
+    )
 
 
 def test_management_ingress_admits_public_https_port_without_source_identity(

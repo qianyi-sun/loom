@@ -166,6 +166,8 @@ if (
     or management.fragment
     or public_store.scheme != "https"
     or not public_store.hostname
+    or public_store.hostname == management.hostname
+    or public_store.port not in {None, 443}
     or public_store.path not in {"", "/"}
     or public_store.username
     or public_store.password
@@ -407,9 +409,12 @@ host activation nor agent registration may weaken them.
 ## 3. Prove the current public-store DNS/CIDR binding
 
 The prepared profile and operational plan must contain the same exact HTTPS
-origin and sorted public `/32` or `/128` endpoints. Resolve again from GB10 at
-the start of the window; guessed, private, broad, stale, or extra addresses are
-a stop condition.
+origin on external port 443 and sorted public `/32` or `/128` endpoints. The
+prepared shadow must already own the TLS Ingress while routing it to the
+selectorless disabled Service; only an acceptance or operational manifest may
+route it to MinIO port 9000 and open the matching ingress rule. Port 9001 must
+remain absent. Resolve again from GB10 at the start of the window; guessed,
+private, broad, stale, or extra addresses are a stop condition.
 
 ```bash
 public_store_host="$(python3 - "$reviewed_public_store_origin" <<'PY'
@@ -417,7 +422,12 @@ import sys
 from urllib.parse import urlsplit
 
 value = urlsplit(sys.argv[1])
-if value.scheme != "https" or not value.hostname or value.path not in {"", "/"}:
+if (
+    value.scheme != "https"
+    or not value.hostname
+    or value.port not in {None, 443}
+    or value.path not in {"", "/"}
+):
     raise SystemExit(1)
 if value.username or value.password or value.query or value.fragment:
     raise SystemExit(1)
