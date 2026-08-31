@@ -13,13 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("ready_for_review", "", False),
         ("reopened", "", False),
         ("synchronize", "", False),
-        ("labeled", "triage", False),
-        ("unlabeled", "triage", False),
-        ("edited", "", False),
         ("edited", "", True),
+        ("labeled", "ci:integration", False),
+        ("unlabeled", "ci:integration", False),
+        ("unexpected-action", "", False),
     ],
 )
-def test_every_non_draft_pr_event_runs_full_protected_gate(
+def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
     action: str,
     action_label: str,
     base_changed: bool,
@@ -31,6 +31,59 @@ def test_every_non_draft_pr_event_runs_full_protected_gate(
         pull_request_action=action,
         pull_request_action_label=action_label,
         pull_request_base_changed=base_changed,
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+
+
+@pytest.mark.parametrize(
+    ("action", "action_label"),
+    [
+        ("edited", ""),
+        ("labeled", "triage"),
+        ("unlabeled", "priority:P1"),
+        ("labeled", ""),
+    ],
+)
+def test_unrelated_pr_metadata_event_is_filtered(
+    action: str,
+    action_label: str,
+) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels={"ci:images"},
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_base_changed=False,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "ci:integration",
+        "ci:integration-docker",
+        "ci:images",
+        "cluster-smoke",
+        "staging-smoke",
+        "ci:coverage-summary",
+    ],
+)
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_supported_selector_metadata_event_runs_full_gate(action: str, label: str) -> None:
+    plan = plan_validations(
+        changed_paths=["docs/user-guide.md"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=label,
     )
 
     assert plan.event_relevant is True
@@ -58,7 +111,9 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
         labels=set(),
         event_name="pull_request",
         pull_request_action="converted_to_draft",
-        pull_request_draft=True,
+        # The action itself must remain filtered even if a synthetic or
+        # replayed payload has not yet reflected the new draft state.
+        pull_request_draft=False,
     )
 
     assert plan.event_relevant is False

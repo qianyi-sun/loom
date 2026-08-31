@@ -98,6 +98,16 @@ GATE_CONTRACTS = {
     ),
 }
 
+CI_SELECTOR_LABELS = (
+    "ci:integration",
+    "ci:integration-docker",
+    "ci:images",
+    "cluster-smoke",
+    "staging-smoke",
+    "ci:coverage-summary",
+)
+CI_SELECTOR_LABELS_JSON = json.dumps(CI_SELECTOR_LABELS, separators=(",", ":"))
+
 SOURCE_PLAN_CONTRACTS = {
     ".github/workflows/ci.yml": ("workflow-plan", "plan"),
     ".github/workflows/images.yml": ("plan", "required"),
@@ -287,17 +297,10 @@ def test_source_workflows_share_native_run_identity() -> None:
 
         assert "github.event.pull_request.draft" in run_name
         assert "github.event.action == 'converted_to_draft'" in run_name
-        assert """fromJSON('["labeled","unlabeled"]')""" not in run_name
-        assert "github.event.action == 'edited'" not in run_name
-        assert "github.event.changes.base == null" not in run_name
-        for label in (
-            "ci:integration",
-            "ci:integration-docker",
-            "ci:images",
-            "cluster-smoke",
-            "staging-smoke",
-            "ci:coverage-summary",
-        ):
+        assert "github.event.action == 'edited'" in run_name
+        assert "github.event.changes.base == null" in run_name
+        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in run_name
+        for label in CI_SELECTOR_LABELS:
             assert label in run_name
             assert (
                 run_name.count(f"contains(github.event.pull_request.labels.*.name, '{label}')") == 3
@@ -330,7 +333,7 @@ def test_source_workflows_have_no_publisher_generation_contract() -> None:
         assert "authoritative-gates.yml" not in plan_step["run"]
 
 
-def test_draft_events_finish_before_checkout_or_gate() -> None:
+def test_draft_and_irrelevant_metadata_events_finish_before_checkout_or_gate() -> None:
     for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         jobs = workflow["jobs"]
@@ -345,11 +348,14 @@ def test_draft_events_finish_before_checkout_or_gate() -> None:
         gate_id = GATE_CONTRACTS[workflow_path][0]
 
         assert event_step["id"] == "event"
-        assert _normalized_expression(event_step["env"]["FILTERED_EVENT"]) == (
-            "${{ github.event_name == 'pull_request' && "
-            "(github.event.pull_request.draft || "
-            "github.event.action == 'converted_to_draft') }}"
-        )
+        filtered_event = _normalized_expression(event_step["env"]["FILTERED_EVENT"])
+        assert "github.event.pull_request.draft" in filtered_event
+        assert "github.event.action == 'converted_to_draft'" in filtered_event
+        assert "github.event.action == 'edited'" in filtered_event
+        assert "github.event.changes.base == null" in filtered_event
+        assert "github.event.action == 'labeled'" in filtered_event
+        assert "github.event.action == 'unlabeled'" in filtered_event
+        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in filtered_event
         assert "checkout_required=false" in event_step["run"]
         assert "gate_mode=filtered" in event_step["run"]
         assert checkout_step["if"] == "steps.event.outputs.checkout_required == 'true'"
@@ -1901,23 +1907,37 @@ def test_ci_planner_uses_merge_base_for_pr_changed_paths_only() -> None:
     assert "pull_request|merge_group)" not in plan_script
 
 
-def test_protected_workflows_cancel_superseded_pr_runs() -> None:
+def test_protected_workflows_cancel_only_authoritative_pr_runs() -> None:
+    normalized_cancellations = set()
     for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
-        cancel = workflow["concurrency"]["cancel-in-progress"]
+        cancel = _normalized_expression(workflow["concurrency"]["cancel-in-progress"])
+        normalized_cancellations.add(cancel)
 
-        assert _normalized_expression(cancel) == "${{ github.event_name == 'pull_request' }}"
+        assert "github.event_name == 'pull_request'" in cancel
+        assert "github.event.action == 'edited'" in cancel
+        assert "github.event.changes.base == null" in cancel
+        assert "github.event.action == 'labeled'" in cancel
+        assert "github.event.action == 'unlabeled'" in cancel
+        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in cancel
+
+    assert len(normalized_cancellations) == 1
 
 
 def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
     for workflow_path in GATE_CONTRACTS:
         workflow = _workflow(workflow_path)
-        group = workflow["concurrency"]["group"]
+        group = _normalized_expression(workflow["concurrency"]["group"])
 
         assert "github.event.pull_request.number || github.ref" in group
+        assert "github.run_id" in group
+        assert "filtered-{0}" in group
+        assert "authoritative" in group
+        assert "github.event.action == 'edited'" in group
+        assert "github.event.changes.base == null" in group
+        assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in group
         assert "admission" not in group
         assert "background" not in group
-        assert "github.event.action" not in group
 
 
 def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
