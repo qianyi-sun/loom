@@ -23,8 +23,8 @@ from loom_launcher.openhands_sdk_capture import (
     resolve_package_version,
     write_native_events_file,
 )
-from loom_launcher.openhands_sdk_prompt import build_terminus_style_agent_kwargs
 from loom_launcher.openhands_sdk_events import OpenHandsEventMapper
+from loom_launcher.openhands_sdk_prompt import build_terminus_style_agent_kwargs
 
 
 def _load_sdk_types() -> tuple[type[Any], type[Any], type[Any], type[Any]]:
