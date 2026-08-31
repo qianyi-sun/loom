@@ -19,13 +19,16 @@ model remain unchanged.
    capacity that the legacy supervisor owns.
 2. Witness readers must never receive `pods/exec` authority and supervisor
    processes must never receive the protected rollout kubeconfig.
-3. A builder with an unavailable storage probe or less than the configured
+3. Each controller must prove its dedicated credential locally before its
+   supervisor units can activate. Credential bytes must never cross the GB10
+   SSH transport or enter rollout evidence.
+4. A builder with an unavailable storage probe or less than the configured
    free-space floor must exit before claiming a materialization.
-4. Automatic cleanup may remove only resources proven to be Loom-managed.
+5. Automatic cleanup may remove only resources proven to be Loom-managed.
    Broad Docker pruning and inference from an unlabelled image name are not
    permitted.
-5. A failed builder allocation must not cause a 30-second resubmission loop.
-6. Existing ready materializations, immutable registry digests, and historical
+6. A failed builder allocation must not cause a 30-second resubmission loop.
+7. Existing ready materializations, immutable registry digests, and historical
    publication projections remain valid. Historical append-only evidence is
    never fabricated.
 
@@ -58,11 +61,28 @@ is removed after convergence evidence proves the stable source.
 ## Runtime Kubernetes authority
 
 Both Slurm controllers use a dedicated kubeconfig at
-`/var/lib/loom-staging-rollout/external-supervisor.kubeconfig`. The existing
-publisher installs the same scoped service-account identity on OLDLAB and
-GB10. Its permissions are limited to the dedicated staging database Secret,
-the objects required for the database port-forward, and `get` on the exact
+`/var/lib/loom-staging-rollout/external-supervisor.kubeconfig`. The protected
+rollout converges that credential locally on OLDLAB and GB10 before publishing
+or starting either controller's supervisor units. Each controller invokes the
+reviewed publisher from the immutable candidate with its own protected rollout
+kubeconfig, writes only the fixed local output path, and proves owner-only file
+metadata, database/ConfigMap access, and `pods/exec` denial. The publisher
+installs the same scoped service-account identity, whose permissions are
+limited to the dedicated staging database Secret, the objects required for the
+database port-forward, and `get` on the exact
 `loom-dev/loom-global-execution-witness-v1` ConfigMap.
+
+GB10 credential convergence is a fixed operation on the existing forced-command
+broker. Its request carries only the reviewed candidate identity and operation
+name; the remote helper reads the source credential and publishes the runtime
+credential on the controller. No kubeconfig bytes, bearer token, arbitrary
+path, or arbitrary command crosses SSH. Observation returns only bounded file
+metadata, a content digest, and effective-permission booleans. Missing
+credentials are repairable before activation; unsafe metadata, unexpected
+authority, a publication failure, or an invalid readback is drift and leaves
+both new units closed. A successfully published narrow credential is monotonic
+least-privilege state and is not replaced with the broad rollout credential
+during compensation or rollback.
 
 The protected rollout kubeconfig remains at
 `/var/lib/loom-staging-rollout/kubeconfig` and is never referenced by a
@@ -117,10 +137,11 @@ The code never broadens ownership based solely on repository or tag spelling.
    storage admission, and cooldown behavior.
 2. Apply the capacity-control-plane manifests and prove that both ConfigMap
    keys refresh and validate for longer than two witness TTLs.
-3. Publish the scoped external-supervisor kubeconfig to both Slurm controllers
-   at the dedicated path and verify its effective permissions.
-4. Apply staging environment state so all four supervisors use the ConfigMap
-   source and dedicated kubeconfig.
+3. Start the protected staging rollout. Its controller-local credential
+   components publish and verify both scoped kubeconfigs before the existing
+   supervisor components may write or start any unit.
+4. Verify the applied environment state so all four supervisors use the
+   ConfigMap source and dedicated kubeconfig.
 5. Verify OLDLAB and GB10 trial and builder supervisors reconcile successfully
    with an empty queue.
 6. Perform owned GB10 legacy cleanup until storage admission passes, without
@@ -134,7 +155,9 @@ digests continue serving trials independently of builder availability.
 ## Verification
 
 Automated tests cover ConfigMap rendering and publisher RBAC, bounded atomic
-publication, ConfigMap reader validation and malformed input, absence of
+publication, controller-local credential publication and observation, absence
+of credential bytes from the GB10 wire protocol, credential-before-unit
+ordering, ConfigMap reader validation and malformed input, absence of
 `pods/exec` from active staging policy, dedicated kubeconfig paths, stopped
 managed-container cleanup, hard pre-claim storage rejection, successful
 admission, and failed-allocation cooldown.

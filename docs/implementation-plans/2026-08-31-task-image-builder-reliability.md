@@ -4,7 +4,7 @@
 
 **Goal:** Restore durable GB10 and OLDLAB builder supervision without pod-bound exec authority and prevent builders from claiming work below their storage floor.
 
-**Architecture:** A capacity-manager sidecar publishes short-lived signed exports to one stable ConfigMap; external supervisors read the object with a dedicated least-privilege kubeconfig and retain all existing cryptographic checks. Builder startup removes only provably managed stopped containers and images, then enforces storage admission before claiming work, while the autoscaler cools down after failed allocations.
+**Architecture:** A capacity-manager sidecar publishes short-lived signed exports to one stable ConfigMap; external supervisors read the object with a dedicated least-privilege kubeconfig and retain all existing cryptographic checks. The protected rollout publishes and proves that credential locally on both controllers through fixed operations before it can activate supervisor units; no credential bytes cross SSH. Builder startup removes only provably managed stopped containers and images, then enforces storage admission before claiming work, while the autoscaler cools down after failed allocations.
 
 **Tech Stack:** Python 3.12, asyncio, urllib/SSL, Kubernetes YAML/RBAC, systemd supervisor arguments, SQLAlchemy/PostgreSQL, Docker SDK, Slurm, pytest.
 
@@ -188,7 +188,75 @@ Query only the latest failed job for the exact environment/pool, suppress target
 
 Require a positive bounded cooldown in TOML normalization and runtime configuration, then run all Task 4 suites until green.
 
-### Task 5: Documentation, verification, commit, and protected delivery
+### Task 5: Brokered controller-local credential convergence
+
+**Files:**
+- Modify: `deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh`
+- Create: `src/loom_cli/rollout/operator/protected_external_supervisor_credential_transport.py`
+- Create: `src/loom_cli/rollout/operator/protected_external_supervisor_credential_component.py`
+- Modify: `src/loom_cli/rollout/operator/protected_gb10_external_supervisor_transport.py`
+- Modify: `scripts/ops/gb10_external_supervisor_broker.py`
+- Modify: `src/loom_cli/rollout/operator/protected_apply_executor.py`
+- Modify: `src/loom_cli/rollout/operator/installed_final_gate_executor.py`
+- Test: `tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py`
+- Create: `tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py`
+- Modify: `tests/loom_cli/rollout/operator/test_protected_gb10_external_supervisor_transport.py`
+- Modify: `tests/loom_cli/rollout/operator/test_protected_apply_executor.py`
+- Modify: `tests/loom_cli/rollout/operator/test_installed_final_gate_executor.py`
+
+**Interfaces:**
+- Produces: immutable `ExternalSupervisorCredentialEvidence` containing only the controller identity, fixed-path SHA-256, UID, GID, mode, size, database-Secret readability, witness-ConfigMap readability, and `pods/exec` denial.
+- Produces: `ProtectedExternalSupervisorCredentialTransport.observe() -> ExternalSupervisorCredentialEvidence | None` and `publish() -> ExternalSupervisorCredentialEvidence`.
+- Adds: fixed GB10 operations `observe_credential` and `publish_credential`; their canonical requests contain only schema version, candidate SHA/tree, and operation.
+- Produces: `ProtectedExternalSupervisorCredentialComponent`, with component IDs `external-supervisor-credential-gb10` and `external-supervisor-credential-oldlab` ordered before both existing supervisor-unit components.
+
+- [ ] **Step 1: Write failing publisher check-mode and local-transport tests**
+
+Require `--check /var/lib/loom-staging-rollout/external-supervisor.kubeconfig` to perform no mutation, reject symlinks/non-regular files/wrong owner or mode, prove the dedicated database Secret and witness ConfigMap are readable, and require `auth can-i create pods/exec` to return exactly `no`. Require observation to return no token, CA, kubeconfig content, or command output.
+
+- [ ] **Step 2: Run the focused tests and verify RED**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py`
+
+Expected: failure because check mode, the evidence type, and the fixed local transport do not exist.
+
+- [ ] **Step 3: Implement fixed local publication and observation**
+
+Add a non-mutating check mode to the existing publisher. Implement the local transport with fixed candidate script, source kubeconfig, output path, service UID/GID, bounded subprocess output, clean environment, and exact post-publication observation. Treat an absent path as repairable; reject every present unsafe or ineffective credential as drift rather than overwriting it implicitly.
+
+- [ ] **Step 4: Write failing GB10 wire and broker tests**
+
+Require canonical `observe_credential` and `publish_credential` requests to contain only `candidate_sha`, `candidate_tree`, `operation`, and `schema_version`. Require the forced broker to dispatch only the candidate helper as UID/GID `995:2007`, and assert that token-, certificate-, kubeconfig-, path-, and arbitrary-command fields are rejected.
+
+- [ ] **Step 5: Run the GB10 transport tests and verify RED**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q tests/loom_cli/rollout/operator/test_protected_gb10_external_supervisor_transport.py tests/ops/test_gb10_external_supervisor_broker.py`
+
+Expected: request-operation and response decoding failures because the credential operations are not allowlisted.
+
+- [ ] **Step 6: Implement controller-local GB10 operations**
+
+Extend the existing typed request parser and candidate helper only. The remote helper constructs the fixed local credential transport from its verified candidate prefix, reads the source kubeconfig locally, and returns canonical evidence. Never place credential content in the request, response, exception, journal, or process arguments.
+
+- [ ] **Step 7: Write failing protected-order tests**
+
+Require both credential components to classify exact or repairable before apply, and require the protected journal order to be GB10 credential, OLDLAB credential, GB10 supervisor units, then OLDLAB supervisor units. Prove a second credential failure leaves all supervisor `apply` calls at zero and that a successfully published first narrow credential is retained without rollback to the broad source credential.
+
+- [ ] **Step 8: Run the protected executor/final-gate tests and verify RED**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q tests/loom_cli/rollout/operator/test_protected_apply_executor.py tests/loom_cli/rollout/operator/test_installed_final_gate_executor.py`
+
+Expected: missing component IDs, transports, and ordering assertions.
+
+- [ ] **Step 9: Implement fail-closed credential-before-unit composition**
+
+Add the credential components to protected apply and convergence, inject fixed local/GB10 transports from the installed final gate, include their non-secret evidence digests in terminal/convergence evidence, and keep supervisor activation closed unless both components are exact. Do not compensate a narrow credential by restoring or exposing the rollout kubeconfig.
+
+- [ ] **Step 10: Pass all Task 5 tests and audit the wire**
+
+Run every Task 5 test, `bash -n deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh`, Ruff, mypy, and a source scan proving the GB10 credential request/response fields cannot contain secret material.
+
+### Task 6: Documentation, verification, commit, and protected delivery
 
 **Files:**
 - Modify: `docs/architecture/task-image-materialization.md`
@@ -204,7 +272,7 @@ Document the stable signed-object transport, dedicated credential path, hard pre
 
 - [ ] **Step 2: Run focused verification**
 
-Run every test named in Tasks 1-4, plus formatting, Ruff, and mypy targets selected by `scripts/plan_ci_validations.py` for the changed paths.
+Run every test named in Tasks 1-5, plus formatting, Ruff, and mypy targets selected by `scripts/plan_ci_validations.py` for the changed paths.
 
 - [ ] **Step 3: Run broader affected suites**
 
