@@ -238,6 +238,26 @@ spec:
           value: /var/run/loom-personal-dev-capacity/private-key.pem
         - name: LOOM_SVC_PERSONAL_DEV_GLOBAL_LIVE_INSTANCE_LIMIT
           value: '16'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_IMAGE
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_INSTANCE_ID
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_AGENT_KEY_ID
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_ENABLED
+          value: 'False'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_FRESHNESS_SEC
+          value: '60'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_MAX_CONCURRENCY
+          value: '2'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_POLL_INTERVAL_SEC
+          value: '1.0'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PROTOCOL_VERSION
+          value: '1'
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_PUBLIC_KEY_SHA256
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_NATIVE_BUILDER_RUNTIME_PROFILE_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_OPERATIONAL_BINDING_JSON
           value: '{}'
         - name: LOOM_SVC_PERSONAL_DEV_OPERATIONAL_PLAN_SHA256
