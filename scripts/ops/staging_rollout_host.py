@@ -6221,7 +6221,7 @@ class HostInstaller:
             "namespace": "loom-staging",
             "environment": "staging",
             "cp_url": "http://127.0.0.1:18081",
-            "smoke_on_behalf_username": "devansh",
+            "smoke_on_behalf_username": "hongjian",
             "smoke_on_behalf_team_id": team_id,
             "scope": "current-gb10",
             # The GB10 SSH inventory fans every host through a single bastion

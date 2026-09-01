@@ -88,6 +88,7 @@ def test_config_template_is_non_secret_and_fixed_to_merged_dev() -> None:
         "deploy/environments/staging.multinode.cluster.toml"
     )
     assert config["expect_admin_token_fingerprint"] == "__ADMIN_TOKEN_FINGERPRINT__"
+    assert config["smoke_on_behalf_username"] == "hongjian"
     assert config["smoke_on_behalf_team_id"] == "__SMOKE_ON_BEHALF_TEAM_ID__"
     assert config["backup_max_objects"] == 1_000_000
     assert config["backup_max_entries"] == 16_000_000

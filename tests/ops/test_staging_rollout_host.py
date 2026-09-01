@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import threading
+import tomllib
 from collections.abc import Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from scripts.ops import staging_rollout_host as host
 from loom_cli.rollout.install_attestation import RunnerInstallAttestation
 from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
 from loom_cli.rollout.operator.backup_job import BackupJobState, PreflightBackupJobEnvelope
+from loom_cli.rollout.operator.config import OperatorConfig
 
 TEAM_ID = "11111111-1111-4111-8111-111111111111"
 TEAM_ID_2 = "22222222-2222-4222-8222-222222222222"
@@ -976,7 +978,18 @@ def test_install_is_idempotent_and_renders_only_safe_token_metadata(tmp_path: Pa
 
     assert first["changed"]
     assert second["changed"] == []
-    rendered = installer.filesystem.path(host.CONFIG_PATH).read_text(encoding="utf-8")
+    rendered_path = installer.filesystem.path(host.CONFIG_PATH)
+    installed_config = OperatorConfig.load(
+        rendered_path,
+        expected_owner_uid=os.getuid(),
+        expected_mode=0o640,
+    )
+    assert installed_config.smoke_on_behalf_username == "hongjian"
+    assert installed_config.smoke_on_behalf_team_id == TEAM_ID
+    rendered = rendered_path.read_text(encoding="utf-8")
+    rendered_config = tomllib.loads(rendered)
+    assert rendered_config["smoke_on_behalf_username"] == "hongjian"
+    assert rendered_config["smoke_on_behalf_team_id"] == TEAM_ID
     assert TEAM_ID in rendered
     assert "sha256:" in rendered and " len=" in rendered
     assert "admin-token-fixture" not in rendered

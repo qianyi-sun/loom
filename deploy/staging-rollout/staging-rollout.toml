@@ -17,7 +17,7 @@ cluster_name = "loom-staging"
 namespace = "loom-staging"
 environment = "staging"
 cp_url = "http://127.0.0.1:18081"
-smoke_on_behalf_username = "devansh"
+smoke_on_behalf_username = "hongjian"
 smoke_on_behalf_team_id = "__SMOKE_ON_BEHALF_TEAM_ID__"
 scope = "current-gb10"
 # Small so the fleet observe does not overwhelm the single GB10 SSH bastion
