@@ -578,7 +578,7 @@ def _decode_helper_apply_failure_response(payload: str) -> tuple[str, str | None
         )
     ):
         raise ValueError("GB10 controller apply failure response drifted")
-    return failure_code, cast(str | None, compensation_failure_code)
+    return failure_code, compensation_failure_code
 
 
 @dataclass(frozen=True, slots=True)

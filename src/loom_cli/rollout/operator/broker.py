@@ -1514,8 +1514,8 @@ def _final_gate_progress(
             if candidate_code in CAPACITY_ACCEPTANCE_FAILURE_CODES and (
                 candidate_node is None or candidate_node in GB10_SLURM_WORKER_HOSTS
             ):
-                capacity_failure_code = cast(str, candidate_code)
-                capacity_node = cast(str | None, candidate_node)
+                capacity_failure_code = candidate_code
+                capacity_node = candidate_node
     return (
         selected.check_id,
         selected.outcome.value,
