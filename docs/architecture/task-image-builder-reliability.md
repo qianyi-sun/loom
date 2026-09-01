@@ -63,26 +63,32 @@ is removed after convergence evidence proves the stable source.
 Both Slurm controllers use a dedicated kubeconfig at
 `/var/lib/loom-staging-rollout/external-supervisor.kubeconfig`. The protected
 rollout converges that credential locally on OLDLAB and GB10 before publishing
-or starting either controller's supervisor units. Each controller invokes the
-reviewed publisher from the immutable candidate with its own protected rollout
-kubeconfig, writes only the fixed local output path, and proves owner-only file
-metadata, database/ConfigMap access, and `pods/exec` denial. The publisher
-installs the same scoped service-account identity, whose permissions are
-limited to the dedicated staging database Secret, the objects required for the
-database port-forward, and `get` on the exact
+or starting either controller's supervisor units. OLDLAB first invokes the
+reviewed publisher from the immutable candidate with its protected rollout
+kubeconfig. That convergence installs the shared scoped service-account
+authority and dedicated database Secret. GB10 then checks its retained legacy
+narrow credential against that authority and atomically copies the checked
+bytes to the fixed output path as a distinct single-link file. The legacy path
+remains narrow while the old units still reference it; no broad rollout
+credential is installed on GB10 or crosses SSH. Both controllers prove
+owner-only file metadata, database/ConfigMap access, and `pods/exec` denial.
+The scoped identity is limited to the dedicated staging database Secret, the
+objects required for the database port-forward, and `get` on the exact
 `loom-dev/loom-global-execution-witness-v1` ConfigMap.
 
 GB10 credential convergence is a fixed operation on the existing forced-command
 broker. Its request carries only the reviewed candidate identity and operation
-name; the remote helper reads the source credential and publishes the runtime
-credential on the controller. No kubeconfig bytes, bearer token, arbitrary
-path, or arbitrary command crosses SSH. Observation returns only bounded file
-metadata, a content digest, and effective-permission booleans. Missing
-credentials are repairable before activation; unsafe metadata, unexpected
-authority, a publication failure, or an invalid readback is drift and leaves
-both new units closed. A successfully published narrow credential is monotonic
-least-privilege state and is not replaced with the broad rollout credential
-during compensation or rollback.
+name; the remote helper reads, checks, and atomically promotes only the fixed
+legacy narrow source. No kubeconfig bytes, bearer token, arbitrary path, or
+arbitrary command crosses SSH. The copy uses a new inode, owner-only mode,
+bounded bytes, stable source metadata, exclusive destination publication, and
+directory durability; the source and output must each remain single-link.
+Observation returns only bounded file metadata, a content digest, and
+effective-permission booleans. Missing credentials are repairable before
+activation; unsafe metadata, unexpected authority, a publication failure, or
+an invalid readback is drift and leaves both new units closed. A successfully
+published narrow credential is monotonic least-privilege state and is not
+replaced with the broad rollout credential during compensation or rollback.
 
 The protected rollout kubeconfig remains at
 `/var/lib/loom-staging-rollout/kubeconfig` and is never referenced by a

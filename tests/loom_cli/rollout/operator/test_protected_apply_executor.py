@@ -687,8 +687,8 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
     )
     assert roots[6:] == [
         "06-external-supervisor-transition-cleanup",
-        "07-external-supervisor-credential-gb10",
-        "08-external-supervisor-credential-oldlab",
+        "07-external-supervisor-credential-oldlab",
+        "08-external-supervisor-credential-gb10",
         "09-external-supervisors-gb10",
         "10-external-supervisors-oldlab",
     ]
@@ -716,13 +716,13 @@ def test_second_credential_failure_leaves_supervisor_units_inactive_and_keeps_fi
             unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
         ),
     }
-    first = CredentialTransport("gx10-01c7")
+    first = CredentialTransport("TRT-EAI-OLDLAB-1")
     credentials = {
-        "gx10-01c7": first,
-        "TRT-EAI-OLDLAB-1": CredentialTransport(
-            "TRT-EAI-OLDLAB-1",
+        "gx10-01c7": CredentialTransport(
+            "gx10-01c7",
             fail_publish=True,
         ),
+        "TRT-EAI-OLDLAB-1": first,
     }
 
     with pytest.raises(RuntimeError, match="narrow credential publication failed"):

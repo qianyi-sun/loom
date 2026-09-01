@@ -75,6 +75,10 @@ _EXTERNAL_SUPERVISOR_CONTROLLER_ORDER = (
     "gx10-01c7",
     "TRT-EAI-OLDLAB-1",
 )
+_EXTERNAL_SUPERVISOR_CREDENTIAL_ORDER = (
+    "TRT-EAI-OLDLAB-1",
+    "gx10-01c7",
+)
 
 
 class ProtectedApplyCommandRunner(Protocol):
@@ -669,7 +673,16 @@ def _external_supervisor_credential_components(
     execution_host: str | None,
 ) -> tuple[ProtectedExternalSupervisorCredentialComponent, ...]:
     if execution_host is None:
-        controller_hosts = _controller_hosts_in_order(plan, transports)
+        bound_hosts = set(
+            parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+        )
+        if set(transports) != bound_hosts:
+            raise ValueError("protected external supervisor credential coverage drifted")
+        controller_hosts = tuple(
+            host for host in _EXTERNAL_SUPERVISOR_CREDENTIAL_ORDER if host in bound_hosts
+        )
+        if len(controller_hosts) != len(bound_hosts):
+            raise ValueError("protected external supervisor controller is unauthorized")
     else:
         bound_hosts = set(
             parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)

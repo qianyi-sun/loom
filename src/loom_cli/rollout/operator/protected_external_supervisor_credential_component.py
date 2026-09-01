@@ -19,7 +19,7 @@ from .protected_external_supervisor_credential_transport import (
 )
 
 _IMPLEMENTATION_DIGEST = hashlib.sha256(
-    b"loom-protected-external-supervisor-credential-v1"
+    b"loom-protected-external-supervisor-credential-v2"
 ).hexdigest()
 _COMPONENT_IDS = {
     "gx10-01c7": "external-supervisor-credential-gb10",

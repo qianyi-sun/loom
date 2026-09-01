@@ -749,6 +749,7 @@ def _fixed_local_credential_transport(
         execution_host=GB10_CONTROLLER_EXECUTION_HOST,
         service_uid=GB10_CONTROLLER_SERVICE_UID,
         service_gid=GB10_CONTROLLER_SERVICE_GID,
+        promote_existing_source=True,
     )
 
 

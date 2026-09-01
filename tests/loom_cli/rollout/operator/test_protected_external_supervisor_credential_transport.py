@@ -29,7 +29,13 @@ class _Run:
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
 
-def _transport(tmp_path: Path, run: _Run):
+def _transport(
+    tmp_path: Path,
+    run: _Run,
+    *,
+    execution_host: str = "TRT-EAI-OLDLAB-1",
+    promote_existing_source: bool = False,
+):
     candidate = tmp_path / "candidate"
     publisher = candidate / "deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"
     publisher.parent.mkdir(parents=True)
@@ -40,11 +46,12 @@ def _transport(tmp_path: Path, run: _Run):
     source.chmod(0o600)
     return credential.FixedLocalExternalSupervisorCredentialTransport(
         candidate_root=candidate,
-        execution_host="TRT-EAI-OLDLAB-1",
+        execution_host=execution_host,
         source_kubeconfig=source,
         output_kubeconfig=run.output_path,
         service_uid=os.geteuid(),
         service_gid=os.getegid(),
+        promote_existing_source=promote_existing_source,
         run=run,
     )
 
@@ -79,6 +86,125 @@ def test_absent_credential_is_repairable_and_publish_returns_safe_evidence(
     ]
     assert run.calls[0][1]["KUBECONFIG"].endswith("rollout.kubeconfig")
     assert "KUBECONFIG" not in run.calls[1][1]
+
+
+def test_gb10_promotes_the_existing_narrow_source_without_broad_authority(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+    run = _Run(output)
+    transport = _transport(
+        tmp_path,
+        run,
+        execution_host="gx10-01c7",
+        promote_existing_source=True,
+    )
+
+    evidence = transport.publish()
+    source = tmp_path / "rollout.kubeconfig"
+
+    assert output.read_bytes() == source.read_bytes() == b"protected-source"
+    assert output.stat().st_ino != source.stat().st_ino
+    assert output.stat().st_nlink == source.stat().st_nlink == 1
+    assert evidence.execution_host == "gx10-01c7"
+    assert evidence.kubeconfig_sha256 == credential.hashlib.sha256(b"protected-source").hexdigest()
+    assert [call[0][1:] for call in run.calls] == [
+        ("--check", str(source)),
+        ("--check", str(output)),
+    ]
+    assert all("KUBECONFIG" not in environment for _, environment, _ in run.calls)
+
+
+def test_gb10_promotion_is_visible_only_with_final_single_link_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+    run = _Run(output)
+    transport = _transport(
+        tmp_path,
+        run,
+        execution_host="gx10-01c7",
+        promote_existing_source=True,
+    )
+    concurrent_observations = []
+
+    def rename_noreplace(directory_fd: int, source: str, destination: str) -> None:
+        os.rename(source, destination, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        assert output.stat().st_nlink == 1
+        concurrent_observations.append(transport.observe())
+
+    monkeypatch.setattr(
+        credential,
+        "_rename_noreplace",
+        rename_noreplace,
+        raising=False,
+    )
+
+    published = transport.publish()
+
+    assert concurrent_observations == [published]
+    assert output.stat().st_nlink == 1
+
+
+def test_gb10_promotion_recovers_after_publication_crash_without_link_count_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+    run = _Run(output)
+    transport = _transport(
+        tmp_path,
+        run,
+        execution_host="gx10-01c7",
+        promote_existing_source=True,
+    )
+
+    def publish_then_crash(directory_fd: int, source: str, destination: str) -> None:
+        os.rename(source, destination, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        raise OSError("simulated crash after atomic publication")
+
+    monkeypatch.setattr(
+        credential,
+        "_rename_noreplace",
+        publish_then_crash,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="publication failed safely"):
+        transport.publish()
+
+    assert output.read_bytes() == b"protected-source"
+    assert output.stat().st_nlink == 1
+    assert transport.publish() == transport.observe()
+
+
+def test_gb10_rejects_a_legacy_source_that_changes_during_permission_check(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+
+    class _SourceMutatingRun(_Run):
+        def __call__(self, argv, environment, timeout_seconds):
+            result = super().__call__(argv, environment, timeout_seconds)
+            if tuple(argv)[1:] == ("--check", str(tmp_path / "rollout.kubeconfig")):
+                source = tmp_path / "rollout.kubeconfig"
+                source.write_text("changed-source", encoding="utf-8")
+                source.chmod(0o600)
+            return result
+
+    run = _SourceMutatingRun(output)
+    transport = _transport(
+        tmp_path,
+        run,
+        execution_host="gx10-01c7",
+        promote_existing_source=True,
+    )
+
+    with pytest.raises(RuntimeError, match="publication failed safely"):
+        transport.publish()
+
+    assert not output.exists()
 
 
 def test_present_unsafe_credential_is_drift_not_overwritten(tmp_path: Path) -> None:

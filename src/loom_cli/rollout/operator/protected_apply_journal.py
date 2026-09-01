@@ -376,6 +376,7 @@ class ProtectedApplyJournal:
         try:
             _require_regular(lock_fd, uid=self.service_uid)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._validate_chain_layout(components)
             results: dict[str, ComponentTerminal] = {}
             preclassified_groups: set[str] = set()
             for ordinal, component in enumerate(components):
@@ -395,6 +396,27 @@ class ProtectedApplyJournal:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             finally:
                 os.close(lock_fd)
+
+    def _validate_chain_layout(
+        self,
+        components: Sequence[ProtectedApplyComponent],
+    ) -> None:
+        expected = {
+            f"{ordinal:02d}-{component.component_id}"
+            for ordinal, component in enumerate(components)
+        }
+        try:
+            entries = tuple(self.root.iterdir())
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "protected apply chain identity is unreadable"
+            ) from exc
+        for entry in entries:
+            if entry.name == self.lock_path.name:
+                continue
+            if entry.name not in expected:
+                raise ProtectedApplyJournalError("protected apply chain identity drifted")
+            _require_directory(entry, uid=self.service_uid)
 
     def _validated_preapply_groups(
         self,
