@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --control-plane-image DIGEST_REF --service-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -12,6 +12,7 @@ known_hosts=
 cluster_id=
 nebius_credentials=
 model_provider_api_key_file=
+gateway_image=
 control_plane_image=
 service_image=
 while (($#)); do
@@ -46,6 +47,11 @@ while (($#)); do
       model_provider_api_key_file=$2
       shift 2
       ;;
+    --gateway-image)
+      (($# >= 2)) || usage
+      gateway_image=$2
+      shift 2
+      ;;
     --control-plane-image)
       (($# >= 2)) || usage
       control_plane_image=$2
@@ -62,6 +68,7 @@ done
 
 [[ $gateway =~ ^[A-Za-z0-9.-]+$ ]] || usage
 [[ $cluster_id =~ ^mk8scluster-[a-z0-9]+$ ]] || usage
+[[ $gateway_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $control_plane_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
@@ -114,14 +121,15 @@ scp "${ssh_options[@]}" \
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
   "$(basename "$model_provider_api_key_file")" \
-  "$control_plane_image" "$service_image" <<'REMOTE'
+  "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
 remote_stage=$1
 cluster_id=$2
 credential_name=$3
 provider_key_name=$4
-control_plane_image=$5
-service_image=$6
+gateway_image=$5
+control_plane_image=$6
+service_image=$7
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
@@ -134,6 +142,10 @@ nebius mk8s cluster get-credentials \
   --no-progress
 chmod 600 "$remote_stage/kubeconfig"
 
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
+  deployment/loom-llm-gateway "gateway=$gateway_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
+  deployment/loom-llm-gateway --timeout=300s
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-control-plane "control-plane=$control_plane_image"
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
