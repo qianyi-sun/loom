@@ -206,10 +206,7 @@ def test_broker_parses_only_canonical_typed_protocol_identity(tmp_path: Path) ->
             changed[forbidden] = "forbidden"
             with pytest.raises(broker.BrokerError, match="fields"):
                 broker.parse_request_identity(
-                    (
-                        json.dumps(changed, sort_keys=True, separators=(",", ":"))
-                        + "\n"
-                    ).encode()
+                    (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n").encode()
                 )
 
 

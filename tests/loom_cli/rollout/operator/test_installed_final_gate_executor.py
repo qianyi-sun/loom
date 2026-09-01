@@ -239,7 +239,8 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     current_config = replace(
         historical_config,
         runner_repo=current_repo,
-        cluster_config_path=current_repo / environment_authority("staging").candidate_cluster_config,
+        cluster_config_path=current_repo
+        / environment_authority("staging").candidate_cluster_config,
         config_sha256="f" * 64,
     )
     current_install = SimpleNamespace(
@@ -305,9 +306,7 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
 
     monkeypatch.setattr(installed_module, "MigrationEpochProtectedApplyExecutor", ProtectedExecutor)
 
-    assert (
-        executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"
-    )  # type: ignore[comparison-overlap]
+    assert executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"  # type: ignore[comparison-overlap]
     expected_cluster_path = (
         environment_authority("staging").candidate_runtime_root
         / plan.candidate_sha

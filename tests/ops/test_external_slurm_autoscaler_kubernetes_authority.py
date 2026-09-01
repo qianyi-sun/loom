@@ -12,9 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
-TRANSITION_BINDING = (
-    ROOT / "deploy/k8s/external-slurm-autoscaler-manager-export-binding.yaml"
-)
+TRANSITION_BINDING = ROOT / "deploy/k8s/external-slurm-autoscaler-manager-export-binding.yaml"
 PUBLISHER = ROOT / "deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"
 
 
@@ -172,7 +170,7 @@ def test_publisher_has_a_non_mutating_runtime_credential_check() -> None:
     assert 'get configmap "$WITNESS_CONFIG_MAP"' in source
     assert "auth can-i create pods/exec" in source
     assert "get namespaces -o name" in source
-    assert 'while IFS= read -r authority_namespace; do' in source
+    assert "while IFS= read -r authority_namespace; do" in source
     assert "--all-namespaces" not in source
     assert 'if [ "$exec_allowed" != "no" ]' in source
 
@@ -223,9 +221,7 @@ esac
 
     assert result.returncode != 0
     assert "unexpected pods/exec authority" in result.stderr
-    assert "-n loom-audit-third auth can-i create pods/exec" in call_log.read_text(
-        encoding="utf-8"
-    )
+    assert "-n loom-audit-third auth can-i create pods/exec" in call_log.read_text(encoding="utf-8")
 
 
 def test_publisher_parses_as_bash() -> None:

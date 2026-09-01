@@ -215,12 +215,10 @@ def test_release_manifest_preserves_dual_arch_builder_activation() -> None:
 
 
 def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None:
-    runbook = Path(
-        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
-    ).read_text(encoding="utf-8")
-    phase2_boundary = " ".join(
-        runbook.split("## Closed Phase 2 boundary", maxsplit=1)[1].split()
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
     )
+    phase2_boundary = " ".join(runbook.split("## Closed Phase 2 boundary", maxsplit=1)[1].split())
 
     assert "do not activate a rootless provider, policy, or supervisor" in phase2_boundary
     assert "does not block the active native Phase 1 builder" in phase2_boundary
@@ -229,36 +227,26 @@ def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None
 
 
 def test_phase1_runbook_removes_complete_or_absent_transition_exec_set() -> None:
-    runbook = Path(
-        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
-    ).read_text(encoding="utf-8")
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
     normalized = " ".join(runbook.split())
 
+    assert 'TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"' in runbook
     assert (
-        'TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"'
-        in runbook
-    )
-    assert (
-        'test "$TRANSITION_PRESENT_COUNT" -eq 0 || '
-        'test "$TRANSITION_PRESENT_COUNT" -eq 4'
+        'test "$TRANSITION_PRESENT_COUNT" -eq 0 || test "$TRANSITION_PRESENT_COUNT" -eq 4'
     ) in normalized
     assert 'delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
     assert 'delete role "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
-    assert (
-        'delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"'
-        in normalized
-    )
-    assert (
-        'delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"'
-        in normalized
-    )
+    assert 'delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
+    assert 'delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
     assert 'error("unexpected pods/exec Role remains")' in normalized
 
 
 def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() -> None:
-    runbook = Path(
-        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
-    ).read_text(encoding="utf-8")
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
     rollback = runbook.split("## Rollback order", maxsplit=1)[1].split(
         "## Disabled Phase 2 prerequisites", maxsplit=1
     )[0]
@@ -276,9 +264,9 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
 
 
 def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:
-    runbook = Path(
-        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
-    ).read_text(encoding="utf-8")
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
     normalized = " ".join(runbook.split())
 
     assert "as_supervisor journalctl" not in normalized

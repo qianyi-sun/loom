@@ -658,8 +658,12 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
         "08-external-supervisors-gb10",
         "09-external-supervisors-oldlab",
     ]
-    assert all(transport.calls.count("credential-publish") == 1 for transport in credentials.values())
-    assert all(supervisor.calls.count("supervisor-apply") == 1 for supervisor in supervisors.values())
+    assert all(
+        transport.calls.count("credential-publish") == 1 for transport in credentials.values()
+    )
+    assert all(
+        supervisor.calls.count("supervisor-apply") == 1 for supervisor in supervisors.values()
+    )
 
 
 def test_second_credential_failure_leaves_supervisor_units_inactive_and_keeps_first_narrow(

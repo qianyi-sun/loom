@@ -303,10 +303,7 @@ class MigrationEpochProtectedApplyExecutor:
             or set(self.external_supervisor_credential_transports)
             != set(self.external_supervisor_credential_identities)
             or any(
-                type(uid) is not int
-                or type(gid) is not int
-                or uid < 0
-                or gid < 0
+                type(uid) is not int or type(gid) is not int or uid < 0 or gid < 0
                 for uid, gid in self.external_supervisor_credential_identities.values()
             )
         ):
@@ -470,10 +467,7 @@ class KubernetesProtectedConvergenceExecutor:
             or set(self.external_supervisor_credential_transports)
             != set(self.external_supervisor_credential_identities)
             or any(
-                type(uid) is not int
-                or type(gid) is not int
-                or uid < 0
-                or gid < 0
+                type(uid) is not int or type(gid) is not int or uid < 0 or gid < 0
                 for uid, gid in self.external_supervisor_credential_identities.values()
             )
         ):
@@ -617,9 +611,7 @@ def _external_supervisor_components(
 ) -> tuple[ProtectedExternalSupervisorComponent, ...]:
     if transports:
         controller_hosts = _controller_hosts_in_order(plan, transports)
-        if any(
-            not host or item is None for host, item in transports.items()
-        ):
+        if any(not host or item is None for host, item in transports.items()):
             raise ValueError("protected external supervisor transport coverage drifted")
         return tuple(
             ProtectedExternalSupervisorComponent(
@@ -665,20 +657,15 @@ def _external_supervisor_credential_components(
         if execution_host not in bound_hosts or set(transports) != {execution_host}:
             raise ValueError("protected external supervisor credential coverage drifted")
         controller_hosts = (execution_host,)
-    if (
-        set(identities) != set(controller_hosts)
-        or any(
-            item is None
-            or type(identity) is not tuple
-            or len(identity) != 2
-            or type(identity[0]) is not int
-            or type(identity[1]) is not int
-            or identity[0] < 0
-            or identity[1] < 0
-            for item, identity in (
-                (transports[host], identities[host]) for host in controller_hosts
-            )
-        )
+    if set(identities) != set(controller_hosts) or any(
+        item is None
+        or type(identity) is not tuple
+        or len(identity) != 2
+        or type(identity[0]) is not int
+        or type(identity[1]) is not int
+        or identity[0] < 0
+        or identity[1] < 0
+        for item, identity in ((transports[host], identities[host]) for host in controller_hosts)
     ):
         raise ValueError("protected external supervisor credential coverage drifted")
     return tuple(

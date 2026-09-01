@@ -14,9 +14,7 @@ from typing import Protocol
 
 _CREDENTIAL_PATH = Path("/var/lib/loom-staging-rollout/external-supervisor.kubeconfig")
 _SOURCE_KUBECONFIG = Path("/var/lib/loom-staging-rollout/kubeconfig")
-_PUBLISHER_RELATIVE = Path(
-    "deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"
-)
+_PUBLISHER_RELATIVE = Path("deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh")
 _EXECUTION_HOSTS = frozenset({"gx10-01c7", "TRT-EAI-OLDLAB-1"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_CREDENTIAL_BYTES = 1024 * 1024
