@@ -7,7 +7,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -37,6 +37,22 @@ DENIED_NETWORK_ID = "6" * 64
 _SYS_PIDFD_SEND_SIGNAL = 424
 _SYS_PIDFD_OPEN = 434
 _LIBC = ctypes.CDLL(None, use_errno=True)
+_REAL_SIGNAL = signal.signal
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_signal_handlers() -> Iterator[None]:
+    handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            _REAL_SIGNAL(signum, handler)
+
+
 HOST_DENIAL_PROGRAM = """import socket,sys
 connection=socket.socket()
 connection.settimeout(2)
@@ -1129,6 +1145,136 @@ def test_conformance_cleanup_never_signals_a_reused_group_after_leader_reap(
     assert reused_signals == []
 
 
+def test_conformance_cleanup_reaps_after_second_retained_leader_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the real second WNOWAIT timeout bypassing final leader reap."""
+    events: list[str] = []
+
+    class Stream:
+        def close(self) -> None:
+            events.append("pipe.close")
+
+    class Process:
+        pid = 424245
+        stdout = Stream()
+        stderr = Stream()
+        args = ("fake",)
+        returncode: int | None = None
+        reaps = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader.wait")
+            self.reaps += 1
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+    process = Process()
+
+    def kill_group(process_group: int, signum: int) -> None:
+        assert process_group == process.pid
+        assert process.reaps == 0
+        events.append(f"group.signal:{signum}")
+
+    def wait_without_reaping(observed: object, timeout: float) -> None:
+        assert observed is process
+        assert timeout == 2
+        events.append("leader.retained_timeout")
+        raise conformance.subprocess.TimeoutExpired(process.args, timeout)
+
+    monkeypatch.setattr(conformance.os, "killpg", kill_group)
+    monkeypatch.setattr(conformance, "_wait_without_reaping", wait_without_reaping)
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        conformance._terminate_and_reap(process)  # type: ignore[arg-type]
+
+    assert process.reaps == 1
+    assert events == [
+        f"group.signal:{signal.SIGTERM}",
+        "pipe.close",
+        "pipe.close",
+        "leader.retained_timeout",
+        f"group.signal:{signal.SIGKILL}",
+        "leader.retained_timeout",
+        "leader.wait",
+    ]
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+def test_conformance_runner_real_signal_cannot_hide_second_timeout_cleanup_error(
+    signum: signal.Signals,
+) -> None:
+    """Uses a real default signal in the former runner restore-to-raise gap."""
+    read_descriptor, write_descriptor = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_descriptor)
+        signal.signal(signum, signal.SIG_DFL)
+        real_signal = signal.signal
+        cleanup_waits = 0
+
+        class Stream:
+            def close(self) -> None:
+                pass
+
+        class Process:
+            pid = 494949
+            stdout = Stream()
+            stderr = Stream()
+            args = ("fake",)
+            returncode: int | None = None
+            reaps = 0
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.reaps += 1
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        process = Process()
+
+        def install(observed: int, handler: object) -> object:
+            previous = real_signal(observed, handler)  # type: ignore[arg-type]
+            if observed == signum and handler == signal.SIG_DFL and cleanup_waits == 2:
+                os.kill(os.getpid(), signum)
+            return previous
+
+        def wait_without_reaping(observed: object, timeout: float) -> None:
+            nonlocal cleanup_waits
+            assert observed is process
+            assert timeout == 2
+            cleanup_waits += 1
+            raise conformance.subprocess.TimeoutExpired(process.args, timeout)
+
+        conformance.signal.signal = install  # type: ignore[assignment]
+        conformance.os.killpg = lambda _group, _signum: None  # type: ignore[assignment]
+        conformance.subprocess.Popen = lambda *_args, **_kwargs: process  # type: ignore[assignment]
+        conformance._drain_bounded = lambda _process: (b"", b"")  # type: ignore[assignment]
+        conformance._process_group_has_other_members = lambda _group: True  # type: ignore[assignment]
+        conformance._wait_without_reaping = wait_without_reaping  # type: ignore[assignment]
+        try:
+            SubprocessRunner().run(("fake",))
+        except ConformanceError:
+            os.write(
+                write_descriptor,
+                f"{cleanup_waits}:{process.reaps}".encode("ascii"),
+            )
+            os._exit(23)
+        except BaseException:
+            os._exit(24)
+        os._exit(25)
+
+    os.close(write_descriptor)
+    _, status = os.waitpid(child, 0)
+    payload = os.read(read_descriptor, 1024)
+    os.close(read_descriptor)
+
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 23
+    assert payload == b"2:1"
+
+
 @pytest.mark.parametrize("signal_window", ("group-check", "leader-wait"))
 def test_conformance_runner_defers_signal_until_retained_leader_is_reaped_once(
     monkeypatch: pytest.MonkeyPatch,
@@ -1329,12 +1475,17 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
         SubprocessRunner().run(("fake",))
 
     assert process.reaps == 1
+    expected_restores = 1 if signal_window == "drain-handoff" else 0
     assert restore_counts == {
-        signal.SIGINT: 1,
-        signal.SIGTERM: 1,
-        signal.SIGHUP: 1,
+        signal.SIGINT: expected_restores,
+        signal.SIGTERM: expected_restores,
+        signal.SIGHUP: expected_restores,
     }
-    assert installed == previous_handlers
+    if signal_window == "drain-handoff":
+        assert installed == previous_handlers
+    else:
+        assert not restoration_delivered
+        assert all(callable(handler) for handler in installed.values())
     assert replayed == ([signum] if signal_window == "drain-handoff" else [])
     if signal_window == "cleanup-adjudication":
         assert isinstance(raised.value.__cause__, ConformanceError)
@@ -1348,7 +1499,6 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
             f"group.signal:{signal.SIGKILL}",
             "descendants.cleanup_failed",
             "leader.wait",
-            "signal.interposed",
         ]
     else:
         assert events == [

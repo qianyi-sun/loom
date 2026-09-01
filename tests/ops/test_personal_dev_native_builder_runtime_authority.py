@@ -64,6 +64,20 @@ SOURCE_SHA = "1" * 40
 SOURCE_TREE = "2" * 40
 PROFILE_SHA256 = "3" * 64
 REQUEST_ID = "00000000-0000-0000-0000-000000000001"
+_REAL_SIGNAL = signal.signal
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_signal_handlers() -> Iterator[None]:
+    handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            _REAL_SIGNAL(signum, handler)
 
 
 class Unused:
@@ -942,6 +956,66 @@ def test_bounded_runner_never_signals_a_reused_group_after_leader_reap(
     assert reused_signals == []
 
 
+def test_bounded_runner_reaps_after_second_retained_leader_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the real second WNOWAIT timeout bypassing final leader reap."""
+    events: list[str] = []
+
+    class Stream:
+        def close(self) -> None:
+            events.append("pipe.close")
+
+    class Process:
+        pid = 424244
+        stdout = Stream()
+        stderr = Stream()
+        args = ("fake",)
+        returncode: int | None = None
+        reaps = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader.wait")
+            self.reaps += 1
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+    process = Process()
+
+    def kill_group(process_group: int, signum: int) -> None:
+        assert process_group == process.pid
+        assert process.reaps == 0
+        events.append(f"group.signal:{signum}")
+
+    def wait_without_reaping(observed: object, timeout: float) -> None:
+        assert observed is process
+        assert timeout == 2
+        events.append("leader.retained_timeout")
+        raise subprocess.TimeoutExpired(process.args, timeout)
+
+    monkeypatch.setattr(authority_module.os, "killpg", kill_group)
+    runner = authority_module.BoundedSubprocessRunner(
+        timeout_seconds=1,
+        maximum_output=1024,
+    )
+    monkeypatch.setattr(runner, "_wait_without_reaping", wait_without_reaping)
+
+    with pytest.raises(AuthorityError, match="command_cleanup_failed"):
+        runner._terminate(process)  # type: ignore[arg-type]
+
+    assert process.reaps == 1
+    assert events == [
+        f"group.signal:{signal.SIGTERM}",
+        "pipe.close",
+        "pipe.close",
+        "leader.retained_timeout",
+        f"group.signal:{signal.SIGKILL}",
+        "leader.retained_timeout",
+        "leader.wait",
+    ]
+
+
 @pytest.mark.parametrize("signal_window", ("group-check", "leader-wait"))
 def test_bounded_runner_defers_signal_until_retained_leader_is_reaped_once(
     monkeypatch: pytest.MonkeyPatch,
@@ -1155,12 +1229,17 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
         runner.run(("fake",))
 
     assert process.reaps == 1
+    expected_restores = 1 if signal_window == "drain-handoff" else 0
     assert restore_counts == {
-        signal.SIGINT: 1,
-        signal.SIGTERM: 1,
-        signal.SIGHUP: 1,
+        signal.SIGINT: expected_restores,
+        signal.SIGTERM: expected_restores,
+        signal.SIGHUP: expected_restores,
     }
-    assert installed == previous_handlers
+    if signal_window == "drain-handoff":
+        assert installed == previous_handlers
+    else:
+        assert not restoration_delivered
+        assert all(callable(handler) for handler in installed.values())
     assert replayed == ([signum] if signal_window == "drain-handoff" else [])
     if signal_window == "drain-handoff":
         assert events == [
@@ -1181,7 +1260,6 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
             f"group.signal:{signal.SIGKILL}",
             "descendants.cleanup_failed",
             "leader.wait",
-            "signal.interposed",
         ]
 
 
@@ -1211,20 +1289,24 @@ def test_cleanup_defers_then_replays_the_first_termination_signal(
 
 
 @pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
-def test_transaction_selects_cleanup_failure_before_restoring_handlers(
+def test_transaction_cleanup_keeps_one_nonraising_recorder_until_error_selection(
     monkeypatch: pytest.MonkeyPatch,
     signum: signal.Signals,
 ) -> None:
-    """Catches transaction handler restoration hiding an adjudicated cleanup error."""
+    """Catches nested cleanup restoring the raising transaction handler too early."""
     installed: dict[int, object] = {}
     previous_handlers: dict[int, object] = {}
-    restore_counts = {value: 0 for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-    delivered = False
+    transaction_handlers: dict[int, object] = {}
+    nested_restore_delivered = False
     replayed: list[int] = []
     real_signal = signal.signal
 
+    class SimulatedTermination(BaseException):
+        pass
+
     def previous(observed: int, _frame: object) -> None:
         replayed.append(observed)
+        raise SimulatedTermination
 
     for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         handler = previous if value == signum else signal.SIG_IGN
@@ -1232,32 +1314,229 @@ def test_transaction_selects_cleanup_failure_before_restoring_handlers(
         previous_handlers[value] = handler
 
     def install(observed: int, handler: object) -> object:
-        nonlocal delivered
+        nonlocal nested_restore_delivered
         if observed not in installed:
             return real_signal(observed, handler)  # type: ignore[arg-type]
-        active = installed[observed]
+        old = installed[observed]
         installed[observed] = handler
-        if handler is previous_handlers[observed]:
-            restore_counts[observed] += 1
-            if observed == signum and not delivered:
-                delivered = True
-                assert callable(active)
-                active(signum, None)
-        return active
+        if callable(handler) and handler not in previous_handlers.values():
+            if observed not in transaction_handlers:
+                transaction_handlers[observed] = handler
+            elif (
+                handler is transaction_handlers[observed]
+                and observed == signum
+                and not nested_restore_delivered
+            ):
+                nested_restore_delivered = True
+                handler(signum, None)
+        return old
 
     monkeypatch.setattr(authority_module.signal, "signal", install)
 
     with pytest.raises(AuthorityError, match="cleanup_failed"):
         with authority_module._defer_transaction_signals():
-            raise AuthorityError("cleanup_failed")
+            with authority_module._defer_cleanup_signals():
+                active = installed[signum]
+                assert callable(active)
+                active(signum, None)
+                raise AuthorityError("cleanup_failed")
 
-    assert restore_counts == {
-        signal.SIGINT: 1,
-        signal.SIGTERM: 1,
-        signal.SIGHUP: 1,
-    }
-    assert installed == previous_handlers
+    assert not nested_restore_delivered
     assert replayed == []
+    assert all(callable(handler) for handler in installed.values())
+    retained = installed[signum]
+    assert callable(retained)
+    retained(signum, None)
+    assert replayed == []
+
+
+@pytest.mark.parametrize(
+    ("first_signum", "second_signum"),
+    (
+        (signal.SIGTERM, signal.SIGHUP),
+        (signal.SIGHUP, signal.SIGTERM),
+    ),
+)
+def test_second_transaction_signal_during_unwind_cannot_bypass_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    first_signum: signal.Signals,
+    second_signum: signal.Signals,
+) -> None:
+    """Catches a second termination signal raising before cleanup is entered."""
+    events: list[str] = []
+    installed: dict[int, object] = {}
+    real_signal = signal.signal
+
+    def previous(observed: int, _frame: object) -> None:
+        events.append(f"signal.replayed:{observed}")
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        installed[signum] = previous
+
+    def install(signum: int, handler: object) -> object:
+        if signum not in installed:
+            return real_signal(signum, handler)  # type: ignore[arg-type]
+        old = installed[signum]
+        installed[signum] = handler
+        return old
+
+    monkeypatch.setattr(authority_module.signal, "signal", install)
+
+    with pytest.raises(AuthorityError, match="cleanup_failed"):
+        with authority_module._defer_transaction_signals():
+            try:
+                first_handler = installed[first_signum]
+                assert callable(first_handler)
+                first_handler(first_signum, None)
+            except authority_module._TransactionInterruption as interruption:
+                events.append(f"signal.interrupted:{first_signum}")
+                second_handler = installed[second_signum]
+                assert callable(second_handler)
+                second_handler(second_signum, None)
+                events.append(f"signal.deferred:{second_signum}")
+                with authority_module._defer_cleanup_signals():
+                    events.append("cleanup.ran")
+                raise AuthorityError("cleanup_failed") from interruption
+
+    assert events == [
+        f"signal.interrupted:{first_signum}",
+        f"signal.deferred:{second_signum}",
+        "cleanup.ran",
+    ]
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+def test_real_signal_cannot_enter_nested_restore_to_cleanup_error_gap(
+    signum: signal.Signals,
+) -> None:
+    """Uses a real default signal to detect nested restoration before error selection."""
+    read_descriptor, write_descriptor = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_descriptor)
+        signal.signal(signum, signal.SIG_DFL)
+        real_signal = signal.signal
+        installed_callables: list[object] = []
+        delivered = False
+
+        def install(observed: int, handler: object) -> object:
+            nonlocal delivered
+            previous = real_signal(observed, handler)  # type: ignore[arg-type]
+            if observed == signum and callable(handler):
+                if handler not in installed_callables:
+                    installed_callables.append(handler)
+                elif (
+                    len(installed_callables) > 1
+                    and handler is installed_callables[0]
+                    and not delivered
+                ):
+                    delivered = True
+                    os.kill(os.getpid(), signum)
+            return previous
+
+        authority_module.signal.signal = install  # type: ignore[assignment]
+        try:
+            with authority_module._defer_transaction_signals():
+                with authority_module._defer_cleanup_signals():
+                    active = signal.getsignal(signum)
+                    assert callable(active)
+                    active(signum, None)
+                    raise AuthorityError("cleanup_failed")
+        except AuthorityError as exc:
+            if exc.code == "cleanup_failed":
+                os.write(write_descriptor, b"cleanup_failed")
+                os._exit(23)
+        except BaseException:
+            os._exit(24)
+        os._exit(25)
+
+    os.close(write_descriptor)
+    _, status = os.waitpid(child, 0)
+    payload = os.read(read_descriptor, 1024)
+    os.close(read_descriptor)
+
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 23
+    assert payload == b"cleanup_failed"
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+def test_bounded_runner_real_signal_cannot_hide_second_timeout_cleanup_error(
+    signum: signal.Signals,
+) -> None:
+    """Uses a real default signal in the former runner restore-to-raise gap."""
+    read_descriptor, write_descriptor = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_descriptor)
+        signal.signal(signum, signal.SIG_DFL)
+        real_signal = signal.signal
+        cleanup_waits = 0
+
+        class Stream:
+            def close(self) -> None:
+                pass
+
+        class Process:
+            pid = 484848
+            stdout = Stream()
+            stderr = Stream()
+            args = ("fake",)
+            returncode: int | None = None
+            reaps = 0
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                self.reaps += 1
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        process = Process()
+
+        def install(observed: int, handler: object) -> object:
+            previous = real_signal(observed, handler)  # type: ignore[arg-type]
+            if observed == signum and handler == signal.SIG_DFL and cleanup_waits == 2:
+                os.kill(os.getpid(), signum)
+            return previous
+
+        def wait_without_reaping(observed: object, timeout: float) -> None:
+            nonlocal cleanup_waits
+            assert observed is process
+            assert timeout == 2
+            cleanup_waits += 1
+            raise authority_module.subprocess.TimeoutExpired(process.args, timeout)
+
+        authority_module.signal.signal = install  # type: ignore[assignment]
+        authority_module.os.killpg = lambda _group, _signum: None  # type: ignore[assignment]
+        authority_module.subprocess.Popen = lambda *_args, **_kwargs: process  # type: ignore[assignment]
+        runner = authority_module.BoundedSubprocessRunner(
+            timeout_seconds=1,
+            maximum_output=1024,
+        )
+        runner._drain = lambda _process: (b"", b"")  # type: ignore[method-assign]
+        runner._group_has_other_members = lambda _group: True  # type: ignore[method-assign]
+        runner._wait_without_reaping = wait_without_reaping  # type: ignore[method-assign]
+        try:
+            runner.run(("fake",))
+        except AuthorityError as exc:
+            if exc.code == "command_cleanup_failed":
+                os.write(
+                    write_descriptor,
+                    f"{cleanup_waits}:{process.reaps}".encode("ascii"),
+                )
+                os._exit(23)
+        except BaseException:
+            os._exit(24)
+        os._exit(25)
+
+    os.close(write_descriptor)
+    _, status = os.waitpid(child, 0)
+    payload = os.read(read_descriptor, 1024)
+    os.close(read_descriptor)
+
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 23
+    assert payload == b"2:1"
 
 
 def test_system_host_adapter_uses_only_fixed_commands_and_validates_output(
@@ -3152,16 +3431,15 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
             if (
                 self.publish_calls > 1
                 and unproved_step == "state.republish"
-                and value.get("phase") != advanced_phase
             ):
                 raise AuthorityError("cleanup_persistent")
             if (
                 self.publish_calls > 1
                 and unproved_step == "state.partial_write"
-                and value.get("phase") != advanced_phase
             ):
                 self.events.append("state.publish")
-                self.snapshot = None
+                assert self.advanced is not None
+                self.snapshot = self.advanced
                 raise AuthorityError("cleanup_persistent")
             snapshot = super().publish(value)
             if self.publish_calls == 1:
@@ -3248,7 +3526,17 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
                 "state.read",
                 "state.read",
                 "state.read",
-                *stage_recovery,
+                "secret.create",
+                "installer.stage_agent_authorized",
+                "installer.verify_staged",
+                "host.verify_inert:true",
+                "secret.unlink",
+                "state.read",
+                "state.read",
+                "state.read",
+                "installer.verify_staged",
+                "state.read",
+                "host.verify_inert:true",
             ],
             "state.partial_write": [
                 "installer.discard_agent_stage",
@@ -3259,7 +3547,19 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
                 "state.publish",
                 "state.read",
                 "state.read",
-                *stage_recovery,
+                "secret.create",
+                "installer.stage_agent_authorized",
+                "installer.verify_staged",
+                "host.verify_inert:true",
+                "secret.unlink",
+                "state.publish",
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                "installer.verify_staged",
+                "state.read",
+                "host.verify_inert:true",
             ],
             "state.committed_error": [
                 "installer.discard_agent_stage",
@@ -3364,7 +3664,16 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
                 "installer.verify_active",
                 "state.read",
             ],
-            "state.partial_write": state_validation_recovery,
+            "state.partial_write": [
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                "state.publish",
+                "state.read",
+                "installer.verify_active",
+                "state.read",
+            ],
             "state.committed_error": [
                 "state.read",
                 "state.publish",
@@ -3400,6 +3709,178 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
             "state.publish",
             *expected_suffixes[unproved_step],
         ]
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+@pytest.mark.parametrize(
+    "recovery_boundary",
+    (
+        "staged_reconstruction",
+        "fallback_publish_exception",
+        "fallback_publish_invalid_return",
+        "fallback_publish_invalid_reread",
+        "compensating_discard",
+        "host_verification",
+    ),
+)
+def test_failed_staged_fallback_compensates_to_verified_prepared_phase(
+    signum: signal.Signals,
+    recovery_boundary: str,
+) -> None:
+    """Catches reconstructed staged files surviving failed staged publication."""
+    runtime, events, _, states, _, secrets = _transition_runtime(_prepared_state())
+    prepared = states.snapshot
+    assert prepared is not None
+    staged = _snapshot(_staged_state())
+
+    class RecoveryInstaller(RecordingInstaller):
+        discard_calls = 0
+        stage_calls = 0
+
+        def stage_agent_authorized(self, **arguments: object) -> dict[str, object]:
+            self.stage_calls += 1
+            result = super().stage_agent_authorized(**arguments)
+            if recovery_boundary == "staged_reconstruction" and self.stage_calls > 1:
+                raise AuthorityError("cleanup_persistent")
+            return result
+
+        def discard_agent_stage(self) -> None:
+            self.discard_calls += 1
+            if recovery_boundary == "compensating_discard" and self.discard_calls == 2:
+                self.events.append("installer.discard_agent_stage")
+                raise AuthorityError("cleanup_transient")
+            super().discard_agent_stage()
+
+    installer = RecoveryInstaller(events)
+    runtime.installer = installer
+
+    class RecoveryHost(RecordingHost):
+        verification_calls = 0
+
+        def verify_inert(self, *, require_empty: bool) -> HostStatus:
+            self.verification_calls += 1
+            result = super().verify_inert(require_empty=require_empty)
+            final_verification = 3 if recovery_boundary == "staged_reconstruction" else 4
+            if (
+                recovery_boundary == "host_verification"
+                and self.verification_calls == final_verification
+            ):
+                raise AuthorityError("cleanup_transient")
+            return result
+
+    host = RecoveryHost(events)
+    runtime.host = host
+
+    class RecoveryStates(RecordingStates):
+        publish_calls = 0
+        prepared_reads = 0
+
+        def publish(self, value: dict[str, object]) -> StateSnapshot:
+            self.publish_calls += 1
+            if self.publish_calls == 1:
+                advanced = super().publish(value)
+                interrupt = signal.getsignal(signum)
+                assert callable(interrupt)
+                interrupt(signum, None)
+                return advanced
+            if self.publish_calls == 2:
+                self.events.append("state.publish")
+                raise AuthorityError("cleanup_persistent")
+            if self.publish_calls == 3:
+                self.events.append("state.publish")
+                self.snapshot = prepared
+                return staged
+            self.events.append("state.publish")
+            self.snapshot = prepared
+            if recovery_boundary == "fallback_publish_invalid_return":
+                return prepared
+            if recovery_boundary == "fallback_publish_invalid_reread":
+                return staged
+            raise AuthorityError("cleanup_persistent")
+
+        def read(self) -> StateSnapshot | None:
+            snapshot = super().read()
+            if self.publish_calls == 3 and snapshot == prepared:
+                self.prepared_reads += 1
+                if self.prepared_reads == 2:
+                    return staged
+            return snapshot
+
+    recovery_states = RecoveryStates(events)
+    recovery_states.snapshot = prepared
+    runtime.states = recovery_states
+    replayed: list[int] = []
+    previous = signal.signal(signum, lambda observed, _frame: replayed.append(observed))
+
+    try:
+        with pytest.raises(AuthorityError, match="cleanup_failed"):
+            runtime.dispatch(_stage_request(prepared.sha256))
+    finally:
+        signal.signal(signum, previous)
+
+    assert replayed == []
+    assert recovery_states.snapshot == prepared
+    assert installer.staged_present is False
+    assert not host.agent_active and not host.dockerd_active and not host.nft_present
+    assert not secrets.present
+    initial_and_prepared_restore = [
+        "state.read",
+        "host.verify_inert:true",
+        "secret.create",
+        "installer.stage_agent_authorized",
+        "installer.verify_staged",
+        "host.verify_inert:true",
+        "secret.unlink",
+        "state.publish",
+        "installer.discard_agent_stage",
+        "state.read",
+        "state.publish",
+        "state.read",
+        "state.read",
+        "state.publish",
+        "state.read",
+        "state.read",
+    ]
+    if recovery_boundary == "staged_reconstruction":
+        recovery = [
+            "secret.create",
+            "installer.stage_agent_authorized",
+            "secret.unlink",
+            "secret.create",
+            "installer.stage_agent_authorized",
+            "secret.unlink",
+            "state.read",
+            "installer.discard_agent_stage",
+            "state.read",
+            "host.verify_inert:true",
+        ]
+    else:
+        recovery = [
+            "secret.create",
+            "installer.stage_agent_authorized",
+            "installer.verify_staged",
+            "host.verify_inert:true",
+            "secret.unlink",
+            "state.publish",
+            "state.read",
+            "state.publish",
+            "state.read",
+            "state.read",
+            "installer.discard_agent_stage",
+            *(
+                ["installer.discard_agent_stage"]
+                if recovery_boundary == "compensating_discard"
+                else []
+            ),
+            "state.read",
+            "host.verify_inert:true",
+            *(
+                ["host.verify_inert:true"]
+                if recovery_boundary == "host_verification"
+                else []
+            ),
+        ]
+    assert events == [*initial_and_prepared_restore, *recovery]
 
 
 @pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))

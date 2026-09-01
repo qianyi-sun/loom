@@ -188,6 +188,10 @@ class SubprocessRunner:
             if cleanup_failure is not None
             else None
         )
+        if selected_cleanup_failure is not None:
+            # Cleanup failure is terminal; keep the non-raising recorder installed
+            # while the selected error propagates to the owning boundary.
+            raise selected_cleanup_failure from cleanup_failure
         restoration_failure: BaseException | None = None
         for restored_signum, handler in previous_handlers.items():
             try:
@@ -196,8 +200,6 @@ class SubprocessRunner:
                 if restoration_failure is None:
                     restoration_failure = exc
 
-        if selected_cleanup_failure is not None:
-            raise selected_cleanup_failure from cleanup_failure
         if restoration_failure is not None:
             raise restoration_failure
         if pending_signal is not None:
@@ -304,26 +306,26 @@ def _wait_without_reaping(process: subprocess.Popen[bytes], timeout: float) -> N
 
 def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    _close_process_pipes(process)
-    try:
-        _wait_without_reaping(process, 2)
-    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        _close_process_pipes(process)
+        try:
+            _wait_without_reaping(process, 2)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                _wait_without_reaping(process, 2)
+            except subprocess.TimeoutExpired as exc:
+                raise ConformanceError("conformance failed") from exc
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            _wait_without_reaping(process, 2)
-        except subprocess.TimeoutExpired as exc:
-            raise ConformanceError("conformance failed") from exc
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
         _wait_for_other_group_members(process.pid, 2)
     finally:
         process.wait()
