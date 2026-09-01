@@ -298,6 +298,36 @@ async def test_kubernetes_capture_counts_selected_node_load_and_target_pending_d
 
 
 @pytest.mark.asyncio
+async def test_kubernetes_capture_accepts_scale_to_zero_inventory() -> None:
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="nodes-8")
+        ),
+        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="pods-10")
+        ),
+    )
+
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core).capture(
+        namespace="loom-nebius-development",
+        target_id="nebius-eu-north1-development",
+        node_label_selector="loom.nebius/node-role=execution",
+    )
+
+    assert snapshot.source_versions == {"nodes": "nodes-8", "pods": "pods-10"}
+    assert snapshot.active_nodes == 0
+    assert snapshot.ready_nodes == 0
+    assert snapshot.provisioned == ResourceTotals(
+        cpu_millis=0,
+        memory_mib=0,
+        storage_mib=0,
+    )
+    assert snapshot.allocatable == snapshot.provisioned
+    assert snapshot.requested == snapshot.provisioned
+    assert snapshot.pending_jobs == 0
+
+
+@pytest.mark.asyncio
 async def test_kubernetes_capture_rejects_target_pod_outside_bound_node_group() -> None:
     core = SimpleNamespace(
         list_node=lambda **_: SimpleNamespace(
