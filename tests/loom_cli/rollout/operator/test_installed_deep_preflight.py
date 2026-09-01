@@ -456,6 +456,9 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
     def command(*_args, **_kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    def manifest_post_image_pin(rendered: str) -> str:
+        return rendered + "# installed-composition-post-image-pin-sentinel\n"
+
     composition = InstalledDeepPreflightComposition(
         config=config,
         service_uid=501,
@@ -518,6 +521,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         read_mutation_epoch=lambda: 9,
         read_database_schema_revision=lambda: "0074",
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        manifest_post_image_pin=manifest_post_image_pin,
     )
 
     admission = composition.sources(candidate, 9, RuntimePurpose.ADMISSION)
@@ -530,6 +534,8 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
 
     assert admission.loaded_artifacts is None
     assert detached.loaded_artifacts is not None
+    assert admission.manifest_post_image_pin is manifest_post_image_pin
+    assert detached.manifest_post_image_pin is manifest_post_image_pin
     assert artifacts.calls == [
         {
             "bundle_digest": reference.bundle_digest,
