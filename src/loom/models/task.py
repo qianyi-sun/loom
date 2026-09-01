@@ -80,9 +80,11 @@ class EnvironmentConfig(BaseModel):
     mcp_servers: list[MCPConnection] = []
     build_timeout_sec: float = Field(default=1200, gt=0)
     # Runtime resource contract. These values are optional for ordinary Loom
-    # tasks, but audited benchmark profiles preserve their native limits here
-    # so drivers can enforce them instead of treating provenance-only TOML as
-    # executable policy.
+    # tasks, but audited benchmark profiles preserve their native values here.
+    # CPU/memory/GPU values are executable driver policy. ``storage_mb`` is
+    # retained for provenance, capacity planning, and service-execution
+    # backends; the Docker backend intentionally does not request a
+    # storage-driver-specific writable-layer quota.
     cpus: float | None = Field(default=None, gt=0)
     memory_mb: int | None = Field(default=None, gt=0)
     storage_mb: int | None = Field(default=None, gt=0)
