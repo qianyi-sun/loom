@@ -168,6 +168,25 @@ gh workflow run release-promotion-gate.yml \
   -f evidence_manifest_b64="$EVIDENCE_MANIFEST_B64"
 ```
 
+After that run succeeds, open the same-repository `dev` to `main` pull request
+and record its number and the successful release workflow run ID. While `dev`
+still equals the candidate SHA, dispatch the direct required promotion check:
+
+```bash
+gh workflow run main-promotion-gate.yml \
+  --ref dev \
+  -f candidate_sha=CANDIDATE_SHA \
+  -f pr_number=PR_NUMBER \
+  -f release_gate_run_id=RELEASE_GATE_RUN_ID
+```
+
+The workflow fails closed unless the open Ready PR is exactly same-repository
+`dev` to `main`, its head and the current `dev` head equal the candidate, the
+specified `release-promotion-gate` run succeeded for that SHA, and exactly one
+unexpired `release-gate-evidence` artifact exists. A later `dev` advance
+invalidates the check for the new PR head and requires new staging/release
+evidence.
+
 Do not promote when candidate identity differs across evidence, a required
 check failed or is missing, the redaction scan fails, a backup/recovery point
 is absent, worker or storage capacity is unsafe, staging and production state

@@ -213,8 +213,9 @@ authorized to access.
 
 ## Operations and Release
 
-Normal development targets `dev`. The `main` branch is reserved for production
-release promotion through the current release gate.
+Normal development targets `dev`. The `main` branch accepts only an exact
+current `dev` candidate that has passed protected staging release evidence;
+production deployment re-verifies the candidate tree and artifact identity.
 
 Operationally, staging and production are separate environments with distinct
 routes, API bases, durable state, object storage, secrets, and desired worker

@@ -75,7 +75,8 @@ def test_governance_docs_define_path_inferred_validation_gates() -> None:
     for document in (contributing, quickstart):
         normalized_document = " ".join(document.split())
         assert "visible and successful on the current head SHA" in normalized_document
-        assert "no active `main` branch ruleset" in normalized_document.lower()
+        assert "main protected promotion" in normalized_document
+        assert "main-promotion-gate" in normalized_document
         assert "same-repository `dev`" in normalized_document
         assert "manual squash merge" not in normalized_document.lower()
         assert "never enable auto-merge" not in normalized_document.lower()
@@ -105,7 +106,7 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
         assert "never enable auto-merge" not in normalized_document
         assert "auto-merge" in normalized_document
 
-    for document in (contributing, operator_runbook, pr_template):
+    for document in (contributing, operator_runbook, release_template):
         normalized_document = " ".join(document.split()).lower()
         assert "release_owner_approval" in normalized_document
         assert "production environment approval" in normalized_document
@@ -115,18 +116,19 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
     assert "native and author-neutral" in contributing
 
 
-def test_release_promotion_template_requires_first_prod_evidence() -> None:
+def test_release_promotion_binds_main_merge_to_prod_evidence() -> None:
     contributing = _read("CONTRIBUTING.md")
     operator_runbook = _read("docs/runbooks/operator-runbook.md")
     staging_validation = _read("docs/runbooks/staging-launch.md")
     pr_template = _read(".github/PULL_REQUEST_TEMPLATE.md")
 
     for required_text in (
-        "Immutable prod tag",
-        "Frontend route evidence",
-        "Worker isolation evidence",
-        "Raw-delivery/export requirement status",
-        "prod tag is new, immutable, and will not be force-moved",
+        "Candidate SHA",
+        "Staging URL",
+        "Release gate workflow run and run ID",
+        "Main promotion gate workflow run",
+        "Production Environment approver",
+        "main-promotion-gate",
     ):
         assert required_text in pr_template
 
