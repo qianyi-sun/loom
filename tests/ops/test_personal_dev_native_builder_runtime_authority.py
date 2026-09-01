@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -2196,6 +2197,43 @@ def test_archive_copy_is_descriptor_bound_root_private_and_always_unlinked(
     with pytest.raises(AuthorityError, match="archive_invalid"):
         with copies.copy(source, expected_sha512=digest, request_id=REQUEST_ID):
             raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(("uid_offset", "gid_offset"), ((1, 0), (0, 1)))
+def test_archive_copy_rejects_source_ownership_drift(
+    tmp_path: Path,
+    uid_offset: int,
+    gid_offset: int,
+) -> None:
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    with tempfile.NamedTemporaryFile(
+        prefix="loom-native-authority-archive-",
+        dir="/tmp",
+        delete=False,
+    ) as staged:
+        staged.write(b"wrong owner archive bytes")
+        source = Path(staged.name)
+    source.chmod(0o600)
+    copies = RootArchiveCopies(
+        root=root,
+        operator_uid=os.getuid() + uid_offset,
+        operator_gid=os.getgid() + gid_offset,
+        root_uid=os.getuid(),
+        root_gid=os.getgid(),
+    )
+
+    try:
+        with pytest.raises(AuthorityError, match="archive_invalid"):
+            with copies.copy(
+                source,
+                expected_sha512=hashlib.sha512(b"wrong owner archive bytes").hexdigest(),
+                request_id=REQUEST_ID,
+            ):
+                raise AssertionError("unreachable")
+    finally:
+        source.unlink(missing_ok=True)
 
 
 def test_archive_copy_unlinks_partial_destination_when_digest_is_rejected(
