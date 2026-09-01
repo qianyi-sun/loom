@@ -387,8 +387,15 @@ class DockerDriver:
                 run_kwargs["mem_limit"] = f"{opts.memory_mb}m"
             elif opts.container_memory_mib > 0:
                 run_kwargs["mem_limit"] = opts.container_memory_mib * 1024 * 1024
-            if opts.storage_mb is not None:
-                run_kwargs["storage_opt"] = {"size": f"{opts.storage_mb}M"}
+            # ``storage_mb`` remains part of imported benchmark metadata and
+            # service-execution planning, but the Docker backend deliberately
+            # does not translate it to HostConfig.StorageOpt.  Docker only
+            # supports writable-layer sizing for selected storage-driver /
+            # backing-filesystem combinations (for example overlay2 on XFS
+            # with project quotas); sending it unconditionally makes otherwise
+            # compatible workers fail during container creation.  Host-level
+            # free-space admission and cleanup remain the Docker worker's disk
+            # safety boundary.
             if opts.container_pids > 0:
                 run_kwargs["pids_limit"] = opts.container_pids
             if opts.cgroup_parent is not None:
