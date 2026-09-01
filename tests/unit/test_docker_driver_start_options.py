@@ -73,7 +73,7 @@ async def test_docker_driver_passes_extra_hosts_to_container_create(
     assert container.started is True
 
 
-async def test_docker_driver_passes_dns_and_tmpfs_to_container_create(
+async def test_docker_driver_passes_compute_limits_but_omits_storage_quota(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     create_kwargs: dict[str, Any] = {}
@@ -125,7 +125,7 @@ async def test_docker_driver_passes_dns_and_tmpfs_to_container_create(
     }
     assert create_kwargs["nano_cpus"] == 2_000_000_000
     assert create_kwargs["mem_limit"] == "4096m"
-    assert create_kwargs["storage_opt"] == {"size": "10240M"}
+    assert "storage_opt" not in create_kwargs
     assert "remove" not in create_kwargs
     assert container.started is True
 
