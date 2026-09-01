@@ -49,6 +49,7 @@ from loom.models.types import ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
+from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
@@ -117,6 +118,7 @@ from loom_service.worker_backends import (
     compatible_cold_start_pool_names,
     get_active_backends,
     get_cold_start_pools,
+    get_service_execution_backend_pools,
     runtime_environment,
 )
 
@@ -396,10 +398,6 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     remains distinct from a fresh worker and therefore never changes the
     backend catalog's ``available`` truth value.
     """
-    active_backends = await get_active_backends(session)
-    if backend in active_backends:
-        return
-
     task_rows = (
         await session.execute(
             select(Task.id, Task.config).where(Task.id.in_(list(task_ids))),
@@ -409,18 +407,48 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         str(task_id): TaskConfig.model_validate(config) for task_id, config in task_rows
     }
     task_configs = tuple(configs_by_id[task_id] for task_id in task_ids if task_id in configs_by_id)
-    legacy_task_configs = tuple(
-        task_config
-        for task_config in task_configs
-        if task_config.service_execution is None
-    )
-    if len(task_configs) == len(task_ids) and not legacy_task_configs:
+    if backend == NEBIUS_BACKEND:
+        incompatible_task_ids = [
+            task_id
+            for task_id in task_ids
+            if (
+                task_id not in configs_by_id
+                or configs_by_id[task_id].service_execution is None
+                or configs_by_id[task_id].service_execution.logical_pool_id
+                != NEBIUS_LOGICAL_POOL_ID
+            )
+        ]
+        if incompatible_task_ids:
+            _reject_submission(
+                reason="nebius_task_incompatible",
+                status_code=400,
+                detail={
+                    "reason": "nebius_task_incompatible",
+                    "backend": NEBIUS_BACKEND,
+                    "logical_pool_id": NEBIUS_LOGICAL_POOL_ID,
+                    "task_ids": incompatible_task_ids,
+                },
+            )
+        service_pools = await get_service_execution_backend_pools(session)
+        if any(pool.pool_name == NEBIUS_LOGICAL_POOL_ID for pool in service_pools):
+            return
+        _reject_submission(
+            reason="nebius_target_unavailable",
+            status_code=400,
+            detail=(
+                "backend 'nebius' has no fresh healthy active target in "
+                f"environment {runtime_environment()!r}"
+            ),
+        )
+
+    active_backends = await get_active_backends(session)
+    if backend in active_backends:
         return
     cold_start_pools = await get_cold_start_pools(session)
     compatible_pools = compatible_cold_start_pool_names(
         cold_start_pools,
         backend=backend,
-        task_configs=legacy_task_configs,
+        task_configs=task_configs,
     )
     if len(task_configs) == len(task_ids) and compatible_pools:
         return
@@ -2685,12 +2713,20 @@ async def cancel_batch(
     service_execution_ids = [
         trial_id
         for trial_id, config in active_rows
-        if isinstance(config, dict) and config.get("service_execution") is not None
+        if (
+            b.backend == NEBIUS_BACKEND
+            and isinstance(config, dict)
+            and config.get("service_execution") is not None
+        )
     ]
     legacy_ids = [
         trial_id
         for trial_id, config in active_rows
-        if not isinstance(config, dict) or config.get("service_execution") is None
+        if (
+            b.backend != NEBIUS_BACKEND
+            or not isinstance(config, dict)
+            or config.get("service_execution") is None
+        )
     ]
 
     # Service execution has a second, provider-facing lifecycle authority.

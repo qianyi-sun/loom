@@ -503,10 +503,11 @@ export interface Backend {
    * full set of drivers Loom ships while understanding which can run
    * a batch right now. */
   available: boolean;
-  /** True when a fresh, healthy pool policy can start compatible worker
-   * capacity. This is planning headroom, not immediately executable capacity. */
+  /** True when a fresh, healthy autoscaler policy or service-execution target
+   * can start compatible capacity. This is planning headroom, not immediately
+   * executable capacity. */
   cold_start_available: boolean;
-  /** Autoscaled pools contributing cold-start authority for this backend. */
+  /** Pools contributing scale-from-zero authority for this backend. */
   cold_start_pools: string[];
 }
 

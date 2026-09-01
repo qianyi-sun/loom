@@ -266,8 +266,27 @@ const BENCHMARK_TAGS_RESPONSES: Record<string, { items: { key: string; values: s
 
 const BACKENDS_RESPONSE = {
   items: [
-    { name: "docker", description: "Local docker on the worker host.", available: true },
-    { name: "fake", description: "In-memory driver.", available: true },
+    {
+      name: "docker",
+      description: "Docker execution on the GB10 or OLDLAB worker pools.",
+      available: true,
+      cold_start_available: false,
+      cold_start_pools: [],
+    },
+    {
+      name: "nebius",
+      description: "Nebius Kubernetes execution pool; scales from zero.",
+      available: false,
+      cold_start_available: true,
+      cold_start_pools: ["nebius-cpu"],
+    },
+    {
+      name: "fake",
+      description: "In-memory driver.",
+      available: true,
+      cold_start_available: false,
+      cold_start_pools: [],
+    },
   ],
 };
 
@@ -675,6 +694,23 @@ describe("NewBatch", () => {
       "Backend",
     )) as HTMLSelectElement;
     expect(dropdown.value).toBe("docker");
+  });
+
+  it("offers Nebius as an explicit scale-from-zero backend", async () => {
+    const user = userEvent.setup();
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+
+    const dropdown = await screen.findByLabelText("Backend");
+    expect(
+      screen.getByRole("option", { name: "nebius (scales from zero)" }),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(dropdown, "nebius");
+    expect(
+      screen.getByText(/fresh scale-from-zero authority through nebius-cpu/i),
+    ).toBeInTheDocument();
   });
 
   it("requests the full catalog so pending benchmarks stay visible", async () => {

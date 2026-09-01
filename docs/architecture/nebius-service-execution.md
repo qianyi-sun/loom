@@ -611,18 +611,24 @@ backend keep their domain-specific names.
 
 | Current surface | Transitional read | Terminal service model |
 | --- | --- | --- |
-| `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | Server ignores no value silently; it derives and returns `execution_class_id`, while legacy value is read-only migration evidence. | Request field and column removed; admission resolves the execution class. |
-| `GET /api/v1/backends`, overview/monitor `available_backends` | Replaced by an execution-class catalog with admissibility and target-health summaries. | Backend catalog route removed. |
-| NewBatch backend picker and BatchDetail/Run Library backend labels | Display resolved execution class and compatibility reasons; no provider/target selector. | Backend picker removed. |
+| `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | User-visible, explicit execution choice: `docker` admits only GB10/OLDLAB worker execution; `nebius` admits only the `nebius-cpu` service-execution pool. | Retained as the stable user choice. No cross-backend fallback is allowed. |
+| `GET /api/v1/backends`, overview/monitor `available_backends` | Reports live-worker evidence separately from fresh scale-from-zero authority. | Retained as the user-facing backend catalog. |
+| NewBatch backend picker and BatchDetail/Run Library backend labels | Displays the explicit backend and whether it is live, scale-from-zero capable, or unavailable. | Retained. Users choose Docker or Nebius; they do not choose a physical node or target. |
 | `Trial.requires_caps` | Versioned frozen `WorkloadRequirementsV1` projection is stored alongside legacy JSON during bounded migration. | Legacy unversioned caps removed. |
 | Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
-| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence; user batches remain forbidden from setting it. | Operator control remains distinct from normal provider-neutral scheduling. |
+| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence within the already selected backend; user batches remain forbidden from setting it. | Operator control remains distinct from the stable user-facing backend choice. |
 | `autoscaler_pool_name`, physical pool policies, slot counts | Legacy-adapter assignment must match the versioned Trial route; configured and fresh capacity are reported separately. | Retained while OLDLAB/GB10 operate, alongside target/Pod evidence for Nebius. |
-| `loom run --backend` | Unchanged local-only driver selection. | Docker, Modal, and fake may remain CLI-only and never appear in service admission or capacity. |
+| `loom run --backend` | Unchanged local-only driver selection; it is distinct from service Batch admission. | Local Docker, Modal, and fake drivers may remain CLI-only. Service `backend=nebius` is handled by the durable control-plane path, not a local Nebius driver. |
 
 Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
 specific fields have an owner and telemetry, but their existence is not a
 deprecation or retirement schedule.
+
+The explicit backend is a routing fence, not a preference. A task revision may
+carry a durable `service_execution` binding so that it is compatible with
+Nebius, but that binding never diverts a Batch submitted with `backend=docker`.
+Likewise, `backend=nebius` rejects task revisions that are not bound to
+`nebius-cpu`; it never falls back to GB10 or OLDLAB.
 
 ## Migration and authority gates
 
