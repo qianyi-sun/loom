@@ -41,8 +41,27 @@ validate_runtime_kubeconfig() {
 
 validate_pods_exec_denied() {
   local path="$1"
-  local authority_namespace exec_allowed
-  for authority_namespace in "$NAMESPACE" "$WITNESS_NAMESPACE"; do
+  local authority_namespaces authority_namespace exec_allowed
+  if ! authority_namespaces="$(
+    "$KUBECTL" --kubeconfig "$path" get namespaces -o name 2>/dev/null
+  )" || [ -z "$authority_namespaces" ]; then
+    echo "error: external supervisor credential namespace audit is unavailable" >&2
+    return 1
+  fi
+  while IFS= read -r authority_namespace; do
+    case "$authority_namespace" in
+      namespace/*)
+        authority_namespace="${authority_namespace#namespace/}"
+        ;;
+      *)
+        echo "error: external supervisor credential namespace audit is unsafe" >&2
+        return 1
+        ;;
+    esac
+    if [ -z "$authority_namespace" ]; then
+      echo "error: external supervisor credential namespace audit is unsafe" >&2
+      return 1
+    fi
     exec_allowed="$(
       "$KUBECTL" --kubeconfig "$path" -n "$authority_namespace" \
         auth can-i create pods/exec 2>/dev/null || true
@@ -51,15 +70,7 @@ validate_pods_exec_denied() {
       echo "error: external supervisor credential has unexpected pods/exec authority" >&2
       return 1
     fi
-  done
-  exec_allowed="$(
-    "$KUBECTL" --kubeconfig "$path" \
-      auth can-i --all-namespaces create pods/exec 2>/dev/null || true
-  )"
-  if [ "$exec_allowed" != "no" ]; then
-    echo "error: external supervisor credential has unexpected pods/exec authority" >&2
-    return 1
-  fi
+  done <<<"$authority_namespaces"
 }
 
 if [ "$#" -eq 2 ]; then

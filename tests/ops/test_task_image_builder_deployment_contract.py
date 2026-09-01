@@ -268,7 +268,11 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
     assert "protected credential-before-unit convergence" in rollback
     assert '--check "$SUPERVISOR_KUBECONFIG"' in rollback
     assert "get secret loom-external-slurm-autoscaler-db -o name" in rollback
-    assert "auth can-i --all-namespaces create pods/exec" in rollback
+    assert "auth can-i --all-namespaces create pods/exec" not in rollback
+    assert "On `gx10-01c7`, run the following locally:" in rollback
+    assert "On `TRT-EAI-OLDLAB-1`, run the following locally:" in rollback
+    assert rollback.count("get namespaces -o name") == 2
+    assert rollback.count("auth can-i create pods/exec") == 2
 
 
 def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:

@@ -75,3 +75,27 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: loom-external-slurm-autoscaler-witness
+---
+# This supports only the credential's fail-closed self-audit. It does not
+# grant access to namespaced workload data or any subresource.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-external-slurm-autoscaler-namespace-audit
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-namespace-audit
+subjects:
+  - kind: ServiceAccount
+    name: loom-external-slurm-autoscaler
+    namespace: loom-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loom-external-slurm-autoscaler-namespace-audit

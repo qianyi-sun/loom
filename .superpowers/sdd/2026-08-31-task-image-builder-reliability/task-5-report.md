@@ -195,3 +195,82 @@ prevents unbounded child-output allocation and leaves failures secret-free.
 The rollback runbook contains no manual credential install, ownership change,
 or permission repair and requires the same narrow authority readback as the
 forward path. No unresolved concerns were found.
+
+## Review fix round 2/5
+
+### Findings addressed
+
+1. Replaced the incomplete empty-namespace `--all-namespaces` access review
+   with a complete current-cluster proof. The credential can now only `list`
+   namespace metadata through a dedicated ClusterRole/ClusterRoleBinding; the
+   publisher rejects an unavailable or empty listing, validates each returned
+   `namespace/<name>` identity, and requires exact `no` for `pods/exec` in
+   every enumerated namespace. A third namespace that answers `yes` now fails
+   non-mutating credential validation.
+2. Rewrote rollback credential readback as two explicit controller-local
+   blocks—one for `gx10-01c7`, one for `TRT-EAI-OLDLAB-1`. Each performs only
+   fixed-path non-mutating validation, metadata, database-Secret, witness
+   ConfigMap, and complete namespace-by-namespace `pods/exec` checks. No
+   manual credential mutation was reintroduced. The prior DEVNULL runner fix
+   remains unchanged.
+
+### RED/GREEN evidence
+
+RED, after adding the namespace-listing, third-namespace, manifest, and
+controller-local runbook regressions and before the fixes:
+
+```console
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# 5 failed, 17 passed in 0.24s
+```
+
+The failures proved that the ClusterRole audit authority and complete namespace
+enumeration were absent, the third namespace was not queried, and rollback
+still lacked explicit local GB10/OLDLAB readback blocks.
+
+GREEN for the same command after the fixes:
+
+```console
+# 22 passed in 0.21s
+```
+
+Final focused Task 5, credential transport, authority, and runbook verification:
+
+```console
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_component.py \
+  tests/loom_cli/rollout/operator/test_protected_gb10_external_supervisor_transport.py \
+  tests/ops/test_gb10_external_supervisor_broker.py \
+  tests/loom_cli/rollout/operator/test_protected_apply_executor.py \
+  tests/loom_cli/rollout/operator/test_installed_final_gate_executor.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# 141 passed in 20.25s
+
+bash -n deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh
+# passed
+
+uv run --frozen --no-sync ruff check \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# All checks passed
+
+uv run --frozen --no-sync mypy \
+  src/loom_cli/rollout/operator/protected_external_supervisor_credential_transport.py
+# Success: no issues found in 1 source file
+
+git diff --check
+# passed
+```
+
+### Self-review
+
+The complete proof no longer relies on `--all-namespaces`; it asks the API for
+the current namespace set and checks every individual namespace. The new RBAC
+grant exposes only namespace names, not namespace contents, Secrets, or any
+subresource. The rollback blocks are explicitly local to both controllers and
+retain only non-mutating credential operations. No unresolved concerns were
+found.

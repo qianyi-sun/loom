@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,8 +35,10 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
         "RoleBinding",
         "Role",
         "RoleBinding",
+        "ClusterRole",
+        "ClusterRoleBinding",
     ]
-    assert [document["metadata"]["namespace"] for document in documents] == [  # type: ignore[index]
+    assert [document["metadata"]["namespace"] for document in documents[:6]] == [  # type: ignore[index]
         "loom-staging",
         "loom-staging",
         "loom-staging",
@@ -110,6 +113,34 @@ def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
     )
 
 
+def test_authority_can_list_only_namespace_metadata_for_complete_exec_audit() -> None:
+    documents = _documents()
+    audit_role = documents[6]
+    assert audit_role == {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "metadata": {"name": "loom-external-slurm-autoscaler-namespace-audit"},
+        "rules": [{"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list"]}],
+    }
+    assert documents[7] == {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "metadata": {"name": "loom-external-slurm-autoscaler-namespace-audit"},
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-external-slurm-autoscaler",
+                "namespace": "loom-staging",
+            }
+        ],
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "loom-external-slurm-autoscaler-namespace-audit",
+        },
+    }
+
+
 def test_publisher_cannot_recreate_transitional_manager_exec_authority() -> None:
     source = PUBLISHER.read_text(encoding="utf-8")
 
@@ -140,9 +171,61 @@ def test_publisher_has_a_non_mutating_runtime_credential_check() -> None:
     assert "validate_runtime_kubeconfig" in source
     assert 'get configmap "$WITNESS_CONFIG_MAP"' in source
     assert "auth can-i create pods/exec" in source
-    assert 'for authority_namespace in "$NAMESPACE" "$WITNESS_NAMESPACE"; do' in source
-    assert "auth can-i --all-namespaces create pods/exec" in source
+    assert "get namespaces -o name" in source
+    assert 'while IFS= read -r authority_namespace; do' in source
+    assert "--all-namespaces" not in source
     assert 'if [ "$exec_allowed" != "no" ]' in source
+
+
+def test_publisher_rejects_pods_exec_in_any_enumerated_namespace(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    kubeconfig = tmp_path / "external-supervisor.kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+    kubeconfig.chmod(0o600)
+    call_log = tmp_path / "kubectl.calls"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' \"$*\" >>\"${KUBECTL_LOG:?}\"
+case \" $* \" in
+  *\" get secret loom-external-slurm-autoscaler-db -o name \"*|*\" get configmap loom-global-execution-witness-v1 -o name \"*)
+    printf 'resource/allowed\\n'
+    ;;
+  *\" get namespaces -o name \"*)
+    printf '%s\\n' namespace/loom-staging namespace/loom-dev namespace/loom-audit-third
+    ;;
+  *\" auth can-i create pods/exec \"*)
+    if [[ \" $* \" == *\" -n loom-audit-third \"* ]]; then
+      printf 'yes\\n'
+    else
+      printf 'no\\n'
+    fi
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(PUBLISHER), "--check", str(kubeconfig)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"KUBECTL": str(kubectl), "KUBECTL_LOG": str(call_log)},
+    )
+
+    assert result.returncode != 0
+    assert "unexpected pods/exec authority" in result.stderr
+    assert "-n loom-audit-third auth can-i create pods/exec" in call_log.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_publisher_parses_as_bash() -> None:

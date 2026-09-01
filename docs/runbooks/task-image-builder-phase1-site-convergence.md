@@ -590,8 +590,13 @@ kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   apply -f "$PREVIOUS_REVIEWED_CAPACITY_MANIFEST"
 # The protected rollback start has already completed protected
 # credential-before-unit convergence. Do not copy, install, chown, or chmod a
-# saved credential. On each external-supervisor controller, perform only this
-# non-mutating readback of the fixed local credential.
+# saved credential. The following readbacks must execute on each named
+# controller, not on the protected staging rollout host.
+```
+
+On `gx10-01c7`, run the following locally:
+
+```bash
 as_supervisor \
   "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
   --check "$SUPERVISOR_KUBECONFIG"
@@ -602,8 +607,41 @@ as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-sta
   get secret loom-external-slurm-autoscaler-db -o name
 as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-test "$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
-  auth can-i --all-namespaces create pods/exec)" = no
+NAMESPACE_RESOURCES="$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
+  get namespaces -o name)"
+test -n "$NAMESPACE_RESOURCES"
+while IFS= read -r namespace_resource; do
+  case "$namespace_resource" in namespace/*) ;; *) exit 1 ;; esac
+  authority_namespace="${namespace_resource#namespace/}"
+  test -n "$authority_namespace"
+  test "$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
+    --namespace "$authority_namespace" auth can-i create pods/exec)" = no
+done <<<"$NAMESPACE_RESOURCES"
+```
+
+On `TRT-EAI-OLDLAB-1`, run the following locally:
+
+```bash
+as_supervisor \
+  "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
+  --check "$SUPERVISOR_KUBECONFIG"
+test ! -L "$SUPERVISOR_KUBECONFIG"
+test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
+  "regular file:$SUPERVISOR_USER:$SUPERVISOR_GROUP:600"
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-staging \
+  get secret loom-external-slurm-autoscaler-db -o name
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
+  get configmap loom-global-execution-witness-v1 -o name
+NAMESPACE_RESOURCES="$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
+  get namespaces -o name)"
+test -n "$NAMESPACE_RESOURCES"
+while IFS= read -r namespace_resource; do
+  case "$namespace_resource" in namespace/*) ;; *) exit 1 ;; esac
+  authority_namespace="${namespace_resource#namespace/}"
+  test -n "$authority_namespace"
+  test "$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
+    --namespace "$authority_namespace" auth can-i create pods/exec)" = no
+done <<<"$NAMESPACE_RESOURCES"
 ```
 
 Define `PREVIOUS_REVIEWED_CAPACITY_MANIFEST` only from the captured immutable,
@@ -611,10 +649,11 @@ review-approved rollback record. The protected rollback request journals the
 credential before any supervisor units; no manual credential repair is allowed.
 Perform the non-mutating credential readback on each applicable controller; it
 must remain `regular file:loom-rollout:loom-rollout:600`, with dedicated
-database-Secret and ConfigMap `get` success and all-namespace `pods/exec`
-denial. Then run the step 3 controller-local status/unit/journal JSON readbacks
-on both controllers. They prove all four units use the dedicated credential and
-only their successful empty-queue results permit timers to be re-enabled by the
+database-Secret and ConfigMap `get` success and exact `pods/exec` denial in
+every namespace currently enumerated by that controller-local credential. Then
+run the step 3 controller-local status/unit/journal JSON readbacks on both
+controllers. They prove all four units use the dedicated credential and only
+their successful empty-queue results permit timers to be re-enabled by the
 protected staging rollout.
 
 ## Disabled Phase 2 prerequisites: inputs, staging, and read-only preflight
