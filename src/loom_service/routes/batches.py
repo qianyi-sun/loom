@@ -408,16 +408,12 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     }
     task_configs = tuple(configs_by_id[task_id] for task_id in task_ids if task_id in configs_by_id)
     if backend == NEBIUS_BACKEND:
-        incompatible_task_ids = [
-            task_id
-            for task_id in task_ids
-            if (
-                task_id not in configs_by_id
-                or configs_by_id[task_id].service_execution is None
-                or configs_by_id[task_id].service_execution.logical_pool_id
-                != NEBIUS_LOGICAL_POOL_ID
-            )
-        ]
+        incompatible_task_ids: list[str] = []
+        for task_id in task_ids:
+            task_config = configs_by_id.get(task_id)
+            binding = task_config.service_execution if task_config is not None else None
+            if binding is None or binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID:
+                incompatible_task_ids.append(task_id)
         if incompatible_task_ids:
             _reject_submission(
                 reason="nebius_task_incompatible",

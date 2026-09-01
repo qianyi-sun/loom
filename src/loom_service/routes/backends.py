@@ -46,10 +46,14 @@ async def list_backends(sc: SessionAndCtx) -> dict[str, Any]:
     cold_start_pools = await get_cold_start_pools(s)
     service_execution_pools = await get_service_execution_backend_pools(s)
     cold_start_pools_by_backend: dict[str, list[str]] = {}
-    for pool in cold_start_pools:
-        cold_start_pools_by_backend.setdefault(pool.backend, []).append(pool.pool_name)
-    for pool in service_execution_pools:
-        cold_start_pools_by_backend.setdefault(pool.backend, []).append(pool.pool_name)
+    for cold_pool in cold_start_pools:
+        cold_start_pools_by_backend.setdefault(cold_pool.backend, []).append(
+            cold_pool.pool_name
+        )
+    for service_pool in service_execution_pools:
+        cold_start_pools_by_backend.setdefault(service_pool.backend, []).append(
+            service_pool.pool_name
+        )
 
     # Union of known + worker-advertised. Each entry marks `available`
     # so the SPA can render greyed-out options for backends that have
