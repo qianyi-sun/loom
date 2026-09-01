@@ -15,6 +15,7 @@ from types import MappingProxyType
 
 import pytest
 import scripts.ops.install_personal_dev_native_builder_runtime as runtime_installer
+import scripts.ops.personal_dev_native_builder_runtime_crypto as runtime_crypto
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -42,6 +43,16 @@ def test_ed25519_public_key_derivation_matches_rfc_8032_vector_1() -> None:
     assert runtime_installer._derive_ed25519_public_key(seed).hex() == (
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
     )
+
+
+def test_oid_validation_keeps_large_canonical_component_encoded() -> None:
+    width = 64 * 1024
+    encoded = b"\x2a" + b"\x81" + b"\x80" * (width - 2) + b"\x01"
+
+    observed = runtime_crypto._decode_oid(encoded, 0, len(encoded))
+
+    assert type(observed) is bytes, type(observed)
+    assert observed == encoded
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,7 +16,7 @@ _ED25519_BASE = (
 )
 _PEM_BEGIN = b"-----BEGIN CERTIFICATE-----\n"
 _PEM_END = b"-----END CERTIFICATE-----\n"
-_BASIC_CONSTRAINTS_OID = (2, 5, 29, 19)
+_BASIC_CONSTRAINTS_OID = b"\x55\x1d\x13"
 _MAX_DER_DEPTH = 32
 _NAME_STRING_TAGS = frozenset({0x0C, 0x12, 0x13, 0x14, 0x16, 0x1A, 0x1C, 0x1E})
 _PRINTABLE_STRING_BYTES = frozenset(
@@ -138,35 +138,18 @@ def _validate_bit_string(payload: bytes, start: int, end: int) -> None:
         raise _CertificateError("noncanonical DER bit string")
 
 
-def _decode_oid(payload: bytes, start: int, end: int) -> tuple[int, ...]:
+def _decode_oid(payload: bytes, start: int, end: int) -> bytes:
     encoded = payload[start:end]
     if not encoded:
         raise _CertificateError("empty DER OID")
-    components: list[int] = []
-    offset = 0
-    while offset < len(encoded):
-        value = 0
-        first = True
-        while True:
-            if offset >= len(encoded):
-                raise _CertificateError("truncated DER OID")
-            octet = encoded[offset]
-            offset += 1
-            if first and octet == 0x80:
-                raise _CertificateError("noncanonical DER OID")
-            first = False
-            value = (value << 7) | (octet & 0x7F)
-            if not octet & 0x80:
-                break
-        components.append(value)
-    first_value, *remaining = components
-    if first_value < 40:
-        first_arcs = (0, first_value)
-    elif first_value < 80:
-        first_arcs = (1, first_value - 40)
-    else:
-        first_arcs = (2, first_value - 80)
-    return (*first_arcs, *remaining)
+    component_start = True
+    for octet in encoded:
+        if component_start and octet == 0x80:
+            raise _CertificateError("noncanonical DER OID")
+        component_start = not bool(octet & 0x80)
+    if not component_start:
+        raise _CertificateError("truncated DER OID")
+    return encoded
 
 
 def _validate_tree(
@@ -353,7 +336,7 @@ def _extensions_are_ca(
     if len(explicit) != 1:
         raise _CertificateError("invalid extensions wrapper")
     _expect_tag(explicit[0], 0x30)
-    seen: set[tuple[int, ...]] = set()
+    seen: set[bytes] = set()
     basic_constraints: bool | None = None
     for extension in _items(payload, explicit[0][2], explicit[0][3]):
         _expect_tag(extension, 0x30)
