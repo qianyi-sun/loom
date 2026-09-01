@@ -26,6 +26,29 @@ repository.
 Complete the native runtime runbook through agent activation first. Use one
 non-root shell. Every referenced input is an owner-only, reviewed file.
 
+The prerequisite must include the operator-only material boundary on exact
+host `TRT-EAI-OLDLAB-1` with architecture `x86_64`. From the exact approved
+source/tree, the runtime runbook's direct-root handoff invokes
+`/opt/loom-personal-dev-native-builder-runtime-authority/source/scripts/ops/install_personal_dev_native_builder_runtime_authority.py`
+with `--target operator-material`. It publishes
+`/etc/loom/personal-dev-native-builder-operator-material-authority.json` and
+exactly five operator code assets:
+
+- `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority`;
+- `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_authority_client.py`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_crypto.py`.
+
+On OLDLAB, the operator-only bootstrap must not install the GB10 broker,
+runtime assets, tmpfiles, or sudoers. The protected-host administrator must
+separately provision
+`/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519` and
+`/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem` only
+after that bootstrap succeeds. The bootstrap must not consume either input;
+the installed material client validates the distinct operator policy before
+opening them through its fixed descriptor-only boundary.
+
 ```bash
 set -euo pipefail
 umask 077

@@ -326,6 +326,11 @@ def test_sudoers_and_tmpfiles_assets_have_the_only_authorized_rules() -> None:
 @pytest.mark.parametrize(
     "path",
     (
+        "docs/architecture/2026-08-31-personal-dev-native-runtime-authority-design.md",
+        "docs/architecture/2026-09-01-personal-dev-native-operator-material-authority-design.md",
+        "docs/implementation-plans/2026-09-01-personal-dev-native-operator-material-authority.md",
+        "docs/runbooks/personal-dev-native-builder-acceptance.md",
+        "docs/runbooks/personal-dev-native-builder-runtime.md",
         "scripts/ops/converge_personal_dev_native_builder_release.py",
         "scripts/ops/install_personal_dev_native_builder_runtime.py",
         "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
