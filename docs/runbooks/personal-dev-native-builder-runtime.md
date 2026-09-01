@@ -689,9 +689,54 @@ jq -cnS \
 chmod 0600 "$evidence_dir/immutable-inputs.json"
 ```
 
-Before the runtime window opens, a direct-root administrator on the protected
-operator host must install the policy-bound material client from the same
-approved authority inventory and provision exactly these fixed inputs:
+Before the runtime window opens, a direct-root administrator on exact host
+`TRT-EAI-OLDLAB-1` with architecture `x86_64` must install the operator-only
+material boundary, including the policy-bound material client, from the same
+approved source commit and tree. This is a separate root handoff; do not run it
+from the non-root operator shell used by the other blocks in this runbook. The
+sealed source must already be the root-owned mode-`0700` checkout at
+`/opt/loom-personal-dev-native-builder-runtime-authority/source`.
+
+In a clean direct-root login on that host, replace both placeholders with the
+same public source identities bound above and run exactly:
+
+```bash
+set -euo pipefail
+test "$(id -u)" = 0
+test "$(uname -n)" = TRT-EAI-OLDLAB-1
+test "$(uname -m)" = x86_64
+operator_authority_source_sha='<merged-40-lowercase-hex>'
+operator_authority_source_tree='<merged-tree-40-lowercase-hex>'
+[[ "$operator_authority_source_sha" =~ ^[0-9a-f]{40}$ ]]
+[[ "$operator_authority_source_tree" =~ ^[0-9a-f]{40}$ ]]
+test "$operator_authority_source_sha" != "$operator_authority_source_tree"
+/usr/bin/env -i HOME=/nonexistent PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C LC_ALL=C \
+  /usr/bin/python3 -I \
+  /opt/loom-personal-dev-native-builder-runtime-authority/source/scripts/ops/install_personal_dev_native_builder_runtime_authority.py \
+  --source-sha "$operator_authority_source_sha" \
+  --source-tree-sha "$operator_authority_source_tree" \
+  --target operator-material
+```
+
+That target publishes
+`/etc/loom/personal-dev-native-builder-operator-material-authority.json`
+and exactly five operator code assets:
+
+- `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority`;
+- `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_authority_client.py`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py`;
+- `/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/personal_dev_native_builder_runtime_crypto.py`.
+
+On OLDLAB, the operator-only bootstrap must not install the GB10 broker,
+runtime assets, tmpfiles, or sudoers. In particular, it does not publish the
+`qianyi` GB10 sudo rule, runtime state/lock paths, Docker/nft/systemd assets, or
+executable capacity.
+
+Only after that code-and-policy transaction succeeds may the protected-host
+administrator separately provision exactly these fixed inputs into the empty
+mode-`0700` material directory:
 
 - `/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519`, a
   root-owned, root-group, single-link regular file with mode `0400` and exactly
@@ -700,14 +745,15 @@ approved authority inventory and provision exactly these fixed inputs:
   root-owned, root-group, single-link regular file with mode `0444` and a size
   from 1 byte through 1 MiB.
 
-The material client validates the complete installed inventory, opens those
-fixed files without following links, and gives the FD-only encoder distinct
-descriptors numbered at least `3`. The operator does not provide either
-pathname. Its local `sudo` authorization is part of the separately provisioned
-protected-operator-host transport authority; it is not granted by the GB10
-authority sudoers asset, which remains limited to the empty-argument remote
-broker. Neither CA bytes nor a CA digest may be recorded; private-key bytes and
-digests are prohibited by the same evidence rule.
+The bootstrap never reads, copies, validates, hashes, or prints either input.
+The material client validates the distinct five-asset operator policy before
+it opens those fixed files without following links, then gives the FD-only
+encoder distinct descriptors numbered at least `3`. The operator does not
+provide either pathname. Its local `sudo` authorization is part of the
+separately provisioned protected-operator-host transport authority; it is not
+granted by the GB10 authority sudoers asset, which remains limited to the
+empty-argument remote broker. Neither CA bytes nor a CA digest may be recorded;
+private-key bytes and digests are prohibited by the same evidence rule.
 
 ```bash
 sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \

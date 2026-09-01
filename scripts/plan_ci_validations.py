@@ -107,6 +107,11 @@ PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT = {
 
 PROTECTED_NATIVE_AUTHORITY_EXACT = {
     "deploy/worker-pools/gb10/README.md",
+    "docs/architecture/2026-08-31-personal-dev-native-runtime-authority-design.md",
+    "docs/architecture/2026-09-01-personal-dev-native-operator-material-authority-design.md",
+    "docs/implementation-plans/2026-09-01-personal-dev-native-operator-material-authority.md",
+    "docs/runbooks/personal-dev-native-builder-acceptance.md",
+    "docs/runbooks/personal-dev-native-builder-runtime.md",
     "scripts/ops/converge_personal_dev_native_builder_release.py",
     "scripts/ops/install_personal_dev_native_builder_runtime.py",
     "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
@@ -122,6 +127,7 @@ PROTECTED_NATIVE_AUTHORITY_EXACT = {
     "tests/ops/test_install_personal_dev_native_builder_runtime.py",
     "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
     "tests/ops/test_personal_dev_native_builder_conformance.py",
+    "tests/ops/test_personal_dev_native_builder_runbooks.py",
     "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
     "tests/ops/test_personal_dev_native_builder_runtime_authority_protocol.py",
     "tests/ops/test_personal_dev_native_builder_runtime_profile.py",

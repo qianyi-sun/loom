@@ -119,11 +119,13 @@ one-time direct-root bootstrap. It is not a sudoer command. It requires:
   no-symlink/no-hardlink source inventory;
 - the expected host and architecture.
 
-It atomically installs the broker, fixed supporting assets, policy, state
-directories, lock/tmpfiles configuration, and sudoers rule. Sudoers is
-validated and published last. Any failure rolls back every asset created by
-that bootstrap attempt. Existing assets must be byte-identical and have exact
-root ownership/modes; drift fails closed.
+The default `runtime` target atomically installs the GB10 broker, fixed
+supporting assets, runtime policy, state directories, lock/tmpfiles
+configuration, and sudoers rule. Sudoers is validated and published last. The
+separate `operator-material` target described below has a distinct inventory
+and installs none of those GB10 capacity or privilege surfaces. Any failure
+rolls back every asset created by that bootstrap attempt. Existing assets must
+be byte-identical and have exact root ownership/modes; drift fails closed.
 
 The policy binds the authority source/tree and SHA-256 of every root-executed
 asset. Updating root code therefore requires a new merged candidate and a new
@@ -139,15 +141,29 @@ pathname option.
 
 The separately installed
 `personal_dev_native_builder_runtime_authority_material_client.py` is a sealed,
-policy-bound root asset. It opens only two fixed administrator-provisioned
-material paths, validates their metadata without following links, and invokes
-the FD-only client from the validated installed library. The operator cannot
-select either pathname, and no checkout or runbook shell is executed as root.
-Its root-owned entrypoint necessarily starts before it can validate itself,
-but its pre-validation module body is stdlib-only and performs no material I/O
-or application-module load. It validates the complete installed policy before
-opening either material file or loading the encoder, so splitting another
-pre-validation launcher would not reduce the operator-controlled trust surface.
+policy-bound root asset. OLDLAB installs it with the explicit
+`--target operator-material` bootstrap on exact host
+`TRT-EAI-OLDLAB-1/x86_64`. Its distinct policy at
+`/etc/loom/personal-dev-native-builder-operator-material-authority.json` binds
+exactly the launcher, material client, FD-only authority client, framed
+protocol module, and stdlib crypto helper. This operator target installs no
+GB10 broker, runtime profile or runtime assets, tmpfiles/state/lock surface, or
+sudoers rule.
+
+The bootstrap creates only an empty mode-`0700` material directory; a direct
+administrator separately provisions the two fixed inputs afterward. The
+bootstrap never opens, copies, validates, hashes, prints, or otherwise consumes
+either input. The material client opens only those fixed
+administrator-provisioned paths, validates their metadata without following
+links, and invokes the FD-only client from the validated installed library.
+The installer first validates those installed assets against a temporary policy
+and publishes the fixed operator policy last as the activation commit point.
+The operator cannot select either pathname, and no checkout or runbook shell is
+executed as root. Its root-owned entrypoint necessarily starts before it can
+validate itself, but its pre-validation module body is stdlib-only and performs
+no material I/O or application-module load. It validates the complete distinct
+five-asset operator policy before opening either material file or loading the
+encoder.
 
 The material client's local `sudo` invocation uses the separately provisioned
 protected-operator-host authorization already required by the fixed root-local

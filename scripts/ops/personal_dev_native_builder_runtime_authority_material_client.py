@@ -68,13 +68,25 @@ def _load_validated_client() -> ModuleType:
     )
     launcher = _load_module(launcher_name, LAUNCHER_PATH)
     try:
-        launcher.load_policy(expected_uid=ROOT_UID, expected_gid=ROOT_GID)
-        if (
-            launcher.ASSET_SPECS.get("material_client")
-            != launcher.AssetSpec(MATERIAL_CLIENT_PATH, 0o555)
-            or launcher.ASSET_SPECS.get("authority_client")
-            != launcher.AssetSpec(CLIENT_PATH, 0o444)
-        ):
+        launcher.load_operator_material_policy(
+            expected_uid=ROOT_UID,
+            expected_gid=ROOT_GID,
+        )
+        expected_inventory = {
+            "authority_client": launcher.AssetSpec(CLIENT_PATH, 0o444),
+            "crypto_helper": launcher.AssetSpec(
+                CLIENT_PATH.parent / "personal_dev_native_builder_runtime_crypto.py",
+                0o444,
+            ),
+            "launcher": launcher.AssetSpec(LAUNCHER_PATH, 0o555),
+            "material_client": launcher.AssetSpec(MATERIAL_CLIENT_PATH, 0o555),
+            "protocol": launcher.AssetSpec(
+                CLIENT_PATH.parent
+                / "personal_dev_native_builder_runtime_authority_protocol.py",
+                0o444,
+            ),
+        }
+        if dict(launcher.OPERATOR_MATERIAL_ASSET_SPECS) != expected_inventory:
             raise MaterialClientError("inventory invalid")
         launcher._pin_application_packages(LIBRARY_ROOT)
         sys.modules[launcher_name] = launcher

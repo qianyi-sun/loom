@@ -13,6 +13,24 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
 ACCEPTANCE = ROOT / "docs/runbooks/personal-dev-native-builder-acceptance.md"
 GB10_README = ROOT / "deploy/worker-pools/gb10/README.md"
+OPERATOR_MATERIAL_POLICY = (
+    "/etc/loom/personal-dev-native-builder-operator-material-authority.json"
+)
+OPERATOR_MATERIAL_BOOTSTRAP = (
+    "/opt/loom-personal-dev-native-builder-runtime-authority/source/"
+    "scripts/ops/install_personal_dev_native_builder_runtime_authority.py"
+)
+OPERATOR_MATERIAL_ASSETS = (
+    "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+    "/usr/local/libexec/"
+    "loom-personal-dev-native-builder-runtime-authority-material-client",
+    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
+    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
+    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+    "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
+)
 
 DIRECT_GB10_TRANSPORT_ARGS = [
     "-F",
@@ -1092,6 +1110,33 @@ def test_native_builder_runtime_delegates_material_validation_to_installed_asset
     assert "agent_private_key=" not in runbook
     assert "service_ca=" not in runbook
     assert "policy-bound material client" in runbook
+
+
+@pytest.mark.parametrize("runbook_path", (RUNTIME, ACCEPTANCE))
+def test_native_builder_runbooks_require_operator_only_material_bootstrap(
+    runbook_path: Path,
+) -> None:
+    """Catches OLDLAB guidance installing the complete GB10 authority inventory."""
+    runbook = _read(runbook_path)
+    normalized = _normalized(runbook)
+
+    assert "TRT-EAI-OLDLAB-1" in runbook
+    assert "x86_64" in runbook
+    assert OPERATOR_MATERIAL_POLICY in runbook
+    assert OPERATOR_MATERIAL_BOOTSTRAP in runbook
+    assert "--target operator-material" in normalized
+    assert all(asset in runbook for asset in OPERATOR_MATERIAL_ASSETS)
+    assert "exactly five operator code assets" in runbook
+    assert "must not install the GB10 broker, runtime assets, tmpfiles, or sudoers" in normalized
+    assert "separately provision" in normalized
+    assert (
+        "/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519"
+        in runbook
+    )
+    assert (
+        "/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem"
+        in runbook
+    )
 
 
 def test_native_builder_runtime_orders_receipt_bound_inert_stage_before_activation() -> None:

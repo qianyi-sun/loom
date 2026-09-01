@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import cast
 
 SOURCE_ROOT = Path("/opt/loom-personal-dev-native-builder-runtime-authority/source")
@@ -50,6 +50,65 @@ _TMPFILES_PAYLOAD = (
     b"f /run/lock/loom-personal-dev-native-builder-runtime-authority.lock "
     b"0600 root root -\n"
     b"d /run/loom-personal-dev-native-builder-runtime-authority 0700 root root -\n"
+)
+_OPERATOR_MATERIAL_POLICY_SCHEMA = (
+    "loom.personal-dev-native-builder-operator-material-authority-policy.v1"
+)
+_OPERATOR_MATERIAL_ROOT = Path(
+    "/etc/loom/personal-dev-native-builder-authority-material"
+)
+_OPERATOR_MATERIAL_LIBRARY_ROOT = Path(
+    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority"
+)
+_OPERATOR_MATERIAL_ASSET_LAYOUT: Mapping[str, tuple[Path, Path, int]] = (
+    MappingProxyType(
+        {
+            "authority_client": (
+                Path(
+                    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+                ),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_authority_client.py",
+                0o444,
+            ),
+            "crypto_helper": (
+                Path("scripts/ops/personal_dev_native_builder_runtime_crypto.py"),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_crypto.py",
+                0o444,
+            ),
+            "launcher": (
+                _LAUNCHER_RELATIVE,
+                Path(
+                    "/usr/local/libexec/"
+                    "loom-personal-dev-native-builder-runtime-authority"
+                ),
+                0o555,
+            ),
+            "material_client": (
+                _MATERIAL_CLIENT_RELATIVE,
+                Path(
+                    "/usr/local/libexec/"
+                    "loom-personal-dev-native-builder-runtime-authority-material-client"
+                ),
+                0o555,
+            ),
+            "protocol": (
+                Path(
+                    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py"
+                ),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_authority_protocol.py",
+                0o444,
+            ),
+        }
+    )
 )
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -322,7 +381,7 @@ def _source_relative(
     name: str,
     specification: object,
     launcher: ModuleType,
-) -> Path:
+) -> tuple[Path, Path, int]:
     path = getattr(specification, "path", None)
     mode = getattr(specification, "mode", None)
     if not isinstance(path, Path) or not path.is_absolute() or not isinstance(mode, int):
@@ -330,19 +389,19 @@ def _source_relative(
     if name == "launcher":
         if path != launcher.LIBEXEC_PATH or mode != 0o555:
             raise BootstrapError("source_inventory_invalid")
-        return _LAUNCHER_RELATIVE
+        return _LAUNCHER_RELATIVE, path, mode
     if name == "material_client":
         if path != launcher.MATERIAL_CLIENT_PATH or mode != 0o555:
             raise BootstrapError("source_inventory_invalid")
-        return _MATERIAL_CLIENT_RELATIVE
+        return _MATERIAL_CLIENT_RELATIVE, path, mode
     if name == "sudoers":
         if path != launcher.ASSET_SPECS["sudoers"].path or mode != 0o440:
             raise BootstrapError("source_inventory_invalid")
-        return _SUDOERS_RELATIVE
+        return _SUDOERS_RELATIVE, path, mode
     if name == "tmpfiles":
         if path != launcher.ASSET_SPECS["tmpfiles"].path or mode != 0o444:
             raise BootstrapError("source_inventory_invalid")
-        return _TMPFILES_RELATIVE
+        return _TMPFILES_RELATIVE, path, mode
     try:
         relative = path.relative_to(launcher.LIBRARY_ROOT)
     except ValueError as exc:
@@ -357,15 +416,23 @@ def _source_relative(
         raise BootstrapError("source_inventory_invalid")
     if name == "broker" and path != launcher.BROKER_PATH:
         raise BootstrapError("source_inventory_invalid")
-    return relative
+    return relative, path, mode
 
 
 def _capture_inventory(
     launcher: ModuleType,
     launcher_payload: bytes,
+    *,
+    specifications: Mapping[str, object] | None = None,
+    operator_material: bool = False,
 ) -> tuple[_SourceAsset, ...]:
-    specifications = getattr(launcher, "ASSET_SPECS", None)
+    if specifications is None:
+        specifications = getattr(launcher, "ASSET_SPECS", None)
     if not isinstance(specifications, Mapping) or not specifications:
+        raise BootstrapError("source_inventory_invalid")
+    if operator_material and set(specifications) != set(
+        _OPERATOR_MATERIAL_ASSET_LAYOUT
+    ):
         raise BootstrapError("source_inventory_invalid")
     assets: list[_SourceAsset] = []
     sources: set[Path] = set()
@@ -373,9 +440,17 @@ def _capture_inventory(
     for name, specification in specifications.items():
         if not isinstance(name, str) or not name:
             raise BootstrapError("source_inventory_invalid")
-        relative = _source_relative(name, specification, launcher)
-        installed_path = specification.path
-        mode = specification.mode
+        relative, installed_path, mode = _source_relative(
+            name,
+            specification,
+            launcher,
+        )
+        if operator_material and (
+            relative,
+            installed_path,
+            mode,
+        ) != _OPERATOR_MATERIAL_ASSET_LAYOUT[name]:
+            raise BootstrapError("source_inventory_invalid")
         if relative in sources or installed_path in destinations:
             raise BootstrapError("source_inventory_invalid")
         payload = (
@@ -394,14 +469,25 @@ def _capture_inventory(
             )
         )
     by_name = {asset.name: asset for asset in assets}
-    if (
-        set(by_name) != set(specifications)
-        or by_name["broker"].installed_path != launcher.BROKER_PATH
-    ):
+    if set(by_name) != set(specifications):
         raise BootstrapError("source_inventory_invalid")
-    if by_name["sudoers"].payload != _SUDOERS_PAYLOAD:
+    runtime_specs = getattr(launcher, "ASSET_SPECS", None)
+    operator_specs = getattr(launcher, "OPERATOR_MATERIAL_ASSET_SPECS", None)
+    if not isinstance(runtime_specs, Mapping):
         raise BootstrapError("source_inventory_invalid")
-    if by_name["tmpfiles"].payload != _TMPFILES_PAYLOAD:
+    if operator_material:
+        if not isinstance(operator_specs, Mapping) or dict(specifications) != dict(
+            operator_specs
+        ):
+            raise BootstrapError("source_inventory_invalid")
+    elif dict(specifications) == dict(runtime_specs):
+        if (
+            by_name["broker"].installed_path != launcher.BROKER_PATH
+            or by_name["sudoers"].payload != _SUDOERS_PAYLOAD
+            or by_name["tmpfiles"].payload != _TMPFILES_PAYLOAD
+        ):
+            raise BootstrapError("source_inventory_invalid")
+    else:
         raise BootstrapError("source_inventory_invalid")
     return tuple(assets)
 
@@ -457,6 +543,62 @@ def _pinned_source_contract() -> Iterator[tuple[ModuleType, ModuleType, tuple[_S
     finally:
         if finder is not None and finder in sys.meta_path:
             sys.meta_path.remove(finder)
+        for name in tuple(sys.modules):
+            if name == "scripts" or name.startswith("scripts."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        sys.dont_write_bytecode = previous_bytecode
+
+
+@contextmanager
+def _pinned_operator_source_contract() -> Iterator[
+    tuple[ModuleType, tuple[_SourceAsset, ...]]
+]:
+    saved = {
+        name: module
+        for name, module in tuple(sys.modules.items())
+        if name == "scripts" or name.startswith("scripts.")
+    }
+    for name in saved:
+        sys.modules.pop(name, None)
+    scripts_package = ModuleType("scripts")
+    scripts_package.__package__ = "scripts"
+    scripts_package.__path__ = []
+    ops_package = ModuleType("scripts.ops")
+    ops_package.__package__ = "scripts.ops"
+    ops_package.__path__ = []
+    scripts_package.__dict__["ops"] = ops_package
+    sys.modules["scripts"] = scripts_package
+    sys.modules["scripts.ops"] = ops_package
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        launcher_path = SOURCE_ROOT / _LAUNCHER_RELATIVE
+        launcher_payload = _read_source_file(launcher_path)
+        launcher = _load_bytes(
+            "scripts.ops.personal_dev_native_builder_runtime_authority_launcher",
+            launcher_path,
+            launcher_payload,
+        )
+        specifications = getattr(
+            launcher,
+            "OPERATOR_MATERIAL_ASSET_SPECS",
+            None,
+        )
+        if not isinstance(specifications, Mapping):
+            raise BootstrapError("source_inventory_invalid")
+        assets = _capture_inventory(
+            launcher,
+            launcher_payload,
+            specifications=specifications,
+            operator_material=True,
+        )
+        yield launcher, assets
+    except BootstrapError:
+        raise
+    except BaseException as exc:
+        raise BootstrapError("source_inventory_invalid") from exc
+    finally:
         for name in tuple(sys.modules):
             if name == "scripts" or name.startswith("scripts."):
                 sys.modules.pop(name, None)
@@ -900,7 +1042,8 @@ def _validate_installed_policy(
     policy_path: Path,
     assets: Sequence[_SourceAsset],
     *,
-    sudoers_path: Path,
+    sudoers_path: Path | None,
+    operator_material: bool = False,
 ) -> None:
     launcher_path = _host_path(launcher_asset.installed_path)
     installed_payload = _read_installed_file(launcher_path, launcher_asset.mode)
@@ -911,12 +1054,21 @@ def _validate_installed_policy(
         module = _load_bytes(module_name, launcher_path, installed_payload)
         specifications = {
             asset.name: module.AssetSpec(
-                sudoers_path if asset.name == "sudoers" else _host_path(asset.installed_path),
+                (
+                    sudoers_path
+                    if asset.name == "sudoers" and sudoers_path is not None
+                    else _host_path(asset.installed_path)
+                ),
                 asset.mode,
             )
             for asset in assets
         }
-        module.load_policy(
+        loader = (
+            module.load_operator_material_policy
+            if operator_material
+            else module.load_policy
+        )
+        loader(
             policy_path=policy_path,
             asset_specs=specifications,
             expected_uid=ROOT_UID,
@@ -937,7 +1089,7 @@ def _rollback(created: Sequence[_CreatedObject]) -> None:
         raise BootstrapError("rollback_failed")
 
 
-def _validate_direct_root() -> None:
+def _validate_direct_root_target(expected_host: str, expected_architecture: str) -> None:
     unsafe = any(
         name in _UNSAFE_ENVIRONMENT_NAMES or name.startswith(_UNSAFE_ENVIRONMENT_PREFIXES)
         for name in os.environ
@@ -945,8 +1097,19 @@ def _validate_direct_root() -> None:
     if os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0) or unsafe:
         raise BootstrapError("direct_root_required")
     identity = os.uname()
-    if identity.nodename != "gx10-01c7" or identity.machine != "aarch64":
+    if (
+        identity.nodename != expected_host
+        or identity.machine != expected_architecture
+    ):
         raise BootstrapError("target_host_required")
+
+
+def _validate_direct_root() -> None:
+    _validate_direct_root_target("gx10-01c7", "aarch64")
+
+
+def _validate_operator_direct_root() -> None:
+    _validate_direct_root_target("TRT-EAI-OLDLAB-1", "x86_64")
 
 
 def _canonical_receipt(value: Mapping[str, object]) -> bytes:
@@ -1091,17 +1254,143 @@ def bootstrap(source_sha: str, source_tree_sha: str) -> dict[str, object]:
     return receipt
 
 
+def bootstrap_operator_material(
+    source_sha: str,
+    source_tree_sha: str,
+) -> dict[str, object]:
+    """Install only the validated OLDLAB material-client authority subset."""
+    _validate_operator_direct_root()
+    if (
+        not isinstance(source_sha, str)
+        or _HEX_40.fullmatch(source_sha) is None
+        or not isinstance(source_tree_sha, str)
+        or _HEX_40.fullmatch(source_tree_sha) is None
+        or source_sha == source_tree_sha
+    ):
+        raise BootstrapError("sealed_source_invalid")
+    _safe_source_root()
+    validator = _load_validator()
+    _validate_sealed_source(validator, source_sha, source_tree_sha)
+
+    with _pinned_operator_source_contract() as (launcher, assets):
+        digests = {asset.name: asset.sha256 for asset in assets}
+        policy_payload = _canonical_receipt(
+            {
+                "asset_sha256": digests,
+                "authority_source_sha": source_sha,
+                "authority_source_tree": source_tree_sha,
+                "schema": _OPERATOR_MATERIAL_POLICY_SCHEMA,
+            }
+        )
+        try:
+            launcher_asset = next(
+                asset for asset in assets if asset.name == "launcher"
+            )
+            policy_logical = launcher.OPERATOR_MATERIAL_POLICY_PATH
+            if (
+                not isinstance(policy_logical, Path)
+                or policy_logical
+                != Path(
+                    "/etc/loom/"
+                    "personal-dev-native-builder-operator-material-authority.json"
+                )
+            ):
+                raise BootstrapError("source_inventory_invalid")
+        except (StopIteration, AttributeError) as exc:
+            raise BootstrapError("source_inventory_invalid") from exc
+
+    created: list[_CreatedObject] = []
+    changed = False
+    try:
+        for asset in assets:
+            changed = (
+                _install_file(
+                    _host_path(asset.installed_path),
+                    asset.payload,
+                    asset.mode,
+                    created,
+                )
+                or changed
+            )
+        material_root = _host_path(_OPERATOR_MATERIAL_ROOT)
+        _ensure_parents(material_root.parent, created)
+        changed = _ensure_directory(material_root, 0o700, created) or changed
+        policy_path = _host_path(policy_logical)
+        staged_policy_path = policy_path.parent / (
+            f".{policy_path.name}.validate-{os.getpid()}"
+        )
+        if not _install_file(
+            staged_policy_path,
+            policy_payload,
+            0o444,
+            created,
+        ):
+            raise BootstrapError("publication_failed")
+        staged_policy_created = created[-1]
+        if staged_policy_created.path != staged_policy_path:
+            raise BootstrapError("publication_failed")
+        _validate_installed_policy(
+            launcher_asset,
+            staged_policy_path,
+            assets,
+            sudoers_path=None,
+            operator_material=True,
+        )
+        if not _remove_created_object(staged_policy_created):
+            raise BootstrapError("publication_failed")
+        created.remove(staged_policy_created)
+        changed = (
+            _install_file(
+                policy_path,
+                policy_payload,
+                0o444,
+                created,
+            )
+            or changed
+        )
+    except BaseException as exc:
+        try:
+            _rollback(created)
+        except BootstrapError as rollback_error:
+            exc.add_note(f"cleanup:{rollback_error.code}")
+        if isinstance(exc, BootstrapError):
+            raise
+        raise BootstrapError("publication_failed") from exc
+
+    receipt: dict[str, object] = {
+        "asset_sha256": digests,
+        "changed": changed,
+        "policy_sha256": hashlib.sha256(policy_payload).hexdigest(),
+        "source_base_sha": APPROVED_BASE_SHA,
+        "source_sha": source_sha,
+        "source_tree_sha": source_tree_sha,
+        "status": "ok",
+        "target": "operator-material",
+    }
+    _canonical_receipt(receipt)
+    return receipt
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--source-tree-sha", required=True)
+    parser.add_argument(
+        "--target",
+        choices=("operator-material", "runtime"),
+        default="runtime",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        receipt = bootstrap(args.source_sha, args.source_tree_sha)
+        receipt = (
+            bootstrap_operator_material(args.source_sha, args.source_tree_sha)
+            if args.target == "operator-material"
+            else bootstrap(args.source_sha, args.source_tree_sha)
+        )
         payload = _canonical_receipt(receipt)
     except BaseException:
         sys.stderr.write("error:native_authority_bootstrap_failed\n")
@@ -1114,4 +1403,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["BootstrapError", "bootstrap", "main"]
+__all__ = ["BootstrapError", "bootstrap", "bootstrap_operator_material", "main"]
