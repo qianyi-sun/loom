@@ -1044,6 +1044,7 @@ def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
     ("stdout", "expected"),
     (
         ("123|loom-job|CANCELLED by 995|Unknown|trt-gb10-1\n", True),
+        ("38794|loom-job|CANCELLED by 995|None|None assigned\n", True),
         ("123|loom-job|RUNNING|2026-08-27T12:00:00|trt-gb10-1\n", False),
         ("123|other-job|CANCELLED|Unknown|trt-gb10-1\n", False),
         ("", False),
@@ -1141,6 +1142,109 @@ def test_busy_accounting_polls_empty_until_full_nonce_row_is_visible(
     assert authority._allocation_never_started(job_name, node=node, deadline=1.0)
     assert len(commands) == 2
     assert clock[0] <= 1.0
+
+
+@pytest.mark.parametrize("persisted_busy_job_id", ("123", None))
+def test_busy_deferral_requires_the_exact_persisted_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persisted_busy_job_id: str | None,
+) -> None:
+    authority = _load_authority()
+    authority.ROOT_UID = os.geteuid()
+    authority.ROOT_GID = os.getegid()
+    candidate_sha = "a" * 40
+    first_node = "trt-gb10-1"
+    busy_node = "trt-gb10-3"
+    monkeypatch.setattr(authority, "SLURM_NODES", (first_node, busy_node))
+    state_root = tmp_path / "jobs"
+    state_root.mkdir(mode=0o700)
+    state_path = state_root / "active.json"
+    busy_job_name = ""
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["/usr/bin/scontrol", "show", "node"]:
+            node = argv[3]
+            allocation = "0" if node == first_node else "20"
+            state = "IDLE" if node == first_node else "ALLOCATED"
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    f"NodeName={node} CPUAlloc={allocation} AllocMem=0 State={state} "
+                    "Partitions=gb10,loom-staging "
+                ),
+                stderr="",
+            )
+        if "/usr/bin/sacct" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=f"456|{busy_job_name}|CANCELLED by 995|None|None assigned\n",
+                stderr="",
+            )
+        raise AssertionError(argv)
+
+    def launch(
+        argv: list[str],
+        *,
+        job_name: str,
+        state_path: Path,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal busy_job_name
+        is_busy = f"--nodelist={busy_node}" in argv
+        job_id = persisted_busy_job_id if is_busy else "101"
+        authority._write_active_job_state(state_path, job_name=job_name, job_id=job_id)
+        if is_busy:
+            busy_job_name = job_name
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="",
+                stderr="srun: Requested nodes are busy\n",
+            )
+        payload = {
+            "candidate_sha": candidate_sha,
+            "node": first_node,
+            "trial_cache_registry": _node_probe_registry_payload(authority),
+        }
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=authority.ALLOCATION_START_MARKER + "\n" + json.dumps(payload) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(authority, "_run", run)
+    monkeypatch.setattr(authority, "_run_allocation_launcher", launch)
+    monkeypatch.setattr(
+        authority,
+        "_cleanup_persisted_probe_job",
+        lambda _job_name, *, state_path, **_kwargs: authority._clear_active_job_state(state_path),
+    )
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
+    )
+
+    with pytest.raises(
+        authority.AcceptanceError, match=f"node allocation failed safely: {busy_node}"
+    ):
+        authority._probe_nodes(
+            candidate_sha,
+            verified,
+            {
+                "repo_dir": Path("/worker/repo"),
+                "env_file": Path("/worker/env"),
+                "image_tag": "staging-aaaaaaa",
+                "requested_concurrency": 10,
+            },
+            job_state_path=state_path,
+            request_nonce="0123456789abcdef01234567",
+        )
 
 
 @pytest.mark.parametrize(

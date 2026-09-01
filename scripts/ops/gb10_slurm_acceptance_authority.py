@@ -2075,9 +2075,12 @@ def _node_is_deferred_busy(
 def _allocation_never_started(
     job_name: str,
     *,
+    expected_job_id: str | None = None,
     node: str,
     deadline: float | None,
 ) -> bool:
+    if expected_job_id is not None and JOB_ID_RE.fullmatch(expected_job_id) is None:
+        return False
     accounting_deadline = time.monotonic() + 5.0
     if deadline is not None:
         accounting_deadline = min(accounting_deadline, deadline)
@@ -2088,6 +2091,7 @@ def _allocation_never_started(
         "--allocations",
         f"--user={SERVICE_USER}",
         f"--name={job_name}",
+        *([] if expected_job_id is None else [f"--jobs={expected_job_id}"]),
         "--starttime=now-10minutes",
         "--format=JobIDRaw,JobName%128,State,Start,NodeList%128",
     )
@@ -2108,10 +2112,11 @@ def _allocation_never_started(
             job_id, recorded_name, state, started_at, recorded_node = fields
             return bool(
                 JOB_ID_RE.fullmatch(job_id) is not None
+                and (expected_job_id is None or job_id == expected_job_id)
                 and recorded_name == job_name
                 and state.partition(" ")[0] in {"CANCELLED", "PENDING"}
-                and started_at == "Unknown"
-                and recorded_node == node
+                and started_at in {"None", "Unknown"}
+                and recorded_node in {"None assigned", node}
             )
         if accounting_deadline - time.monotonic() <= 0.05:
             return False
@@ -2184,6 +2189,7 @@ def _probe_nodes(
             str(SERVICE_UID),
             str(SERVICE_GID),
         )
+        expected_job_id: str | None = None
         try:
             if job_state_path is None:
                 result = _run(
@@ -2200,6 +2206,11 @@ def _probe_nodes(
                     timeout=60,
                     deadline=work_deadline,
                 )
+                active_job = _read_active_job_state(job_state_path)
+                if active_job is not None and active_job.get("job_name") == job_name:
+                    job_id = active_job.get("job_id")
+                    if type(job_id) is str:
+                        expected_job_id = job_id
         finally:
             if job_state_path is None:
                 _cleanup_probe_jobs(job_name, deadline=cleanup_deadline)
@@ -2219,8 +2230,10 @@ def _probe_nodes(
         )
         scheduler_never_started = bool(
             potential_unstarted_busy
+            and (job_state_path is None or expected_job_id is not None)
             and _allocation_never_started(
                 job_name,
+                expected_job_id=expected_job_id,
                 node=node,
                 deadline=cleanup_deadline,
             )
