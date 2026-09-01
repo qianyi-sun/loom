@@ -51,6 +51,9 @@ class FinalSmokeError(RuntimeError):
         self.code = code
 
 
+CapacityRefresh = Callable[[FinalGatePlan], str]
+
+
 @dataclass(frozen=True, slots=True)
 class FinalSmokeExecutor:
     """Submit or recover one exact bounded batch and require terminal success."""
@@ -60,6 +63,7 @@ class FinalSmokeExecutor:
     expected_token_fingerprint: str
     authority: AdminSmokeAuthority
     request: SmokeTransport
+    refresh_capacity: CapacityRefresh
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     terminal_timeout_seconds: float = 900.0
@@ -73,6 +77,7 @@ class FinalSmokeExecutor:
             or any(character in str(self.token_path) for character in (",", "\n", "\r", "\x00"))
             or not self.expected_token_fingerprint.startswith("sha256:")
             or not callable(self.request)
+            or not callable(self.refresh_capacity)
             or not callable(self.monotonic)
             or not callable(self.sleep)
             or not 0 < self.terminal_timeout_seconds <= 3600
@@ -157,6 +162,22 @@ class FinalSmokeExecutor:
             if batch_id is not None:
                 mutated = True
             if batch_id is None:
+                # Admission evidence expires after five minutes while the
+                # protected rollout guard intentionally suspends the combined
+                # capacity/GC CronJob.  Refresh only the capacity publication
+                # immediately before the one request that consumes it.
+                mutated = True
+                try:
+                    capacity_digest = self.refresh_capacity(plan)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise FinalSmokeError("smoke-capacity-refresh-failed") from exc
+                if (
+                    not isinstance(capacity_digest, str)
+                    or len(capacity_digest) != 64
+                    or any(character not in "0123456789abcdef" for character in capacity_digest)
+                ):
+                    raise FinalSmokeError("smoke-capacity-refresh-failed")
+                evidence["capacity"] = capacity_digest
                 submitted = self._expect_json(
                     evidence,
                     "submit",
@@ -167,7 +188,6 @@ class FinalSmokeExecutor:
                     headers={"X-Loom-Admin-Actor": self.authority.admin_actor},
                     accepted=frozenset({200, 201}),
                 )
-                mutated = True
                 value = submitted.get("id") or submitted.get("batch_id")
                 if not isinstance(value, str) or not value:
                     raise FinalSmokeError("smoke-submit-identity-invalid")
@@ -307,4 +327,4 @@ class FinalSmokeExecutor:
         )
 
 
-__all__ = ["FinalSmokeExecutor", "SmokeTransport"]
+__all__ = ["CapacityRefresh", "FinalSmokeExecutor", "SmokeTransport"]

@@ -671,6 +671,23 @@ state remain fail-closed. Rehearsal and final smoke obtain the represented
 identity, task, worker pool, agent, and audit actor from one shared authority
 factory; final smoke is only the canonical protected-route terminal proof.
 
+When no exact request/attempt batch exists, final smoke first runs one
+capacity-only Kubernetes Job and submits immediately after it succeeds. The
+Job is cloned from the digest-bound lifecycle CronJob artifact and is bound to
+the exact final plan, candidate/tree, post-apply epoch, active guard generation,
+and guard PostgreSQL backend PID. The in-pod authority check requires the live
+request-derived guard session and exact `rollout_apply` epoch both before and
+after database publication; the action cannot run GC. The installed helper
+then verifies the Job UID, annotations, immutable pod inputs, terminal status,
+fresh capacity output, database readback, and unchanged ready guard. A process
+restart may recover the same exact attempt Job without reapplying it. A stale
+or drifted existing Job fails that attempt; a later attempt receives a new Job
+name. Recovery accepts only the closed K3s 1.36 server-defaulted Job contract:
+the UID-derived selector and controller labels, execution-count defaults, pod
+and container defaults, and canonical resource quantities must be exact, and
+every unplanned field fails closed. If an exact smoke batch already exists,
+recovery polls it and does not refresh or submit again.
+
 `browser_report_contract` is likewise the sole sanitized browser-report
 predicate for rehearsal and final acceptance. Both modes require the complete
 schema-v4 check set, exact route, candidate identity, represented user, audit
