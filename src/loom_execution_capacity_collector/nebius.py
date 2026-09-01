@@ -107,7 +107,10 @@ class NebiusCapacityReader:
         while True:
             response = await self._quotas.list(
                 ListQuotaAllowancesRequest(
-                    parent_id=self._settings.nebius_project_id,
+                    parent_id=(
+                        self._settings.nebius_quota_parent_id
+                        or self._settings.nebius_project_id
+                    ),
                     page_size=1000,
                     page_token=page_token,
                 ),
@@ -170,7 +173,7 @@ class NebiusCapacityReader:
         )
 
         quotas = await self._list_quotas()
-        bindings = {
+        bindings: dict[str, _QuotaBinding] = {
             "nodes": _QuotaBinding(
                 self._settings.quota_nodes_name,
                 self._settings.quota_nodes_unit,
@@ -181,17 +184,21 @@ class NebiusCapacityReader:
                 self._settings.quota_vcpu_unit,
                 "vcpu",
             ),
-            "memory": _QuotaBinding(
-                self._settings.quota_memory_name,
-                self._settings.quota_memory_unit,
-                "bytes",
-            ),
             "storage": _QuotaBinding(
                 self._settings.quota_storage_name,
                 self._settings.quota_storage_unit,
                 "bytes",
             ),
         }
+        if (
+            self._settings.quota_memory_name is not None
+            and self._settings.quota_memory_unit is not None
+        ):
+            bindings["memory"] = _QuotaBinding(
+                self._settings.quota_memory_name,
+                self._settings.quota_memory_unit,
+                "bytes",
+            )
         values = {name: self._select_quota(quotas, binding) for name, binding in bindings.items()}
         node_group = await self._node_groups.get(
             GetNodeGroupRequest(id=self._settings.nebius_node_group_id),
@@ -255,10 +262,26 @@ class NebiusCapacityReader:
             name="node group resource version",
             positive=True,
         )
+        if "memory" in values:
+            quota_memory_mib = values["memory"][0]
+            used_memory_mib = values["memory"][1]
+            memory_source_version = values["memory"][2]
+        else:
+            # Nebius currently exposes no memory quota allowance for regular
+            # CPU instances. Memory is coupled to the immutable node preset,
+            # so the accepted policy ceiling and exact node-group count are
+            # the authoritative limit/usage fallback rather than a fabricated
+            # provider quota row.
+            quota_memory_mib = policy.max_nodes * policy.node_memory_mib
+            used_memory_mib = node_count * policy.node_memory_mib
+            memory_source_version = (
+                f"derived:policy-{policy.version}:node-group-{node_group_version}"
+            )
         return ProviderCapacitySnapshot(
             source_versions={
                 "node_group": str(node_group_version),
                 **{f"quota_{name}": value[2] for name, value in values.items()},
+                "quota_memory": memory_source_version,
             },
             provider_capacity_state=provider_state,
             provider_capacity_reason=provider_reason,
@@ -266,11 +289,11 @@ class NebiusCapacityReader:
             autoscaler_reason=autoscaler_reason,
             quota_nodes=values["nodes"][0],
             quota_vcpu_millis=values["vcpu"][0],
-            quota_memory_mib=values["memory"][0],
+            quota_memory_mib=quota_memory_mib,
             quota_storage_mib=values["storage"][0],
             used_nodes=values["nodes"][1],
             used_vcpu_millis=values["vcpu"][1],
-            used_memory_mib=values["memory"][1],
+            used_memory_mib=used_memory_mib,
             used_storage_mib=values["storage"][1],
             node_count=node_count,
             target_node_count=target_count,

@@ -1,8 +1,31 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-execution-capacity-collector
+  namespace: loom-nebius-development
+data:
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID: nebius-eu-north1-development
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_POOL_ID: nebius-cpu
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NAMESPACE: loom-nebius-development
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR: loom.nebius/node-role=execution
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID: project-e00ksehzpr00ftw5pe61gt
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_QUOTA_PARENT_ID: tenant-e00zcze7mmwb61vk7e
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID: mk8snodegroup-e00n6mbxcz8jgp8bat
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_REGION: eu-north1
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_CONTROL_PLANE_URL: http://loom-control-plane.loom.svc.cluster.local:8080
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_NAME: compute.instance.count
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_NAME: compute.instance.non-gpu.vcpu
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME: compute.disk.size.network-ssd
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_UNIT: count
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_UNIT: count
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_UNIT: byte
+  LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_SERVICE: compute
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: loom-execution-capacity-collector
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 automountServiceAccountToken: true
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -21,7 +44,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: loom-execution-capacity-collector
-    namespace: loom-nebius-staging
+    namespace: loom-nebius-development
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -31,16 +54,14 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: loom-execution-capacity-collector
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 spec:
-  # Repository wiring remains inert until the target, exact quota names,
-  # credentials, and live-readback acceptance are separately authorized.
-  suspend: true
+  suspend: false
   schedule: "* * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 30
   successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 10
+  failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 2
@@ -64,7 +85,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: prepare-credentials
-              image: loom-execution-actuator:0.8
+              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:b1e2255831eccdb330d9f7c9566e3226647ea61e7bf26202b662cf2d935f6c3b
               imagePullPolicy: IfNotPresent
               command:
                 - python
@@ -86,7 +107,7 @@ spec:
                   drop: ["ALL"]
           containers:
             - name: collector
-              image: loom-execution-actuator:0.8
+              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:b1e2255831eccdb330d9f7c9566e3226647ea61e7bf26202b662cf2d935f6c3b
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "loom_execution_capacity_collector"]
               envFrom:
@@ -130,3 +151,5 @@ spec:
                           path: control-plane-token
             - name: credentials
               emptyDir: {}
+          nodeSelector:
+            loom.nebius/node-role: system

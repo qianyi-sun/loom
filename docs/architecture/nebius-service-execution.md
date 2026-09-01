@@ -275,21 +275,29 @@ raw API responses. A target Pod found outside the configured node selector is
 identity drift and prevents publication.
 
 `deploy/k8s/nebius-capacity-collector.yaml` packages the one-shot collector as
-a one-minute `CronJob` with concurrency forbidden, a read-only `get/list`
-ClusterRole for Nodes and Pods, a non-root/read-only-root filesystem, and
-owner-only copied credential files. It is checked in with `suspend=true` and
-depends on a separately provisioned ConfigMap containing the exact target,
-pool, namespace, node selector, project, node-group, region, control-plane URL,
-and quota name/unit bindings plus two separately provisioned Secrets for the
-Nebius service-account credential file and a Loom bearer carrying only
+an active development one-minute `CronJob` with concurrency forbidden, a
+read-only `get/list` ClusterRole for Nodes and Pods, a non-root/read-only-root
+filesystem, owner-only copied credential files, and the exact accepted
+development target, quota-parent, node-group, region, and quota bindings in a
+checked ConfigMap. Two separately provisioned Secrets hold the Nebius
+service-account credential file and a Loom bearer carrying only
 `execution:capacity:observe`. Operators mint that credential with
-`loom admin tokens worker mint --kind execution-capacity-collector`; it can
+`loom admin tokens worker mint --kind execution-capacity-collector
+--expires-in-days 0`; it can
 read only the collector policy projection and publish capacity observations,
-and cannot mutate policy or use ordinary worker authority. Repository
-merge neither creates those credentials nor unsuspends the collector. The
-collector uses the official Nebius Python SDK only for quota `list` and node
-group `get`; it contains no Nebius create, update, delete, or operation-wait
-path.
+and cannot mutate policy or use ordinary worker authority. The idempotent
+`scripts/ops/apply_nebius_development_runtime.sh` bootstrap creates that token
+only when its Secret is absent and never renews it on a calendar schedule. The
+same bootstrap applies the development-only Control Plane patch that binds the
+scheduler to `nebius-cpu` and the persisted image-admission keyring; the
+provider-neutral base Deployment remains disabled. The
+Nebius authorized public key deliberately has no `expires_at`; the SDK derives
+and refreshes short-lived access tokens from it. The collector uses the
+official Nebius Python SDK only for quota `list` and node group `get`; it
+contains no Nebius create, update, delete, or operation-wait path. Its recurring
+success is also the live permission/key check: failures make capacity evidence
+stale and stop new reservations rather than requiring a person to reconnect the
+runtime.
 
 Resource sizing and capacity forecasts are a fourth independent evidence
 boundary. Migration `0120` adds immutable
@@ -534,9 +542,13 @@ The proportionate baseline is documented in
 [Nebius execution security](nebius-execution-security.md) and the matching
 [operator check](../runbooks/nebius-execution-security.md).
 
-`deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
-replicas. Repository merge cannot scale it or create its referenced database
-secret, namespace in a live target, runtime class, cluster, or cloud resource.
+`deploy/k8s/nebius-execution-actuator.yaml` is the active development runtime
+at one system-node replica, bound to `nebius-eu-north1-development` and an
+immutable registry digest. It creates no execution node itself: ordinary
+persisted Batch/Trial demand creates a Job, and the managed node-group
+autoscaler remains the only authority that changes the `0..1` execution-node
+count. The one-time bootstrap still requires the referenced database and
+credential Secrets; no per-Batch operator action is part of the path.
 The disposable k3s conformance test validates the real Kubernetes API seam
 with a suspended Job and makes no Nebius call.
 

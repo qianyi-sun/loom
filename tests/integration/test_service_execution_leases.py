@@ -86,6 +86,8 @@ from loom_control_plane.service_execution import (
     execution_lease_projection,
     persist_execution_catalog,
     record_execution_event,
+    refresh_execution_target_health,
+    request_trial_execution_cancellation,
     reserve_trial_execution,
     set_execution_target_health,
     verify_trial_execution_fence,
@@ -612,6 +614,57 @@ async def _reserve(
         deadline_at=now + timedelta(hours=1),
         now=now,
     )
+
+
+async def test_actuator_refreshes_target_health_without_reenabling_operator_state(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            _trial_id, target = await _seed_ready_trial(session, now=now)
+            await set_execution_target_health(
+                session,
+                target_id=target.target_id,
+                desired_state="draining",
+                observed_state="ready",
+                health_status="healthy",
+                observed_at=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=_FakeKubernetesJobApi(),
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+            ),
+            controller_id="target-health-refresh-test",
+        )
+        refreshed_at = now + timedelta(seconds=2)
+        assert await actuator.reconcile_full_once(now=refreshed_at) == 0
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionTarget, target.target_id)
+            assert persisted is not None
+            assert persisted.desired_state == "draining"
+            assert persisted.observed_state == "ready"
+            assert persisted.health_status == "healthy"
+            assert persisted.health_observed_at == refreshed_at
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="health observation regressed",
+            ):
+                await refresh_execution_target_health(
+                    session,
+                    target_id=target.target_id,
+                    observed_at=refreshed_at - timedelta(seconds=1),
+                )
+    finally:
+        await engine.dispose()
 
 
 async def test_reservation_persists_trial_lease_command_and_history_atomically(
@@ -2003,6 +2056,49 @@ async def test_revocation_fences_old_generation_and_database_rejects_generation_
         await engine.dispose()
 
 
+async def test_trial_cancellation_persists_service_execution_revocation(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+
+        async with sessions() as session:
+            command = await request_trial_execution_cancellation(
+                session,
+                trial_id=trial_id,
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+            assert command is not None
+            assert command.command_type == "cancel"
+            assert command.generation == 2
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.desired_state == "cancel"
+            assert persisted.generation == 2
+            assert persisted.revoked_at == now + timedelta(seconds=1)
+            assert persisted.cleanup_state == "pending"
+            assert (
+                await request_trial_execution_cancellation(
+                    session,
+                    trial_id=trial_id,
+                    now=now + timedelta(seconds=2),
+                )
+                is None
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 async def test_retry_creates_a_new_attempt_and_finalization_is_idempotent(
     postgres_url: str,
 ) -> None:
@@ -2773,11 +2869,9 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             await session.commit()
 
         assert await restarted.run_commands_once(now=now + timedelta(seconds=2)) == 1
-        assert kubernetes.delete_count == 0
-        assert await restarted.run_commands_once(now=now + timedelta(minutes=5, seconds=2)) == 1
         assert kubernetes.delete_count == 1
         assert kubernetes.jobs == {}
-        assert await restarted.reconcile_full_once(now=now + timedelta(minutes=5, seconds=3)) == 1
+        assert await restarted.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
@@ -2786,8 +2880,8 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             assert persisted.observed_state == "deleted"
             assert persisted.cleanup_state == "complete"
             assert persisted.output_commit_state == "unavailable"
-            assert persisted.output_unavailable_reason == "cleanup_deadline_elapsed"
-            assert persisted.deleted_at == now + timedelta(minutes=5, seconds=3)
+            assert persisted.output_unavailable_reason == "operator_cancelled"
+            assert persisted.deleted_at == now + timedelta(seconds=3)
             capacity_authorization = (
                 await session.execute(
                     select(ExecutionProvisioningAuthorization).where(
@@ -2913,17 +3007,10 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
 
         assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
         async with sessions() as session:
-            pending = await session.get(ServiceExecutionLease, lease.id)
-            assert pending is not None
-            assert pending.observed_state != "deleted"
-            assert pending.output_commit_state == "not_started"
-
-        assert await actuator.run_commands_once(now=now + timedelta(minutes=5, seconds=1)) == 1
-        async with sessions() as session:
             closed = await session.get(ServiceExecutionLease, lease.id)
             assert closed is not None
             assert closed.observed_state == "deleted"
             assert closed.output_commit_state == "unavailable"
-            assert closed.output_unavailable_reason == "cleanup_deadline_elapsed"
+            assert closed.output_unavailable_reason == "operator_cancelled"
     finally:
         await engine.dispose()

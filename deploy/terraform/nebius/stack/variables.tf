@@ -51,3 +51,9 @@ variable "evidence_bucket_max_bytes" {
   type        = number
   default     = 107374182400
 }
+
+variable "capacity_observer_public_key_pem" {
+  description = "PEM public key for the non-expiring capacity-observer authorized key."
+  type        = string
+  sensitive   = true
+}
