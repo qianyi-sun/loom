@@ -15,7 +15,11 @@ from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES
 from loom_cli.rollout.image_readiness import DockerRunner as ImageDockerRunner
 from loom_cli.rollout.kubernetes_readiness import CommandRunner as KubernetesCommandRunner
-from loom_cli.rollout.manifest_readiness import RenderManifest, ServerDryRun
+from loom_cli.rollout.manifest_readiness import (
+    ManifestPostImagePin,
+    RenderManifest,
+    ServerDryRun,
+)
 from loom_cli.rollout.operator.candidate import GitRunner
 from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import (
@@ -91,6 +95,7 @@ class InstalledDeepPreflightComposition:
     gb10_candidate_source_run: SystemdCommandRunner | None = None
     container_registry: str = ""
     container_registry_push: str = ""
+    manifest_post_image_pin: ManifestPostImagePin | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -191,6 +196,7 @@ class InstalledDeepPreflightComposition:
             gb10_candidate_source_run=self.gb10_candidate_source_run,
             container_registry=self.container_registry,
             container_registry_push=self.container_registry_push,
+            manifest_post_image_pin=self.manifest_post_image_pin,
         )
 
     def authority(self) -> DeepPreflightAuthority:

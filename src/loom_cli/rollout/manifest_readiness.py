@@ -81,6 +81,7 @@ class CommandResult(Protocol):
 RenderManifest = Callable[[], str]
 ServerDryRun = Callable[[str], CommandResult]
 FieldOwnershipRetryRender = Callable[[str], str]
+ManifestPostImagePin = Callable[[str], str]
 
 _LIFECYCLE_CRONJOB_NAME = "loom-staging-data-lifecycle"
 
@@ -237,6 +238,7 @@ class ManifestRenderSession:
         *,
         field_ownership_dry_run: ServerDryRun | None = None,
         field_ownership_retry_render: FieldOwnershipRetryRender | None = None,
+        manifest_post_image_pin: ManifestPostImagePin | None = None,
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
@@ -251,6 +253,7 @@ class ManifestRenderSession:
             server_dry_run if field_ownership_dry_run is None else field_ownership_dry_run
         )
         self._field_ownership_retry_render = field_ownership_retry_render
+        self._manifest_post_image_pin = manifest_post_image_pin
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
@@ -285,6 +288,8 @@ class ManifestRenderSession:
                         container_registry=self._container_registry,
                         registry_digests=self._registry_digests,
                     )
+                if self._manifest_post_image_pin is not None:
+                    rendered = self._manifest_post_image_pin(rendered)
                 self._artifact = inspect_rendered_manifests(
                     rendered,
                     image_tag=self._image_tag,
@@ -783,6 +788,7 @@ def _hash_json(value: object) -> str:
 __all__ = [
     "FieldOwnershipRetryRender",
     "ManifestArtifact",
+    "ManifestPostImagePin",
     "ManifestRenderSession",
     "RenderManifest",
     "ServerDryRun",

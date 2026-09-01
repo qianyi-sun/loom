@@ -25,6 +25,8 @@ from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     GB10SharedMountReadiness,
 )
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES
+from loom_cli.rollout.manifest_readiness import ManifestRenderSession
 from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
@@ -222,12 +224,29 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     monkeypatch.setattr(
         installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
     )
-    primary_render = """apiVersion: v1
-kind: ConfigMap
+    expected_manifest_images = (
+        "loom-control-plane",
+        "loom-egress-xds",
+        "loom-family-orchestrator",
+        "loom-llm-gateway",
+        "loom-pipeline-orchestrator",
+        "loom-service",
+        "loom-web",
+        "loom-worker",
+    )
+    primary_render = """apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: primary-render
   namespace: loom-staging
-"""
+spec:
+  template:
+    spec:
+      containers:
+""" + "".join(
+        f"      - name: {name}\n        image: {name}:{candidate.image_tag}\n"
+        for name in expected_manifest_images
+    )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "render_manifests",
@@ -340,25 +359,45 @@ metadata:
         "trajectories",
     )
     assert captured["composition"]["manifest_image_names"] == frozenset(  # type: ignore[index]
-        {
-            "loom-control-plane",
-            "loom-egress-xds",
-            "loom-family-orchestrator",
-            "loom-llm-gateway",
-            "loom-pipeline-orchestrator",
-            "loom-service",
-            "loom-web",
-            "loom-worker",
-        }
+        expected_manifest_images
     )
     manifest_factory = captured["composition"]["render_manifest_factory"]  # type: ignore[index]
+    manifest_post_image_pin = captured["composition"]["manifest_post_image_pin"]  # type: ignore[index]
     assert callable(manifest_factory)
-    rendered = manifest_factory(candidate)()  # type: ignore[operator]
-    assert rendered == primary_render + "---\n" + authority_source
+    assert callable(manifest_post_image_pin)
+    image_digests = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    registry_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-registry').encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    def render_artifact():
+        return ManifestRenderSession(
+            manifest_factory(candidate),  # type: ignore[arg-type]
+            lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+            manifest_post_image_pin=manifest_post_image_pin,  # type: ignore[arg-type]
+            image_tag=candidate.image_tag,
+            namespace=config.namespace,
+            image_digests=image_digests,
+            expected_image_names=expected_manifest_images,
+            container_registry=cluster.container_registry,
+            registry_digests=registry_digests,
+        ).render()
+
+    artifact = render_artifact()
+    assert artifact.rendered_yaml.endswith("---\n" + authority_source)
+
+    authority_with_comment = authority_source + "# exact-byte-sensitivity\n"
+    authority_path.write_text(authority_with_comment, encoding="utf-8")
+    changed_artifact = render_artifact()
+    assert changed_artifact.rendered_yaml.endswith("---\n" + authority_with_comment)
+    assert changed_artifact.rendered_sha256 != artifact.rendered_sha256
 
     authority_path.write_text(authority_source.rsplit("---", 1)[0], encoding="utf-8")
     with pytest.raises(ValueError, match="authority resource set is invalid"):
-        manifest_factory(candidate)()  # type: ignore[operator]
+        manifest_post_image_pin(manifest_factory(candidate)())  # type: ignore[operator]
 
 
 class _Artifacts:

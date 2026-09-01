@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
 
+from loom_cli.rollout import manifest_readiness
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES
 from loom_cli.rollout.manifest_readiness import (
     ManifestRenderSession,
+    compose_external_supervisor_authority,
     inspect_rendered_manifests,
     pin_rendered_manifest_images,
     render_checkpoint_guard_field_ownership_payload,
@@ -57,6 +60,87 @@ spec:
   suspend: false
 """
     )
+
+
+def _external_supervisor_authority() -> str:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("rendered", "authority"),
+    [
+        ("", _external_supervisor_authority()),
+        (_rendered(), ""),
+    ],
+    ids=("empty-primary", "empty-authority"),
+)
+def test_external_supervisor_authority_composer_rejects_empty_input(
+    rendered: str,
+    authority: str,
+) -> None:
+    with pytest.raises(ValueError, match="authority manifest is invalid"):
+        compose_external_supervisor_authority(rendered, authority)
+
+
+def test_external_supervisor_authority_composer_rejects_oversized_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manifest_readiness, "_MAX_RENDERED_BYTES", 64)
+
+    with pytest.raises(ValueError, match="authority manifest is invalid"):
+        compose_external_supervisor_authority(
+            _rendered(),
+            _external_supervisor_authority(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "malformed-yaml",
+        "non-resource-document",
+        "malformed-metadata",
+        "duplicate-identity",
+        "extra-identity",
+        "missing-identity",
+        "wrong-secret-type",
+        "secret-data",
+        "secret-string-data",
+    ],
+)
+def test_external_supervisor_authority_composer_rejects_drifted_resource_set(
+    mutation: str,
+) -> None:
+    authority = _external_supervisor_authority()
+    if mutation == "malformed-yaml":
+        drifted = "["
+    elif mutation == "non-resource-document":
+        drifted = authority + "---\nscalar\n"
+    elif mutation == "malformed-metadata":
+        documents = list(yaml.safe_load_all(authority))
+        documents[0]["metadata"] = "invalid"
+        drifted = yaml.safe_dump_all(documents, sort_keys=False)
+    elif mutation == "duplicate-identity":
+        drifted = authority + "---\n" + authority.split("---", 1)[0]
+    elif mutation == "extra-identity":
+        drifted = authority + (
+            "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n"
+            "  name: ambient-authority\n  namespace: loom-staging\n"
+        )
+    elif mutation == "missing-identity":
+        drifted = authority.rsplit("---", 1)[0]
+    elif mutation == "wrong-secret-type":
+        drifted = authority.replace("type: Opaque", "type: kubernetes.io/tls", 1)
+    elif mutation == "secret-data":
+        drifted = authority.replace("type: Opaque", "type: Opaque\ndata: {}", 1)
+    else:
+        drifted = authority.replace("type: Opaque", "type: Opaque\nstringData: {}", 1)
+
+    with pytest.raises(ValueError, match=r"(?:authority|database Secret).* invalid"):
+        compose_external_supervisor_authority(_rendered(), drifted)
 
 
 def test_manifest_render_binds_every_local_image_to_exact_id() -> None:

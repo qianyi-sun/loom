@@ -30,6 +30,7 @@ from loom_cli.rollout.lifecycle_protocol import (
 )
 from loom_cli.rollout.manifest_readiness import (
     ManifestArtifact,
+    ManifestPostImagePin,
     ManifestRenderSession,
     RenderManifest,
     ServerDryRun,
@@ -268,6 +269,7 @@ class PreflightRuntimeSources:
     gb10_candidate_source_run: SystemdCommandRunner | None = None
     container_registry: str = ""
     container_registry_push: str = ""
+    manifest_post_image_pin: ManifestPostImagePin | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -321,6 +323,7 @@ class PreflightRuntimeSources:
                     if self.permit_reserved_rotation_candidate
                     else None
                 ),
+                manifest_post_image_pin=self.manifest_post_image_pin,
                 image_tag=self.candidate.image_tag,
                 namespace=self.config.namespace,
                 image_digests=self.loaded_artifacts.images.image_digests,
@@ -559,6 +562,7 @@ class PreflightRuntimeSources:
                 if self.permit_reserved_rotation_candidate
                 else None
             ),
+            manifest_post_image_pin=self.manifest_post_image_pin,
             image_tag=self.candidate.image_tag,
             namespace=self.config.namespace,
             expected_candidate_sha=self.candidate.resolved_sha,
