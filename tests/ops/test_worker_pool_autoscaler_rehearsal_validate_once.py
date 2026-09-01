@@ -34,12 +34,12 @@ def _args(module: Any, *extra: str) -> Any:
             "loom-rehearsal-abc123",
             "--kubeconfig",
             "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
-            "--global-execution-manager-export",
-            "deployment/loom-capacity-manager",
-            "--global-execution-manager-namespace",
-            "loom-dev",
-            "--global-execution-manager-kubeconfig",
-            "/var/lib/loom-staging-rollout/kubeconfig",
+            "--global-execution-witness-config-map",
+            "loom-global-execution-witness-v1",
+            "--global-execution-witness-namespace",
+            "loom-rehearsal-abc123",
+            "--global-execution-witness-kubeconfig",
+            "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
             "--expected-manager-public-key-sha256",
             "a" * 64,
             "--validate-only",
@@ -70,12 +70,12 @@ def _builder_argv(tmp_path: Path) -> list[str]:
         "loom-rehearsal-abc123",
         "--kubeconfig",
         "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
-        "--global-execution-manager-export",
-        "deployment/loom-capacity-manager",
-        "--global-execution-manager-namespace",
-        "loom-dev",
-        "--global-execution-manager-kubeconfig",
-        "/var/lib/loom-staging-rollout/kubeconfig",
+        "--global-execution-witness-config-map",
+        "loom-global-execution-witness-v1",
+        "--global-execution-witness-namespace",
+        "loom-rehearsal-abc123",
+        "--global-execution-witness-kubeconfig",
+        "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
         "--expected-manager-public-key-sha256",
         "a" * 64,
         "--validate-only",
@@ -143,8 +143,7 @@ def test_rehearsal_task_image_builder_policy_is_read_only_and_exclusive(
         module.external_once,
         "_load_current_global_execution_witness",
         lambda value, *, pool_id: (
-            captured.update({"witness_args": value, "witness_pool_id": pool_id})
-            or witness
+            captured.update({"witness_args": value, "witness_pool_id": pool_id}) or witness
         ),
     )
     monkeypatch.setattr(
@@ -214,8 +213,7 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
         module.external_once,
         "_load_current_global_execution_witness",
         lambda args, *, pool_id: (
-            captured.update({"witness_args": args, "witness_pool_id": pool_id})
-            or witness
+            captured.update({"witness_args": args, "witness_pool_id": pool_id}) or witness
         ),
     )
     monkeypatch.setattr(
@@ -243,9 +241,7 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
     assert captured["witness_args"] is captured["args"]
     assert captured["witness_pool_id"] == "gb10"
     assert captured["asserted_witness"] is witness
-    assert captured["witness_expectations"]["expected_authority"] == (
-        "global-capacity-manager"
-    )
+    assert captured["witness_expectations"]["expected_authority"] == ("global-capacity-manager")
     assert captured["witness_expectations"]["expected_pool_id"] == "gb10"
     assert result == {
         "database_reachable": True,
@@ -265,7 +261,7 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
     assert "local_hostname" not in str(result)
 
 
-def test_rehearsal_policy_validation_blocks_when_manager_export_is_unavailable(
+def test_rehearsal_policy_validation_blocks_when_global_witness_is_unavailable(
     module: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,14 +273,35 @@ def test_rehearsal_policy_validation_blocks_when_manager_export_is_unavailable(
         module.external_once,
         "_load_current_global_execution_witness",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            module.GlobalExecutionFenceError(
-                "global execution witness export is unavailable"
-            )
+            module.GlobalExecutionFenceError("global execution witness export is unavailable")
         ),
     )
 
     with pytest.raises(module.RehearsalPolicyValidationError, match="witness"):
         asyncio.run(module._main_async(_args(module)))
+
+
+def test_rehearsal_policy_validation_rejects_legacy_manager_authority_before_database(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _args(module)
+    args.global_execution_witness_config_map = None
+    args.global_execution_witness_namespace = None
+    args.global_execution_witness_kubeconfig = None
+    args.global_execution_manager_export = "deployment/loom-capacity-manager"
+    args.global_execution_manager_namespace = "loom-dev"
+    args.global_execution_manager_kubeconfig = "/var/lib/loom-staging-rollout/kubeconfig"
+    monkeypatch.setattr(
+        module.external_once,
+        "_validate_external_policies_once",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy manager authority must not reach the database")
+        ),
+    )
+
+    with pytest.raises(module.RehearsalPolicyValidationError, match="authority"):
+        asyncio.run(module._main_async(args))
 
 
 @pytest.mark.parametrize(

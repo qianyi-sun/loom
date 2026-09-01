@@ -81,6 +81,10 @@ from loom_cli.rollout.rehearsal_browser import (
     rehearsal_browser_report_ready,
     rehearsal_browser_resource_ready,
 )
+from loom_cli.rollout.rehearsal_global_execution_witness import (
+    build_rehearsal_global_execution_witness_config_map,
+    rehearsal_global_execution_witness_config_map_ready,
+)
 from loom_cli.rollout.rehearsal_journal_backend import RehearsalStepOutcome
 from loom_cli.rollout.rehearsal_readiness import REHEARSAL_CHECK_IDS
 from loom_cli.rollout.rehearsal_release import (
@@ -1711,6 +1715,38 @@ class IsolatedRehearsalExecutor:
             if load_state != "not-found":
                 return None, "external-supervisor-unit-preexisting"
 
+        witness_config_map = build_rehearsal_global_execution_witness_config_map(
+            namespace=plan.resources.namespace,
+            plan_digest=plan.plan_digest,
+        )
+        observed_witness_config_map = self._command(
+            (
+                "kubectl",
+                "--kubeconfig",
+                str(self.kubeconfig),
+                "--namespace",
+                plan.resources.namespace,
+                "apply",
+                "--server-side=true",
+                "--field-manager=loom-staging-preflight",
+                "--request-timeout=30s",
+                "-f",
+                "-",
+                "-o",
+                "json",
+            ),
+            _json_bytes(witness_config_map),
+            timeout=45,
+        )
+        if observed_witness_config_map is None:
+            return None, "external-supervisor-witness-seed-failed"
+        if not rehearsal_global_execution_witness_config_map_ready(
+            observed_witness_config_map,
+            expected=witness_config_map,
+        ):
+            return None, "external-supervisor-witness-readback-drift"
+        witness_config_map_digest = hashlib.sha256(_json_bytes(witness_config_map)).hexdigest()
+
         command_digests: dict[str, str] = {}
         for supervisor, unit, description, command in validations:
             command_digests[supervisor.name] = hashlib.sha256(
@@ -1749,6 +1785,7 @@ class IsolatedRehearsalExecutor:
                     "namespace": plan.resources.namespace,
                     "policy_seed_sha256": policy_evidence_digest,
                     "schema_version": 1,
+                    "witness_seed_sha256": witness_config_map_digest,
                 }
             )
         ).hexdigest()

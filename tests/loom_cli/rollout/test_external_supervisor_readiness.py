@@ -643,7 +643,19 @@ def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
     expected[expected.index("--kubeconfig") + 1] = REHEARSAL_KUBECONFIG
     expected[expected.index("--db-local-port") + 1] = "25448"
     expected[expected.index("--db-secret-name") + 1] = "loom-secrets"
+    expected[expected.index("--global-execution-witness-namespace") + 1] = "loom-rehearsal-abc123"
+    expected[expected.index("--global-execution-witness-kubeconfig") + 1] = REHEARSAL_KUBECONFIG
+    expected_fingerprint = command[command.index("--expected-manager-public-key-sha256") + 1]
+    assert (
+        expected_fingerprint
+        != live.args[live.args.index("--expected-manager-public-key-sha256") + 1]
+    )
+    assert len(expected_fingerprint) == 64
+    assert set(expected_fingerprint) <= set("0123456789abcdef")
+    expected[expected.index("--expected-manager-public-key-sha256") + 1] = expected_fingerprint
     assert list(command[2:-1]) == expected
+    assert "loom-dev" not in command
+    assert _EXTERNAL_SUPERVISOR_KUBECONFIG not in command
     for flag in (
         "--pool-name",
         "--db-local-host",
@@ -660,6 +672,40 @@ def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
         artifact.validation_argv("loom-staging", REHEARSAL_KUBECONFIG)
     with pytest.raises(ValueError, match="not canonical"):
         artifact.validation_argv("loom-rehearsal-abc123", STAGING_KUBECONFIG)
+
+
+def test_validation_argv_normalizes_legacy_manager_to_isolated_witness(
+    tmp_path: Path,
+) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[_supervisor(args=_legacy_manager_args())],
+        )
+    )
+    live = artifact.supervisors[0]
+
+    command = artifact.validation_argv(
+        "loom-rehearsal-abc123",
+        REHEARSAL_KUBECONFIG,
+    )[live.name]
+
+    assert command[command.index("--global-execution-witness-config-map") + 1] == (
+        "loom-global-execution-witness-v1"
+    )
+    assert command[command.index("--global-execution-witness-namespace") + 1] == (
+        "loom-rehearsal-abc123"
+    )
+    assert command[command.index("--global-execution-witness-kubeconfig") + 1] == (
+        REHEARSAL_KUBECONFIG
+    )
+    expected_fingerprint = command[command.index("--expected-manager-public-key-sha256") + 1]
+    assert len(expected_fingerprint) == 64
+    assert set(expected_fingerprint) <= set("0123456789abcdef")
+    assert all(not flag.startswith("--global-execution-manager-") for flag in command)
+    assert "deployment/loom-capacity-manager" not in command
+    assert "loom-dev" not in command
+    assert STAGING_KUBECONFIG not in command
 
 
 def test_validation_ports_are_unique_and_disjoint_from_live_ports(tmp_path: Path) -> None:

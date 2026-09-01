@@ -23,6 +23,9 @@ from loom_cli.environment_state import (
     render_external_slurm_autoscaler_timer,
 )
 from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_file
+from loom_cli.rollout.rehearsal_global_execution_witness import (
+    rehearsal_global_execution_public_key_sha256,
+)
 
 PROFILE_PATH = "deploy/environment-state/staging.toml"
 SCRIPT_PATH = "scripts/ops/worker_pool_autoscaler_external_once.py"
@@ -675,24 +678,38 @@ class ExternalSupervisorIdentity:
         if kubeconfig != REHEARSAL_KUBECONFIG:
             raise ValueError("external supervisor rehearsal kubeconfig is not canonical")
         _argument_map(self.args, pool_name=self.pool_name)
+        rehearsal_manager_public_key_sha256 = rehearsal_global_execution_public_key_sha256(
+            isolated_namespace
+        )
 
         rewritten: list[str] = []
         index = 0
+        flag_replacements = {
+            "--global-execution-manager-export": "--global-execution-witness-config-map",
+            "--global-execution-manager-namespace": "--global-execution-witness-namespace",
+            "--global-execution-manager-kubeconfig": "--global-execution-witness-kubeconfig",
+        }
         replacements = {
             "--namespace": namespace,
             "--kubeconfig": kubeconfig,
             "--db-local-port": str(_rehearsal_db_local_port(self.db_local_port)),
             "--db-secret-name": "loom-secrets",
+            "--global-execution-witness-config-map": _STAGING_WITNESS_CONFIG_MAP,
+            "--global-execution-witness-namespace": isolated_namespace,
+            "--global-execution-witness-kubeconfig": kubeconfig,
+            "--expected-manager-public-key-sha256": (rehearsal_manager_public_key_sha256),
         }
         while index < len(self.args):
             token = self.args[index]
             if "=" in token:
-                flag, _value = token.split("=", 1)
-                rewritten.append(f"{flag}={replacements.get(flag, token.split('=', 1)[1])}")
+                source_flag, source_value = token.split("=", 1)
+                flag = flag_replacements.get(source_flag, source_flag)
+                rewritten.append(f"{flag}={replacements.get(flag, source_value)}")
                 index += 1
                 continue
-            rewritten.append(token)
-            rewritten.append(replacements.get(token, self.args[index + 1]))
+            flag = flag_replacements.get(token, token)
+            rewritten.append(flag)
+            rewritten.append(replacements.get(flag, self.args[index + 1]))
             index += 2
         execution_host = self.execution_host.split(".", 1)[0].casefold()
         local_host = STAGING_ROLLOUT_EXECUTION_HOST.split(".", 1)[0].casefold()
