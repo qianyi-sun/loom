@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,28 @@ def _source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
 
 
+def _run_before_privilege_gate(
+    tmp_path: Path,
+    arguments: list[str],
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_id = fake_bin / "id"
+    fake_id.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$*\" == \"-u\" ]]; then printf '4242\\n'; else exit 2; fi\n",
+        encoding="utf-8",
+    )
+    fake_id.chmod(0o755)
+    return subprocess.run(
+        [shutil.which("bash") or "bash", str(INSTALLER), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+
 def test_installer_parses_as_bash() -> None:
     bash = shutil.which("bash")
     if bash is None:
@@ -27,6 +50,48 @@ def test_installer_parses_as_bash() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "present_option",
+    ["--controller-public-key", "--legacy-deploy-public-key"],
+)
+def test_installer_requires_both_public_key_paths_before_privilege_gate(
+    tmp_path: Path,
+    present_option: str,
+) -> None:
+    public_key = tmp_path / "authority.pub"
+    public_key.write_text("ssh-ed25519 AAAA authority\n", encoding="utf-8")
+
+    result = _run_before_privilege_gate(
+        tmp_path,
+        [present_option, str(public_key)],
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == "error: controller broker installation input is unavailable\n"
+
+
+def test_installer_accepts_both_public_key_paths_before_privilege_gate(
+    tmp_path: Path,
+) -> None:
+    controller_key = tmp_path / "controller.pub"
+    legacy_key = tmp_path / "legacy.pub"
+    controller_key.write_text("ssh-ed25519 AAAA controller\n", encoding="utf-8")
+    legacy_key.write_text("ssh-ed25519 AAAB legacy\n", encoding="utf-8")
+
+    result = _run_before_privilege_gate(
+        tmp_path,
+        [
+            "--controller-public-key",
+            str(controller_key),
+            "--legacy-deploy-public-key",
+            str(legacy_key),
+        ],
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == "error: GB10 autoscaler-controller installation requires root\n"
 
 
 def test_installer_is_pinned_to_the_gb10_controller_and_kubectl_digest() -> None:
@@ -70,6 +135,7 @@ def test_installer_couples_acceptance_authority_before_broker_publication() -> N
     source = _source()
 
     assert "--controller-public-key)" in source
+    assert "--legacy-deploy-public-key)" in source
     assert (
         'ACCEPTANCE_AUTHORITY_SOURCE="$REPO_ROOT/scripts/ops/'
         'gb10_slurm_acceptance_authority.py"' in source
@@ -102,10 +168,14 @@ def test_installer_keeps_one_forced_ssh_and_sudo_authority_surface() -> None:
     source = _source()
 
     assert "--controller-public-key)" in source
+    assert "--legacy-deploy-public-key)" in source
     assert 'BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"' in source
     assert 'SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"' in source
     assert 'SUDOERS_RULE="qianyi ALL=(root) NOPASSWD:NOSETENV: $BROKER_PATH \\"\\""' in source
-    assert '"$BROKER_PATH" --install-authority "$CONTROLLER_PUBLIC_KEY"' in source
+    assert (
+        '"$BROKER_PATH" --install-authority \\\n'
+        '  "$CONTROLLER_PUBLIC_KEY" "$LEGACY_DEPLOY_PUBLIC_KEY"'
+    ) in source
     assert source.count("SUDOERS_RULE=") == 1
     assert source.count("qianyi ALL=(root)") == 1
     assert source.count("--install-authority") == 1
