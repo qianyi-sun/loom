@@ -57,6 +57,7 @@ INSTALLED_BROKER = Path("/usr/local/libexec/loom-gb10-external-supervisor-broker
 REMOTE_SSH_USER = "qianyi"
 REMOTE_SSH_HOME = Path("/home/qianyi")
 _AUTHORIZED_KEY_MARKER = "loom-gb10-external-supervisor"
+_ROLLOUT_KEY_MARKER = "loom-staging-rollout"
 _LOCK_NAME = ".loom-gb10-external-supervisor-broker.lock"
 _HELPER_MODULE = "loom_cli.rollout.operator.protected_gb10_external_supervisor_transport"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -225,7 +226,12 @@ def _public_key_identity(payload: bytes) -> tuple[str, str]:
     return fields[0], fields[1]
 
 
-def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
+def render_authorized_keys(
+    existing: bytes,
+    public_key: bytes,
+    *,
+    predecessor_public_key: bytes | None = None,
+) -> bytes:
     """Add exactly one forced key while preserving unrelated file bytes."""
 
     if len(existing) > 4 * 1024 * 1024 or b"\x00" in existing:
@@ -241,6 +247,63 @@ def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
     )
     lines = text.splitlines()
     marked = [line for line in lines if line.rstrip().endswith(f" {_AUTHORIZED_KEY_MARKER}")]
+    if predecessor_public_key is not None:
+        predecessor_algorithm, predecessor_encoded = _public_key_identity(
+            predecessor_public_key
+        )
+        if predecessor_encoded == encoded:
+            raise BrokerError("GB10 external supervisor predecessor key is not distinct")
+        predecessor_forced = (
+            f'restrict,command="/usr/bin/sudo -n -- {INSTALLED_BROKER}" '
+            f"{predecessor_algorithm} {predecessor_encoded} {_AUTHORIZED_KEY_MARKER}"
+        )
+        predecessor_normal = (
+            f"{predecessor_algorithm} {predecessor_encoded} {_ROLLOUT_KEY_MARKER}"
+        )
+        predecessor_matching = [line for line in lines if predecessor_encoded in line]
+        controller_matching = [line for line in lines if encoded in line]
+        rollout_marked = [
+            line
+            for line in lines
+            if not line.lstrip().startswith("#")
+            and line.rstrip().endswith(f" {_ROLLOUT_KEY_MARKER}")
+        ]
+        if len(predecessor_matching) > 1:
+            raise BrokerError("GB10 external supervisor predecessor authority is duplicated")
+        if any(line.strip() != predecessor_normal for line in rollout_marked):
+            raise BrokerError("GB10 external supervisor rollout authority is ambiguous")
+        if len(marked) > 1:
+            raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
+        if marked and marked[0].strip() == predecessor_forced:
+            if predecessor_matching != marked or controller_matching:
+                raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
+            migrated = text.replace(predecessor_forced, predecessor_normal, 1)
+            migrated_prefix = (
+                migrated
+                if not migrated or migrated.endswith("\n")
+                else migrated + "\n"
+            )
+            return (migrated_prefix + expected + "\n").encode("utf-8")
+        if marked and marked[0].strip() == expected:
+            if controller_matching != marked or any(
+                line.strip() != predecessor_normal for line in predecessor_matching
+            ):
+                raise BrokerError("GB10 external supervisor key authority is duplicated")
+            if not predecessor_matching:
+                return (predecessor_normal + "\n").encode("ascii") + existing
+            return existing
+        if marked:
+            raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
+        if controller_matching:
+            raise BrokerError("GB10 external supervisor key is already present without force")
+        if any(line.strip() != predecessor_normal for line in predecessor_matching):
+            raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
+        existing_prefix = (
+            existing if not existing or existing.endswith(b"\n") else existing + b"\n"
+        )
+        additions = [] if predecessor_matching else [predecessor_normal]
+        additions.append(expected)
+        return existing_prefix + ("\n".join(additions) + "\n").encode("ascii")
     if len(marked) > 1 or (marked and marked[0].strip() != expected):
         raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
     matching = [line for line in lines if encoded in line]
@@ -250,11 +313,13 @@ def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
         return existing
     if matching:
         raise BrokerError("GB10 external supervisor key is already present without force")
-    prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
-    return prefix + expected.encode("ascii") + b"\n"
+    authorized_keys_prefix = (
+        existing if not existing or existing.endswith(b"\n") else existing + b"\n"
+    )
+    return authorized_keys_prefix + expected.encode("ascii") + b"\n"
 
 
-def install_forced_key(public_key_path: Path) -> None:
+def _read_public_key_file(public_key_path: Path) -> bytes:
     if not public_key_path.is_absolute() or ".." in public_key_path.parts:
         raise BrokerError("GB10 external supervisor public key path is invalid")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -267,6 +332,21 @@ def install_forced_key(public_key_path: Path) -> None:
     finally:
         os.close(descriptor)
     _public_key_identity(public_key)
+    return public_key
+
+
+def install_forced_key(
+    public_key_path: Path,
+    *,
+    predecessor_public_key_path: Path | None = None,
+) -> None:
+    public_key = _read_public_key_file(public_key_path)
+    predecessor_public_key = (
+        None
+        if predecessor_public_key_path is None
+        else _read_public_key_file(predecessor_public_key_path)
+    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     account = pwd.getpwnam(REMOTE_SSH_USER)
     if account.pw_dir != str(REMOTE_SSH_HOME):
         raise BrokerError("GB10 external supervisor SSH account drifted")
@@ -301,7 +381,11 @@ def install_forced_key(public_key_path: Path) -> None:
             existing = os.read(descriptor, 4 * 1024 * 1024 + 1)
         finally:
             os.close(descriptor)
-    rendered = render_authorized_keys(existing, public_key)
+    rendered = render_authorized_keys(
+        existing,
+        public_key,
+        predecessor_public_key=predecessor_public_key,
+    )
     if rendered == existing:
         return
     descriptor, temporary_name = tempfile.mkstemp(prefix=".authorized_keys.", dir=ssh_dir)
@@ -2097,9 +2181,14 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         if os.geteuid() != 0 or os.getegid() != 0:
             raise BrokerError("GB10 external supervisor broker identity is invalid")
-        if len(arguments) == 2 and arguments[0] == "--install-authority":
+        if len(arguments) in {2, 3} and arguments[0] == "--install-authority":
             _require_host_authority()
-            install_forced_key(Path(arguments[1]))
+            install_forced_key(
+                Path(arguments[1]),
+                predecessor_public_key_path=(
+                    None if len(arguments) == 2 else Path(arguments[2])
+                ),
+            )
             return 0
         if arguments:
             raise BrokerError("GB10 external supervisor broker arguments are invalid")

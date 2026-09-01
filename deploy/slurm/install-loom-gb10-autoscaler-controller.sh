@@ -29,6 +29,7 @@ BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"
 BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"
 SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"
 CONTROLLER_PUBLIC_KEY=""
+LEGACY_DEPLOY_PUBLIC_KEY=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -40,8 +41,16 @@ while [ "$#" -gt 0 ]; do
       CONTROLLER_PUBLIC_KEY="$2"
       shift 2
       ;;
+    --legacy-deploy-public-key)
+      if [ "$#" -lt 2 ] || [ -n "$LEGACY_DEPLOY_PUBLIC_KEY" ]; then
+        echo "error: legacy deploy public key argument is invalid" >&2
+        exit 2
+      fi
+      LEGACY_DEPLOY_PUBLIC_KEY="$2"
+      shift 2
+      ;;
     *)
-      echo "usage: sudo $0 --controller-public-key /absolute/path.pub" >&2
+      echo "usage: sudo $0 --controller-public-key /absolute/path.pub --legacy-deploy-public-key /absolute/path.pub" >&2
       exit 2
       ;;
   esac
@@ -49,6 +58,9 @@ done
 if [ -z "$CONTROLLER_PUBLIC_KEY" ] \
   || [[ "$CONTROLLER_PUBLIC_KEY" != /* ]] \
   || [ ! -f "$CONTROLLER_PUBLIC_KEY" ] \
+  || [ -z "$LEGACY_DEPLOY_PUBLIC_KEY" ] \
+  || [[ "$LEGACY_DEPLOY_PUBLIC_KEY" != /* ]] \
+  || [ ! -f "$LEGACY_DEPLOY_PUBLIC_KEY" ] \
   || [ ! -f "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
   || [ -L "$ACCEPTANCE_AUTHORITY_SOURCE" ] \
   || [ ! -f "$ACCEPTANCE_TMPFILES_SOURCE" ] \
@@ -121,7 +133,8 @@ chmod 0440 "$temporary_dir/loom-gb10-external-supervisor.sudoers"
 /usr/sbin/visudo -cf "$temporary_dir/loom-gb10-external-supervisor.sudoers" >/dev/null
 install -o root -g root -m 0440 \
   "$temporary_dir/loom-gb10-external-supervisor.sudoers" "$SUDOERS_PATH"
-"$BROKER_PATH" --install-authority "$CONTROLLER_PUBLIC_KEY"
+"$BROKER_PATH" --install-authority \
+  "$CONTROLLER_PUBLIC_KEY" "$LEGACY_DEPLOY_PUBLIC_KEY"
 
 install -d -o root -g root -m 0755 "$RUNTIME_ROOT" "$RUNTIME_ROOT/candidates"
 install -d -o "$SERVICE_UID" -g "$SERVICE_GID" -m 0750 \

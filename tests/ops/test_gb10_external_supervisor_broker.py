@@ -1545,6 +1545,244 @@ def test_forced_key_render_rejects_same_key_with_unrestricted_authority() -> Non
         broker.render_authorized_keys(public_key, public_key)
 
 
+def test_forced_key_render_migrates_exact_legacy_controller_key() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    predecessor = (
+        b"# preserve loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    expected = (
+        b"# preserve loom-staging-rollout\n"
+        + legacy_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    migrated = broker.render_authorized_keys(
+        predecessor,
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == expected
+    assert (
+        broker.render_authorized_keys(
+            migrated,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+        == expected
+    )
+
+
+def test_forced_key_migration_rejects_foreign_rollout_marker() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    foreign_public_key = _public_key(9, "foreign")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    foreign_identity = b" ".join(foreign_public_key.split()[:2])
+    ambiguous = (
+        foreign_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    with pytest.raises(broker.BrokerError, match="rollout authority is ambiguous"):
+        broker.render_authorized_keys(
+            ambiguous,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+
+
+def test_forced_key_migration_installs_missing_predecessor_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+
+    migrated = broker.render_authorized_keys(
+        b"",
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == (
+        legacy_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+
+def test_forced_key_migration_repairs_controller_only_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    controller_only = (
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    migrated = broker.render_authorized_keys(
+        controller_only,
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == legacy_identity + b" loom-staging-rollout\n" + controller_only
+
+
+def test_forced_key_migration_rejects_reused_controller_identity() -> None:
+    public_key = _public_key()
+
+    with pytest.raises(broker.BrokerError, match="not distinct"):
+        broker.render_authorized_keys(
+            b"",
+            public_key,
+            predecessor_public_key=public_key,
+        )
+
+
+def test_forced_key_migration_rejects_duplicate_predecessor_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    duplicated = (
+        legacy_identity
+        + b" loom-staging-rollout\n"
+        + legacy_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    with pytest.raises(broker.BrokerError, match="duplicated"):
+        broker.render_authorized_keys(
+            duplicated,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+
+
+def test_install_forced_key_migrates_predecessor_authority_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path = tmp_path / "controller.pub"
+    legacy_path.write_bytes(legacy_public_key)
+    controller_path.write_bytes(controller_public_key)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    broker.install_forced_key(
+        controller_path,
+        predecessor_public_key_path=legacy_path,
+    )
+
+    assert authorized_keys.read_bytes() == (
+        legacy_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    assert authorized_keys.stat().st_mode & 0o777 == 0o600
+
+
+def test_broker_install_authority_dispatches_exact_predecessor_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path = tmp_path / "controller.pub"
+    legacy_path.write_bytes(legacy_public_key)
+    controller_path.write_bytes(controller_public_key)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    assert broker.main(
+        ["--install-authority", str(controller_path), str(legacy_path)]
+    ) == 0
+    assert authorized_keys.read_bytes() == (
+        legacy_identity
+        + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+
 def test_existing_candidate_requires_exact_clean_hardened_root_owned_runtime(
     tmp_path: Path,
 ) -> None:
