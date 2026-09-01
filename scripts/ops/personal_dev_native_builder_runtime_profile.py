@@ -498,11 +498,10 @@ Type=notify
 ExecStart=/usr/bin/dockerd --config-file={self.dockerd_config_path}
 ExecStartPost=/usr/bin/chgrp {self.socket_gid} {self.docker_socket}
 ExecStartPost=/usr/bin/chmod {self.socket_mode:o} {self.docker_socket}
-Restart=on-failure
-RestartSec=5s
+Restart=no
 TimeoutStartSec=120s
 TimeoutStopSec=120s
-KillMode=process
+KillMode=control-group
 Delegate=yes
 TasksMax=infinity
 LimitNOFILE=1048576

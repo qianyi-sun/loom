@@ -11,11 +11,10 @@ Type=notify
 ExecStart=/usr/bin/dockerd --config-file=/etc/loom/personal-dev-native-builder/dockerd.json
 ExecStartPost=/usr/bin/chgrp 24851 /run/loom-personal-dev-builder/docker.sock
 ExecStartPost=/usr/bin/chmod 660 /run/loom-personal-dev-builder/docker.sock
-Restart=on-failure
-RestartSec=5s
+Restart=no
 TimeoutStartSec=120s
 TimeoutStopSec=120s
-KillMode=process
+KillMode=control-group
 Delegate=yes
 TasksMax=infinity
 LimitNOFILE=1048576

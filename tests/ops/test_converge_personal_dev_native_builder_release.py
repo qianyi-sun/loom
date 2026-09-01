@@ -5,13 +5,16 @@ from dataclasses import dataclass, field, replace
 
 import pytest
 from scripts.ops.converge_personal_dev_native_builder_release import (
+    NativeBuilderDockerCliApi,
     NativeBuilderImageRecord,
     NativeBuilderReleaseConfig,
     NativeBuilderReleaseImage,
     PersonalDevNativeBuilderReleaseConverger,
     PersonalDevNativeBuilderReleaseError,
+    create_broker_release_converger,
     main,
 )
+from scripts.ops.personal_dev_native_builder_conformance import CommandResult
 
 _SOURCE = "https://github.com/qianyi-sun/loom"
 _MANAGED = "io.loom.personal-dev.native-builder.release-managed"
@@ -152,6 +155,66 @@ def _converger(
         primary=primary,
         dedicated=dedicated,
     )
+
+
+def test_broker_factory_accepts_only_fixed_endpoint_adapters() -> None:
+    config = _config(previous=False)
+    primary = FakeDockerApi(_PRIMARY)
+    dedicated = FakeDockerApi(_DEDICATED)
+
+    converger = create_broker_release_converger(
+        config,
+        primary=primary,
+        dedicated=dedicated,
+    )
+
+    assert isinstance(converger, PersonalDevNativeBuilderReleaseConverger)
+    with pytest.raises(PersonalDevNativeBuilderReleaseError, match="endpoint"):
+        create_broker_release_converger(
+            config,
+            primary=FakeDockerApi("unix:///tmp/operator.sock"),
+            dedicated=dedicated,
+        )
+
+
+def test_docker_cli_api_accepts_a_bounded_broker_runner() -> None:
+    calls: list[tuple[tuple[str, ...], bool, dict[str, str] | None]] = []
+
+    class Runner:
+        def run(
+            self,
+            argv: tuple[str, ...] | list[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            calls.append((tuple(argv), check, env))
+            return CommandResult(0, "", "")
+
+    api = NativeBuilderDockerCliApi(_PRIMARY, runner=Runner())
+
+    assert api.images() == ()
+    assert calls == [
+        (
+            (
+                "/usr/bin/docker",
+                "-H",
+                _PRIMARY,
+                "image",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+            ),
+            False,
+            {
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+        )
+    ]
 
 
 def test_plan_is_canonical_read_only_and_uses_separate_daemons() -> None:

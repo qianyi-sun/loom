@@ -23,6 +23,10 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
+from scripts.ops.personal_dev_native_builder_runtime_crypto import (
+    derive_ed25519_public_key,
+    is_ca_certificate_bundle,
+)
 from scripts.ops.personal_dev_native_builder_runtime_profile import (
     NativeBuilderRuntimeArchiveMember,
     NativeBuilderRuntimeProfile,
@@ -46,9 +50,8 @@ _IMAGE_REFERENCE = re.compile(
     r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$"
 )
 _KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_AGENT_STAGE_MANIFEST = Path(
-    "/etc/loom/personal-dev-native-builder/agent-stage-v1.json"
-)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_AGENT_STAGE_MANIFEST = Path("/etc/loom/personal-dev-native-builder/agent-stage-v1.json")
 _RENAME_NOREPLACE = 1
 _AT_FDCWD = -100
 
@@ -58,9 +61,7 @@ class PersonalDevNativeBuilderRuntimeInstallError(RuntimeError):
 
     def __init__(self, code: str) -> None:
         safe_code = (
-            code
-            if isinstance(code, str) and _ERROR_CODE.fullmatch(code)
-            else "internal_error"
+            code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else "internal_error"
         )
         self.code = safe_code
         super().__init__(safe_code)
@@ -104,18 +105,12 @@ class NativeBuilderSubprocessRunner:
                 timeout=_COMMAND_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "command_timeout"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("command_timeout") from exc
         if (
-            len(completed.stdout.encode("utf-8", errors="replace"))
-            > _MAX_COMMAND_OUTPUT
-            or len(completed.stderr.encode("utf-8", errors="replace"))
-            > _MAX_COMMAND_OUTPUT
+            len(completed.stdout.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
+            or len(completed.stderr.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "command_output_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("command_output_invalid")
         result = NativeBuilderCommandResult(
             completed.returncode,
             completed.stdout,
@@ -142,19 +137,12 @@ class NativeBuilderInstallContext:
             or ".." in self.root.parts
             or self.authority_uid < 0
             or self.authority_gid < 0
-            or any(
-                not isinstance(value, str) or not value
-                for value in self.command_prefix
-            )
+            or any(not isinstance(value, str) or not value for value in self.command_prefix)
         ):
             raise PersonalDevNativeBuilderRuntimeInstallError("context_invalid")
 
     def path(self, absolute: Path) -> Path:
-        if (
-            not isinstance(absolute, Path)
-            or not absolute.is_absolute()
-            or ".." in absolute.parts
-        ):
+        if not isinstance(absolute, Path) or not absolute.is_absolute() or ".." in absolute.parts:
             raise PersonalDevNativeBuilderRuntimeInstallError("path_invalid")
         if self.root == Path("/"):
             return absolute
@@ -207,9 +195,7 @@ def _fsync_directory(path: Path) -> None:
 def _safe_remove_stage(path: Path) -> None:
     metadata = os.lstat(path)
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "staging_cleanup_invalid"
-        )
+        raise PersonalDevNativeBuilderRuntimeInstallError("staging_cleanup_invalid")
     path.chmod(0o700)
     with os.scandir(path) as entries:
         for entry in entries:
@@ -220,9 +206,7 @@ def _safe_remove_stage(path: Path) -> None:
             elif stat.S_ISREG(child_metadata.st_mode):
                 child.unlink()
             else:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "staging_cleanup_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("staging_cleanup_invalid")
     path.rmdir()
 
 
@@ -230,9 +214,7 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "atomic_publish_unavailable"
-        )
+        raise PersonalDevNativeBuilderRuntimeInstallError("atomic_publish_unavailable")
     renameat2.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -310,11 +292,7 @@ def _write_member(
     try:
         descriptor = os.open(
             destination,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_CLOEXEC
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         digest = hashlib.sha256()
@@ -324,28 +302,20 @@ def _write_member(
             while remaining:
                 chunk = source.read(min(1024 * 1024, remaining))
                 if not chunk:
-                    raise PersonalDevNativeBuilderRuntimeInstallError(
-                        "archive_member_invalid"
-                    )
+                    raise PersonalDevNativeBuilderRuntimeInstallError("archive_member_invalid")
                 output.write(chunk)
                 digest.update(chunk)
                 remaining -= len(chunk)
             if source.read(1):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "archive_member_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("archive_member_invalid")
             os.fchmod(output.fileno(), expected.install_mode)
             os.fchown(output.fileno(), uid, gid)
             output.flush()
             os.fsync(output.fileno())
         if digest.hexdigest() != expected.sha256:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "archive_member_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("archive_member_invalid")
     except OSError as exc:
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "archive_destination_invalid"
-        ) from exc
+        raise PersonalDevNativeBuilderRuntimeInstallError("archive_destination_invalid") from exc
     finally:
         source.close()
         if descriptor is not None:
@@ -415,9 +385,7 @@ def _extract_verified_archive(
                                 "archive_member_invalid"
                             )
                         seen_files.add(name)
-                        target = destination.joinpath(
-                            *PurePosixPath(name).parts
-                        )
+                        target = destination.joinpath(*PurePosixPath(name).parts)
                         _write_member(
                             bundle,
                             member,
@@ -431,9 +399,7 @@ def _extract_verified_archive(
             except PersonalDevNativeBuilderRuntimeInstallError:
                 raise
             except (OSError, tarfile.TarError, EOFError) as exc:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "archive_invalid"
-                ) from exc
+                raise PersonalDevNativeBuilderRuntimeInstallError("archive_invalid") from exc
             if (
                 seen_files != set(members)
                 or seen_directories != expected_directories
@@ -475,9 +441,7 @@ def _read_regular(
             or (gid is not None and before.st_gid != gid)
             or (mode is not None and stat.S_IMODE(before.st_mode) != mode)
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "managed_file_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid")
         payload = bytearray()
         while chunk := os.read(
             descriptor,
@@ -486,16 +450,12 @@ def _read_regular(
             payload.extend(chunk)
         after = os.fstat(descriptor)
         if len(payload) != before.st_size or _identity(before) != _identity(after):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "managed_file_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid")
         return bytes(payload)
     except PersonalDevNativeBuilderRuntimeInstallError:
         raise
     except OSError as exc:
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "managed_file_invalid"
-        ) from exc
+        raise PersonalDevNativeBuilderRuntimeInstallError("managed_file_invalid") from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -503,9 +463,7 @@ def _read_regular(
 
 def _normalized_nftables(payload: str) -> tuple[str, ...]:
     if not isinstance(payload, str) or "\x00" in payload:
-        raise PersonalDevNativeBuilderRuntimeInstallError(
-            "nftables_state_invalid"
-        )
+        raise PersonalDevNativeBuilderRuntimeInstallError("nftables_state_invalid")
     lines: list[str] = []
     for raw_line in payload.splitlines():
         line = raw_line.strip()
@@ -518,6 +476,22 @@ def _normalized_nftables(payload: str) -> tuple[str, ...]:
         )
         lines.append(" ".join(line.split()))
     return tuple(lines)
+
+
+def _derive_ed25519_public_key(private_seed: bytes) -> bytes:
+    """Derive the RFC 8032 compressed public key using only sealed stdlib."""
+    try:
+        return derive_ed25519_public_key(private_seed)
+    except ValueError as exc:
+        raise PersonalDevNativeBuilderRuntimeInstallError("public_key_invalid") from exc
+
+
+def _public_key_sha256(private_seed: bytes) -> str:
+    return hashlib.sha256(_derive_ed25519_public_key(private_seed)).hexdigest()
+
+
+def _is_ca_bundle(payload: bytes) -> bool:
+    return is_ca_certificate_bundle(payload)
 
 
 class PersonalDevNativeBuilderRuntimeInstaller:
@@ -573,23 +547,17 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         )
         if (
             not isinstance(result, NativeBuilderCommandResult)
-            or len(result.stdout.encode("utf-8", errors="replace"))
-            > _MAX_COMMAND_OUTPUT
-            or len(result.stderr.encode("utf-8", errors="replace"))
-            > _MAX_COMMAND_OUTPUT
+            or len(result.stdout.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
+            or len(result.stderr.encode("utf-8", errors="replace")) > _MAX_COMMAND_OUTPUT
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "command_output_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("command_output_invalid")
         return result
 
     def _verify_context(self) -> None:
         try:
             metadata = os.lstat(self.context.root)
         except OSError as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "parent_directory_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("parent_directory_invalid") from exc
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
@@ -597,9 +565,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or metadata.st_gid != self.context.authority_gid
             or stat.S_IMODE(metadata.st_mode) & 0o022
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "parent_directory_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("parent_directory_invalid")
         if self.context.root == Path("/") and (
             self.effective_uid != 0
             or self.context.authority_uid != 0
@@ -621,9 +587,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 or metadata.st_uid != self.context.authority_uid
                 or stat.S_IMODE(metadata.st_mode) & 0o022
             ):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "parent_directory_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("parent_directory_invalid")
 
     def _ensure_directory(self, absolute: Path) -> Path:
         mapped = self._path(absolute)
@@ -640,9 +604,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                     or metadata.st_gid != self.context.authority_gid
                     or stat.S_IMODE(metadata.st_mode) & 0o022
                 ):
-                    raise PersonalDevNativeBuilderRuntimeInstallError(
-                        "parent_directory_invalid"
-                    )
+                    raise PersonalDevNativeBuilderRuntimeInstallError("parent_directory_invalid")
                 continue
             current.mkdir(mode=0o755)
             os.chown(
@@ -656,9 +618,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
     def _service_active(self, unit: str) -> bool:
         result = self._run("/usr/bin/systemctl", "is-active", unit, check=False)
         if result.stderr:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
         if result.returncode == 0 and result.stdout == "active\n":
             return True
         if result.returncode in {3, 4} and result.stdout in {
@@ -672,9 +632,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         if self._service_active(self.profile.dockerd_service_path.name) or self._service_active(
             self.profile.agent_service_path.name
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
 
     def _verify_nft_table_absent(self) -> None:
         result = self._run(
@@ -689,9 +647,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or result.stderr
             or target in (line.strip() for line in result.stdout.splitlines())
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "nftables_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("nftables_state_invalid")
 
     def _systemctl(self, action: str, unit: str | None = None) -> None:
         arguments = ["/usr/bin/systemctl", action]
@@ -699,9 +655,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             arguments.append(unit)
         result = self._run(*arguments, check=False)
         if result.returncode != 0 or result.stdout or result.stderr:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
 
     def _json_result(
         self,
@@ -735,16 +689,10 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             )
             if result.returncode == 2 and not result.stdout and not result.stderr:
                 rows.append(None)
-            elif (
-                result.returncode == 0
-                and not result.stderr
-                and result.stdout.count("\n") == 1
-            ):
+            elif result.returncode == 0 and not result.stderr and result.stdout.count("\n") == 1:
                 rows.append((database, result.stdout.rstrip("\n")))
             else:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "identity_conflict"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("identity_conflict")
         if all(row is None for row in rows) and not require_present:
             return
         if any(row is None for row in rows):
@@ -756,8 +704,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         )
         agent_group = f"{self.profile.agent_name}:x:{self.profile.agent_gid}:"
         socket_group = (
-            f"{self.profile.socket_group}:x:{self.profile.socket_gid}:"
-            f"{self.profile.agent_name}"
+            f"{self.profile.socket_group}:x:{self.profile.socket_gid}:{self.profile.agent_name}"
         )
         expected = (
             ("passwd", passwd),
@@ -774,14 +721,10 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         self._verify_context()
         hostname = self._run("/bin/hostname", "--fqdn", check=False)
         architecture = self._run("/usr/bin/uname", "-m", check=False)
-        if (
-            hostname != NativeBuilderCommandResult(0, self.profile.host_name + "\n")
-            or architecture
-            != NativeBuilderCommandResult(0, self.profile.architecture + "\n")
-        ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "host_identity_invalid"
-            )
+        if hostname != NativeBuilderCommandResult(
+            0, self.profile.host_name + "\n"
+        ) or architecture != NativeBuilderCommandResult(0, self.profile.architecture + "\n"):
+            raise PersonalDevNativeBuilderRuntimeInstallError("host_identity_invalid")
         kvm = self._run(
             "/usr/bin/test",
             "-c",
@@ -803,9 +746,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         try:
             controller_names = set(controllers.decode("ascii").split())
         except UnicodeDecodeError as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "cgroup_v2_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("cgroup_v2_invalid") from exc
         if not {"cpu", "memory", "pids"}.issubset(controller_names):
             raise PersonalDevNativeBuilderRuntimeInstallError("cgroup_v2_invalid")
 
@@ -828,18 +769,13 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "os": "linux",
             "version": self.profile.docker_version,
         }:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "docker_identity_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("docker_identity_invalid")
         info = self._json_result(
             self._run(
                 "/usr/bin/docker",
                 "info",
                 "--format",
-                (
-                    '{"cgroup_driver":"{{.CgroupDriver}}",'
-                    '"storage_driver":"{{.Driver}}"}'
-                ),
+                ('{"cgroup_driver":"{{.CgroupDriver}}","storage_driver":"{{.Driver}}"}'),
                 check=False,
             ),
             error="docker_identity_invalid",
@@ -848,9 +784,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "cgroup_driver": self.profile.docker_cgroup_driver,
             "storage_driver": self.profile.docker_storage_driver,
         }:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "docker_identity_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("docker_identity_invalid")
 
         cpu = self._run("/usr/bin/nproc", "--all", check=False)
         memory = self._run(
@@ -872,9 +806,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             disk_lines = disk.stdout.splitlines()
             disk_bytes = int(disk_lines[1])
         except (IndexError, TypeError, ValueError) as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "host_capacity_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("host_capacity_invalid") from exc
         if (
             cpu.returncode != 0
             or cpu.stderr
@@ -889,9 +821,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or memory_bytes < self.profile.minimum_memory_bytes
             or disk_bytes < self.profile.minimum_disk_free_bytes
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "host_capacity_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("host_capacity_invalid")
 
         route_result = self._json_result(
             self._run(
@@ -909,28 +839,20 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             error="address_pool_conflict",
         )
         if not isinstance(route_result, list):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "address_pool_conflict"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("address_pool_conflict")
         provider_network = ipaddress.ip_network(self.profile.address_pool)
         for route in route_result:
             if not isinstance(route, dict) or not isinstance(route.get("dst"), str):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "address_pool_conflict"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("address_pool_conflict")
             destination = route["dst"]
             if destination == "default":
                 continue
             try:
                 network = ipaddress.ip_network(destination, strict=False)
             except ValueError as exc:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "address_pool_conflict"
-                ) from exc
+                raise PersonalDevNativeBuilderRuntimeInstallError("address_pool_conflict") from exc
             if provider_network.overlaps(network):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "address_pool_conflict"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("address_pool_conflict")
         self._verify_identity_inventory()
         self._verify_services_inactive()
         self._verify_nft_table_absent()
@@ -995,9 +917,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                     or (result.stdout and not permits_stdout)
                     or result.stderr
                 ):
-                    raise PersonalDevNativeBuilderRuntimeInstallError(
-                        "generated_input_invalid"
-                    )
+                    raise PersonalDevNativeBuilderRuntimeInstallError("generated_input_invalid")
 
     def _static_files(self) -> Mapping[Path, bytes]:
         return {
@@ -1008,9 +928,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             self.profile.dockerd_service_path: self.profile.dockerd_service,
             self.profile.slice_unit_path: self.profile.slice_unit,
             self.profile.sysusers_path: self.profile.sysusers,
-            self.profile.agent_service_template_path: (
-                self.profile.agent_service_template
-            ),
+            self.profile.agent_service_template_path: (self.profile.agent_service_template),
         }
 
     def _verify_file(
@@ -1030,9 +948,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             mode=mode,
         )
         if actual != payload:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "staged_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid")
 
     def _verify_directory(
         self,
@@ -1045,21 +961,15 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         try:
             metadata = os.lstat(path)
         except OSError as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "staged_state_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid") from exc
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid
-            != (self.context.authority_uid if uid is None else uid)
-            or metadata.st_gid
-            != (self.context.authority_gid if gid is None else gid)
+            or metadata.st_uid != (self.context.authority_uid if uid is None else uid)
+            or metadata.st_gid != (self.context.authority_gid if gid is None else gid)
             or stat.S_IMODE(metadata.st_mode) != mode
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "staged_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid")
 
     def _ensure_managed_directory(
         self,
@@ -1081,9 +991,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             _fsync_directory(path)
             _fsync_directory(parent)
         except OSError as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "runtime_directory_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("runtime_directory_invalid") from exc
 
     def _verify_runtime_directories(self) -> None:
         self._verify_directory(
@@ -1106,9 +1014,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         release = self._path(self.profile.release_root)
         self._verify_directory(release, mode=0o555)
         expected_files = {Path(name) for name in self.profile.members}
-        expected_directories = {
-            path.parent for path in expected_files if path.parent != Path(".")
-        }
+        expected_directories = {path.parent for path in expected_files if path.parent != Path(".")}
         actual_files: set[Path] = set()
         actual_directories: set[Path] = set()
         for root, directories, files in os.walk(release, followlinks=False):
@@ -1117,19 +1023,12 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 child = root_path / name
                 metadata = os.lstat(child)
                 if stat.S_ISLNK(metadata.st_mode):
-                    raise PersonalDevNativeBuilderRuntimeInstallError(
-                        "staged_state_invalid"
-                    )
+                    raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid")
                 actual_directories.add(child.relative_to(release))
             for name in files:
                 actual_files.add((root_path / name).relative_to(release))
-        if (
-            actual_files != expected_files
-            or actual_directories != expected_directories
-        ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "staged_state_invalid"
-            )
+        if actual_files != expected_files or actual_directories != expected_directories:
+            raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid")
         for relative in expected_directories:
             self._verify_directory(release / relative, mode=0o555)
         for name, member in self.profile.members.items():
@@ -1140,13 +1039,8 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 gid=self.context.authority_gid,
                 mode=member.install_mode,
             )
-            if (
-                len(payload) != member.size
-                or hashlib.sha256(payload).hexdigest() != member.sha256
-            ):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "staged_state_invalid"
-                )
+            if len(payload) != member.size or hashlib.sha256(payload).hexdigest() != member.sha256:
+                raise PersonalDevNativeBuilderRuntimeInstallError("staged_state_invalid")
 
     def _agent_paths(self) -> tuple[Path, ...]:
         return (
@@ -1167,17 +1061,14 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         try:
             value = json.loads(payload.decode("ascii"))
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_stage_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid") from exc
         keys = {
             "agent_image",
             "agent_instance_id",
             "builder_image",
-            "ca_sha256",
             "key_id",
-            "private_key_sha256",
             "profile_sha256",
+            "public_key_sha256",
             "schema",
             "service_url",
             "unit_sha256",
@@ -1190,9 +1081,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or value["schema"] != "loom.personal-dev-native-builder-agent-stage.v1"
             or value["profile_sha256"] != self.profile.sha256
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_stage_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid")
         return cast(dict[str, str], value)
 
     def _verify_agent_staged(self) -> None:
@@ -1228,15 +1117,11 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         self._verify_file(self.profile.agent_service_path, unit, mode=0o444)
         if (
             len(key) != 32
-            or hashlib.sha256(key).hexdigest()
-            != manifest["private_key_sha256"]
-            or not ca
-            or hashlib.sha256(ca).hexdigest() != manifest["ca_sha256"]
+            or _public_key_sha256(key) != manifest["public_key_sha256"]
+            or not _is_ca_bundle(ca)
             or hashlib.sha256(unit).hexdigest() != manifest["unit_sha256"]
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_stage_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid")
 
     def _verify_installed(self) -> None:
         self._verify_context()
@@ -1250,9 +1135,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         ]
         if any(agent_states):
             if not all(agent_states):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "agent_stage_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid")
             self._verify_agent_staged()
 
     def _verify_existing_destinations(self) -> None:
@@ -1276,18 +1159,14 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         ]
         if any(agent_states):
             if not all(agent_states):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "agent_stage_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid")
             self._verify_agent_staged()
 
     def _archive_stage(self, archive: Path, parent: Path | None = None) -> Path:
         if parent is None:
             temporary = Path(tempfile.mkdtemp(prefix="loom-native-gvisor-verify-"))
         else:
-            temporary = Path(
-                tempfile.mkdtemp(prefix=".gvisor-stage-", dir=parent)
-            )
+            temporary = Path(tempfile.mkdtemp(prefix=".gvisor-stage-", dir=parent))
         os.chown(
             temporary,
             self.context.authority_uid,
@@ -1427,9 +1306,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             check=False,
         )
         if sysusers.returncode != 0 or sysusers.stderr:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "identity_install_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("identity_install_invalid")
         if self.context.root == Path("/"):
             self._verify_identity_inventory(require_present=True)
         self._ensure_managed_directory(
@@ -1467,15 +1344,11 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or _IMAGE_REFERENCE.fullmatch(builder_image) is None
             or _KEY_ID.fullmatch(key_id) is None
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_binding_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_binding_invalid")
         try:
             instance = uuid.UUID(agent_instance_id)
         except (AttributeError, TypeError, ValueError) as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_binding_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_binding_invalid") from exc
         parsed = urlsplit(service_url)
         if (
             str(instance) != agent_instance_id
@@ -1489,20 +1362,14 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or parsed.geturl() != service_url
             or any(character.isspace() for character in service_url)
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_binding_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_binding_invalid")
         try:
             port = parsed.port
             parsed.hostname.encode("ascii")
         except (UnicodeEncodeError, ValueError) as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_binding_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_binding_invalid") from exc
         if port is not None and not 1 <= port <= 65535:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_binding_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_binding_invalid")
 
     def _render_agent_unit(
         self,
@@ -1524,17 +1391,13 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         payload = self.profile.agent_service_template
         for marker, value in replacements.items():
             if marker not in payload:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "agent_template_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("agent_template_invalid")
             payload = payload.replace(marker, value)
         if b"@@" in payload or not payload.endswith(b"\n"):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_template_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_template_invalid")
         return payload
 
-    def stage_agent(
+    def _stage_agent(
         self,
         *,
         agent_image: str,
@@ -1544,6 +1407,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         key_id: str,
         private_key: Path,
         ca_file: Path,
+        expected_public_key_sha256: str | None,
     ) -> dict[str, str]:
         self._verify_installed()
         self._verify_services_inactive()
@@ -1568,10 +1432,14 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             gid=self.context.authority_gid,
             mode=0o444,
         )
-        if len(key) != 32 or not ca:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_material_invalid"
-            )
+        if len(key) != 32 or not _is_ca_bundle(ca):
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_material_invalid")
+        public_key_sha256 = _public_key_sha256(key)
+        if expected_public_key_sha256 is not None and (
+            _SHA256.fullmatch(expected_public_key_sha256) is None
+            or public_key_sha256 != expected_public_key_sha256
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError("public_key_invalid")
         unit = self._render_agent_unit(
             agent_image=agent_image,
             builder_image=builder_image,
@@ -1584,10 +1452,9 @@ class PersonalDevNativeBuilderRuntimeInstaller:
                 "agent_image": agent_image,
                 "agent_instance_id": agent_instance_id,
                 "builder_image": builder_image,
-                "ca_sha256": hashlib.sha256(ca).hexdigest(),
                 "key_id": key_id,
-                "private_key_sha256": hashlib.sha256(key).hexdigest(),
                 "profile_sha256": self.profile.sha256,
+                "public_key_sha256": public_key_sha256,
                 "schema": "loom.personal-dev-native-builder-agent-stage.v1",
                 "service_url": service_url,
                 "unit_sha256": hashlib.sha256(unit).hexdigest(),
@@ -1606,6 +1473,131 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         self._systemctl("daemon-reload")
         self._verify_agent_staged()
         return self._receipt("stage-agent", state="staged")
+
+    def stage_agent(
+        self,
+        *,
+        agent_image: str,
+        builder_image: str,
+        service_url: str,
+        agent_instance_id: str,
+        key_id: str,
+        private_key: Path,
+        ca_file: Path,
+    ) -> dict[str, str]:
+        return self._stage_agent(
+            agent_image=agent_image,
+            builder_image=builder_image,
+            service_url=service_url,
+            agent_instance_id=agent_instance_id,
+            key_id=key_id,
+            private_key=private_key,
+            ca_file=ca_file,
+            expected_public_key_sha256=None,
+        )
+
+    def stage_agent_authorized(
+        self,
+        *,
+        agent_image: str,
+        builder_image: str,
+        service_url: str,
+        agent_instance_id: str,
+        key_id: str,
+        private_key: Path,
+        ca_file: Path,
+        expected_public_key_sha256: str,
+    ) -> dict[str, str]:
+        """Stage material only when its raw Ed25519 public identity is approved."""
+        return self._stage_agent(
+            agent_image=agent_image,
+            builder_image=builder_image,
+            service_url=service_url,
+            agent_instance_id=agent_instance_id,
+            key_id=key_id,
+            private_key=private_key,
+            ca_file=ca_file,
+            expected_public_key_sha256=expected_public_key_sha256,
+        )
+
+    def discard_agent_stage(self) -> None:
+        """Remove only exact inactive agent-stage files after broker rollback."""
+        self._verify_services_inactive()
+        specifications = (
+            (
+                _AGENT_STAGE_MANIFEST,
+                16 * 1024,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            (
+                self.profile.agent_service_path,
+                64 * 1024,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            (
+                self.profile.ca_file_path,
+                _MAX_CA_BYTES,
+                self.context.authority_uid,
+                self.context.authority_gid,
+                0o444,
+            ),
+            (
+                self.profile.private_key_path,
+                32,
+                self._agent_uid,
+                self._agent_gid,
+                self.profile.private_key_mode,
+            ),
+        )
+        first_failure: BaseException | None = None
+        removed = False
+        for absolute, maximum, uid, gid, mode in specifications:
+            path = self._path(absolute)
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            try:
+                _read_regular(
+                    path,
+                    maximum=maximum,
+                    uid=uid,
+                    gid=gid,
+                    mode=mode,
+                )
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                continue
+            try:
+                removed = True
+                self._unlink(absolute)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if removed:
+            try:
+                self._systemctl("daemon-reload")
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            if isinstance(
+                first_failure,
+                PersonalDevNativeBuilderRuntimeInstallError,
+            ):
+                raise first_failure
+            raise PersonalDevNativeBuilderRuntimeInstallError(
+                "agent_stage_invalid"
+            ) from first_failure
 
     def verify_staged(self) -> dict[str, str]:
         self._verify_installed()
@@ -1641,9 +1633,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or networks.returncode != 0
             or networks.stderr
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_daemon_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_daemon_invalid")
         return (
             tuple(value for value in containers.stdout.splitlines() if value),
             tuple(value for value in networks.stdout.splitlines() if value),
@@ -1655,30 +1645,22 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             self._path(path).exists() and not self._path(path).is_symlink()
             for path in self._agent_paths()
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "agent_stage_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("agent_stage_invalid")
         if not all(
             (
                 self._service_active(self.profile.dockerd_service_path.name),
                 self._service_active(self.profile.agent_service_path.name),
             )
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
         socket_path = self._path(self.profile.docker_socket)
         try:
             socket_metadata = os.lstat(socket_path)
         except OSError as exc:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_socket_invalid"
-            ) from exc
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_socket_invalid") from exc
         socket_kind_valid = stat.S_ISSOCK(socket_metadata.st_mode)
         if self.context.root != Path("/"):
-            socket_kind_valid = socket_kind_valid or stat.S_ISREG(
-                socket_metadata.st_mode
-            )
+            socket_kind_valid = socket_kind_valid or stat.S_ISREG(socket_metadata.st_mode)
         if (
             not socket_kind_valid
             or stat.S_ISLNK(socket_metadata.st_mode)
@@ -1686,9 +1668,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or socket_metadata.st_gid != self._socket_gid
             or stat.S_IMODE(socket_metadata.st_mode) != self.profile.socket_mode
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_socket_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_socket_invalid")
         endpoint = f"unix://{self.profile.docker_socket}"
         daemon_info = self._json_result(
             self._run(
@@ -1713,18 +1693,13 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             "driver": self.profile.docker_storage_driver,
             "server_version": self.profile.docker_version,
         }:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_daemon_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_daemon_invalid")
         version = self._run(str(self.profile.runsc_path), "--version", check=False)
         if version != NativeBuilderCommandResult(
             0,
-            f"runsc version {self.profile.version}\n"
-            f"spec: {self.profile.runsc_spec_version}\n",
+            f"runsc version {self.profile.version}\nspec: {self.profile.runsc_spec_version}\n",
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "runsc_version_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("runsc_version_invalid")
         nft_check = self._run(
             "/usr/sbin/nft",
             "--check",
@@ -1749,14 +1724,10 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             or _normalized_nftables(nft_live.stdout)
             != _normalized_nftables(self.profile.nftables.decode("ascii"))
         ):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "nftables_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("nftables_state_invalid")
         containers, networks = self._dedicated_inventory()
         if containers or networks:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_daemon_busy"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_daemon_busy")
         return self._receipt("verify-active", state="active")
 
     def _unlink(self, absolute: Path) -> None:
@@ -1798,28 +1769,81 @@ class PersonalDevNativeBuilderRuntimeInstaller:
             directory.rmdir()
         except OSError as exc:
             if exc.errno not in {errno.ENOENT, errno.ENOTEMPTY}:
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "remove_failed"
-                ) from exc
+                raise PersonalDevNativeBuilderRuntimeInstallError("remove_failed") from exc
         else:
             _fsync_directory(directory.parent)
 
+    def _removed_installation_is_exact(self) -> bool:
+        managed_artifacts = (
+            self.profile.release_root,
+            *self._static_files().keys(),
+            *self._agent_paths(),
+        )
+        if any(
+            self._path(absolute).exists() or self._path(absolute).is_symlink()
+            for absolute in managed_artifacts
+        ):
+            return False
+        self._verify_context()
+        if self._service_active(self.profile.agent_service_path.name) or self._service_active(
+            self.profile.dockerd_service_path.name
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
+        self._verify_nft_table_absent()
+        if self.context.root == Path("/"):
+            self._verify_identity_inventory(require_present=True)
+        for absolute in (
+            self.profile.config_root,
+            self.profile.agent_state_path,
+            self.profile.exec_root,
+        ):
+            path = self._path(absolute)
+            if path.exists() or path.is_symlink():
+                raise PersonalDevNativeBuilderRuntimeInstallError("removed_state_invalid")
+        data_root = self._path(self.profile.data_root)
+        if not data_root.exists() and not data_root.is_symlink():
+            return True
+        self._verify_directory(data_root, mode=0o750)
+        try:
+            children = tuple(data_root.iterdir())
+        except OSError as exc:
+            raise PersonalDevNativeBuilderRuntimeInstallError("removed_state_invalid") from exc
+        docker_root = data_root / "docker"
+        if children != (docker_root,):
+            raise PersonalDevNativeBuilderRuntimeInstallError("removed_state_invalid")
+        try:
+            metadata = os.lstat(docker_root)
+        except OSError as exc:
+            raise PersonalDevNativeBuilderRuntimeInstallError("removed_state_invalid") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != self.context.authority_uid
+            or metadata.st_gid != self.context.authority_gid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise PersonalDevNativeBuilderRuntimeInstallError("removed_state_invalid")
+        return True
+
+    def _removed_receipt(self) -> dict[str, str]:
+        receipt = self._receipt("remove", state="managed-files-absent")
+        receipt["retained"] = "dedicated-image-cache-and-system-identities"
+        return receipt
+
     def remove(self) -> dict[str, str]:
+        if self._removed_installation_is_exact():
+            return self._removed_receipt()
         self._verify_installed()
         agent_active = self._service_active(self.profile.agent_service_path.name)
         dockerd_active = self._service_active(self.profile.dockerd_service_path.name)
         if agent_active:
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
         started_for_inventory = False
         if not dockerd_active:
             self._systemctl("daemon-reload")
             self._systemctl("start", self.profile.dockerd_service_path.name)
             if not self._service_active(self.profile.dockerd_service_path.name):
-                raise PersonalDevNativeBuilderRuntimeInstallError(
-                    "service_state_invalid"
-                )
+                raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
             started_for_inventory = True
         try:
             containers, networks = self._dedicated_inventory()
@@ -1830,14 +1854,10 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         if containers or networks:
             if started_for_inventory:
                 self._systemctl("stop", self.profile.dockerd_service_path.name)
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "dedicated_daemon_busy"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("dedicated_daemon_busy")
         self._systemctl("stop", self.profile.dockerd_service_path.name)
         if self._service_active(self.profile.dockerd_service_path.name):
-            raise PersonalDevNativeBuilderRuntimeInstallError(
-                "service_state_invalid"
-            )
+            raise PersonalDevNativeBuilderRuntimeInstallError("service_state_invalid")
         for absolute in self._agent_paths():
             path = self._path(absolute)
             if path.exists() or path.is_symlink():
@@ -1855,9 +1875,7 @@ class PersonalDevNativeBuilderRuntimeInstaller:
         ):
             self._remove_empty_directory(absolute)
         self._systemctl("daemon-reload")
-        receipt = self._receipt("remove", state="managed-files-absent")
-        receipt["retained"] = "dedicated-image-cache-and-system-identities"
-        return receipt
+        return self._removed_receipt()
 
 
 class _InstallerOperations(Protocol):

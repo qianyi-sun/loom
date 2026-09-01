@@ -16,21 +16,20 @@ observation.
 The ordering is intentional:
 
 1. capture read-only before-state;
-2. stream the measured archive to the fixed no-argument root authority, which
-   stages the runtime, temporarily converges the exact current and previous
-   images, runs the single disposable two-container conformance script, and
-   returns both dedicated services to inactive state;
-3. stream the private key and CA through that same bounded stdin protocol while
-   both services remain inactive;
-4. activate and verify only the dedicated daemon and agent through the same
-   fixed authority;
+2. stage and verify all root-owned bytes while both dedicated services are
+   inactive;
+3. activate only the dedicated daemon, converge exact current and previous
+   images, and run the disposable two-container conformance;
+4. stop the daemon, stage the private key and agent unit while inactive, then
+   reactivate the daemon and start the agent;
 5. continue with the native acceptance runbook, which applies management only
    after it observes the agent service active and then requires fresh signed
    zero-grant readiness before any owner deployment.
 
 Secret values are never printed, placed in command arguments, copied into the
 repository, or included in evidence. Paths, ownership, modes, public-key
-digests, CA digests, and bounded Secret key-name inventories may be recorded.
+digests, and bounded Secret key-name inventories may be recorded. Private-key
+and CA bytes or digests are prohibited in evidence and issue comments.
 
 ## 1. Bind the exact source, release, profile, and evidence authority
 
@@ -53,24 +52,19 @@ previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-e
 runtime_window_id='<authorized-native-runtime-window-id>'
 reviewed_kubeconfig='<absolute-owner-only-mode-0600-kubeconfig>'
 evidence_root='<absolute-existing-owner-only-evidence-root-outside-repository>'
-gb10_target='<ssh-user>@gx10-01c7'
+gb10_dns_observer='<read-only-gb10-dns-observer-ssh-target>'
 slurm_observer='<read-only-slurm-observer-ssh-target>'
 
 runtime_profile='deploy/personal-dev-native-builder/runtime-profile-v1.json'
 runtime_profile_sha256='c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d'
 prepared_control_profile='<absolute-owner-only-prepared-schema-3-profile.toml>'
 prepared_control_profile_sha256='<prepared-profile-64-lowercase-hex>'
-native_runtime_authority='/usr/local/libexec/loom-personal-dev-native-runtime-authority'
-native_runtime_request_schema='loom.personal-dev-native-runtime-authority.request.v1'
 archive_url='https://storage.googleapis.com/gvisor/releases/release/20260810/aarch64/gvisor.tar.bz2'
 archive_sha512='dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7'
-agent_private_key='<absolute-root-owned-mode-0400-ed25519-private-key>'
-service_ca='<absolute-root-owned-mode-0444-service-ca>'
 rollback_shadow_manifest='<absolute-byte-reviewed-schema-4-shadow-manifest>'
 rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 
 repository_root="$(pwd -P)"
-merged_source_tree="$(git rev-parse 'HEAD^{tree}')"
 loom_python="$repository_root/.venv/bin/python"
 loom_cli() {
   env PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
@@ -96,6 +90,23 @@ PY
 }
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-${merged_source_sha}"
+authority_source_sha="$merged_source_sha"
+native_authority_git=(
+  /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  /usr/bin/git --no-replace-objects -C "$repository_root"
+)
+authority_source_tree="$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
+native_authority_client=(
+  "$loom_python"
+  "$repository_root/scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+)
+native_authority_privileged_client=(
+  /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client
+)
+native_authority_local_archive_root="/run/loom-personal-dev-native-builder-runtime-authority-archives"
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
 ssh_run() {
   local target="$1"
@@ -113,31 +124,386 @@ PY
   test -n "$remote_command"
   ssh "${ssh_options[@]}" "$target" -- "$remote_command"
 }
-native_runtime_header() {
-  local action="$1"
+native_authority_stage_agent() {
+  local request_id="$1"
+  shift
+  sudo -n -- "${native_authority_privileged_client[@]}" stage-agent \
+    --authority-source-sha "$authority_source_sha" \
+    --authority-source-tree "$authority_source_tree" \
+    --request-id "$request_id" \
+    --runtime-profile-sha256 "$runtime_profile_sha256" \
+    --schema-version 1 \
+    "$@"
+}
+validate_native_authority_receipt() {
+  local operation="$1"
   local request_id="$2"
-  local fields="$3"
-  jq -cnS \
-    --arg action "$action" \
-    --arg request_id "$request_id" \
-    --arg schema "$native_runtime_request_schema" \
-    --arg source_sha "$merged_source_sha" \
-    --arg source_tree_sha "$merged_source_tree" \
-    --argjson fields "$fields" \
-    '$fields + {action:$action,request_id:$request_id,schema:$schema,
-      source_sha:$source_sha,source_tree_sha:$source_tree_sha}'
+  local receipt state state_sha256
+  receipt="$(cat)"
+  test -n "$receipt" || return 1
+  printf '%s' "$receipt" | jq -e \
+    --arg operation "$operation" --arg request_id "$request_id" \
+    --arg source "$authority_source_sha" --arg tree "$authority_source_tree" \
+    --arg profile "$runtime_profile_sha256" '
+      def exact_fields($expected):
+        if type == "object" then keys == $expected else false end;
+      def hex40: type == "string" and test("^[0-9a-f]{40}$");
+      def hex64: type == "string" and test("^[0-9a-f]{64}$");
+      def uuid:
+        type == "string" and
+        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+      def nonnegative_integer: type == "number" and . >= 0 and floor == .;
+      def https_origin:
+        type == "string" and startswith("https://") and
+        (index("\r") | not) and (index("\n") | not) and (index("\u0000") | not);
+      def agent_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:[0-9a-f]{64}$");
+      def builder_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-builder@sha256:[0-9a-f]{64}$");
+      def conformance:
+        exact_fields([
+          "architecture","buildkit_sandbox_id","client_sandbox_id",
+          "cross_provider_network","foreign_to_provider","host_to_provider",
+          "managed_containers_after","managed_networks_after","platform",
+          "private_control_plane","public_https","runtime","schema","status"
+        ]) and
+        .architecture == "arm64" and
+        (.buildkit_sandbox_id | hex64) and
+        (.client_sandbox_id | hex64) and
+        .cross_provider_network == "denied" and
+        .foreign_to_provider == "denied" and
+        .host_to_provider == "denied" and
+        .managed_containers_after == 0 and .managed_networks_after == 0 and
+        .platform == "linux/arm64" and .private_control_plane == "denied" and
+        .public_https == "allowed" and .runtime == "runsc-personal-dev-native" and
+        .schema == "loom-personal-dev-native-builder-conformance-v1" and
+        .status == "passed";
+      def public_state:
+        (
+          if .phase == "prepared" then
+            exact_fields([
+              "authority_source_sha","authority_source_tree","conformance",
+              "current_agent","current_builder","current_revision","phase",
+              "previous_agent","previous_builder","previous_revision",
+              "public_store_origin","runtime_profile_sha256","schema"
+            ])
+          elif .phase == "staged" or .phase == "active" then
+            exact_fields([
+              "agent_instance_id","agent_key_id","authority_source_sha",
+              "authority_source_tree","conformance","current_agent",
+              "current_builder","current_revision","phase","previous_agent",
+              "previous_builder","previous_revision","public_key_sha256",
+              "public_store_origin","runtime_profile_sha256","schema",
+              "service_origin"
+            ])
+          else false
+          end
+        ) and
+        .schema == "loom.personal-dev-native-builder-runtime-authority-state.v1" and
+        .authority_source_sha == $source and .authority_source_tree == $tree and
+        .runtime_profile_sha256 == $profile and
+        (.current_agent | agent_image) and (.current_builder | builder_image) and
+        (.current_revision | hex40) and (.public_store_origin | https_origin) and
+        (
+          (.previous_agent == "" and .previous_builder == "" and .previous_revision == "") or
+          ((.previous_agent | agent_image) and (.previous_builder | builder_image) and
+           (.previous_revision | hex40) and .previous_revision != .current_revision)
+        ) and
+        (
+          if .phase == "prepared" then true else
+            (.agent_instance_id | uuid) and
+            (.agent_key_id | type == "string" and test("^[a-z][a-z0-9._-]{0,63}$")) and
+            (.public_key_sha256 | hex64) and (.service_origin | https_origin)
+          end
+        ) and
+        (.conformance | conformance);
+      exact_fields([
+        "agent_service","architecture","authority_source_sha","authority_source_tree",
+        "dockerd_service","executable_new_capacity","host_name",
+        "managed_containers","managed_networks","nft_table","operation","phase",
+        "request_id","runtime_profile_sha256","schema","state","state_sha256"
+      ]) and
+      .schema == "loom.personal-dev-native-builder-runtime-authority-receipt.v1" and
+      .operation == $operation and .request_id == $request_id and
+      .authority_source_sha == $source and .authority_source_tree == $tree and
+      .runtime_profile_sha256 == $profile and .host_name == "gx10-01c7" and
+      .architecture == "aarch64" and .executable_new_capacity == 0 and
+      (.agent_service == "active" or .agent_service == "inactive") and
+      (.dockerd_service == "active" or .dockerd_service == "inactive") and
+      (.nft_table == "present" or .nft_table == "absent") and
+      (.managed_containers | nonnegative_integer) and
+      (.managed_networks == null or (.managed_networks | nonnegative_integer)) and
+      (
+        if $operation == "status" then true
+        elif $operation == "prepare" then .phase == "prepared"
+        elif $operation == "stage-agent" then .phase == "staged"
+        elif $operation == "activate" then .phase == "active"
+        elif $operation == "remove" then .phase == "inert"
+        else false
+        end
+      ) and
+      (
+        if .phase == "inert" then .state == null and .state_sha256 == ""
+        else
+          (.state | public_state) and (.state_sha256 | hex64) and
+          .state.phase == .phase
+        end
+      )
+    ' >/dev/null || return 1
+  if test "$(printf '%s' "$receipt" | jq -er .phase)" != inert; then
+    state_sha256="$(printf '%s' "$receipt" | jq -er .state_sha256)" || return 1
+    state="$(printf '%s' "$receipt" | jq -a -cS -j .state)" || return 1
+    test "$(printf '%s\n' "$state" | sha256sum | awk '{print $1}')" = "$state_sha256" || return 1
+  fi
+  printf '%s' "$receipt" | jq -a -cS -j -e . || return 1
+}
+native_authority_request() {
+  local operation="$1"
+  local request_id="$2"
+  local output="$3"
+  shift 3
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  case "$operation" in
+    status|prepare|stage-agent|activate|remove) ;;
+    *) exit 1 ;;
+  esac
+  if ! {
+    {
+    if test "$operation" = stage-agent; then
+      native_authority_stage_agent "$request_id" "$@"
+    else
+      "${native_authority_client[@]}" "$operation" \
+        --authority-source-sha "$authority_source_sha" \
+        --authority-source-tree "$authority_source_tree" \
+        --request-id "$request_id" \
+        --runtime-profile-sha256 "$runtime_profile_sha256" \
+        --schema-version 1 \
+        "$@"
+    fi
+  } | sudo -n -- /usr/bin/ssh -F /dev/null \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
+    -o User=qianyi \
+    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+    -o IdentitiesOnly=yes \
+    -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
+    -o PasswordAuthentication=no \
+    -o KbdInteractiveAuthentication=no \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o UpdateHostKeys=no \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=10 \
+    trt-gb10-1 \
+    'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
+    | jq -cS -j -s '
+      if length == 1 and (.[0] | type) == "object" then .[0]
+      else error("authority receipt cardinality") end
+    ' | validate_native_authority_receipt "$operation" "$request_id"
+  } > "$output"; then
+    rm -f -- "$output"
+    return 1
+  fi
+  chmod 0600 "$output"
+}
+native_authority_stage_archive() {
+  (
+    local request_id="$1"
+    local source="$2"
+    local local_dir="$native_authority_local_archive_root/$request_id"
+    local local_archive="$local_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
+    local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
+    local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
+    local operation_status
+    [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+    test -f "$source" && test ! -L "$source"
+    test "$(stat -c %u "$source")" = "$(id -u)"
+    test "$(stat -c %a "$source")" = 600
+    cleanup_native_authority_local_archive() {
+      local primary_status=$?
+      local file_status=0
+      local directory_status=0
+      trap - EXIT
+      trap '' HUP INT TERM
+      if sudo -n -- /usr/bin/rm -f -- "$local_archive"; then
+        :
+      else
+        file_status=$?
+      fi
+      if sudo -n -- /usr/bin/rmdir -- "$local_dir"; then
+        :
+      else
+        directory_status=$?
+      fi
+      if test "$primary_status" -ne 0; then
+        exit "$primary_status"
+      fi
+      if test "$file_status" -ne 0; then
+        exit "$file_status"
+      fi
+      exit "$directory_status"
+    }
+    trap cleanup_native_authority_local_archive EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    sudo -n -- /usr/bin/install -d -m 0700 "$local_dir"
+    test ! -e "$local_archive"
+    if /bin/cat -- "$source" \
+      | sudo -n -- /usr/bin/install -m 0600 /dev/stdin "$local_archive"; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
+    test "$(sudo -n -- /usr/bin/sha512sum "$local_archive" | awk '{print $1}')" \
+      = "$archive_sha512"
+    if {
+      printf 'mkdir %s\n' "$remote_dir"
+      printf 'chmod 700 %s\n' "$remote_dir"
+      printf 'put %s %s\n' "$local_archive" "$remote_archive"
+      printf 'chmod 600 %s\n' "$remote_archive"
+    } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
+      -o HostName=207.35.188.227 \
+      -o Port=2221 \
+      -o User=qianyi \
+      -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+      -o IdentitiesOnly=yes \
+      -o PubkeyAuthentication=yes \
+      -o PreferredAuthentications=publickey \
+      -o GSSAPIAuthentication=no \
+      -o HostbasedAuthentication=no \
+      -o PasswordAuthentication=no \
+      -o KbdInteractiveAuthentication=no \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+      -o GlobalKnownHostsFile=/dev/null \
+      -o UpdateHostKeys=no \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=3 \
+      -o ConnectTimeout=10 \
+      trt-gb10-1; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
+  )
+}
+native_authority_remove_staged_archive() {
+  local request_id="$1"
+  local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
+  local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  {
+    printf 'rm %s\n' "$remote_archive"
+    printf 'rmdir %s\n' "$remote_dir"
+  } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
+    -o User=qianyi \
+    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+    -o IdentitiesOnly=yes \
+    -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
+    -o PasswordAuthentication=no \
+    -o KbdInteractiveAuthentication=no \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o UpdateHostKeys=no \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=10 \
+    trt-gb10-1
+}
+native_authority_prepare() {
+  (
+    local request_id="$1"
+    local source="$2"
+    local output="$3"
+    shift 3
+    cleanup_native_authority_remote_archive() {
+      local primary_status=$?
+      local cleanup_status=0
+      trap - EXIT HUP INT TERM
+      trap '' HUP INT TERM
+      if native_authority_remove_staged_archive "$request_id"; then
+        :
+      else
+        cleanup_status=$?
+      fi
+      if test "$primary_status" -ne 0; then
+        exit "$primary_status"
+      fi
+      exit "$cleanup_status"
+    }
+    trap cleanup_native_authority_remote_archive EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    native_authority_stage_archive "$request_id" "$source"
+    native_authority_request prepare "$request_id" "$output" "$@"
+  )
+}
+new_native_authority_request_id() {
+  python3 - <<'PY'
+from uuid import uuid4
+
+print(uuid4())
+PY
+}
+validate_native_authority_transport_config() {
+  local config target
+  config="$repository_root/deploy/worker-pools/gb10/ssh_config"
+  test -f "$config" && test ! -L "$config"
+  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
+  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 207.35.188.227
+  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 2221
+  test "$(awk '$1 == "user" { print $2; exit }' <<< "$target")" = qianyi
+  test -z "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")"
+  test -z "$(awk '$1 == "proxycommand" { print $2; exit }' <<< "$target")"
+  test "$(awk '$1 == "identityfile" { print $2; exit }' <<< "$target")" = \
+    /var/lib/loom-staging-rollout/gb10-deploy-ed25519
+  test "$(awk '$1 == "userknownhostsfile" { print $2; exit }' <<< "$target")" = \
+    /etc/loom/staging-rollout-gb10-known-hosts
+  test "$(awk '$1 == "globalknownhostsfile" { print $2; exit }' <<< "$target")" = /dev/null
+  test "$(awk '$1 == "identitiesonly" { print $2; exit }' <<< "$target")" = yes
+  test "$(awk '$1 == "pubkeyauthentication" { print $2; exit }' <<< "$target")" = true
+  test "$(awk '$1 == "passwordauthentication" { print $2; exit }' <<< "$target")" = no
+  test "$(awk '$1 == "stricthostkeychecking" { print $2; exit }' <<< "$target")" = true
+  test "$(awk '$1 == "updatehostkeys" { print $2; exit }' <<< "$target")" = false
 }
 
 test "$merged_source_sha" != '<merged-40-lowercase-hex>'
 test "$trusted_release_sha256" != '<trusted-release-64-lowercase-hex>'
 test "$runtime_window_id" != '<authorized-native-runtime-window-id>'
-test "$(git rev-parse --show-toplevel)" = "$repository_root"
-test "$(git rev-parse HEAD)" = "$merged_source_sha"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test "$("${native_authority_git[@]}" rev-parse --show-toplevel)" = \
+  "$repository_root"
+test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
+  "$merged_source_sha"
+test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
+test -x "${native_authority_client[1]}"
 verify_loom_cli_source
 test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = \
   "$runtime_profile_sha256"
+test "$authority_source_tree" = "$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
+validate_native_authority_transport_config
 
 for path in "$trusted_release" "$reviewed_kubeconfig" "$prepared_control_profile" \
   "$rollback_shadow_manifest"; do
@@ -273,7 +639,11 @@ current_revision="$(jq -er .source_sha "$trusted_release")"
 [[ "$current_agent" =~ ^ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:[0-9a-f]{64}$ ]]
 [[ "$current_builder" =~ ^ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:[0-9a-f]{64}$ ]]
 
-previous_args=()
+previous_args=(
+  --previous-agent ''
+  --previous-builder ''
+  --previous-revision ''
+)
 if test -n "$previous_trusted_release"; then
   [[ "$previous_trusted_release_sha256" =~ ^[0-9a-f]{64}$ ]]
   test -f "$previous_trusted_release"
@@ -303,7 +673,7 @@ fi
 
 jq -cnS \
   --arg source "$merged_source_sha" \
-  --arg tree "$(git rev-parse HEAD^{tree})" \
+  --arg tree "$authority_source_tree" \
   --arg release "$trusted_release_sha256" \
   --arg previous_release "$previous_trusted_release_sha256" \
   --arg profile "$runtime_profile_sha256" \
@@ -319,51 +689,29 @@ jq -cnS \
 chmod 0600 "$evidence_dir/immutable-inputs.json"
 ```
 
-Validate the private material only on the protected operator host. Do not
-record either file's bytes or private-key digest in issue comments.
+Before the runtime window opens, a direct-root administrator on the protected
+operator host must install the policy-bound material client from the same
+approved authority inventory and provision exactly these fixed inputs:
+
+- `/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519`, a
+  root-owned, root-group, single-link regular file with mode `0400` and exactly
+  32 bytes;
+- `/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem`, a
+  root-owned, root-group, single-link regular file with mode `0444` and a size
+  from 1 byte through 1 MiB.
+
+The material client validates the complete installed inventory, opens those
+fixed files without following links, and gives the FD-only encoder distinct
+descriptors numbered at least `3`. The operator does not provide either
+pathname. Its local `sudo` authorization is part of the separately provisioned
+protected-operator-host transport authority; it is not granted by the GB10
+authority sudoers asset, which remains limited to the empty-argument remote
+broker. Neither CA bytes nor a CA digest may be recorded; private-key bytes and
+digests are prohibited by the same evidence rule.
 
 ```bash
-validate_protected_material_metadata() {
-  sudo /bin/sh -euc '
-    key="$1"
-    ca="$2"
-    test -f "$key"
-    test ! -L "$key"
-    test "$(realpath -e "$key")" = "$key"
-    test "$(stat -c %u "$key")" = 0
-    test "$(stat -c %g "$key")" = 0
-    test "$(stat -c %a "$key")" = 400
-    test "$(stat -c %s "$key")" = 32
-    test "$(stat -c %h "$key")" = 1
-    test -f "$ca"
-    test ! -L "$ca"
-    test "$(realpath -e "$ca")" = "$ca"
-    test "$(stat -c %u "$ca")" = 0
-    test "$(stat -c %g "$ca")" = 0
-    test "$(stat -c %a "$ca")" = 444
-    test "$(stat -c %h "$ca")" = 1
-  ' sh "$agent_private_key" "$service_ca"
-}
-
-validate_protected_material_metadata
-
-sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repository_root/src" \
-  "$repository_root/.venv/bin/python" - "$agent_private_key" \
-  "$agent_key_id" "$expected_public_key_sha256" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-from loom.personal_dev_native_builder_protocol import (
-    load_personal_dev_native_builder_signer,
-)
-
-signer = load_personal_dev_native_builder_signer(
-    Path(sys.argv[1]), key_id=sys.argv[2]
-)
-if hashlib.sha256(signer.public_key_bytes(sys.argv[2])).hexdigest() != sys.argv[3]:
-    raise SystemExit(1)
-PY
+sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
+  --expected-public-key-sha256 "$expected_public_key_sha256" >/dev/null
 ```
 
 ## 2. Capture read-only before-state
@@ -381,19 +729,9 @@ test "$(sha256sum "$reviewed_kubeconfig" | awk '{print $1}')" = \
 
 capture_host() {
   local output="$1"
-  ssh_run "$gb10_target" /bin/sh -euc '
-    jq -cnS \
-      --arg architecture "$(uname -m)" \
-      --arg boot_id "$(sed -n "1p" /proc/sys/kernel/random/boot_id)" \
-      --arg hostname "$(hostname)" \
-      --arg dedicated_daemon "$(systemctl is-active loom-personal-dev-builder-dockerd.service 2>/dev/null || true)" \
-      --arg agent "$(systemctl is-active loom-personal-dev-native-builder-agent.service 2>/dev/null || true)" \
-      --arg primary_docker "$(docker version --format "{{.Server.Version}}" 2>/dev/null || true)" \
-      "{agent:\$agent,architecture:\$architecture,boot_id:\$boot_id,
-        dedicated_daemon:\$dedicated_daemon,hostname:\$hostname,
-        primary_docker:\$primary_docker}"
-  ' > "$output"
-  chmod 0600 "$output"
+  local request_id
+  request_id="$(new_native_authority_request_id)"
+  native_authority_request status "$request_id" "$output"
 }
 
 capture_slurm() {
@@ -478,7 +816,8 @@ origin on external port 443 and sorted public `/32` or `/128` endpoints. The
 prepared shadow must already own the TLS Ingress while routing it to the
 selectorless disabled Service; only an acceptance or operational manifest may
 route it to MinIO port 9000 and open the matching ingress rule. Port 9001 must
-remain absent. Resolve again from GB10 at the start of the window; guessed,
+remain absent. Resolve again through the read-only GB10 observer at the start
+of the window; guessed,
 private, broad, stale, or extra addresses are a stop condition.
 
 ```bash
@@ -502,8 +841,8 @@ PY
 
 dns_raw="$evidence_dir/public-store-dns.raw"
 {
-  ssh_run "$gb10_target" getent ahostsv4 "$public_store_host" || true
-  ssh_run "$gb10_target" getent ahostsv6 "$public_store_host" || true
+  ssh_run "$gb10_dns_observer" getent ahostsv4 "$public_store_host" || true
+  ssh_run "$gb10_dns_observer" getent ahostsv6 "$public_store_host" || true
 } > "$dns_raw"
 chmod 0600 "$dns_raw"
 
@@ -539,46 +878,15 @@ chmod 0600 "$evidence_dir/public-store-dns.json"
 rm -f "$dns_raw"
 ```
 
-## 4. Bootstrap the sealed authority once, then prepare while inactive
+## 4. Download and stage data, then prepare through the fixed authority
 
-The checked-in installer, converger, profile, and conformance script are the
-only runtime implementation. The authority does not copy that logic. It
-validates a root-owned sealed checkout, invokes those exact assets with a clean
-environment, and accepts no command-line arguments through sudo.
-
-Before the first request for a new authority source, an external administrator
-must provision the exact clean checkout at
-`/opt/loom-personal-dev-native-runtime-authority/source` as root-owned mode
-`0700` and run the following from a **direct root login**, not through sudo.
-This is the only broad root bootstrap. It installs sudoers last and is not
-reachable through the operator rule.
-
-```bash
-cd /opt/loom-personal-dev-native-runtime-authority/source
-test "$(id -u)" = 0
-test -z "${SUDO_USER:-}${SUDO_UID:-}${SUDO_GID:-}${SUDO_COMMAND:-}"
-test "$(stat -c %U:%G:%a .)" = root:root:700
-test "$(git rev-parse HEAD)" = '<merged-40-lowercase-hex>'
-test "$(git rev-parse 'HEAD^{tree}')" = '<merged-tree-40-lowercase-hex>'
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-python3 scripts/ops/personal_dev_native_runtime_authority.py bootstrap \
-  --source-sha '<merged-40-lowercase-hex>' \
-  --source-tree-sha '<merged-tree-40-lowercase-hex>'
-/usr/sbin/visudo -cf \
-  /etc/sudoers.d/loom-personal-dev-native-runtime-authority
-```
-
-Do not bootstrap from an operator-owned checkout, replace the fixed sudoers
-line, or install a second copy of the installer. A future source upgrade repeats
-this direct-root sealed-source transaction; it never edits the installed
-policy or wrapper in place.
-
-Download the measured gVisor archive without privilege. The `prepare` request
-then streams the archive through bounded stdin. The fixed authority verifies
-its SHA-512, runs `preflight`, `install`, and `verify-staged`, starts only the
-dedicated daemon, runs the release plan twice, applies/verifies it, invokes the
-single checked-in two-container conformance script, and returns the host to an
-inactive state in a `finally` boundary.
+Download the public gVisor archive without privilege. An unprivileged read feeds
+a fixed root-private local copy whose digest is checked before root SFTP opens
+it; root never reopens the operator pathname. The data-only upload authenticates
+as `qianyi` and creates no remote shell. The fixed broker opens the resulting
+owner-only remote file, copies it into its root-private state directory,
+verifies the digest, and performs preflight, installation, release convergence,
+the fixed two-container conformance asset, and compensation back to inert state.
 
 ```bash
 archive="$evidence_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
@@ -589,100 +897,61 @@ curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
 chmod 0600 "$archive_part"
 test "$(sha512sum "$archive_part" | awk '{print $1}')" = "$archive_sha512"
 mv -T "$archive_part" "$archive"
-archive_size="$(stat -c %s "$archive")"
-test "$archive_size" -gt 0
-test "$archive_size" -le 1073741824
 
-prepare_fields="$(jq -cnS \
-  --arg archive_sha512 "$archive_sha512" \
-  --argjson archive_size "$archive_size" \
-  --arg current_agent "$current_agent" \
-  --arg current_builder "$current_builder" \
-  --arg current_revision "$current_revision" \
-  --arg previous_agent "${previous_agent:-}" \
-  --arg previous_builder "${previous_builder:-}" \
-  --arg previous_revision "${previous_revision:-}" \
-  --arg public_store_origin "$reviewed_public_store_origin" \
-  '{archive_sha512:$archive_sha512,archive_size:$archive_size,
-    current_agent:$current_agent,current_builder:$current_builder,
-    current_revision:$current_revision,previous_agent:$previous_agent,
-    previous_builder:$previous_builder,previous_revision:$previous_revision,
-    public_store_origin:$public_store_origin}')"
-prepare_header="$(native_runtime_header \
-  prepare "$runtime_window_id-prepare" "$prepare_fields")"
-
-{
-  printf '%s\n' "$prepare_header"
-  dd if="$archive" status=none
-} | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  > "$evidence_dir/native-runtime-prepare.json"
-chmod 0600 "$evidence_dir/native-runtime-prepare.json"
-jq -e --arg source "$merged_source_sha" '
-  .action=="prepare" and .status=="ok" and .source_sha==$source and
-  (.receipts|keys)==[
-    "release-apply","release-plan","release-verify",
-    "runtime-install","runtime-preflight","runtime-verify-staged",
-    "two-container-conformance"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
-  "$evidence_dir/native-runtime-prepare.json" >/dev/null
+prepare_request_id="$(new_native_authority_request_id)"
+prepare_archive="/var/tmp/loom-personal-dev-native-builder/$prepare_request_id/gvisor-release-20260810.0-aarch64.tar.bz2"
+native_authority_prepare "$prepare_request_id" "$archive" \
+  "$evidence_dir/runtime-prepare.json" \
+  --archive-path "$prepare_archive" \
+  --archive-sha512 "$archive_sha512" \
+  --current-agent "$current_agent" \
+  --current-builder "$current_builder" \
+  --current-revision "$current_revision" \
+  "${previous_args[@]}" \
+  --public-store-origin "$reviewed_public_store_origin"
+prepared_state_sha256="$(jq -er .state_sha256 "$evidence_dir/runtime-prepare.json")"
+jq -e '.phase == "prepared" and .agent_service == "inactive" and
+  .dockerd_service == "inactive" and .nft_table == "absent" and
+  .managed_containers == 0 and .managed_networks == null' \
+  "$evidence_dir/runtime-prepare.json" >/dev/null
 ```
 
-## 5. Stream the agent secrets through the fixed authority while inactive
+## 5. Review the prepared public receipt
 
-The prepare action leaves both dedicated units inactive and the exact nftables
-table absent. The stage-agent action re-verifies that boundary, reads exactly
-32 private-key bytes followed by the declared bounded CA bytes from stdin, and
-passes only root-owned temporary paths to the existing installer. Secret bytes
-never appear in argv, stdout, the receipt, or the journal.
+The canonical `prepare` receipt is the complete host evidence boundary for
+preflight, the sealed installer, current/previous image convergence, and the
+fixed KVM-gVisor conformance asset. It records only public runtime identities,
+state, and conformance result; it never records host commands, logs, or secret
+material. No operator-supplied source or executable byte crosses this boundary.
+
+## 6. Stage the agent and activate it through the fixed authority
+
+`stage-agent` accepts only the prepared-state digest and public agent identity.
+The sealed installed material client opens the two fixed protected inputs and
+passes distinct descriptors to the FD-only encoder. The values and their
+digests are not in the client header, environment, command arguments, receipt,
+evidence, or staging directory.
 
 ```bash
-test "$(sudo stat -c %s "$agent_private_key")" = 32
-ca_size="$(sudo stat -c %s "$service_ca")"
-test "$ca_size" -gt 0
-test "$ca_size" -le 1048576
-
-stage_fields="$(jq -cnS \
-  --arg agent_instance_id "$agent_instance_id" \
-  --arg current_agent "$current_agent" \
-  --arg current_builder "$current_builder" \
-  --arg key_id "$agent_key_id" \
-  --arg service_url "$reviewed_management_origin" \
-  --argjson ca_size "$ca_size" \
-  '{agent_instance_id:$agent_instance_id,ca_size:$ca_size,
-    current_agent:$current_agent,current_builder:$current_builder,
-    key_id:$key_id,private_key_size:32,service_url:$service_url}')"
-stage_header="$(native_runtime_header \
-  stage-agent "$runtime_window_id-stage-agent" "$stage_fields")"
-
-{
-  printf '%s\n' "$stage_header"
-  sudo dd if="$agent_private_key" bs=32 count=1 iflag=fullblock status=none
-  sudo dd if="$service_ca" bs=1 count="$ca_size" iflag=fullblock status=none
-} | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  > "$evidence_dir/native-runtime-stage-agent.json"
-chmod 0600 "$evidence_dir/native-runtime-stage-agent.json"
-jq -e --arg source "$merged_source_sha" '
-  .action=="stage-agent" and .status=="ok" and .source_sha==$source and
-  (.receipts|keys)==["agent-stage","runtime-verify-staged"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
-  "$evidence_dir/native-runtime-stage-agent.json" >/dev/null
+stage_request_id="$(new_native_authority_request_id)"
+native_authority_request stage-agent "$stage_request_id" \
+  "$evidence_dir/agent-stage.json" \
+  --expected-state-sha256 "$prepared_state_sha256" \
+  --agent-image "$current_agent" \
+  --builder-image "$current_builder" \
+  --service-origin "$reviewed_management_origin" \
+  --agent-instance-id "$agent_instance_id" \
+  --agent-key-id "$agent_key_id" \
+  --expected-public-key-sha256 "$expected_public_key_sha256"
+staged_state_sha256="$(jq -er .state_sha256 "$evidence_dir/agent-stage.json")"
+jq -e '.phase == "staged" and .agent_service == "inactive" and
+  .dockerd_service == "inactive" and .nft_table == "absent" and
+  .managed_containers == 0 and .managed_networks == null' \
+  "$evidence_dir/agent-stage.json" >/dev/null
 
 emit_public_key() {
-  sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repository_root/src" \
-    "$repository_root/.venv/bin/python" - "$agent_private_key" \
-    "$agent_key_id" <<'PY'
-import sys
-from pathlib import Path
-
-from loom.personal_dev_native_builder_protocol import (
-    load_personal_dev_native_builder_signer,
-)
-
-signer = load_personal_dev_native_builder_signer(
-    Path(sys.argv[1]), key_id=sys.argv[2]
-)
-sys.stdout.buffer.write(signer.public_key_bytes(sys.argv[2]))
-PY
+  sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
+    --expected-public-key-sha256 "$expected_public_key_sha256"
 }
 
 emit_public_key \
@@ -697,40 +966,15 @@ test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get secret \
   -o 'go-template={{range $key, $value := .data}}{{$key}}{{"\n"}}{{end}}')" = \
   public-key
 chmod 0600 "$evidence_dir/native-builder-public-key.apply.txt"
-```
 
-## 6. Activate through the same no-argument authority
-
-Activation first repeats staged verification, then loads only the fixed nftables
-file and starts only the dedicated daemon and agent. Any failure runs the fixed
-deactivation path before returning a generic error. A separate check request
-proves the final installed state without granting broader command authority.
-
-```bash
-activate_header="$(native_runtime_header \
-  activate "$runtime_window_id-activate" '{}')"
-printf '%s\n' "$activate_header" \
-  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  > "$evidence_dir/native-runtime-activate.json"
-chmod 0600 "$evidence_dir/native-runtime-activate.json"
-jq -e --arg source "$merged_source_sha" '
-  .action=="activate" and .status=="ok" and .source_sha==$source and
-  (.receipts|keys)==["runtime-verify-active","runtime-verify-staged"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
-  "$evidence_dir/native-runtime-activate.json" >/dev/null
-
-check_fields='{"expected_state":"active"}'
-check_header="$(native_runtime_header \
-  check "$runtime_window_id-check-active" "$check_fields")"
-printf '%s\n' "$check_header" \
-  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  > "$evidence_dir/native-runtime-check-active.json"
-chmod 0600 "$evidence_dir/native-runtime-check-active.json"
-jq -e --arg source "$merged_source_sha" '
-  .action=="check" and .status=="ok" and .source_sha==$source and
-  (.receipts|keys)==["runtime-verify-active"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
-  "$evidence_dir/native-runtime-check-active.json" >/dev/null
+activate_request_id="$(new_native_authority_request_id)"
+native_authority_request activate "$activate_request_id" \
+  "$evidence_dir/runtime-activate.json" \
+  --expected-state-sha256 "$staged_state_sha256"
+jq -e '.phase == "active" and .agent_service == "active" and
+  .dockerd_service == "active" and .nft_table == "present" and
+  .managed_containers == 0 and .managed_networks == 0' \
+  "$evidence_dir/runtime-activate.json" >/dev/null
 
 capture_host "$evidence_dir/after-host.json"
 ```
@@ -738,8 +982,8 @@ capture_host "$evidence_dir/after-host.json"
 The agent is now active before management activation, but signed durable
 readiness is not yet possible if the current management release has native mode
 disabled. That is expected. Continue immediately with
-personal-dev-native-builder-acceptance.md; its signed-zero-grant-readiness gate
-occurs after management apply and before any owner request. The runtime
+`personal-dev-native-builder-acceptance.md`; its `signed-zero-grant-readiness`
+gate occurs after management apply and before any owner request. The runtime
 transaction is not accepted until that gate passes.
 
 ## 7. Capture after-state and seal evidence
@@ -785,12 +1029,12 @@ outside the index.
 
 Rollback is permitted only with zero active grants and no personal/build
 namespace. First apply the exact reviewed shadow to disable new provider claims.
-Then stop the agent before disabling the dedicated daemon, remove the exact nft
-table, and ask the installer to remove only byte-identical managed runtime
-files. The dedicated image cache and system identities are retained as inert
-state: removal never recursively deletes Docker data or accounts. The removal
-receipt therefore reports `managed-files-absent`, not whole-host absence. It
-never restarts or alters the primary Docker daemon.
+The fixed `remove` transition stops the agent before the dedicated daemon,
+removes only the exact nft table, and removes only byte-identical managed
+runtime files. The dedicated image cache and system identities are retained as
+inert state: removal never recursively deletes Docker data or accounts. Its
+canonical receipt reports the resulting inert public state and never restarts
+or alters the primary Docker daemon.
 
 ```bash
 rollback_shadow_recheck="$evidence_dir/rollback-shadow.recheck.yaml"
@@ -815,15 +1059,16 @@ kubectl --kubeconfig "$kubeconfig" apply --server-side \
   -f "$rollback_shadow_manifest" \
   > "$evidence_dir/rollback-shadow.apply.txt"
 
-remove_header="$(native_runtime_header \
-  remove "$runtime_window_id-remove" '{}')"
-printf '%s\n' "$remove_header" \
-  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  > "$evidence_dir/runtime-remove.json"
-jq -e --arg source "$merged_source_sha" '
-  .action=="remove" and .status=="ok" and .source_sha==$source and
-  (.receipts|keys)==["runtime-remove"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
+capture_host "$evidence_dir/runtime-remove-preflight.json"
+remove_state_sha256="$(jq -er .state_sha256 "$evidence_dir/runtime-remove-preflight.json")"
+remove_request_id="$(new_native_authority_request_id)"
+native_authority_request remove "$remove_request_id" \
+  "$evidence_dir/runtime-remove.json" \
+  --expected-state-sha256 "$remove_state_sha256"
+jq -e '.phase == "inert" and .agent_service == "inactive" and
+  .dockerd_service == "inactive" and .nft_table == "absent" and
+  .managed_containers == 0 and .managed_networks == null and
+  .state == null and .state_sha256 == ""' \
   "$evidence_dir/runtime-remove.json" >/dev/null
 
 loom_cli admin personal-dev-control-plane status \

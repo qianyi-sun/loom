@@ -33,8 +33,12 @@ export LC_ALL=C
 test "$(id -u)" != 0
 
 repository_root="$(pwd -P)"
+native_authority_git=(
+  /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  /usr/bin/git --no-replace-objects -C "$repository_root"
+)
 merged_source_sha='<merged-40-lowercase-hex>'
-merged_source_tree="$(git rev-parse 'HEAD^{tree}')"
 trusted_release='<absolute-owner-only-trusted-release.json>'
 trusted_release_sha256='<trusted-release-64-lowercase-hex>'
 profile='<absolute-owner-only-prepared-schema-3-profile.toml>'
@@ -46,12 +50,9 @@ rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 runtime_evidence='<absolute-active-native-runtime-evidence-directory>'
 runtime_profile_sha256='c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d'
 archive_sha512='dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7'
-native_runtime_authority='/usr/local/libexec/loom-personal-dev-native-runtime-authority'
-native_runtime_request_schema='loom.personal-dev-native-runtime-authority.request.v1'
 
 reviewed_kubeconfig='<absolute-owner-only-mode-0600-kubeconfig>'
 evidence_root='<absolute-existing-owner-only-evidence-root-outside-repository>'
-gb10_target='<ssh-user>@gx10-01c7'
 slurm_observer='<read-only-slurm-observer-ssh-target>'
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
 ssh_run() {
@@ -93,6 +94,209 @@ if observed_loom != expected_loom or observed_loom_cli != expected_loom_cli:
     raise SystemExit(1)
 PY
 }
+native_authority_client=(
+  "$loom_python"
+  "$repository_root/scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+)
+validate_native_authority_receipt() {
+  local operation="$1"
+  local request_id="$2"
+  local receipt state state_sha256
+  receipt="$(cat)"
+  test -n "$receipt" || return 1
+  printf '%s' "$receipt" | jq -e \
+    --arg operation "$operation" --arg request_id "$request_id" \
+    --arg source "$authority_source_sha" --arg tree "$authority_source_tree" \
+    --arg profile "$runtime_profile_sha256" '
+      def exact_fields($expected):
+        if type == "object" then keys == $expected else false end;
+      def hex40: type == "string" and test("^[0-9a-f]{40}$");
+      def hex64: type == "string" and test("^[0-9a-f]{64}$");
+      def uuid:
+        type == "string" and
+        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+      def nonnegative_integer: type == "number" and . >= 0 and floor == .;
+      def https_origin:
+        type == "string" and startswith("https://") and
+        (index("\r") | not) and (index("\n") | not) and (index("\u0000") | not);
+      def agent_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:[0-9a-f]{64}$");
+      def builder_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-builder@sha256:[0-9a-f]{64}$");
+      def conformance:
+        exact_fields([
+          "architecture","buildkit_sandbox_id","client_sandbox_id",
+          "cross_provider_network","foreign_to_provider","host_to_provider",
+          "managed_containers_after","managed_networks_after","platform",
+          "private_control_plane","public_https","runtime","schema","status"
+        ]) and
+        .architecture == "arm64" and
+        (.buildkit_sandbox_id | hex64) and
+        (.client_sandbox_id | hex64) and
+        .cross_provider_network == "denied" and
+        .foreign_to_provider == "denied" and
+        .host_to_provider == "denied" and
+        .managed_containers_after == 0 and .managed_networks_after == 0 and
+        .platform == "linux/arm64" and .private_control_plane == "denied" and
+        .public_https == "allowed" and .runtime == "runsc-personal-dev-native" and
+        .schema == "loom-personal-dev-native-builder-conformance-v1" and
+        .status == "passed";
+      def public_state:
+        (
+          if .phase == "prepared" then
+            exact_fields([
+              "authority_source_sha","authority_source_tree","conformance",
+              "current_agent","current_builder","current_revision","phase",
+              "previous_agent","previous_builder","previous_revision",
+              "public_store_origin","runtime_profile_sha256","schema"
+            ])
+          elif .phase == "staged" or .phase == "active" then
+            exact_fields([
+              "agent_instance_id","agent_key_id","authority_source_sha",
+              "authority_source_tree","conformance","current_agent",
+              "current_builder","current_revision","phase","previous_agent",
+              "previous_builder","previous_revision","public_key_sha256",
+              "public_store_origin","runtime_profile_sha256","schema",
+              "service_origin"
+            ])
+          else false
+          end
+        ) and
+        .schema == "loom.personal-dev-native-builder-runtime-authority-state.v1" and
+        .authority_source_sha == $source and .authority_source_tree == $tree and
+        .runtime_profile_sha256 == $profile and
+        (.current_agent | agent_image) and (.current_builder | builder_image) and
+        (.current_revision | hex40) and (.public_store_origin | https_origin) and
+        (
+          (.previous_agent == "" and .previous_builder == "" and .previous_revision == "") or
+          ((.previous_agent | agent_image) and (.previous_builder | builder_image) and
+           (.previous_revision | hex40) and .previous_revision != .current_revision)
+        ) and
+        (
+          if .phase == "prepared" then true else
+            (.agent_instance_id | uuid) and
+            (.agent_key_id | type == "string" and test("^[a-z][a-z0-9._-]{0,63}$")) and
+            (.public_key_sha256 | hex64) and (.service_origin | https_origin)
+          end
+        ) and
+        (.conformance | conformance);
+      exact_fields([
+        "agent_service","architecture","authority_source_sha","authority_source_tree",
+        "dockerd_service","executable_new_capacity","host_name",
+        "managed_containers","managed_networks","nft_table","operation","phase",
+        "request_id","runtime_profile_sha256","schema","state","state_sha256"
+      ]) and
+      .schema == "loom.personal-dev-native-builder-runtime-authority-receipt.v1" and
+      .operation == $operation and .request_id == $request_id and
+      .authority_source_sha == $source and .authority_source_tree == $tree and
+      .runtime_profile_sha256 == $profile and .host_name == "gx10-01c7" and
+      .architecture == "aarch64" and .executable_new_capacity == 0 and
+      (.agent_service == "active" or .agent_service == "inactive") and
+      (.dockerd_service == "active" or .dockerd_service == "inactive") and
+      (.nft_table == "present" or .nft_table == "absent") and
+      (.managed_containers | nonnegative_integer) and
+      (.managed_networks == null or (.managed_networks | nonnegative_integer)) and
+      (
+        if $operation == "status" then true
+        elif $operation == "prepare" then .phase == "prepared"
+        elif $operation == "stage-agent" then .phase == "staged"
+        elif $operation == "activate" then .phase == "active"
+        elif $operation == "remove" then .phase == "inert"
+        else false
+        end
+      ) and
+      (
+        if .phase == "inert" then .state == null and .state_sha256 == ""
+        else
+          (.state | public_state) and (.state_sha256 | hex64) and
+          .state.phase == .phase
+        end
+      )
+    ' >/dev/null || return 1
+  if test "$(printf '%s' "$receipt" | jq -er .phase)" != inert; then
+    state_sha256="$(printf '%s' "$receipt" | jq -er .state_sha256)" || return 1
+    state="$(printf '%s' "$receipt" | jq -a -cS -j .state)" || return 1
+    test "$(printf '%s\n' "$state" | sha256sum | awk '{print $1}')" = "$state_sha256" || return 1
+  fi
+  printf '%s' "$receipt" | jq -a -cS -j -e . || return 1
+}
+native_authority_request() {
+  local operation="$1"
+  local request_id="$2"
+  local output="$3"
+  shift 3
+  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  case "$operation" in
+    status) ;;
+    *) return 1 ;;
+  esac
+  if ! "${native_authority_client[@]}" "$operation" \
+    --authority-source-sha "$authority_source_sha" \
+    --authority-source-tree "$authority_source_tree" \
+    --request-id "$request_id" \
+    --runtime-profile-sha256 "$runtime_profile_sha256" \
+    --schema-version 1 \
+    "$@" | sudo -n -- /usr/bin/ssh -F /dev/null \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
+    -o User=qianyi \
+    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+    -o IdentitiesOnly=yes \
+    -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
+    -o PasswordAuthentication=no \
+    -o KbdInteractiveAuthentication=no \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o UpdateHostKeys=no \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=10 \
+    trt-gb10-1 \
+    'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
+    | jq -cS -j -s '
+      if length == 1 and (.[0] | type) == "object" then .[0]
+      else error("authority receipt cardinality") end
+    ' | validate_native_authority_receipt "$operation" "$request_id" > "$output"; then
+    rm -f -- "$output"
+    return 1
+  fi
+  chmod 0600 "$output"
+}
+new_native_authority_request_id() {
+  python3 - <<'PY'
+from uuid import uuid4
+
+print(uuid4())
+PY
+}
+validate_native_authority_transport_config() {
+  local config target
+  config="$repository_root/deploy/worker-pools/gb10/ssh_config"
+  test -f "$config" && test ! -L "$config"
+  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
+  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 207.35.188.227
+  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 2221
+  test "$(awk '$1 == "user" { print $2; exit }' <<< "$target")" = qianyi
+  test -z "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")"
+  test -z "$(awk '$1 == "proxycommand" { print $2; exit }' <<< "$target")"
+  test "$(awk '$1 == "identityfile" { print $2; exit }' <<< "$target")" = \
+    /var/lib/loom-staging-rollout/gb10-deploy-ed25519
+  test "$(awk '$1 == "userknownhostsfile" { print $2; exit }' <<< "$target")" = \
+    /etc/loom/staging-rollout-gb10-known-hosts
+  test "$(awk '$1 == "globalknownhostsfile" { print $2; exit }' <<< "$target")" = /dev/null
+  test "$(awk '$1 == "identitiesonly" { print $2; exit }' <<< "$target")" = yes
+  test "$(awk '$1 == "pubkeyauthentication" { print $2; exit }' <<< "$target")" = true
+  test "$(awk '$1 == "passwordauthentication" { print $2; exit }' <<< "$target")" = no
+  test "$(awk '$1 == "stricthostkeychecking" { print $2; exit }' <<< "$target")" = true
+  test "$(awk '$1 == "updatehostkeys" { print $2; exit }' <<< "$target")" = false
+}
 trusted_launcher_profile='<absolute-owner-only-trusted-launcher-profile.json>'
 scanner_finding_policy='<absolute-owner-only-scanner-finding-policy.json>'
 backup_restore_evidence='<absolute-owner-only-backup-restore-evidence.json>'
@@ -114,16 +318,22 @@ owner_1_name='<owner-1-personal-name>'
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-native-two-owner-$merged_source_sha"
-test "$(git rev-parse --show-toplevel)" = "$repository_root"
-test "$(git rev-parse HEAD)" = "$merged_source_sha"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-native_runtime_common="$(jq -cnS \
-  --arg schema "$native_runtime_request_schema" \
-  --arg source_sha "$merged_source_sha" \
-  --arg source_tree_sha "$merged_source_tree" \
-  '{schema:$schema,source_sha:$source_sha,source_tree_sha:$source_tree_sha}')"
+authority_source_sha="$merged_source_sha"
+authority_source_tree="$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
+test "$("${native_authority_git[@]}" rev-parse --show-toplevel)" = \
+  "$repository_root"
+test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
+  "$merged_source_sha"
+test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
+test -x "${native_authority_client[1]}"
 verify_loom_cli_source
+test "$authority_source_tree" = "$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
+validate_native_authority_transport_config
 for path in "$trusted_release" "$profile" "$acceptance_plan" \
   "$rollback_shadow_manifest" "$reviewed_kubeconfig" \
   "$trusted_launcher_profile" "$scanner_finding_policy" \
@@ -291,21 +501,12 @@ jq -e '. == {executable_new_capacity_ceiling:0,status:"ready"}' \
 ## 3. Apply only the expiring schema-3 acceptance plane
 
 ```bash
-observe_agent_header="$(jq -cS \
-  --arg action observe-agent \
-  --arg request_id "acceptance-${merged_source_sha:0:12}-agent" \
-  '. + {action:$action,request_id:$request_id}' \
-  <<< "$native_runtime_common")"
-printf '%s\n' "$observe_agent_header" \
-  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  | jq -cS . > "$evidence_dir/agent-active-pre-management.json"
-chmod 0600 "$evidence_dir/agent-active-pre-management.json"
-jq -e '.action == "observe-agent" and .status == "ok" and
-  .evidence == {active_state:"active",
-    fragment_path:"/etc/systemd/system/loom-personal-dev-native-builder-agent.service",
-    sub_state:"running"} and
-  (.receipts|keys) == ["agent-active-evidence"] and
-  all(.receipts[];test("^[0-9a-f]{64}$"))' \
+pre_management_status_request_id="$(new_native_authority_request_id)"
+native_authority_request status "$pre_management_status_request_id" \
+  "$evidence_dir/agent-active-pre-management.json"
+jq -e '.phase == "active" and .agent_service == "active" and
+  .dockerd_service == "active" and .nft_table == "present" and
+  .managed_containers == 0 and .managed_networks == 0' \
   "$evidence_dir/agent-active-pre-management.json" >/dev/null
 
 shadow_recheck="$evidence_dir/preflight-shadow.yaml"
@@ -395,7 +596,7 @@ owner_0_deploy_pid=$!
 owner_1_deploy_pid=$!
 raw_jobs="$evidence_dir/simultaneous-amd64-jobs.raw.json"
 raw_grants="$evidence_dir/simultaneous-arm64-grants.raw.json"
-raw_containers="$evidence_dir/simultaneous-arm64-containers.raw.json"
+native_overlap_status="$evidence_dir/simultaneous-arm64-status.json"
 overlap_deadline=$((SECONDS + 600))
 while true; do
   jobs_before="$evidence_dir/jobs-before.tmp"
@@ -430,29 +631,14 @@ while true; do
   test "$SECONDS" -lt "$overlap_deadline"
   sleep 1
 done
-observe_container_fields="$(jq -cS '{grant_ids:[.[].grant_id]|sort}' \
-  "$raw_grants")"
-observe_container_header="$(jq -cS \
-  --arg action observe-containers \
-  --arg request_id "acceptance-${merged_source_sha:0:12}-containers" \
-  --argjson fields "$observe_container_fields" \
-  '. + $fields + {action:$action,request_id:$request_id}' \
-  <<< "$native_runtime_common")"
-container_authority_evidence="$evidence_dir/native-runtime-observe-containers.json"
-printf '%s\n' "$observe_container_header" \
-  | ssh_run "$gb10_target" sudo "$native_runtime_authority" \
-  | jq -cS . > "$container_authority_evidence"
-jq -e '.action == "observe-containers" and .status == "ok" and
-  (.receipts|keys) == ["container-evidence"] and
-  all(.receipts[];test("^[0-9a-f]{64}$")) and
-  (.evidence|length) == 4' "$container_authority_evidence" >/dev/null
-jq -cS .evidence "$container_authority_evidence" > "$raw_containers"
-jq -e 'length == 4 and ([.[]|select(.role=="buildkit")]|length==2) and
-  ([.[]|select(.role=="client")]|length==2) and all(.[];
-  .runtime=="runsc-personal-dev-native" and .platform=="linux/arm64") and
-  ([.[].grant_id]|unique|length==2)' "$raw_containers" >/dev/null
-chmod 0600 "$raw_jobs" "$raw_grants" "$raw_containers"
-chmod 0600 "$container_authority_evidence"
+native_overlap_status_request_id="$(new_native_authority_request_id)"
+native_authority_request status "$native_overlap_status_request_id" \
+  "$native_overlap_status"
+jq -e '.phase == "active" and .agent_service == "active" and
+  .dockerd_service == "active" and .nft_table == "present" and
+  .managed_containers == 4 and .managed_networks == 2' \
+  "$native_overlap_status" >/dev/null
+chmod 0600 "$raw_jobs" "$raw_grants"
 owner_0_rc=0; owner_1_rc=0
 wait "$owner_0_deploy_pid" || owner_0_rc=$?
 wait "$owner_1_deploy_pid" || owner_1_rc=$?
@@ -483,14 +669,34 @@ jq -cS --arg owner0 "${owner_0_initial_candidate:0:12}" \
   --arg owner1 "${owner_1_initial_candidate:0:12}" '
   [$owner0,$owner1] as $order | [$order[] as $candidate | .[] |
   select(.candidate==$candidate)]' "$raw_grants" > "$simultaneous_grants"
-jq -cS --slurpfile grants "$simultaneous_grants" '
-  [$grants[0][] as $grant | ("buildkit","client") as $role | .[] |
-  select(.grant_id==$grant.grant_id and .role==$role)]' \
-  "$raw_containers" > "$simultaneous_containers"
+initial_native_runtime="$evidence_dir/initial-native-runtime-evidence.jsonl"
+: > "$initial_native_runtime"
+for candidate in "$owner_0_initial_candidate" "$owner_1_initial_candidate"; do
+  read_count "SELECT jsonb_build_object('grant_id',g.id,
+    'evidence',g.runtime_evidence_json)::text FROM personal_dev_native_build_grants g
+    JOIN personal_dev_candidates c ON c.id=g.candidate_id
+    WHERE c.candidate_sha='$candidate' AND g.state='succeeded'" \
+    | jq -cS . >> "$initial_native_runtime"
+done
+jq -cS --slurpfile grants "$simultaneous_grants" -s '
+  . as $evidence | [$grants[0][] as $grant |
+    ($evidence[] | select(.grant_id == $grant.grant_id)) as $runtime |
+    {grant_id:$grant.grant_id,id:$runtime.evidence.buildkit_container_id,
+     image:($runtime.evidence.builder_image|split("@")[1]),
+     platform:$runtime.evidence.platform,role:"buildkit",
+     runtime_name:$runtime.evidence.runtime_name},
+    {grant_id:$grant.grant_id,id:$runtime.evidence.client_container_id,
+     image:($runtime.evidence.builder_image|split("@")[1]),
+     platform:$runtime.evidence.platform,role:"client",
+     runtime_name:$runtime.evidence.runtime_name}]' \
+  "$initial_native_runtime" > "$simultaneous_containers"
 jq -e 'length==2' "$simultaneous_jobs" >/dev/null
 jq -e 'length==2' "$simultaneous_grants" >/dev/null
-jq -e 'length==4 and ([.[].id]|unique|length==4)' "$simultaneous_containers" >/dev/null
-chmod 0600 "$simultaneous_jobs" "$simultaneous_grants" "$simultaneous_containers"
+jq -e 'length==4 and
+  all(.[]; .platform=="linux/arm64" and .runtime_name=="runsc-personal-dev-native") and
+  ([.[].id]|unique|length==4)' "$simultaneous_containers" >/dev/null
+chmod 0600 "$initial_native_runtime" "$simultaneous_jobs" "$simultaneous_grants" \
+  "$simultaneous_containers"
 acceptance_status "$evidence_dir/after-initial.status.json"
 ```
 

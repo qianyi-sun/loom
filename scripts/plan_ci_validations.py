@@ -105,6 +105,30 @@ PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT = {
     "tests/ops/test_personal_dev_native_runtime_authority.py",
 }
 
+PROTECTED_NATIVE_AUTHORITY_EXACT = {
+    "deploy/worker-pools/gb10/README.md",
+    "scripts/ops/converge_personal_dev_native_builder_release.py",
+    "scripts/ops/install_personal_dev_native_builder_runtime.py",
+    "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
+    "scripts/ops/personal_dev_native_builder_conformance.py",
+    "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
+    "scripts/ops/personal_dev_native_builder_runtime_profile.py",
+    "tests/ops/test_converge_personal_dev_native_builder_release.py",
+    "tests/ops/test_install_personal_dev_native_builder_runtime.py",
+    "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
+    "tests/ops/test_personal_dev_native_builder_conformance.py",
+    "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
+    "tests/ops/test_personal_dev_native_builder_runtime_authority_protocol.py",
+    "tests/ops/test_personal_dev_native_builder_runtime_profile.py",
+}
+
+PROTECTED_NATIVE_AUTHORITY_PREFIXES = ("deploy/personal-dev-native-builder/",)
+
 
 @dataclass(frozen=True)
 class ValidationPlan:
@@ -189,6 +213,14 @@ def _is_protected_personal_dev_native_authority_path(path: str) -> bool:
     return path in PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT
 
 
+def _is_protected_native_authority_path(path: str) -> bool:
+    return _matches(
+        path,
+        exact=PROTECTED_NATIVE_AUTHORITY_EXACT,
+        prefixes=PROTECTED_NATIVE_AUTHORITY_PREFIXES,
+    )
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -246,6 +278,10 @@ def plan_validations(
     if any(_is_protected_personal_dev_native_authority_path(path) for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "protected-personal-dev-native-authority")
+
+    if any(_is_protected_native_authority_path(path) for path in paths):
+        for name in HEAVY_CHECKS:
+            select(name, "protected-native-authority")
 
     integration_exact = {
         ".github/workflows/ci.yml",
@@ -365,6 +401,7 @@ def plan_validations(
             or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
             or _is_protected_staging_rollout_path(path)
             or _is_protected_personal_dev_native_authority_path(path)
+            or _is_protected_native_authority_path(path)
         )
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:

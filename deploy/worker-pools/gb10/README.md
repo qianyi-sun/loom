@@ -160,6 +160,24 @@ service public key. Normal operators inspect the broker request instead of
 running candidate internals directly. Uninstall revokes the service key on all
 ledger-bound hosts before removing local key material.
 
+## Native-runtime authority
+
+The personal native-builder runbooks use the installed
+`/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority` as the
+only remote sudo target. The operator encoder writes a framed request to stdin;
+root-local OpenSSH runs with `-F /dev/null` and pins the direct controller
+`trt-gb10-1` at `207.35.188.227:2221`, the deployment identity, and known-host
+settings; it then invokes only `sudo -n --` for that launcher. The
+non-executable broker library is never a remote command.
+
+`status`, `prepare`, `stage-agent`, `activate`, and `remove` receipts are the
+sole privileged host evidence boundary. Do not run remote privileged shells,
+Python, systemd, nftables, Docker, or file-copy commands for this runtime. The
+public gVisor archive is the one data-only unprivileged SFTP upload; private
+key and CA bytes enter only through local root-opened client descriptors and
+never through a command argument, environment, receipt, evidence file, or
+remote staging path.
+
 ## Supervisor and health
 
 Environment-state renders and owns:

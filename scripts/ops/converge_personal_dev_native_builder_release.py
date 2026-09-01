@@ -10,7 +10,10 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, NoReturn, Protocol, cast
+
+if TYPE_CHECKING:
+    from scripts.ops.personal_dev_native_builder_conformance import Runner
 
 _PRIMARY_ENDPOINT = "unix:///var/run/docker.sock"
 _DEDICATED_ENDPOINT = "unix:///run/loom-personal-dev-builder/docker.sock"
@@ -411,37 +414,51 @@ class _CommandResult:
 
 
 class NativeBuilderDockerCliApi:
-    def __init__(self, endpoint: str) -> None:
+    def __init__(self, endpoint: str, *, runner: Runner | None = None) -> None:
         if endpoint not in {_PRIMARY_ENDPOINT, _DEDICATED_ENDPOINT}:
             raise PersonalDevNativeBuilderReleaseError("docker_endpoint_invalid")
         self.endpoint = endpoint
+        self.runner = runner
 
     def _run(self, *arguments: str) -> _CommandResult:
         argv = ["/usr/bin/docker", "-H", self.endpoint, *arguments]
-        try:
-            completed = subprocess.run(
+        if self.runner is None:
+            try:
+                completed = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=_ROOT_ENV,
+                    timeout=_COMMAND_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PersonalDevNativeBuilderReleaseError("docker_timeout") from exc
+            returncode = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        else:
+            completed_by_runner = self.runner.run(
                 argv,
-                capture_output=True,
-                text=True,
                 check=False,
                 env=_ROOT_ENV,
-                timeout=_COMMAND_TIMEOUT_SECONDS,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise PersonalDevNativeBuilderReleaseError("docker_timeout") from exc
+            returncode = completed_by_runner.returncode
+            stdout = completed_by_runner.stdout
+            stderr = completed_by_runner.stderr
         if (
-            len(completed.stdout.encode("utf-8", errors="replace"))
+            len(stdout.encode("utf-8", errors="replace"))
             > _MAX_COMMAND_OUTPUT
-            or len(completed.stderr.encode("utf-8", errors="replace"))
+            or len(stderr.encode("utf-8", errors="replace"))
             > _MAX_COMMAND_OUTPUT
         ):
             raise PersonalDevNativeBuilderReleaseError(
                 "docker_output_invalid"
             )
         result = _CommandResult(
-            completed.returncode,
-            completed.stdout,
-            completed.stderr,
+            returncode,
+            stdout,
+            stderr,
         )
         if result.returncode != 0 or result.stderr:
             raise PersonalDevNativeBuilderReleaseError("docker_command_failed")
@@ -571,10 +588,29 @@ def _parser() -> argparse.ArgumentParser:
 def _default_converger(
     config: NativeBuilderReleaseConfig,
 ) -> _ConvergerOperations:
+    return create_broker_release_converger(config)
+
+
+def create_broker_release_converger(
+    config: NativeBuilderReleaseConfig,
+    *,
+    primary: NativeBuilderDockerApi | None = None,
+    dedicated: NativeBuilderDockerApi | None = None,
+    runner: Runner | None = None,
+) -> PersonalDevNativeBuilderReleaseConverger:
+    """Create the typed converger with only the two compiled Docker endpoints."""
     return PersonalDevNativeBuilderReleaseConverger(
         config=config,
-        primary=NativeBuilderDockerCliApi(_PRIMARY_ENDPOINT),
-        dedicated=NativeBuilderDockerCliApi(_DEDICATED_ENDPOINT),
+        primary=(
+            NativeBuilderDockerCliApi(_PRIMARY_ENDPOINT, runner=runner)
+            if primary is None
+            else primary
+        ),
+        dedicated=(
+            NativeBuilderDockerCliApi(_DEDICATED_ENDPOINT, runner=runner)
+            if dedicated is None
+            else dedicated
+        ),
     )
 
 
@@ -660,5 +696,6 @@ __all__ = [
     "NativeBuilderReleaseImage",
     "PersonalDevNativeBuilderReleaseConverger",
     "PersonalDevNativeBuilderReleaseError",
+    "create_broker_release_converger",
     "main",
 ]
