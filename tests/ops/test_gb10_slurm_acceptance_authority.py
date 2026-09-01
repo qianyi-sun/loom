@@ -1144,11 +1144,15 @@ def test_busy_accounting_polls_empty_until_full_nonce_row_is_visible(
     assert clock[0] <= 1.0
 
 
-@pytest.mark.parametrize("persisted_busy_job_id", ("123", None))
+@pytest.mark.parametrize(
+    ("persisted_busy_job_id", "expected_deferred"),
+    (("456", True), ("123", False), (None, False)),
+)
 def test_busy_deferral_requires_the_exact_persisted_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     persisted_busy_job_id: str | None,
+    expected_deferred: bool,
 ) -> None:
     authority = _load_authority()
     authority.ROOT_UID = os.geteuid()
@@ -1161,6 +1165,7 @@ def test_busy_deferral_requires_the_exact_persisted_job(
     state_root.mkdir(mode=0o700)
     state_path = state_root / "active.json"
     busy_job_name = ""
+    accounting_commands: list[list[str]] = []
 
     def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:3] == ["/usr/bin/scontrol", "show", "node"]:
@@ -1177,6 +1182,7 @@ def test_busy_deferral_requires_the_exact_persisted_job(
                 stderr="",
             )
         if "/usr/bin/sacct" in argv:
+            accounting_commands.append(argv)
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -1230,10 +1236,8 @@ def test_busy_deferral_requires_the_exact_persisted_job(
         worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
     )
 
-    with pytest.raises(
-        authority.AcceptanceError, match=f"node allocation failed safely: {busy_node}"
-    ):
-        authority._probe_nodes(
+    def probe() -> tuple[list[str], list[str]]:
+        return authority._probe_nodes(
             candidate_sha,
             verified,
             {
@@ -1245,6 +1249,18 @@ def test_busy_deferral_requires_the_exact_persisted_job(
             job_state_path=state_path,
             request_nonce="0123456789abcdef01234567",
         )
+
+    if expected_deferred:
+        passed, deferred = probe()
+        assert passed == [first_node]
+        assert deferred == [busy_node]
+        assert len(accounting_commands) == 1
+        assert "--jobs=456" in accounting_commands[0]
+    else:
+        with pytest.raises(
+            authority.AcceptanceError, match=f"node allocation failed safely: {busy_node}"
+        ):
+            probe()
 
 
 @pytest.mark.parametrize(
