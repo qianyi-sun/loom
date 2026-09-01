@@ -226,6 +226,24 @@ def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None
     assert "must still wait for every active Phase 1 convergence gate above" in phase2_boundary
 
 
+def test_phase1_runbook_uses_fixed_trusted_gb10_controller_bootstrap() -> None:
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+
+    assert "Run the activation itself locally on `gx10-01c7`" in normalized
+    assert "root-owned out-of-band transport" in normalized
+    assert "Do not execute a bootstrap or installer from the candidate checkout" in normalized
+    assert "root-owned directory with mode `0700`" in normalized
+    assert "each key file owned by `root:root` and mode `0600`" in normalized
+    assert '"root:root:700:directory"' in runbook
+    assert "/usr/bin/python3 -I /usr/local/libexec/loom-gb10-controller-bootstrap" in runbook
+    assert '--source-sha "$MERGED_SHA"' in runbook
+    assert '--controller-public-key "$CONTROLLER_PUBLIC_KEY"' in runbook
+    assert '--legacy-deploy-public-key "$LEGACY_PUBLIC_KEY"' in runbook
+
+
 def test_phase1_runbook_assigns_transition_cleanup_to_protected_precredential_apply() -> None:
     runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
         encoding="utf-8"
