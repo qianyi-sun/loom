@@ -15,7 +15,7 @@ API_SERVER="https://192.168.50.103:6443"
 
 validate_runtime_kubeconfig() {
   local path="$1"
-  local metadata owner_uid owner_gid mode links size kind exec_allowed
+  local metadata owner_uid owner_gid mode links size kind
   if [ -L "$path" ] || [ ! -f "$path" ]; then
     echo "error: external supervisor credential metadata is unsafe" >&2
     return 1
@@ -36,9 +36,25 @@ validate_runtime_kubeconfig() {
     get secret "$TARGET_SECRET" -o name >/dev/null
   "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
     get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
+  validate_pods_exec_denied "$path"
+}
+
+validate_pods_exec_denied() {
+  local path="$1"
+  local authority_namespace exec_allowed
+  for authority_namespace in "$NAMESPACE" "$WITNESS_NAMESPACE"; do
+    exec_allowed="$(
+      "$KUBECTL" --kubeconfig "$path" -n "$authority_namespace" \
+        auth can-i create pods/exec 2>/dev/null || true
+    )"
+    if [ "$exec_allowed" != "no" ]; then
+      echo "error: external supervisor credential has unexpected pods/exec authority" >&2
+      return 1
+    fi
+  done
   exec_allowed="$(
-    "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
-      auth can-i create pods/exec 2>/dev/null || true
+    "$KUBECTL" --kubeconfig "$path" \
+      auth can-i --all-namespaces create pods/exec 2>/dev/null || true
   )"
   if [ "$exec_allowed" != "no" ]; then
     echo "error: external supervisor credential has unexpected pods/exec authority" >&2

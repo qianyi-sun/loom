@@ -140,6 +140,8 @@ def test_publisher_has_a_non_mutating_runtime_credential_check() -> None:
     assert "validate_runtime_kubeconfig" in source
     assert 'get configmap "$WITNESS_CONFIG_MAP"' in source
     assert "auth can-i create pods/exec" in source
+    assert 'for authority_namespace in "$NAMESPACE" "$WITNESS_NAMESPACE"; do' in source
+    assert "auth can-i --all-namespaces create pods/exec" in source
     assert 'if [ "$exec_allowed" != "no" ]' in source
 
 

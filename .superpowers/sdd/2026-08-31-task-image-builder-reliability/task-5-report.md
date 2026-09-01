@@ -113,3 +113,85 @@ only for focused tests; production construction binds
 to use its pre-existing verified root-owned candidate flow and drops helper
 execution to UID/GID `995:2007`; OLDLAB now explicitly binds both effective UID
 and GID.
+
+## Review fix round 1/5
+
+### Findings addressed
+
+1. The publisher now requires `pods/exec` denial in both `loom-staging` and
+   `loom-dev`, then verifies the same denial with
+   `kubectl auth can-i --all-namespaces create pods/exec`. The transport emits
+   `pods_exec_denied=True` only after this expanded, fail-closed publisher
+   check succeeds.
+2. The production credential command runner no longer uses
+   `capture_output=True`. Both streams are sent to `subprocess.DEVNULL` as a
+   bounded sink, and it returns empty byte streams to preserve the transport
+   interface without retaining child output in memory.
+3. The Phase 1 rollback no longer accepts or installs a captured kubeconfig.
+   It relies on the reviewed rollback candidate's protected
+   credential-before-unit convergence, then performs a non-mutating `--check`
+   plus file metadata, database Secret, witness ConfigMap, and all-namespace
+   `pods/exec` readback.
+
+### RED/GREEN evidence
+
+RED, after adding the three focused regression tests and before the fixes:
+
+```console
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# 3 failed, 21 passed in 0.69s
+```
+
+The failures were respectively the missing staging/all-namespace authority
+proof, missing bounded `stdout`/`stderr` sinks, and manual rollback credential
+installation.
+
+GREEN for the same command after the fixes:
+
+```console
+# 24 passed in 0.66s
+```
+
+Final focused Task 5 and runbook verification:
+
+```console
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen --no-sync pytest -p no:cacheprovider -q \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_component.py \
+  tests/loom_cli/rollout/operator/test_protected_gb10_external_supervisor_transport.py \
+  tests/ops/test_gb10_external_supervisor_broker.py \
+  tests/loom_cli/rollout/operator/test_protected_apply_executor.py \
+  tests/loom_cli/rollout/operator/test_installed_final_gate_executor.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# 139 passed in 19.77s
+
+bash -n deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh
+# passed
+
+uv run --frozen --no-sync ruff check \
+  src/loom_cli/rollout/operator/protected_external_supervisor_credential_transport.py \
+  tests/loom_cli/rollout/operator/test_protected_external_supervisor_credential_transport.py \
+  tests/ops/test_external_slurm_autoscaler_kubernetes_authority.py \
+  tests/ops/test_task_image_builder_deployment_contract.py
+# All checks passed
+
+uv run --frozen --no-sync mypy \
+  src/loom_cli/rollout/operator/protected_external_supervisor_credential_transport.py
+# Success: no issues found in 1 source file
+
+git diff --check
+# passed
+```
+
+### Self-review
+
+The namespace and all-namespace checks are both exact `no` comparisons; every
+non-`no`, command failure, or malformed result stops publication. DEVNULL
+prevents unbounded child-output allocation and leaves failures secret-free.
+The rollback runbook contains no manual credential install, ownership change,
+or permission repair and requires the same narrow authority readback as the
+forward path. No unresolved concerns were found.

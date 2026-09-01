@@ -496,11 +496,11 @@ submission assertions before proceeding.
 ## Rollback order
 
 Capture the prior reviewed immutable capacity manifest, protected rollout
-request/status evidence, supervisor profile/unit artifact, dedicated
-kubeconfig, and any transition authority JSON before each mutation. The
+request/status evidence, supervisor profile/unit artifact, dedicated credential
+readback evidence, and any transition authority JSON before each mutation. The
 transition objects are removal evidence only and must never be restored. A
 rollback may restore only the other recorded prior artifacts; it must never
-construct an ad hoc profile, credential, RBAC rule, or exec fallback.
+construct, copy, or install an ad hoc credential, RBAC rule, or exec fallback.
 
 1. Close scale-up first on both controllers. Stop all four timers and active
    oneshots as `loom-rollout`; do not start another reconciliation while rollback
@@ -512,12 +512,15 @@ construct an ad hoc profile, credential, RBAC rule, or exec fallback.
    dry-run bind to it, then use a new `loom-staging-rollout --env staging start`
    request. `start` accepts no ref or SHA argument; do not use `loom admin
    environment-state apply` or write user-systemd units directly.
-3. Restore only the captured immutable capacity manifest and dedicated
-   supervisor-kubeconfig artifact. Never restore transition exec RBAC or its
-   admission objects. A witness failure remains fail-closed; restoring a
-   ConfigMap transport never restores `pods/exec`.
-4. Read back file ownership, ConfigMap access, exec denial, protected rollout
-   status, and all four controller-local units before reopening scale-up.
+3. Restore only the captured immutable capacity manifest. The reviewed rollback
+   candidate's protected credential-before-unit convergence alone may publish
+   the fixed local credential; never copy or install a saved kubeconfig. Never
+   restore transition exec RBAC or its admission objects. A witness failure
+   remains fail-closed; restoring a ConfigMap transport never restores
+   `pods/exec`.
+4. Read back file ownership, database-Secret and ConfigMap access, exec denial,
+   protected rollout status, and all four controller-local units before
+   reopening scale-up.
 
 On `gx10-01c7`, close the GB10 pair:
 
@@ -553,7 +556,6 @@ restored.
 ```bash
 ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA
 PREVIOUS_REVIEWED_CAPACITY_MANIFEST=/secure/rollback/REVIEWED_CAPACITY_MANIFEST.yaml
-PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG=/secure/rollback/REVIEWED_EXTERNAL_SUPERVISOR.kubeconfig
 
 assert_response_sha() {
   jq -e --arg sha "$ROLLBACK_RELEASE_SHA" '
@@ -586,28 +588,34 @@ assert_response_sha "$EVIDENCE_ROOT/staging-rollback-status.json"
 # cluster artifact, after that controller's brokered rollback attempt completes.
 kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
   apply -f "$PREVIOUS_REVIEWED_CAPACITY_MANIFEST"
-# On each applicable external-supervisor controller, restore the separately
-# captured credential and prove the exact reachable dedicated authority.
-sudo install -o "$SUPERVISOR_USER" -g "$SUPERVISOR_GROUP" -m 0600 \
-  "$PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" "$SUPERVISOR_KUBECONFIG"
+# The protected rollback start has already completed protected
+# credential-before-unit convergence. Do not copy, install, chown, or chmod a
+# saved credential. On each external-supervisor controller, perform only this
+# non-mutating readback of the fixed local credential.
+as_supervisor \
+  "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
+  --check "$SUPERVISOR_KUBECONFIG"
 test ! -L "$SUPERVISOR_KUBECONFIG"
 test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
   "regular file:$SUPERVISOR_USER:$SUPERVISOR_GROUP:600"
+as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-staging \
+  get secret loom-external-slurm-autoscaler-db -o name
 as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
   get configmap loom-global-execution-witness-v1 -o name
-as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
-  auth can-i create pods/exec
+test "$(as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" \
+  auth can-i --all-namespaces create pods/exec)" = no
 ```
 
-Define `PREVIOUS_REVIEWED_CAPACITY_MANIFEST` and
-`PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG` only from the captured immutable,
-review-approved rollback record. Perform the credential restore/readback on
-each applicable controller; it must remain
-`regular file:loom-rollout:loom-rollout:600`, with ConfigMap `get` success and
-`pods/exec` `no`. Then run the step 3 controller-local status/unit/journal JSON
-readbacks on both controllers. They prove all four units use the dedicated
-credential and only their successful empty-queue results permit timers to be
-re-enabled by the protected staging rollout.
+Define `PREVIOUS_REVIEWED_CAPACITY_MANIFEST` only from the captured immutable,
+review-approved rollback record. The protected rollback request journals the
+credential before any supervisor units; no manual credential repair is allowed.
+Perform the non-mutating credential readback on each applicable controller; it
+must remain `regular file:loom-rollout:loom-rollout:600`, with dedicated
+database-Secret and ConfigMap `get` success and all-namespace `pods/exec`
+denial. Then run the step 3 controller-local status/unit/journal JSON readbacks
+on both controllers. They prove all four units use the dedicated credential and
+only their successful empty-queue results permit timers to be re-enabled by the
+protected staging rollout.
 
 ## Disabled Phase 2 prerequisites: inputs, staging, and read-only preflight
 

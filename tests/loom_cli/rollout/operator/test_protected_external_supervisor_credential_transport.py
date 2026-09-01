@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,3 +118,27 @@ def test_check_failure_is_secret_free_and_fails_closed(tmp_path: Path) -> None:
     message = str(caught.value)
     assert "sensitive" not in message
     assert output.read_text(encoding="utf-8") == "apiVersion: v1\n"
+
+
+def test_default_command_runner_discards_unbounded_child_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=b"unexpected child output",
+            stderr=b"unexpected child error",
+        )
+
+    monkeypatch.setattr(credential.subprocess, "run", run)
+
+    result = credential._subprocess_run(("publisher",), {}, 1.0)
+
+    assert captured["stdout"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.DEVNULL
+    assert result.stdout == b""
+    assert result.stderr == b""

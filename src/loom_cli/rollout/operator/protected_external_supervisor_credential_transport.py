@@ -116,12 +116,19 @@ def _subprocess_run(
     environment: Mapping[str, str],
     timeout_seconds: float,
 ) -> CommandResult:
-    return subprocess.run(
+    result = subprocess.run(
         tuple(argv),
         check=False,
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         timeout=timeout_seconds,
         env=dict(environment),
+    )
+    return subprocess.CompletedProcess(
+        args=tuple(argv),
+        returncode=result.returncode,
+        stdout=b"",
+        stderr=b"",
     )
 
 

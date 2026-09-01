@@ -255,6 +255,22 @@ def test_phase1_runbook_removes_complete_or_absent_transition_exec_set() -> None
     assert 'error("unexpected pods/exec Role remains")' in normalized
 
 
+def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() -> None:
+    runbook = Path(
+        "docs/runbooks/task-image-builder-phase1-site-convergence.md"
+    ).read_text(encoding="utf-8")
+    rollback = runbook.split("## Rollback order", maxsplit=1)[1].split(
+        "## Disabled Phase 2 prerequisites", maxsplit=1
+    )[0]
+
+    assert "PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" not in rollback
+    assert "sudo install" not in rollback
+    assert "protected credential-before-unit convergence" in rollback
+    assert '--check "$SUPERVISOR_KUBECONFIG"' in rollback
+    assert "get secret loom-external-slurm-autoscaler-db -o name" in rollback
+    assert "auth can-i --all-namespaces create pods/exec" in rollback
+
+
 def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:
     runbook = Path(
         "docs/runbooks/task-image-builder-phase1-site-convergence.md"
