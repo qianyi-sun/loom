@@ -457,8 +457,8 @@ def _run_predecessor_status_compatibility_guard(
         f"predecessor_profile={shlex.quote(str(predecessor_profile))}\n"
         f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
-        "exec 31<\"$predecessor_release_source\"\n"
-        "exec 36<\"$kubeconfig_source\"\n"
+        'exec 31<"$predecessor_release_source"\n'
+        'exec 36<"$kubeconfig_source"\n'
         "predecessor_release=/proc/self/fd/31\n"
         "kubeconfig=/proc/self/fd/36\n"
         f"run_predecessor_shadow_status {shlex.quote(str(status_path))}\n"
@@ -4054,11 +4054,11 @@ def test_isolated_postgres_waits_for_final_pid1_before_readiness(
         "pid1_checks=0\n"
         "sleep() { :; }\n"
         "docker() {\n"
-        "  test \"$1\" = exec || return 97\n"
-        "  case \"$*\" in\n"
+        '  test "$1" = exec || return 97\n'
+        '  case "$*" in\n'
         "    *'read -r comm </proc/1/comm; test \"$comm\" = postgres'*)\n"
         "      pid1_checks=$((pid1_checks + 1))\n"
-        "      if test \"$pid1_checks\" -eq 1; then\n"
+        '      if test "$pid1_checks" -eq 1; then\n'
         "        printf 'bootstrap-pid1\\n' >> \"$call_log\"\n"
         "        return 1\n"
         "      fi\n"
@@ -4067,7 +4067,7 @@ def test_isolated_postgres_waits_for_final_pid1_before_readiness(
         "      ;;\n"
         "    *pg_isready*)\n"
         "      printf 'pg-isready\\n' >> \"$call_log\"\n"
-        "      test \"$pid1_checks\" -ge 2\n"
+        '      test "$pid1_checks" -ge 2\n'
         "      ;;\n"
         "    *) return 98 ;;\n"
         "  esac\n"
@@ -4269,9 +4269,7 @@ def test_schema_transition_rehearsal_exports_explicit_postgres_identity(
     assert arguments[0] == b"run"
     assert arguments[-2:] == [b"postgres-image", b""]
     environment = [
-        arguments[index + 1]
-        for index, argument in enumerate(arguments)
-        if argument == b"--env"
+        arguments[index + 1] for index, argument in enumerate(arguments) if argument == b"--env"
     ]
     assert len(environment) == 3
     assert set(environment) == {
@@ -5638,9 +5636,7 @@ def test_schema_transition_predecessor_ready_uses_guarded_status_runner(
     )
 
     assert result.returncode == 0, result.stderr
-    assert call_log.read_text(encoding="ascii").splitlines() == [
-        "guarded-predecessor-status"
-    ]
+    assert call_log.read_text(encoding="ascii").splitlines() == ["guarded-predecessor-status"]
 
 
 def test_schema_transition_pre_quiesce_failure_does_not_mutate_recovery(
