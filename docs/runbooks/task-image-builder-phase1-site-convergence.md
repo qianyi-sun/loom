@@ -485,10 +485,11 @@ From the protected staging rollout host, merge the protected rollback PR before
 this block. It restores the recorded prior branch-controlled bytes, has passed
 CI and review, and is merged to the installed authority's pinned `dev` branch.
 Set `ROLLBACK_RELEASE_SHA` to that exact merge SHA; a raw captured profile is
-evidence only and cannot be selected directly by the rollout CLI. Capture and
-bind each broker response before the real start. Only after the real response
-is bound to that same SHA may the separately captured non-branch artifacts be
-restored.
+evidence only and cannot be selected directly by the rollout CLI. Repeat that
+same exact 40-hex value in each controller-local readback block below. Capture
+and bind each broker response before the real start. Only after the real
+response is bound to that same SHA may the separately captured non-branch
+artifacts be restored.
 
 ```bash
 ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA
@@ -534,9 +535,9 @@ kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
 On `gx10-01c7`, run the following locally:
 
 ```bash
+ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA
+[[ "$ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
 ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
-test "$ROLLBACK_CANDIDATE_ROOT" = \
-  "/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
 test ! -L "$ROLLBACK_CANDIDATE_ROOT"
 test -d "$ROLLBACK_CANDIDATE_ROOT"
 test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = \
@@ -569,9 +570,9 @@ done <<<"$NAMESPACE_RESOURCES"
 On `TRT-EAI-OLDLAB-1`, run the following locally:
 
 ```bash
+ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA
+[[ "$ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
 ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
-test "$ROLLBACK_CANDIDATE_ROOT" = \
-  "/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
 test ! -L "$ROLLBACK_CANDIDATE_ROOT"
 test -d "$ROLLBACK_CANDIDATE_ROOT"
 test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = \

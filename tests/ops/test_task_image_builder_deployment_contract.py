@@ -252,6 +252,12 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
         "## Disabled Phase 2 prerequisites", maxsplit=1
     )[0]
     rollback_normalized = " ".join(rollback.replace("\\\n", "").split())
+    gb10_readback = rollback.split("On `gx10-01c7`, run the following locally:", maxsplit=1)[
+        1
+    ].split("On `TRT-EAI-OLDLAB-1`, run the following locally:", maxsplit=1)[0]
+    oldlab_readback = rollback.split(
+        "On `TRT-EAI-OLDLAB-1`, run the following locally:", maxsplit=1
+    )[1]
 
     assert "PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" not in rollback
     assert "sudo install" not in rollback
@@ -263,19 +269,20 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
     assert "On `TRT-EAI-OLDLAB-1`, run the following locally:" in rollback
     assert rollback.count("get namespaces -o name") == 2
     assert rollback.count("auth can-i create pods/exec") == 2
+    for controller_readback in (gb10_readback, oldlab_readback):
+        assert "ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA" in controller_readback
+        assert '[[ "$ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in controller_readback
+        assert (
+            'ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/'
+            '$ROLLBACK_RELEASE_SHA/repo"' in controller_readback
+        )
     assert (
         rollback.count(
             'ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"'
         )
         == 2
     )
-    assert (
-        rollback_normalized.count(
-            'test "$ROLLBACK_CANDIDATE_ROOT" = '
-            '"/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"'
-        )
-        == 2
-    )
+    assert 'test "$ROLLBACK_CANDIDATE_ROOT" = ' not in rollback_normalized
     assert (
         rollback_normalized.count(
             'test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = "$ROLLBACK_RELEASE_SHA"'
