@@ -777,7 +777,6 @@ def test_worker_input_verifier_rejects_git_ignored_physical_entries(
     )
 
     assert verified["head"] == candidate_sha
-    assert verified["target_device"] == repo.stat().st_dev
     assert verified["target_inode"] == repo.stat().st_ino
     assert verified["env_sha256"] == hashlib.sha256(env_file.read_bytes()).hexdigest()
 
@@ -796,6 +795,31 @@ def test_worker_input_verifier_rejects_git_ignored_physical_entries(
             image_tag="staging-aaaaaaa",
             requested_concurrency=10,
         )
+
+
+def test_worker_input_evidence_excludes_mount_local_device_numbers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    _root, repo, candidate_sha = _checkout(tmp_path)
+    env_file = tmp_path / "worker.env"
+    env_file.write_bytes(_canonical_worker_env(authority, image_tag="staging-aaaaaaa"))
+    env_file.chmod(0o600)
+    monkeypatch.setattr(authority, "SERVICE_UID", os.geteuid())
+    monkeypatch.setattr(authority, "SERVICE_GID", os.getegid())
+
+    verified = authority._verify_worker_inputs(
+        repo_dir=repo,
+        env_file=env_file,
+        candidate_sha=candidate_sha,
+        image_tag="staging-aaaaaaa",
+        requested_concurrency=10,
+    )
+
+    assert set(verified).isdisjoint({"root_device", "target_device", "git_device", "env_device"})
+    assert verified["target_inode"] == repo.stat().st_ino
+    assert verified["env_inode"] == env_file.stat().st_ino
 
 
 @pytest.mark.parametrize(

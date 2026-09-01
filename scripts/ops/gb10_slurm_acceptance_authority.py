@@ -734,11 +734,8 @@ def verify_worker_checkout(*, repo_dir, candidate_sha, uid, gid):
         "index_sha256": hashlib.sha256(raw_index).hexdigest(),
         "tree_content_sha256": tree_content_sha256,
         "tracked_entries": len(index),
-        "root_device": root_metadata.st_dev,
         "root_inode": root_metadata.st_ino,
-        "target_device": repo_metadata.st_dev,
         "target_inode": repo_metadata.st_ino,
-        "git_device": git_metadata.st_dev,
         "git_inode": git_metadata.st_ino,
     }
 
@@ -854,7 +851,6 @@ def verify_worker_environment(*, env_file, image_tag, requested_concurrency, uid
         raise WorkerInputVerificationError("worker environment contract drifted")
     return {
         "env_sha256": hashlib.sha256(encoded).hexdigest(),
-        "env_device": before.st_dev,
         "env_inode": before.st_ino,
         "env_size": before.st_size,
         "env_mtime_ns": before.st_mtime_ns,
