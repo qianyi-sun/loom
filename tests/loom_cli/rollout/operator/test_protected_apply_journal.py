@@ -355,6 +355,94 @@ def test_typed_external_supervisor_diagnostic_rejects_free_form_text() -> None:
         )
 
 
+def test_schema_v1_diagnostic_rejects_typed_compensation_classification() -> None:
+    with pytest.raises(ValueError, match="failure diagnostic is invalid"):
+        ComponentFailureDiagnostic.from_dict(
+            {
+                "schema_version": 1,
+                "component_id": "external-supervisor-reconciliation",
+                "ordinal": 0,
+                "failure_code": "compensation-reconciliation-failed",
+                "diagnostic": "free-form value",
+            }
+        )
+
+
+def test_reconciliation_outcomes_advance_after_failure_then_success(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    reconcile_calls = 0
+
+    def exact(_plan):
+        return ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest="1" * 64,
+            observed_epoch=7,
+        )
+
+    def reconcile(_plan):
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        if reconcile_calls == 1:
+            raise ExternalSupervisorCompensationError("transition-validation-failed")
+
+    def fail_later(_plan):
+        raise RuntimeError("later component failed")
+
+    reconciliation = ProtectedApplyComponent(
+        component_id="external-supervisor-reconciliation",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=exact,
+        apply=reconcile,
+        reconcile_before_apply=True,
+    )
+    later = ProtectedApplyComponent(
+        component_id="staging-manifests",
+        implementation_digest="4" * 64,
+        input_fingerprint="5" * 64,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.READY,
+            evidence_digest="6" * 64,
+            observed_epoch=7,
+        ),
+        apply=fail_later,
+    )
+
+    with pytest.raises(ExternalSupervisorCompensationError):
+        journal.execute(_plan(tmp_path), (reconciliation, later))
+
+    outcomes = (
+        tmp_path
+        / "state/requests/req-alpha/attempts/1/protected-apply"
+        / "00-external-supervisor-reconciliation/reconciliation-outcomes"
+    )
+    assert json.loads((outcomes / "00000000.json").read_text()) == {
+        "component_id": "external-supervisor-reconciliation",
+        "compensation_failure_code": "transition-validation-failed",
+        "diagnostic": "classified external-supervisor compensation reconciliation failure",
+        "failure_code": "compensation-reconciliation-failed",
+        "sequence": 0,
+        "schema_version": 1,
+        "status": "failed",
+    }
+
+    with pytest.raises(RuntimeError, match="later component failed"):
+        journal.execute(_plan(tmp_path), (reconciliation, later))
+
+    assert json.loads((outcomes / "00000001.json").read_text()) == {
+        "component_id": "external-supervisor-reconciliation",
+        "compensation_failure_code": None,
+        "diagnostic": None,
+        "failure_code": None,
+        "sequence": 1,
+        "schema_version": 1,
+        "status": "succeeded",
+    }
+    assert not (outcomes.parent / "terminal.json").exists()
+
+
 def test_reconciliation_terminal_is_deferred_until_the_component_chain_completes(
     tmp_path: Path,
 ) -> None:

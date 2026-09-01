@@ -80,8 +80,10 @@ from .preflight_artifact_references import (
 )
 from .protected_apply_journal import (
     ProtectedApplyJournalError,
+    ReconciliationOutcomeStatus,
     read_component_failure,
     read_component_failure_diagnostic,
+    read_latest_reconciliation_outcome,
 )
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .protected_gb10_external_supervisor_transport import (
@@ -1425,7 +1427,32 @@ def _protected_apply_progress(
     for _ordinal, component_id, component_root in component_entries:
         if not _private_progress_file(component_root / "intent.json", service_uid=service_uid):
             raise RequestStoreError("protected apply progress is incomplete")
-        if not _private_progress_file(component_root / "terminal.json", service_uid=service_uid):
+        has_terminal = _private_progress_file(
+            component_root / "terminal.json",
+            service_uid=service_uid,
+        )
+        if component_id == "external-supervisor-reconciliation":
+            try:
+                reconciliation_outcome = read_latest_reconciliation_outcome(
+                    component_root,
+                    service_uid=service_uid,
+                )
+            except (OSError, ProtectedApplyJournalError) as exc:
+                raise RequestStoreError("protected apply progress is unsafe") from exc
+            if reconciliation_outcome is not None:
+                if reconciliation_outcome.status is ReconciliationOutcomeStatus.FAILED:
+                    return (
+                        component_id,
+                        "protected_component_incomplete",
+                        (),
+                        reconciliation_outcome.failure_code,
+                        reconciliation_outcome.diagnostic,
+                        None,
+                        reconciliation_outcome.compensation_failure_code,
+                    )
+                last_complete = component_id
+                continue
+        if not has_terminal:
             failure_path = component_root / "failure.json"
             failed_hosts: tuple[str, ...] = ()
             if _private_progress_file(failure_path, service_uid=service_uid):
@@ -1508,11 +1535,12 @@ def _final_gate_progress(
     capacity_node: str | None = None
     if selected.check_id == "final.capacity" and not selected.passed:
         blockers = selected.evidence.get("blockers")
-        if isinstance(blockers, dict) and set(blockers) <= {"capacity", "capacity-node"}:
+        if isinstance(blockers, dict) and set(blockers) == {"capacity", "capacity-node"}:
             candidate_code = blockers.get("capacity")
             candidate_node = blockers.get("capacity-node")
-            if candidate_code in CAPACITY_ACCEPTANCE_FAILURE_CODES and (
-                candidate_node is None or candidate_node in GB10_SLURM_WORKER_HOSTS
+            if (
+                candidate_code in CAPACITY_ACCEPTANCE_FAILURE_CODES
+                and candidate_node in GB10_SLURM_WORKER_HOSTS
             ):
                 capacity_failure_code = candidate_code
                 capacity_node = candidate_node
