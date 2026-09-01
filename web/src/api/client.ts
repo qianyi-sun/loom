@@ -494,8 +494,7 @@ export function retryPipelineStageRun(
   );
 }
 
-/** Plan 28 PR-3: backend catalog entry returned by GET /api/v1/backends.
- * Driven by the union of `capabilities.backend` reported by active workers. */
+/** Backend catalog entry returned by GET /api/v1/backends. */
 export interface Backend {
   name: string;
   description: string;
@@ -504,6 +503,11 @@ export interface Backend {
    * full set of drivers Loom ships while understanding which can run
    * a batch right now. */
   available: boolean;
+  /** True when a fresh, healthy pool policy can start compatible worker
+   * capacity. This is planning headroom, not immediately executable capacity. */
+  cold_start_available: boolean;
+  /** Autoscaled pools contributing cold-start authority for this backend. */
+  cold_start_pools: string[];
 }
 
 /** Plan 28 PR-3: one (agent, model, n_per_task) tuple within a Batch.
