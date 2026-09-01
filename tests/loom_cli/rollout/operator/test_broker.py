@@ -2597,6 +2597,63 @@ def test_status_advances_past_recovered_reconciliation_failure(tmp_path: Path) -
     assert payload["protected_failure_diagnostic"] == diagnostic
 
 
+def test_status_advances_past_legacy_reconciliation_when_later_intent_exists(
+    tmp_path: Path,
+) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    reconciliation = root / "00-external-supervisor-reconciliation"
+    _private_directory(reconciliation)
+    _private_file(reconciliation / "intent.json")
+    _private_file(
+        reconciliation / "failure-diagnostic.json",
+        json.dumps(
+            {
+                "schema_version": 2,
+                "component_id": "external-supervisor-reconciliation",
+                "ordinal": 0,
+                "failure_code": "compensation-reconciliation-failed",
+                "diagnostic": (
+                    "classified external-supervisor compensation reconciliation failure"
+                ),
+                "primary_failure_code": None,
+                "compensation_failure_code": "transition-validation-failed",
+            }
+        ),
+    )
+    manifests = root / "01-staging-manifests"
+    _private_directory(manifests)
+    _private_file(manifests / "intent.json")
+    diagnostic = (
+        "unclassified staging-manifests failure: RuntimeError "
+        "at protected_apply_executor.py:245 in _run"
+    )
+    _private_file(
+        manifests / "failure-diagnostic.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "component_id": "staging-manifests",
+                "ordinal": 1,
+                "failure_code": "apply-failed",
+                "diagnostic": diagnostic,
+            }
+        ),
+    )
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "staging-manifests"
+    assert payload["protected_failure_code"] == "apply-failed"
+    assert payload["protected_failure_diagnostic"] == diagnostic
+
+
 @pytest.mark.parametrize(
     "diagnostic_record",
     [

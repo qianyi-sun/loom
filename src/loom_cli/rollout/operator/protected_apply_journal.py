@@ -10,6 +10,8 @@ blindly repeating protected work.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -40,6 +42,7 @@ _RECONCILIATION_OUTCOME_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
+_RENAME_NOREPLACE = 1
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_FAILURE_DIAGNOSTIC_CHARS = 512
 _MAX_RECONCILIATION_OUTCOMES = 1024
@@ -933,10 +936,77 @@ class ProtectedApplyJournal:
             diagnostic=diagnostic,
             compensation_failure_code=compensation_failure_code,
         )
-        self._publish_or_match(
+        self._publish_reconciliation_outcome(
             outcomes_root / f"{sequence:08d}.json",
             outcome.to_dict(),
         )
+
+    def _publish_reconciliation_outcome(
+        self,
+        path: Path,
+        value: Mapping[str, object],
+    ) -> None:
+        payload = _json_bytes(value)
+        if (
+            len(payload) > _MAX_RECONCILIATION_OUTCOME_BYTES
+            or path.parent.name != "reconciliation-outcomes"
+            or _RECONCILIATION_COMPONENT_DIRECTORY_RE.fullmatch(path.parent.parent.name) is None
+        ):
+            raise ProtectedApplyJournalError(
+                "protected reconciliation outcome publication is invalid"
+            )
+        source_directory_fd = _open_directory(path.parent.parent)
+        try:
+            destination_directory_fd = _open_directory(path.parent)
+        except BaseException:
+            os.close(source_directory_fd)
+            raise
+        temporary = f".{path.name}.{uuid4().hex}.tmp"
+        created = False
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                _PRIVATE_FILE_MODE,
+                dir_fd=source_directory_fd,
+            )
+            created = True
+            try:
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+                _write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _rename_noreplace(
+                source_directory_fd,
+                temporary,
+                destination_directory_fd,
+                path.name,
+            )
+            created = False
+            os.fsync(destination_directory_fd)
+            os.fsync(source_directory_fd)
+        except FileExistsError:
+            if self._read(path) != dict(value):
+                raise ProtectedApplyJournalError(
+                    "protected reconciliation outcome cannot be replaced"
+                ) from None
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not publish protected reconciliation outcome"
+            ) from exc
+        finally:
+            if created:
+                try:
+                    os.unlink(temporary, dir_fd=source_directory_fd)
+                except OSError:
+                    pass
+            os.close(destination_directory_fd)
+            os.close(source_directory_fd)
 
     def _classify_with_diagnostic(
         self,
@@ -1138,6 +1208,40 @@ def _open_directory(path: Path) -> int:
         | getattr(os, "O_DIRECTORY", 0)
         | getattr(os, "O_NOFOLLOW", 0),
     )
+
+
+def _rename_noreplace(
+    source_directory_fd: int,
+    source: str,
+    destination_directory_fd: int,
+    destination: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ProtectedApplyJournalError(
+            "atomic protected reconciliation outcome publication is unavailable"
+        )
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        source_directory_fd,
+        os.fsencode(source),
+        destination_directory_fd,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(error, os.strerror(error), destination)
+        raise OSError(error, os.strerror(error), destination)
 
 
 def _hash_json(value: Mapping[str, object]) -> str:

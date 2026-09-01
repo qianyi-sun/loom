@@ -1424,7 +1424,7 @@ def _protected_apply_progress(
     if len({ordinal for ordinal, _component, _path in component_entries}) != len(component_entries):
         raise RequestStoreError("protected apply progress is unsafe")
     last_complete: str | None = None
-    for _ordinal, component_id, component_root in component_entries:
+    for component_index, (_ordinal, component_id, component_root) in enumerate(component_entries):
         if not _private_progress_file(component_root / "intent.json", service_uid=service_uid):
             raise RequestStoreError("protected apply progress is incomplete")
         has_terminal = _private_progress_file(
@@ -1452,6 +1452,16 @@ def _protected_apply_progress(
                     )
                 last_complete = component_id
                 continue
+            if not has_terminal and component_index + 1 < len(component_entries):
+                _next_ordinal, _next_component, next_component_root = component_entries[
+                    component_index + 1
+                ]
+                if _private_progress_file(
+                    next_component_root / "intent.json",
+                    service_uid=service_uid,
+                ):
+                    last_complete = component_id
+                    continue
         if not has_terminal:
             failure_path = component_root / "failure.json"
             failed_hosts: tuple[str, ...] = ()

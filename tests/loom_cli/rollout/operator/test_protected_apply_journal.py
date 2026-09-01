@@ -443,6 +443,44 @@ def test_reconciliation_outcomes_advance_after_failure_then_success(
     assert not (outcomes.parent / "terminal.json").exists()
 
 
+def test_reconciliation_outcome_publication_does_not_need_post_publish_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = _journal(tmp_path)
+    real_unlink = os.unlink
+
+    def reject_outcome_unlink(path, *args, dir_fd=None, **kwargs):
+        if dir_fd is not None:
+            directory = Path(os.readlink(f"/proc/self/fd/{dir_fd}"))
+            if directory.name == "reconciliation-outcomes":
+                raise RuntimeError("simulated crash before temporary unlink")
+        return real_unlink(path, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", reject_outcome_unlink)
+    reconciliation = ProtectedApplyComponent(
+        component_id="external-supervisor-reconciliation",
+        implementation_digest="2" * 64,
+        input_fingerprint="3" * 64,
+        classify=lambda _plan: ComponentObservation(
+            state=ComponentState.EXACT,
+            evidence_digest="1" * 64,
+            observed_epoch=7,
+        ),
+        apply=lambda _plan: None,
+        reconcile_before_apply=True,
+    )
+
+    journal.execute(_plan(tmp_path), (reconciliation,))
+
+    outcome = (
+        tmp_path
+        / "state/requests/req-alpha/attempts/1/protected-apply"
+        / "00-external-supervisor-reconciliation/reconciliation-outcomes/00000000.json"
+    )
+    assert outcome.stat().st_nlink == 1
+
+
 def test_reconciliation_terminal_is_deferred_until_the_component_chain_completes(
     tmp_path: Path,
 ) -> None:
