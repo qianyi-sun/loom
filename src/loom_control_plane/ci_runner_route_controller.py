@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from loom_control_plane.ci_runner_lease_broker import (
+    GITHUB_RATE_LIMIT_RESERVE,
     WORKFLOW_CLASS_CONTRACTS,
     AssignmentState,
     CiRunnerLeaseBroker,
@@ -47,11 +48,12 @@ GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20
+MAX_GITHUB_REQUESTS_PER_RECONCILE = 35
 MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
 ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS = 3
 PUBLISHER_RETRY_SECONDS = 15
 ROUTE_DECISION_RETENTION_DAYS = 7
-OLDLAB_REQUEST_MAX_AGE_SECONDS = 30
+OLDLAB_REQUEST_MAX_AGE_SECONDS = 90
 TRUSTED_BRANCH = "dev"
 ALLOWED_EVENTS = {"pull_request", "merge_group", "workflow_dispatch", "push"}
 WORKFLOW_PATHS = {
@@ -105,6 +107,65 @@ APP_INSTALLATION_PERMISSIONS = {
 
 class RouteControllerError(RuntimeError):
     """A bounded, secret-free route-controller failure."""
+
+
+class GitHubRateLimitGovernor:
+    """Persist GitHub's core budget across the controller's oneshot processes."""
+
+    def __init__(
+        self,
+        *,
+        broker: CiRunnerLeaseBroker,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.broker = broker
+        self.now = now or (lambda: datetime.now(UTC))
+        self.requests = 0
+
+    def before_request(self) -> None:
+        observed_at = self.now()
+        if observed_at.tzinfo is None:
+            raise RouteControllerError("GitHub rate-limit clock is invalid")
+        budget = self.broker.github_rate_limit_budget()
+        if budget is not None:
+            reset_at = _github_timestamp(budget.reset_at, "rate_limit.reset_at")
+            if budget.remaining <= GITHUB_RATE_LIMIT_RESERVE and reset_at > observed_at.astimezone(
+                UTC
+            ):
+                raise RouteControllerError(
+                    f"GitHub API rate-limit safety reserve is active until {budget.reset_at}"
+                )
+        if self.requests >= MAX_GITHUB_REQUESTS_PER_RECONCILE:
+            raise RouteControllerError("GitHub API per-reconcile request budget is exhausted")
+        self.requests += 1
+
+    def observe(self, headers: Any) -> None:
+        resource = headers.get("X-RateLimit-Resource")
+        if resource is not None and resource != "core":
+            return
+        values = (
+            headers.get("X-RateLimit-Limit"),
+            headers.get("X-RateLimit-Remaining"),
+            headers.get("X-RateLimit-Reset"),
+        )
+        if all(value is None for value in values):
+            return
+        if any(value is None for value in values):
+            raise RouteControllerError("GitHub API rate-limit headers are incomplete")
+        try:
+            limit, remaining, reset_epoch = (int(cast(str, value)) for value in values)
+            reset_at = datetime.fromtimestamp(reset_epoch, tz=UTC)
+        except (OverflowError, ValueError) as exc:
+            raise RouteControllerError("GitHub API rate-limit headers are invalid") from exc
+        try:
+            self.broker.record_github_rate_limit_budget(
+                limit=limit,
+                remaining=remaining,
+                reset_at=reset_at,
+                now=self.now(),
+            )
+        except LeaseBrokerError as exc:
+            raise RouteControllerError(str(exc)) from exc
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -161,6 +222,7 @@ class GitHubRouteAPI:
         repository: str,
         token: str | None = None,
         token_provider: Callable[[], str] | None = None,
+        rate_limit_governor: GitHubRateLimitGovernor | None = None,
     ) -> None:
         if repository != EXPECTED_REPOSITORY or (token is None) == (token_provider is None):
             raise RouteControllerError("GitHub route API configuration is invalid")
@@ -168,6 +230,11 @@ class GitHubRouteAPI:
             raise RouteControllerError("GitHub route API configuration is invalid")
         self.repository = repository
         self._token_provider = token_provider or (lambda: cast(str, token))
+        self._rate_limit_governor = rate_limit_governor
+        self._workflow_run_cache: dict[int, Mapping[str, object]] = {}
+        self._content_blob_cache: dict[tuple[str, str], str] = {}
+        self._check_run_cache: dict[tuple[str, str], tuple[Mapping[str, object], ...]] = {}
+        self._workflow_jobs_cache: dict[tuple[int, int], tuple[Mapping[str, object], ...]] = {}
 
     def _token(self) -> str:
         token = self._token_provider()
@@ -182,6 +249,8 @@ class GitHubRouteAPI:
         *,
         payload: Mapping[str, object] | None = None,
     ) -> Any:
+        if self._rate_limit_governor is not None:
+            self._rate_limit_governor.before_request()
         token = self._token()
         body = json.dumps(payload, separators=(",", ":")).encode() if payload is not None else None
         request = urllib.request.Request(
@@ -201,7 +270,11 @@ class GitHubRouteAPI:
                 request, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS
             ) as response:
                 raw = cast(bytes, response.read(MAX_JSON_BYTES + 1))
+                if self._rate_limit_governor is not None:
+                    self._rate_limit_governor.observe(response.headers)
         except urllib.error.HTTPError as exc:
+            if self._rate_limit_governor is not None:
+                self._rate_limit_governor.observe(exc.headers)
             raise RouteControllerError(
                 f"GitHub API {method} {path} failed with HTTP {exc.code}"
             ) from None
@@ -265,10 +338,18 @@ class GitHubRouteAPI:
                 or any(not isinstance(item, dict) for item in runs)
             ):
                 continue
-            if total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW:
+            if (
+                total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW
+                or len(runs) > MAX_ACTIVE_RUNS_PER_WORKFLOW
+            ):
                 raise RouteControllerError("active workflow inventory exceeds the scan bound")
-            if total_count == len(runs):
-                return cast(list[dict[str, object]], runs)
+            # GitHub does not guarantee that ``total_count`` and the returned
+            # page are captured from the same instant. Runs frequently enter
+            # or leave ``in_progress`` between those two reads, especially
+            # during a PR burst. The page itself remains a bounded, useful
+            # snapshot: processing a partial snapshot is fail-safe because a
+            # missed request stays hosted and is rediscovered next cycle.
+            return cast(list[dict[str, object]], runs)
         raise RouteControllerError(
             "GitHub active workflow inventory remained malformed after bounded retries"
         )
@@ -300,6 +381,8 @@ class GitHubRouteAPI:
         return exact[0] if exact else None
 
     def download_artifact(self, artifact_id: int) -> bytes:
+        if self._rate_limit_governor is not None:
+            self._rate_limit_governor.before_request()
         initial = urllib.request.Request(
             (f"https://api.github.com/repos/{self.repository}/actions/artifacts/{artifact_id}/zip"),
             method="GET",
@@ -314,6 +397,8 @@ class GitHubRouteAPI:
         try:
             opener.open(initial, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as exc:
+            if self._rate_limit_governor is not None:
+                self._rate_limit_governor.observe(exc.headers)
             if exc.code not in {301, 302, 303, 307, 308}:
                 raise RouteControllerError(
                     f"GitHub artifact download failed with HTTP {exc.code}"
@@ -355,21 +440,34 @@ class GitHubRouteAPI:
         return raw
 
     def workflow_run(self, run_id: int) -> Mapping[str, object]:
+        cached = self._workflow_run_cache.get(run_id)
+        if cached is not None:
+            return cached
         payload = self._request("GET", f"/actions/runs/{run_id}")
         if not isinstance(payload, dict):
             raise RouteControllerError("GitHub workflow run is malformed")
+        self._workflow_run_cache[run_id] = payload
         return payload
 
     def content_blob_sha(self, path: str, ref: str) -> str:
+        cache_key = (path, ref)
+        cached = self._content_blob_cache.get(cache_key)
+        if cached is not None:
+            return cached
         encoded_path = urllib.parse.quote(path, safe="/")
         encoded_ref = urllib.parse.quote(ref, safe="")
         payload = self._request("GET", f"/contents/{encoded_path}?ref={encoded_ref}")
         sha = payload.get("sha") if isinstance(payload, dict) else None
         if not isinstance(sha, str) or _SHA_RE.fullmatch(sha) is None:
             raise RouteControllerError("GitHub workflow blob identity is malformed")
+        self._content_blob_cache[cache_key] = sha
         return sha
 
     def check_runs(self, head_sha: str, name: str) -> Sequence[Mapping[str, object]]:
+        cache_key = (head_sha, name)
+        cached = self._check_run_cache.get(cache_key)
+        if cached is not None:
+            return cached
         encoded_name = urllib.parse.quote(name, safe="")
         payload = self._request(
             "GET",
@@ -378,16 +476,24 @@ class GitHubRouteAPI:
         checks = payload.get("check_runs") if isinstance(payload, dict) else None
         if not isinstance(checks, list):
             raise RouteControllerError("GitHub check-run inventory is malformed")
-        return [item for item in checks if isinstance(item, dict)]
+        result = tuple(item for item in checks if isinstance(item, dict))
+        self._check_run_cache[cache_key] = result
+        return result
 
     def workflow_jobs(self, run_id: int, attempt: int) -> Sequence[Mapping[str, object]]:
+        cache_key = (run_id, attempt)
+        cached = self._workflow_jobs_cache.get(cache_key)
+        if cached is not None:
+            return cached
         payload = self._request(
             "GET", f"/actions/runs/{run_id}/attempts/{attempt}/jobs?filter=all&per_page=100"
         )
         jobs = payload.get("jobs") if isinstance(payload, dict) else None
         if not isinstance(jobs, list):
             raise RouteControllerError("GitHub workflow jobs are malformed")
-        return [item for item in jobs if isinstance(item, dict)]
+        result = tuple(item for item in jobs if isinstance(item, dict))
+        self._workflow_jobs_cache[cache_key] = result
+        return result
 
 
 class GitHubAppRouteCheckPublisher:
@@ -401,6 +507,7 @@ class GitHubAppRouteCheckPublisher:
         installation_id: int,
         private_key_pem: bytes,
         now: Callable[[], datetime] | None = None,
+        rate_limit_governor: GitHubRateLimitGovernor | None = None,
     ) -> None:
         if repository != EXPECTED_REPOSITORY:
             raise RouteControllerError("route publisher repository is invalid")
@@ -424,6 +531,7 @@ class GitHubAppRouteCheckPublisher:
         self.installation_id = installation_id
         self._private_key_pem = private_key_pem
         self.now = now or (lambda: datetime.now(UTC))
+        self._rate_limit_governor = rate_limit_governor
         self._cached_token: str | None = None
         self._cached_token_expires_at: datetime | None = None
 
@@ -434,7 +542,10 @@ class GitHubAppRouteCheckPublisher:
         *,
         token: str,
         payload: Mapping[str, object],
+        account_rate_limit: bool = True,
     ) -> Mapping[str, object]:
+        if account_rate_limit and self._rate_limit_governor is not None:
+            self._rate_limit_governor.before_request()
         request = urllib.request.Request(
             url,
             data=json.dumps(payload, separators=(",", ":")).encode(),
@@ -452,7 +563,11 @@ class GitHubAppRouteCheckPublisher:
                 request, timeout=GITHUB_REQUEST_TIMEOUT_SECONDS
             ) as response:
                 raw = cast(bytes, response.read(MAX_JSON_BYTES + 1))
+                if account_rate_limit and self._rate_limit_governor is not None:
+                    self._rate_limit_governor.observe(response.headers)
         except urllib.error.HTTPError as exc:
+            if account_rate_limit and self._rate_limit_governor is not None:
+                self._rate_limit_governor.observe(exc.headers)
             raise RouteControllerError(
                 f"GitHub route publisher {method} failed with HTTP {exc.code}"
             ) from None
@@ -500,6 +615,7 @@ class GitHubAppRouteCheckPublisher:
                 "repositories": ["loom"],
                 "permissions": APP_INSTALLATION_PERMISSIONS,
             },
+            account_rate_limit=False,
         )
         token = response.get("token")
         permissions = response.get("permissions")
@@ -1314,15 +1430,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         publisher_private_key = _read_app_private_key(args.publisher_app_private_key_file)
         config = LeaseBrokerConfig.from_profile(args.profile)
         broker = CiRunnerLeaseBroker(args.state_db, config)
+        rate_limit_governor = GitHubRateLimitGovernor(broker=broker)
         publisher = GitHubAppRouteCheckPublisher(
             repository=args.repository,
             app_id=args.publisher_app_id,
             installation_id=args.publisher_installation_id,
             private_key_pem=publisher_private_key,
+            rate_limit_governor=rate_limit_governor,
         )
         api = GitHubRouteAPI(
             repository=args.repository,
             token_provider=publisher.installation_token,
+            rate_limit_governor=rate_limit_governor,
         )
         controller = CiRunnerRouteController(
             api=api,
