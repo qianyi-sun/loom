@@ -80,9 +80,11 @@ The operator bootstrap reuses the existing descriptor-bound source capture,
 atomic no-replace writes, retained-identity checks, fsync ordering, idempotent
 drift validation, created-object ownership ledger, and reverse rollback. It
 captures only the five operator assets, builds the distinct canonical policy,
-installs and validates the complete subset, ensures the empty material root,
-and returns a bounded public receipt containing only source and installed-code
-identities.
+installs the complete subset, and ensures the empty material root. It validates
+the installed assets against a retained-identity temporary policy, removes that
+staging file, and publishes the fixed policy last as the activation commit
+point. It then returns a bounded public receipt containing only source and
+installed-code identities.
 
 ## Failure and recovery
 

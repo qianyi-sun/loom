@@ -156,6 +156,8 @@ bootstrap never opens, copies, validates, hashes, prints, or otherwise consumes
 either input. The material client opens only those fixed
 administrator-provisioned paths, validates their metadata without following
 links, and invokes the FD-only client from the validated installed library.
+The installer first validates those installed assets against a temporary policy
+and publishes the fixed operator policy last as the activation commit point.
 The operator cannot select either pathname, and no checkout or runbook shell is
 executed as root. Its root-owned entrypoint necessarily starts before it can
 validate itself, but its pre-validation module body is stdlib-only and performs

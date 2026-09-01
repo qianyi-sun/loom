@@ -127,6 +127,7 @@ PROTECTED_NATIVE_AUTHORITY_EXACT = {
     "tests/ops/test_install_personal_dev_native_builder_runtime.py",
     "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
     "tests/ops/test_personal_dev_native_builder_conformance.py",
+    "tests/ops/test_personal_dev_native_builder_runbooks.py",
     "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
     "tests/ops/test_personal_dev_native_builder_runtime_authority_protocol.py",
     "tests/ops/test_personal_dev_native_builder_runtime_profile.py",

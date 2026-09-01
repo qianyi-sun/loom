@@ -343,6 +343,7 @@ def test_sudoers_and_tmpfiles_assets_have_the_only_authorized_rules() -> None:
         "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
         "scripts/ops/personal_dev_native_builder_runtime_profile.py",
         "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
+        "tests/ops/test_personal_dev_native_builder_runbooks.py",
         "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
         "deploy/personal-dev-native-builder/runtime-profile-v1.json",
         "deploy/worker-pools/gb10/README.md",
@@ -613,6 +614,7 @@ def test_operator_bootstrap_rejects_non_oldlab_target_before_mutation(
         "launcher",
         "material-client",
         "protocol",
+        "policy-stage",
         "policy",
         "material-root",
         "installed-validation",
@@ -658,6 +660,11 @@ def test_operator_bootstrap_rolls_back_every_publication_boundary(
             host_root,
             "/etc/loom/personal-dev-native-builder-operator-material-authority.json",
         ),
+        "policy-stage": _installed(
+            host_root,
+            "/etc/loom/"
+            f".personal-dev-native-builder-operator-material-authority.json.validate-{os.getpid()}",
+        ),
     }
     original_install = module._install_file
     original_ensure = module._ensure_directory
@@ -702,6 +709,56 @@ def test_operator_bootstrap_rolls_back_every_publication_boundary(
         module.bootstrap_operator_material(source_sha, source_tree)
 
     assert _tree_snapshot(host_root) == before
+
+
+def test_operator_policy_is_published_only_after_installed_validation(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the callable material policy becoming visible before validation."""
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    policy_path = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-operator-material-authority.json",
+    )
+    material_root = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-authority-material",
+    )
+    original_install = module._install_file
+    original_validate = module._validate_installed_policy
+    events: list[str] = []
+
+    def observe_policy_commit(
+        path: Path,
+        payload: bytes,
+        mode: int,
+        created: list[object],
+    ) -> bool:
+        if path == policy_path:
+            assert events == ["validated"]
+            assert material_root.is_dir()
+            events.append("policy-committed")
+        return original_install(path, payload, mode, created)
+
+    def observe_validation(*args: object, **kwargs: object) -> None:
+        assert not policy_path.exists()
+        assert material_root.is_dir()
+        original_validate(*args, **kwargs)
+        events.append("validated")
+
+    monkeypatch.setattr(module, "_install_file", observe_policy_commit)
+    monkeypatch.setattr(module, "_validate_installed_policy", observe_validation)
+
+    receipt = module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert receipt["status"] == "ok"
+    assert events == ["validated", "policy-committed"]
 
 
 def test_operator_bootstrap_never_opens_provisioned_material(
@@ -842,6 +899,59 @@ def test_operator_bootstrap_rejects_unsafe_source_before_installing(
     before = _tree_snapshot(host_root)
 
     with pytest.raises(module.BootstrapError, match="sealed_source_invalid"):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert _tree_snapshot(host_root) == before
+
+
+@pytest.mark.parametrize(
+    "inventory_override",
+    (
+        "ASSET_SPECS",
+        (
+            "MappingProxyType({**OPERATOR_MATERIAL_ASSET_SPECS, "
+            "'authority_client': ASSET_SPECS['protocol'], "
+            "'protocol': ASSET_SPECS['authority_client']})"
+        ),
+    ),
+    ids=("full-runtime", "swapped-paths"),
+)
+def test_operator_bootstrap_rejects_nonexact_inventory_before_publication(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    inventory_override: str,
+) -> None:
+    """Catches a nonexact inventory reaching any OLDLAB publication boundary."""
+    module, host_root, _source_sha, _source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    launcher = module.SOURCE_ROOT / (
+        "scripts/ops/"
+        "personal_dev_native_builder_runtime_authority_launcher.py"
+    )
+    launcher.write_text(
+        launcher.read_text(encoding="utf-8")
+        + "\nOPERATOR_MATERIAL_ASSET_SPECS = "
+        + inventory_override
+        + "\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o644)
+    _git(module.SOURCE_ROOT, "add", str(launcher.relative_to(module.SOURCE_ROOT)))
+    _git(module.SOURCE_ROOT, "commit", "-m", "malformed operator inventory")
+    source_sha = _git(module.SOURCE_ROOT, "rev-parse", "HEAD")
+    source_tree = _git(module.SOURCE_ROOT, "rev-parse", "HEAD^{tree}")
+
+    def reject_publication(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("operator inventory reached publication")
+
+    monkeypatch.setattr(module, "_install_file", reject_publication)
+    before = _tree_snapshot(host_root)
+
+    with pytest.raises(module.BootstrapError, match="source_inventory_invalid"):
         module.bootstrap_operator_material(source_sha, source_tree)
 
     assert _tree_snapshot(host_root) == before

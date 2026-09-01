@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import cast
 
 SOURCE_ROOT = Path("/opt/loom-personal-dev-native-builder-runtime-authority/source")
@@ -56,6 +56,59 @@ _OPERATOR_MATERIAL_POLICY_SCHEMA = (
 )
 _OPERATOR_MATERIAL_ROOT = Path(
     "/etc/loom/personal-dev-native-builder-authority-material"
+)
+_OPERATOR_MATERIAL_LIBRARY_ROOT = Path(
+    "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority"
+)
+_OPERATOR_MATERIAL_ASSET_LAYOUT: Mapping[str, tuple[Path, Path, int]] = (
+    MappingProxyType(
+        {
+            "authority_client": (
+                Path(
+                    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+                ),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_authority_client.py",
+                0o444,
+            ),
+            "crypto_helper": (
+                Path("scripts/ops/personal_dev_native_builder_runtime_crypto.py"),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_crypto.py",
+                0o444,
+            ),
+            "launcher": (
+                _LAUNCHER_RELATIVE,
+                Path(
+                    "/usr/local/libexec/"
+                    "loom-personal-dev-native-builder-runtime-authority"
+                ),
+                0o555,
+            ),
+            "material_client": (
+                _MATERIAL_CLIENT_RELATIVE,
+                Path(
+                    "/usr/local/libexec/"
+                    "loom-personal-dev-native-builder-runtime-authority-material-client"
+                ),
+                0o555,
+            ),
+            "protocol": (
+                Path(
+                    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py"
+                ),
+                _OPERATOR_MATERIAL_LIBRARY_ROOT
+                / "scripts"
+                / "ops"
+                / "personal_dev_native_builder_runtime_authority_protocol.py",
+                0o444,
+            ),
+        }
+    )
 )
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -371,10 +424,15 @@ def _capture_inventory(
     launcher_payload: bytes,
     *,
     specifications: Mapping[str, object] | None = None,
+    operator_material: bool = False,
 ) -> tuple[_SourceAsset, ...]:
     if specifications is None:
         specifications = getattr(launcher, "ASSET_SPECS", None)
     if not isinstance(specifications, Mapping) or not specifications:
+        raise BootstrapError("source_inventory_invalid")
+    if operator_material and set(specifications) != set(
+        _OPERATOR_MATERIAL_ASSET_LAYOUT
+    ):
         raise BootstrapError("source_inventory_invalid")
     assets: list[_SourceAsset] = []
     sources: set[Path] = set()
@@ -387,6 +445,12 @@ def _capture_inventory(
             specification,
             launcher,
         )
+        if operator_material and (
+            relative,
+            installed_path,
+            mode,
+        ) != _OPERATOR_MATERIAL_ASSET_LAYOUT[name]:
+            raise BootstrapError("source_inventory_invalid")
         if relative in sources or installed_path in destinations:
             raise BootstrapError("source_inventory_invalid")
         payload = (
@@ -411,16 +475,19 @@ def _capture_inventory(
     operator_specs = getattr(launcher, "OPERATOR_MATERIAL_ASSET_SPECS", None)
     if not isinstance(runtime_specs, Mapping):
         raise BootstrapError("source_inventory_invalid")
-    if dict(specifications) == dict(runtime_specs):
+    if operator_material:
+        if not isinstance(operator_specs, Mapping) or dict(specifications) != dict(
+            operator_specs
+        ):
+            raise BootstrapError("source_inventory_invalid")
+    elif dict(specifications) == dict(runtime_specs):
         if (
             by_name["broker"].installed_path != launcher.BROKER_PATH
             or by_name["sudoers"].payload != _SUDOERS_PAYLOAD
             or by_name["tmpfiles"].payload != _TMPFILES_PAYLOAD
         ):
             raise BootstrapError("source_inventory_invalid")
-    elif not isinstance(operator_specs, Mapping) or dict(specifications) != dict(
-        operator_specs
-    ):
+    else:
         raise BootstrapError("source_inventory_invalid")
     return tuple(assets)
 
@@ -524,6 +591,7 @@ def _pinned_operator_source_contract() -> Iterator[
             launcher,
             launcher_payload,
             specifications=specifications,
+            operator_material=True,
         )
         yield launcher, assets
     except BootstrapError:
@@ -1244,7 +1312,33 @@ def bootstrap_operator_material(
                 )
                 or changed
             )
+        material_root = _host_path(_OPERATOR_MATERIAL_ROOT)
+        _ensure_parents(material_root.parent, created)
+        changed = _ensure_directory(material_root, 0o700, created) or changed
         policy_path = _host_path(policy_logical)
+        staged_policy_path = policy_path.parent / (
+            f".{policy_path.name}.validate-{os.getpid()}"
+        )
+        if not _install_file(
+            staged_policy_path,
+            policy_payload,
+            0o444,
+            created,
+        ):
+            raise BootstrapError("publication_failed")
+        staged_policy_created = created[-1]
+        if staged_policy_created.path != staged_policy_path:
+            raise BootstrapError("publication_failed")
+        _validate_installed_policy(
+            launcher_asset,
+            staged_policy_path,
+            assets,
+            sudoers_path=None,
+            operator_material=True,
+        )
+        if not _remove_created_object(staged_policy_created):
+            raise BootstrapError("publication_failed")
+        created.remove(staged_policy_created)
         changed = (
             _install_file(
                 policy_path,
@@ -1253,16 +1347,6 @@ def bootstrap_operator_material(
                 created,
             )
             or changed
-        )
-        material_root = _host_path(_OPERATOR_MATERIAL_ROOT)
-        _ensure_parents(material_root.parent, created)
-        changed = _ensure_directory(material_root, 0o700, created) or changed
-        _validate_installed_policy(
-            launcher_asset,
-            policy_path,
-            assets,
-            sudoers_path=None,
-            operator_material=True,
         )
     except BaseException as exc:
         try:
