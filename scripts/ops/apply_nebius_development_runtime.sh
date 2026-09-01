@@ -34,6 +34,22 @@ done
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
 [[ -n "$model_provider_api_key_file" && -s "$model_provider_api_key_file" ]] || usage
 
+python3 - "$nebius_credentials" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+subject = document.get("subject-credentials")
+if not isinstance(subject, dict):
+    raise SystemExit("Nebius credentials must contain subject-credentials")
+required = {"alg", "private-key", "kid", "iss", "sub"}
+if not required <= subject.keys() or subject.get("alg") != "RS256":
+    raise SystemExit("Nebius credentials must be a complete RS256 service-account document")
+if subject.get("iss") != subject.get("sub"):
+    raise SystemExit("Nebius credential issuer and subject must match")
+PY
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
 
