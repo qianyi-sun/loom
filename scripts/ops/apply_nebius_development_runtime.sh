@@ -48,8 +48,8 @@ if [[ ${scheduler_enabled,,} != true ]]; then
   exit 1
 fi
 
-kubectl apply --server-side --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
-kubectl apply --server-side --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
+kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
+kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
 
 kubectl create secret generic loom-execution-capacity-collector-nebius \
   -n loom-nebius-development \

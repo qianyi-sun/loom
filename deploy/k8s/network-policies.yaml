@@ -40,6 +40,12 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-pipeline-orchestrator
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: loom-nebius-development
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: loom-execution-actuator
     ports:
     - port: 5432
       protocol: TCP
@@ -142,6 +148,12 @@ spec:
     - podSelector:
         matchLabels:
           app: loom-worker-router
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: loom-nebius-development
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: loom-execution-capacity-collector
     ports:
     - port: 8080
       protocol: TCP

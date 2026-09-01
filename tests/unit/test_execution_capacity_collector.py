@@ -559,6 +559,19 @@ def test_collector_secret_init_creates_only_owner_files(tmp_path: Path) -> None:
     assert all((path.stat().st_mode & 0o777) == 0o600 for path in destination.iterdir())
 
 
+def test_collector_secret_init_normalizes_kubernetes_fsgroup_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "control-plane-token").write_text("token", encoding="utf-8")
+    (source / "nebius-credentials.json").write_text("{}", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir(mode=0o770)
+
+    copy_projected_credentials(source, destination)
+
+    assert oct(destination.stat().st_mode & 0o777) == "0o700"
+
+
 def test_collector_manifest_is_active_configured_and_strictly_read_only() -> None:
     documents = list(
         yaml.safe_load_all(
