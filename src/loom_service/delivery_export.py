@@ -1363,11 +1363,13 @@ def _raw_metrics(item: SelectedTrial, calls: list[LlmCall]) -> dict[str, Any]:
 
 def _raw_verifier_output(item: SelectedTrial) -> dict[str, Any]:
     result = item.trial.result if isinstance(item.trial.result, dict) else {}
+    config = item.trial.config if isinstance(item.trial.config, dict) else {}
     return {
         "schema_version": "1",
         "trial_id": str(item.trial.id),
         "task_id": item.trial.task_id,
         "reward": item.reward,
+        "skip_verifier": config.get("skip_verifier") is True,
         "verifier_output": result.get("verifier_output") or result,
     }
 

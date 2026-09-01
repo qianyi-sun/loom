@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from loom.agent.terminus2.harbor_environment import (
 from loom.agent.terminus2.model_switch import (
     Role,
     install_role_router,
+    redact_agent_llm_kwargs,
     seed_fingerprint,
 )
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
@@ -260,14 +262,58 @@ async def _publish_harbor_artifacts_to_sandbox(
     return published
 
 
+def _scrub_harbor_trajectory_llm_kwargs(path: Path) -> None:
+    """Drop Harbor's dumped ``agent.extra.llm_kwargs.api_key`` before publish.
+
+    Harbor Terminus2 persists constructor ``llm_kwargs`` into trajectory.json.
+    Loom passes the step JWT as ``api_key`` there; multi-model already redacts
+    ``agent._llm_kwargs`` before dump, but single-model did not. Scrub the file
+    as defense in depth so a late dump cannot publish the JWT.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    agent = payload.get("agent")
+    if not isinstance(agent, dict):
+        return
+    extra = agent.get("extra")
+    if not isinstance(extra, dict):
+        return
+    llm_kwargs = extra.get("llm_kwargs")
+    if not isinstance(llm_kwargs, dict) or "api_key" not in llm_kwargs:
+        return
+    scrubbed = {
+        key: value
+        for key, value in llm_kwargs.items()
+        if key != "api_key" and "loom_step_" not in str(value)
+    }
+    if scrubbed:
+        extra["llm_kwargs"] = scrubbed
+    else:
+        extra.pop("llm_kwargs", None)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def _assert_harbor_artifacts_have_no_step_secrets(logs_root: Path) -> None:
-    """Fail closed if a step JWT leaked into Harbor's published dump."""
+    """Fail closed if a step JWT leaked into Harbor's published dump.
+
+    Match the real credential (``loom_step_`` JWT prefix). Do not treat a bare
+    ``"api_key"`` JSON key as a secret: agents often read third-party package
+    sources that contain that string, which previously false-failed publish
+    after long exploratory runs (e.g. greenlinestanport).
+    """
+    trajectory_path = logs_root / "trajectory.json"
+    if trajectory_path.is_file():
+        _scrub_harbor_trajectory_llm_kwargs(trajectory_path)
     for name in _HARBOR_ARTIFACT_NAMES:
         path = logs_root / name
         if not path.is_file():
             continue
         body = path.read_bytes()
-        if b"loom_step_" in body or b'"api_key"' in body.lower():
+        if b"loom_step_" in body:
             raise AgentError(
                 f"refusing to publish Harbor artifact {name}: "
                 "step credential material is present",
@@ -491,6 +537,10 @@ class LoomTerminus2Runtime:
             enable_summarize=False,
             llm_kwargs={"api_key": step_token},
         )
+        # LiteLLM already received the step JWT via constructor kwargs copy.
+        # Strip it from Harbor's trajectory dump field for single- and
+        # multi-model runs (install_role_router also redacts; idempotent).
+        redact_agent_llm_kwargs(agent)
         model_switch = None
         if self.multi_model is not None and self.multi_model.enabled:
             if self.multi_model.secondary_model is None:
