@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -1934,6 +1935,8 @@ def test_install_forced_key_migrates_predecessor_authority_atomically(
     controller_path = tmp_path / "controller.pub"
     legacy_path.write_bytes(legacy_public_key)
     controller_path.write_bytes(controller_public_key)
+    legacy_path.chmod(0o600)
+    controller_path.chmod(0o600)
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir(mode=0o700)
     authorized_keys = ssh_dir / "authorized_keys"
@@ -1970,6 +1973,425 @@ def test_install_forced_key_migrates_predecessor_authority_atomically(
     assert authorized_keys.stat().st_mode & 0o777 == 0o600
 
 
+def test_install_forced_key_rejects_writable_public_key_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o666)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="public key metadata is unsafe"):
+        broker.install_forced_key(controller_path)
+
+    assert not (tmp_path / ".ssh").exists()
+
+
+def test_install_forced_key_rejects_reused_key_before_creating_ssh_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    legacy_path.write_bytes(_public_key(8, "legacy"))
+    controller_path.chmod(0o600)
+    legacy_path.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="predecessor key is not distinct"):
+        broker.install_forced_key(
+            controller_path,
+            predecessor_public_key_path=legacy_path,
+        )
+
+    assert not (tmp_path / ".ssh").exists()
+
+
+def test_install_forced_key_preserves_authorized_keys_changed_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# preserve exactly\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_replace = os.replace
+    publications = 0
+
+    def corrupt_first_publication(source: Path | str, destination: Path | str) -> None:
+        nonlocal publications
+        real_replace(source, destination)
+        if Path(destination) == authorized_keys and publications == 0:
+            publications += 1
+            authorized_keys.write_bytes(b"corrupt after publication\n")
+            authorized_keys.chmod(0o600)
+
+    monkeypatch.setattr(broker.os, "replace", corrupt_first_publication)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert authorized_keys.read_bytes() == b"corrupt after publication\n"
+    assert authorized_keys.stat().st_mode & 0o777 == 0o600
+
+
+def test_install_forced_key_preserves_replacement_authorized_keys_during_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(b"# original\n" + _public_key(9, "unrelated"))
+    authorized_keys.chmod(0o600)
+    displaced = ssh_dir / "transaction-publication"
+    replacement = b"# concurrent external update\n" + _public_key(10, "external")
+    replacement_inode: int | None = None
+    readbacks = 0
+    real_read = broker._read_authorized_keys
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_on_publication_readback(
+        path: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[bool, bytes]:
+        nonlocal readbacks, replacement_inode
+        readbacks += 1
+        if readbacks == 2:
+            path.rename(displaced)
+            path.write_bytes(replacement)
+            path.chmod(0o600)
+            replacement_inode = path.stat().st_ino
+            raise broker.BrokerError("injected publication readback failure")
+        return real_read(path, uid=uid, gid=gid)
+
+    monkeypatch.setattr(broker, "_read_authorized_keys", replace_on_publication_readback)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_file()
+    assert replacement_inode is not None
+    assert authorized_keys.stat().st_ino == replacement_inode
+    assert authorized_keys.read_bytes() == replacement
+
+
+def test_install_forced_key_preserves_replacement_authorized_keys_staging_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# original\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    displaced = ssh_dir / "displaced-authorized-keys-staging"
+    replacement = b"external staging replacement\n"
+    replacement_path: Path | None = None
+    replacement_inode: int | None = None
+    real_fsync = broker.os.fsync
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_staging_then_fail(descriptor: int) -> None:
+        nonlocal replacement_path, replacement_inode
+        candidates = list(ssh_dir.glob(".authorized_keys.*"))
+        if candidates and replacement_path is None:
+            staging = candidates[0]
+            staging.rename(displaced)
+            staging.write_bytes(replacement)
+            staging.chmod(0o600)
+            replacement_path = staging
+            replacement_inode = staging.stat().st_ino
+            raise OSError("injected authorized-keys staging fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(broker.os, "fsync", replace_staging_then_fail)
+
+    with pytest.raises(broker.BrokerError):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_file()
+    assert replacement_path is not None
+    assert replacement_inode is not None
+    assert replacement_path.stat().st_ino == replacement_inode
+    assert replacement_path.read_bytes() == replacement
+    assert authorized_keys.read_bytes() == original
+
+
+def test_install_forced_key_removes_new_ssh_directory_when_chown_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_chown = broker.os.chown
+
+    def fail_ssh_chown(path: Path | str, uid: int, gid: int) -> None:
+        if Path(path).name.startswith(".loom-directory-.ssh."):
+            raise OSError("injected chown failure")
+        real_chown(path, uid, gid)
+
+    monkeypatch.setattr(broker.os, "chown", fail_ssh_chown)
+
+    with pytest.raises(broker.BrokerError, match="authorized keys publication failed"):
+        broker.install_forced_key(controller_path)
+
+    assert not ssh_dir.exists()
+
+
+def test_install_forced_key_removes_new_ssh_directory_when_parent_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_fsync = broker._fsync_path_directory
+    failed = False
+
+    def fail_first_parent_fsync(path: Path) -> None:
+        nonlocal failed
+        if path == ssh_dir.parent and ssh_dir.exists() and not failed:
+            failed = True
+            raise OSError("injected parent fsync failure")
+        real_fsync(path)
+
+    monkeypatch.setattr(broker, "_fsync_path_directory", fail_first_parent_fsync)
+
+    with pytest.raises(broker.BrokerError, match="publication failed"):
+        broker.install_forced_key(controller_path)
+
+    assert failed is True
+    assert not ssh_dir.exists()
+
+
+def test_install_forced_key_preserves_replacement_ssh_directory_during_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    displaced = tmp_path / "displaced-ssh"
+    replacement_inode: int | None = None
+    real_read = broker._read_authorized_keys
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_ssh_directory_then_fail(
+        path: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[bool, bytes]:
+        nonlocal replacement_inode
+        if path == ssh_dir / "authorized_keys" and replacement_inode is None:
+            ssh_dir.rename(displaced)
+            ssh_dir.mkdir(mode=0o700)
+            replacement_inode = ssh_dir.stat().st_ino
+            raise broker.BrokerError("injected authority inspection failure")
+        return real_read(path, uid=uid, gid=gid)
+
+    monkeypatch.setattr(broker, "_read_authorized_keys", replace_ssh_directory_then_fail)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_dir()
+    assert replacement_inode is not None
+    assert ssh_dir.stat().st_ino == replacement_inode
+
+
+def test_install_forced_key_rerun_recovers_hard_stop_after_ssh_directory_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_rename = broker._rename_noreplace
+
+    class SimulatedHardStop(BaseException):
+        pass
+
+    def rename_then_stop(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        raise SimulatedHardStop
+
+    monkeypatch.setattr(broker, "_rename_noreplace", rename_then_stop)
+
+    with pytest.raises(SimulatedHardStop):
+        broker.install_forced_key(controller_path)
+
+    assert ssh_dir.is_dir()
+    assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o700
+    assert list(ssh_dir.iterdir()) == []
+
+    monkeypatch.setattr(broker, "_rename_noreplace", real_rename)
+    broker.install_forced_key(controller_path)
+
+    assert (ssh_dir / "authorized_keys").read_bytes().endswith(b" loom-gb10-external-supervisor\n")
+
+
+def test_install_forced_key_rolls_back_before_reporting_deferred_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# preserve exactly\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    monkeypatch.setattr(broker, "_SIGNALS_DEFERRED", False)
+    monkeypatch.setattr(broker, "_DEFERRED_SIGNAL", None)
+    real_write = broker._write_authorized_keys
+    writes = 0
+
+    def signal_after_first_write(
+        path: Path,
+        payload: bytes,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[int, int]:
+        nonlocal writes
+        assert broker._SIGNALS_DEFERRED is True
+        identity = real_write(path, payload, uid=uid, gid=gid)
+        writes += 1
+        if writes == 1:
+            broker._handle_broker_signal(signal.SIGTERM, None)
+        return identity
+
+    monkeypatch.setattr(broker, "_write_authorized_keys", signal_after_first_write)
+
+    with pytest.raises(broker.BrokerInterruptedError, match="interrupted safely"):
+        broker.install_forced_key(controller_path)
+
+    assert writes == 2
+    assert authorized_keys.read_bytes() == original
+    assert broker._SIGNALS_DEFERRED is False
+    assert broker._DEFERRED_SIGNAL is None
+
+
 def test_broker_install_authority_dispatches_exact_predecessor_migration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1982,6 +2404,8 @@ def test_broker_install_authority_dispatches_exact_predecessor_migration(
     controller_path = tmp_path / "controller.pub"
     legacy_path.write_bytes(legacy_public_key)
     controller_path.write_bytes(controller_public_key)
+    legacy_path.chmod(0o600)
+    controller_path.chmod(0o600)
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir(mode=0o700)
     authorized_keys = ssh_dir / "authorized_keys"
@@ -1994,6 +2418,7 @@ def test_broker_install_authority_dispatches_exact_predecessor_migration(
     authorized_keys.chmod(0o600)
     monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
     monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker, "_read_public_key_file", lambda path: path.read_bytes())
     monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
     monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
     monkeypatch.setattr(
