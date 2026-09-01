@@ -29,6 +29,11 @@ from loom_cli.rollout.gb10_slurm_acceptance import (
     validate_gb10_slurm_acceptance,
 )
 
+from .protected_external_supervisor_credential_transport import (
+    ExternalSupervisorCredentialEvidence,
+    FixedLocalExternalSupervisorCredentialTransport,
+    ProtectedExternalSupervisorCredentialTransport,
+)
 from .protected_external_supervisor_transport import (
     AtomicUserUnitStore,
     ExternalSupervisorLiveObservation,
@@ -54,6 +59,7 @@ _REMOTE_COMMAND = "loom-external-supervisor-v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_WIRE_BYTES = 4 * 1024 * 1024
+_CREDENTIAL_MISSING = object()
 
 
 class CommandResult(Protocol):
@@ -327,6 +333,21 @@ def _encode_helper_request(
                 ),
             }
         )
+    elif operation in {"observe_credential", "publish_credential"}:
+        if any(
+            item is not None
+            for item in (
+                artifact,
+                predecessor_authority,
+                expected,
+                plan_digest,
+                attestation_digest,
+                transition_digest,
+                profile_sha256,
+                nodes,
+            )
+        ):
+            raise ValueError("GB10 controller credential request is invalid")
     elif operation != "reconcile_compensations" or any(
         item is not None
         for item in (
@@ -351,6 +372,7 @@ def _encode_helper_response(
     operation: str,
     *,
     observation: ExternalSupervisorLiveObservation | None = None,
+    credential: ExternalSupervisorCredentialEvidence | None | object = _CREDENTIAL_MISSING,
 ) -> str:
     if operation == "observe":
         if observation is None:
@@ -361,8 +383,25 @@ def _encode_helper_response(
             "schema_version": 1,
             "status": "ok",
         }
-    elif operation in {"apply", "reconcile_compensations"} and observation is None:
+    elif operation in {"apply", "reconcile_compensations"} and (
+        observation is None and credential is _CREDENTIAL_MISSING
+    ):
         payload = {"operation": operation, "schema_version": 1, "status": "ok"}
+    elif operation in {"observe_credential", "publish_credential"} and observation is None:
+        if credential is _CREDENTIAL_MISSING or (
+            operation == "publish_credential" and credential is None
+        ):
+            raise ValueError("GB10 controller credential response is invalid")
+        if credential is not None and not isinstance(
+            credential, ExternalSupervisorCredentialEvidence
+        ):
+            raise ValueError("GB10 controller credential response is invalid")
+        payload = {
+            "credential": None if credential is None else credential.to_dict(),
+            "operation": operation,
+            "schema_version": 1,
+            "status": "ok",
+        }
     else:
         raise ValueError("GB10 controller helper response is invalid")
     return _canonical_json(payload)
@@ -376,7 +415,11 @@ def _decode_helper_response(payload: str, *, operation: str) -> dict[str, object
         else (
             {"acceptance", "operation", "schema_version", "status"}
             if operation == "accept_capacity"
-            else {"operation", "schema_version", "status"}
+            else (
+                {"credential", "operation", "schema_version", "status"}
+                if operation in {"observe_credential", "publish_credential"}
+                else {"operation", "schema_version", "status"}
+            )
         )
     )
     if (
@@ -396,9 +439,29 @@ def _decode_helper_observation(payload: str) -> ExternalSupervisorLiveObservatio
     )
 
 
+def _decode_helper_credential(
+    payload: str,
+    *,
+    operation: str,
+) -> ExternalSupervisorCredentialEvidence | None:
+    if operation not in {"observe_credential", "publish_credential"}:
+        raise ValueError("GB10 controller credential response operation is invalid")
+    value = _decode_helper_response(payload, operation=operation)["credential"]
+    if value is None:
+        if operation != "observe_credential":
+            raise RuntimeError("GB10 controller credential response drifted")
+        return None
+    if not isinstance(value, dict):
+        raise RuntimeError("GB10 controller credential response drifted")
+    try:
+        return ExternalSupervisorCredentialEvidence.from_dict(value)
+    except ValueError as exc:
+        raise RuntimeError("GB10 controller credential response drifted") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class FixedGB10ExternalSupervisorTransport:
-    """Invoke only four typed controller operations through one forced key."""
+    """Invoke only fixed typed controller operations through one forced key."""
 
     candidate_sha: str
     candidate_tree: str
@@ -462,6 +525,31 @@ class FixedGB10ExternalSupervisorTransport:
             self._invoke(request),
             operation="reconcile_compensations",
         )
+
+    def observe_credential(self) -> ExternalSupervisorCredentialEvidence | None:
+        request = _encode_helper_request(
+            operation="observe_credential",
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+        )
+        return _decode_helper_credential(
+            self._invoke(request),
+            operation="observe_credential",
+        )
+
+    def publish_credential(self) -> ExternalSupervisorCredentialEvidence:
+        request = _encode_helper_request(
+            operation="publish_credential",
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+        )
+        evidence = _decode_helper_credential(
+            self._invoke(request),
+            operation="publish_credential",
+        )
+        if evidence is None:  # narrowed by the decoder; retains explicit fail-closed type.
+            raise RuntimeError("GB10 controller credential response drifted")
+        return evidence
 
     def accept_capacity(
         self,
@@ -542,10 +630,24 @@ class FixedGB10ExternalSupervisorTransport:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class GB10ExternalSupervisorCredentialTransport:
+    """Adapt the fixed GB10 credential operations to the journal protocol."""
+
+    transport: FixedGB10ExternalSupervisorTransport
+
+    def observe(self) -> ExternalSupervisorCredentialEvidence | None:
+        return self.transport.observe_credential()
+
+    def publish(self) -> ExternalSupervisorCredentialEvidence:
+        return self.transport.publish_credential()
+
+
 def _handle_helper_request(
     payload: str,
     *,
-    transport: ProtectedExternalSupervisorTransport,
+    transport: ProtectedExternalSupervisorTransport | None,
+    credential_transport: ProtectedExternalSupervisorCredentialTransport | None = None,
 ) -> str:
     request = _strict_json(payload, label="GB10 controller request")
     operation = request.get("operation")
@@ -554,6 +656,8 @@ def _handle_helper_request(
         "observe",
         "apply",
         "reconcile_compensations",
+        "observe_credential",
+        "publish_credential",
     }:
         raise ValueError("GB10 controller request is invalid")
     candidate_sha = _sha(request.get("candidate_sha"), label="GB10 controller candidate SHA")
@@ -561,6 +665,17 @@ def _handle_helper_request(
         request.get("candidate_tree"),
         label="GB10 controller candidate tree",
     )
+    if operation in {"observe_credential", "publish_credential"}:
+        if set(request) != common or credential_transport is None:
+            raise ValueError("GB10 controller credential request is invalid")
+        evidence = (
+            credential_transport.observe()
+            if operation == "observe_credential"
+            else credential_transport.publish()
+        )
+        return _encode_helper_response(operation, credential=evidence)
+    if transport is None:
+        raise ValueError("GB10 controller supervisor transport is unavailable")
     if operation == "reconcile_compensations":
         if set(request) != common:
             raise ValueError("GB10 controller reconcile request is invalid")
@@ -625,6 +740,18 @@ def _fixed_local_transport() -> FixedExternalSupervisorTransport:
     )
 
 
+def _fixed_local_credential_transport(
+    candidate_sha: str,
+) -> FixedLocalExternalSupervisorCredentialTransport:
+    candidate_root = Path("/opt/loom-staging-runner/candidates") / candidate_sha / "repo"
+    return FixedLocalExternalSupervisorCredentialTransport(
+        candidate_root=candidate_root,
+        execution_host=GB10_CONTROLLER_EXECUTION_HOST,
+        service_uid=GB10_CONTROLLER_SERVICE_UID,
+        service_gid=GB10_CONTROLLER_SERVICE_GID,
+    )
+
+
 def build_fixed_gb10_external_supervisor_transport(
     *,
     candidate_sha: str,
@@ -672,7 +799,11 @@ def main() -> int:
         )
         if not _helper_runtime_matches(candidate_sha):
             raise ValueError("GB10 controller helper runtime drifted")
-        response = _handle_helper_request(text, transport=_fixed_local_transport())
+        response = _handle_helper_request(
+            text,
+            transport=_fixed_local_transport(),
+            credential_transport=_fixed_local_credential_transport(candidate_sha),
+        )
     except (OSError, RuntimeError, UnicodeError, ValueError):
         return 1
     sys.stdout.write(response)
@@ -688,5 +819,6 @@ __all__ = [
     "GB10_CONTROLLER_HOME",
     "GB10_CONTROLLER_UNIT_DIR",
     "FixedGB10ExternalSupervisorTransport",
+    "GB10ExternalSupervisorCredentialTransport",
     "build_fixed_gb10_external_supervisor_transport",
 ]

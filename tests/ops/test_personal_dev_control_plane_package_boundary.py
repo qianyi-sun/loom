@@ -457,8 +457,8 @@ def _run_predecessor_status_compatibility_guard(
         f"predecessor_profile={shlex.quote(str(predecessor_profile))}\n"
         f"predecessor_loom_cli={shlex.quote(str(predecessor_cli))}\n"
         f"evidence_dir={shlex.quote(str(tmp_path))}\n"
-        "exec 31<\"$predecessor_release_source\"\n"
-        "exec 36<\"$kubeconfig_source\"\n"
+        'exec 31<"$predecessor_release_source"\n'
+        'exec 36<"$kubeconfig_source"\n'
         "predecessor_release=/proc/self/fd/31\n"
         "kubeconfig=/proc/self/fd/36\n"
         f"run_predecessor_shadow_status {shlex.quote(str(status_path))}\n"
@@ -936,9 +936,38 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
     ownership = _read("config/component-ownership.toml")
 
+    assert (
+        "# syntax=docker/dockerfile:1.20@sha256:"
+        "26147acbda4f14c5add9946e2fd2ed543fc402884fd75146bd342a7f6271dc1d" in dockerfile
+    )
+    assert (
+        "golang:1.26-alpine3.23@sha256:"
+        "b17af760035fc2f338eed92d448a6c67f2d45438844fc6c60678fa5f99e44b57" in dockerfile
+    )
+    assert (
+        "https://github.com/moby/buildkit/archive/"
+        "991535e0973488b6a429096d21fa13f81f2d89d8.tar.gz" in dockerfile
+    )
+    assert "ebc242057b1eee67eb14ead8def52c3770c6793c8c8ac0c53d41983b085360f4" in dockerfile
+    assert (
+        "https://github.com/rootless-containers/rootlesskit/archive/"
+        "62d2101fbbe4f79bc845a337c4e868d27ff602c9.tar.gz" in dockerfile
+    )
+    assert "51aa4e79847ce9ad48e76a7b824f13ab323b4b90bc13a692e9c8035b8da9340a" in dockerfile
+    assert dockerfile.count("go get golang.org/x/crypto@v0.55.0") == 2
+    assert "go version go1.26.7" in dockerfile
+    assert "golang.org/x/crypto" in dockerfile
+    assert 'required_version="v0.55.0"' in dockerfile
     assert "rootlesskit version 3.1.0" in dockerfile
-    assert "go mod edit -require=golang.org/x/crypto@v0.55.0" in dockerfile
-    assert "rootlesskit.sha256" in dockerfile
+    for binary_sha256 in (
+        "5c594a04284993e440e7d6fa8f007e15351df0118b3ee2f29e1a1baaf5a23a83",
+        "85a89191d7dc2ee53a06f54aaf7969df62092602e31b7dfbc008e1b67e6908c4",
+        "ab942b0add070aa7ff4be0f366b5fd20c6c99a485f071556a59d5564c5d8841b",
+        "c2e0830c20f1122e671d24a5a4fe91b5ab71e8bae80fc650ebbffec3168e155b",
+        "6c117ff680f6b94f28cca78961c6bee3ff7b49fa1e159c2db63322e7f2ecd549",
+        "3871394a3917b1c9d12f04f2d2296b9a870fb94be5d3ff812410777a77e922cd",
+    ):
+        assert binary_sha256 in dockerfile
     assert "ARG TARGETARCH" in dockerfile
     assert "/usr/bin/buildctl" in dockerfile
     assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile
@@ -4025,11 +4054,11 @@ def test_isolated_postgres_waits_for_final_pid1_before_readiness(
         "pid1_checks=0\n"
         "sleep() { :; }\n"
         "docker() {\n"
-        "  test \"$1\" = exec || return 97\n"
-        "  case \"$*\" in\n"
+        '  test "$1" = exec || return 97\n'
+        '  case "$*" in\n'
         "    *'read -r comm </proc/1/comm; test \"$comm\" = postgres'*)\n"
         "      pid1_checks=$((pid1_checks + 1))\n"
-        "      if test \"$pid1_checks\" -eq 1; then\n"
+        '      if test "$pid1_checks" -eq 1; then\n'
         "        printf 'bootstrap-pid1\\n' >> \"$call_log\"\n"
         "        return 1\n"
         "      fi\n"
@@ -4038,7 +4067,7 @@ def test_isolated_postgres_waits_for_final_pid1_before_readiness(
         "      ;;\n"
         "    *pg_isready*)\n"
         "      printf 'pg-isready\\n' >> \"$call_log\"\n"
-        "      test \"$pid1_checks\" -ge 2\n"
+        '      test "$pid1_checks" -ge 2\n'
         "      ;;\n"
         "    *) return 98 ;;\n"
         "  esac\n"
@@ -4240,9 +4269,7 @@ def test_schema_transition_rehearsal_exports_explicit_postgres_identity(
     assert arguments[0] == b"run"
     assert arguments[-2:] == [b"postgres-image", b""]
     environment = [
-        arguments[index + 1]
-        for index, argument in enumerate(arguments)
-        if argument == b"--env"
+        arguments[index + 1] for index, argument in enumerate(arguments) if argument == b"--env"
     ]
     assert len(environment) == 3
     assert set(environment) == {
@@ -5609,9 +5636,7 @@ def test_schema_transition_predecessor_ready_uses_guarded_status_runner(
     )
 
     assert result.returncode == 0, result.stderr
-    assert call_log.read_text(encoding="ascii").splitlines() == [
-        "guarded-predecessor-status"
-    ]
+    assert call_log.read_text(encoding="ascii").splitlines() == ["guarded-predecessor-status"]
 
 
 def test_schema_transition_pre_quiesce_failure_does_not_mutate_recovery(

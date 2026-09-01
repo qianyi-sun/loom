@@ -93,6 +93,7 @@ def _enabled_config(module: Any, tmp_path: Path):
         max_jobs=1,
         pending_job_cap=1,
         idle_exit_after_seconds=120,
+        failure_backoff_seconds=300,
         sbatch_path="/usr/bin/sbatch",
         squeue_path="/usr/bin/squeue",
         sacct_path="/usr/bin/sacct",
@@ -127,7 +128,9 @@ def test_validate_only_succeeds_before_runtime_materialization(
     monkeypatch.setattr(module, "_validate_builder_runtime_files", forbidden)
     monkeypatch.setattr(module, "_validate_builder_credentials", forbidden)
     monkeypatch.setattr(module.transport, "_load_cp_db_url", forbidden)
-    monkeypatch.setattr(module, "_global_execution_scale_up_allowed", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        module, "_global_execution_scale_up_allowed", lambda *_args, **_kwargs: True
+    )
 
     asyncio.run(module._main_async(_args(module, tmp_path, "--validate-only")))
 
@@ -204,6 +207,7 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
         "max_jobs": 1,
         "pending_job_cap": 1,
         "idle_exit_after_seconds": 120,
+        "failure_backoff_seconds": 123,
         "exclusive": True,
         "sbatch_path": "sbatch",
         "squeue_path": "squeue",
@@ -232,16 +236,20 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     assert config.builder_token_file == str(tmp_path / "builder-token")
     assert config.repo_dir == str(repo_dir)
     assert config.registry_docker_config_dir == str(registry_docker_config_dir)
+    assert config.failure_backoff_seconds == 123
 
 
 def test_invalid_global_execution_witness_enters_drain_only_mode(
     module: Any,
     tmp_path: Path,
 ) -> None:
-    assert module._global_execution_scale_up_allowed(
-        _args(module, tmp_path),
-        slurm_cluster_id="gb10",
-    ) is False
+    assert (
+        module._global_execution_scale_up_allowed(
+            _args(module, tmp_path),
+            slurm_cluster_id="gb10",
+        )
+        is False
+    )
 
 
 async def test_builder_token_validation_requires_dedicated_scope(
@@ -310,9 +318,7 @@ async def test_builder_credentials_require_expected_registry_auth_entry(
 
     class _Session:
         async def execute(self, _query: object) -> Any:
-            return SimpleNamespace(
-                one_or_none=lambda: ("worker", ["task-image:build"], None, None)
-            )
+            return SimpleNamespace(one_or_none=lambda: ("worker", ["task-image:build"], None, None))
 
     with pytest.raises(module.TaskImageBuilderPolicyError, match="registry credentials"):
         await module._validate_builder_credentials(
@@ -344,9 +350,7 @@ async def test_builder_credentials_reject_username_only_registry_entry(
 
     class _Session:
         async def execute(self, _query: object) -> Any:
-            return SimpleNamespace(
-                one_or_none=lambda: ("worker", ["task-image:build"], None, None)
-            )
+            return SimpleNamespace(one_or_none=lambda: ("worker", ["task-image:build"], None, None))
 
     with pytest.raises(module.TaskImageBuilderPolicyError, match="registry credentials"):
         await module._validate_builder_credentials(
@@ -583,9 +587,7 @@ def test_builder_env_refuses_hardlinked_token_without_replacing_target(
 ) -> None:
     template = tmp_path / "trial-worker.env"
     template.write_text(
-        "LOOM_WORKER_TOKEN=ordinary\n"
-        "LOOM_WORKER_POOL_NAME=oldlab\n"
-        "LOOM_WORKER_MAX_CONCURRENT=6\n",
+        "LOOM_WORKER_TOKEN=ordinary\nLOOM_WORKER_POOL_NAME=oldlab\nLOOM_WORKER_MAX_CONCURRENT=6\n",
         encoding="utf-8",
     )
     template.chmod(0o600)

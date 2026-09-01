@@ -146,6 +146,7 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
             max_jobs=int(policy["max_jobs"]),
             pending_job_cap=int(policy["pending_job_cap"]),
             idle_exit_after_seconds=int(policy["idle_exit_after_seconds"]),
+            failure_backoff_seconds=int(policy["failure_backoff_seconds"]),
             sbatch_path=str(policy["sbatch_path"]),
             squeue_path=str(policy["squeue_path"]),
             sacct_path=str(policy["sacct_path"]),
@@ -176,16 +177,14 @@ def _read_private_builder_input(path: Path, *, label: str, max_bytes: int) -> by
             or metadata.st_size <= 0
             or metadata.st_size > max_bytes
         ):
-            raise TaskImageBuilderPolicyError(
-                f"task-image builder {label} metadata is unsafe"
-            )
+            raise TaskImageBuilderPolicyError(f"task-image builder {label} metadata is unsafe")
         with path.open("rb") as handle:
             payload = handle.read(max_bytes + 1)
             opened = os.fstat(handle.fileno())
-        if (
-            len(payload) > max_bytes
-            or (opened.st_dev, opened.st_ino, opened.st_size)
-            != (metadata.st_dev, metadata.st_ino, metadata.st_size)
+        if len(payload) > max_bytes or (opened.st_dev, opened.st_ino, opened.st_size) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
         ):
             raise TaskImageBuilderPolicyError(
                 f"task-image builder {label} changed while being read"
@@ -194,9 +193,7 @@ def _read_private_builder_input(path: Path, *, label: str, max_bytes: int) -> by
     except TaskImageBuilderPolicyError:
         raise
     except OSError as exc:
-        raise TaskImageBuilderPolicyError(
-            f"task-image builder {label} is unavailable"
-        ) from exc
+        raise TaskImageBuilderPolicyError(f"task-image builder {label} is unavailable") from exc
 
 
 def _replace_env_values(existing: str, updates: dict[str, str]) -> str:
@@ -260,9 +257,7 @@ def _materialize_builder_env(config: Any) -> dict[str, str]:
         or parent_metadata.st_uid != os.geteuid()
         or stat.S_IMODE(parent_metadata.st_mode) & 0o022
     ):
-        raise TaskImageBuilderPolicyError(
-            "task-image builder env destination metadata is unsafe"
-        )
+        raise TaskImageBuilderPolicyError("task-image builder env destination metadata is unsafe")
     if target.exists() or target.is_symlink():
         _read_private_builder_input(target, label="env destination", max_bytes=1 << 20)
     rendered = _replace_env_values(
@@ -309,9 +304,7 @@ def _materialize_builder_env(config: Any) -> dict[str, str]:
         max_bytes=1 << 20,
     )
     if target_payload != rendered:
-        raise TaskImageBuilderPolicyError(
-            "task-image builder env changed after materialization"
-        )
+        raise TaskImageBuilderPolicyError("task-image builder env changed after materialization")
     return {"env_sha256": hashlib.sha256(rendered).hexdigest()}
 
 
@@ -345,8 +338,7 @@ def _validate_builder_runtime_files(config: TaskImageBuilderPoolConfig) -> None:
 
 def _usable_registry_auth(value: object) -> bool:
     return isinstance(value, dict) and any(
-        isinstance(value.get(key), str) and value[key]
-        for key in ("auth", "identitytoken")
+        isinstance(value.get(key), str) and value[key] for key in ("auth", "identitytoken")
     )
 
 
@@ -380,9 +372,7 @@ def _builder_registry_auths(registry_docker_config_dir: str) -> dict[str, object
         ) from exc
     auths = docker_config.get("auths") if isinstance(docker_config, dict) else None
     if not isinstance(auths, dict):
-        raise TaskImageBuilderPolicyError(
-            "task-image builder registry credentials are invalid"
-        )
+        raise TaskImageBuilderPolicyError("task-image builder registry credentials are invalid")
     return auths
 
 
@@ -522,9 +512,7 @@ async def _main_async(args: argparse.Namespace) -> None:
             args,
             slurm_cluster_id=config.slurm_cluster_id,
         ):
-            raise TaskImageBuilderPolicyError(
-                "global execution witness is unavailable"
-            )
+            raise TaskImageBuilderPolicyError("global execution witness is unavailable")
         evidence = _rehearsal_validation_evidence(config)
         print(
             json.dumps(

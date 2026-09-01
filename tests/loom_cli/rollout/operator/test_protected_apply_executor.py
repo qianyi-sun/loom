@@ -27,6 +27,9 @@ from loom_cli.rollout.operator.protected_apply_executor import (
 from loom_cli.rollout.operator.protected_environment_state_component import (
     EnvironmentStateEvidence,
 )
+from loom_cli.rollout.operator.protected_external_supervisor_credential_transport import (
+    ExternalSupervisorCredentialEvidence,
+)
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_artifact,
@@ -54,10 +57,31 @@ class Runner:
         self.calls: list[str] = []
         self.environment = {"KUBECONFIG": "/exact"}
         self.manifest_status = 1
+        self.transition_objects: dict[str, dict[str, object]] = {}
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
         command = " ".join(argv)
+        inventory_resources = {
+            "roles": "role",
+            "rolebindings": "rolebinding",
+            "validatingadmissionpolicies": "validatingadmissionpolicy",
+            "validatingadmissionpolicybindings": "validatingadmissionpolicybinding",
+        }
+        requested_resource = argv[argv.index("get") + 1] if "get" in argv else None
+        if requested_resource in inventory_resources:
+            self.calls.append("transition-read")
+            resource = inventory_resources[requested_resource]
+            items = []
+            if resource == "role":
+                items.extend(
+                    value
+                    for key, value in self.transition_objects.items()
+                    if key.startswith("unrelated-role-")
+                )
+            if resource in self.transition_objects:
+                items.append(self.transition_objects[resource])
+            return json.dumps({"apiVersion": "v1", "items": items, "kind": "List"}).encode()
         if "SELECT version_num FROM alembic_version" in command:
             self.calls.append("migration-read")
             return (self.revision + "\n").encode()
@@ -83,7 +107,11 @@ class Runner:
 
     def run_checked(self, argv, *, env, input_payload, timeout_seconds):
         assert env == self.environment
-        if "--server-side=true" in argv:
+        if "delete" in argv:
+            resource = argv[argv.index("delete") + 1]
+            self.calls.append(f"transition-delete-{resource}")
+            del self.transition_objects[resource]
+        elif "--server-side=true" in argv:
             self.calls.append("manifest-apply")
             assert input_payload is not None
             self.manifest_status = 0
@@ -219,6 +247,60 @@ class ExternalSupervisors:
             raise RuntimeError("reconciliation blocked")
 
 
+class CredentialTransport:
+    """Controller-local narrow credential fixture; it never exposes source bytes."""
+
+    def __init__(
+        self,
+        execution_host: str,
+        *,
+        exact: bool = False,
+        fail_publish: bool = False,
+        drifted: bool = False,
+        fail_observe: bool = False,
+    ) -> None:
+        self.execution_host = execution_host
+        self.exact = exact
+        self.fail_publish = fail_publish
+        self.drifted = drifted
+        self.fail_observe = fail_observe
+        self.calls: list[str] = []
+        self.published_evidence: ExternalSupervisorCredentialEvidence | None = None
+
+    def observe(self) -> ExternalSupervisorCredentialEvidence | None:
+        self.calls.append("credential-observe")
+        if self.fail_observe:
+            raise RuntimeError("credential classification failed")
+        return self._evidence() if self.exact or self.drifted else None
+
+    def publish(self) -> ExternalSupervisorCredentialEvidence:
+        self.calls.append("credential-publish")
+        if self.fail_publish:
+            raise RuntimeError("narrow credential publication failed")
+        self.exact = True
+        self.published_evidence = self._evidence()
+        return self.published_evidence
+
+    def _evidence(self) -> ExternalSupervisorCredentialEvidence:
+        return ExternalSupervisorCredentialEvidence(
+            execution_host=self.execution_host,
+            kubeconfig_sha256="d" * 64,
+            uid=os.geteuid() + (1 if self.drifted else 0),
+            gid=os.getegid(),
+            mode=0o600,
+            size=4096,
+            database_secret_readable=True,
+            witness_config_map_readable=True,
+            pods_exec_denied=True,
+        )
+
+
+def _credential_identities(
+    transports: dict[str, CredentialTransport],
+) -> dict[str, tuple[int, int]]:
+    return {host: (os.geteuid(), os.getegid()) for host in transports}
+
+
 def _attempt(state_root: Path) -> None:
     state_root.mkdir(mode=0o700, exist_ok=True)
     state_root.chmod(0o700)
@@ -266,6 +348,7 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
     runner = Runner(revision="0069", epoch=7)
     runner.plan_digest = plan.plan_digest
     supervisors = ExternalSupervisors()
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
@@ -275,6 +358,8 @@ def test_executor_orders_epoch_before_nonlegacy_migration_and_recovers(
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )
 
@@ -302,6 +387,7 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
     runner = Runner(revision="0069", epoch=7)
     runner.plan_digest = plan.plan_digest
     supervisors = ExternalSupervisors(fail_reconcile=True)
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
@@ -311,6 +397,8 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )
 
@@ -331,6 +419,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     )
     runner = Runner(revision="0065", epoch=None)
     runner.plan_digest = plan.plan_digest
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=state,
         service_uid=os.geteuid(),
@@ -340,6 +429,8 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )
 
@@ -354,10 +445,13 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[3].name == "03-environment-state"
     assert roots[4].name == "04-gb10-candidate"
     assert roots[5].name == "05-production-defaults"
-    assert roots[6].name == "06-external-supervisors-gb10"
+    assert roots[6].name == "06-external-supervisor-transition-cleanup"
+    assert roots[7].name == "07-external-supervisor-credential-gb10"
+    assert roots[8].name == "08-external-supervisors-gb10"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     executor = MigrationEpochProtectedApplyExecutor(
         state_root=tmp_path,
         service_uid=os.geteuid(),
@@ -367,6 +461,8 @@ def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(),
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.browser", CheckOperation.VERIFY, _plan(tmp_path))
@@ -380,6 +476,7 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
     runner.plan_digest = plan.plan_digest
     gb10 = GB10Fleet()
     supervisors = ExternalSupervisors()
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7")}
     environment_state = EnvironmentState()
     applied = MigrationEpochProtectedApplyExecutor(
         state_root=state,
@@ -390,6 +487,8 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
     assert applied.ready
@@ -403,6 +502,8 @@ def test_convergence_reuses_exact_classifiers_without_mutating(tmp_path: Path) -
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )("final.convergence", CheckOperation.VERIFY, plan)
 
@@ -422,6 +523,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
     runner = Runner(revision="0069", epoch=9)
     runner.plan_digest = plan.plan_digest
     runner.manifest_status = 1
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7", exact=False)}
 
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
@@ -431,6 +533,8 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=False),
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
         environment_state_attempts=1,
     )("final.convergence", CheckOperation.VERIFY, plan)
@@ -443,6 +547,8 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "environment-state",
         "gb10-candidate",
         "production-defaults",
+        "external-supervisor-transition-cleanup",
+        "external-supervisor-credential-gb10",
         "external-supervisors-gb10",
     }
     assert all(not call.endswith("-apply") for call in runner.calls)
@@ -459,6 +565,10 @@ def test_convergence_blocks_when_only_oldlab_supervisor_is_stale(tmp_path: Path)
     )
     gb10_supervisor.plan_digest = plan.plan_digest
     gb10_supervisor.attestation_digest = plan.attestation_digest
+    credentials = {
+        "gx10-01c7": CredentialTransport("gx10-01c7", exact=True),
+        "TRT-EAI-OLDLAB-1": CredentialTransport("TRT-EAI-OLDLAB-1", exact=True),
+    }
 
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
@@ -473,6 +583,8 @@ def test_convergence_blocks_when_only_oldlab_supervisor_is_stale(tmp_path: Path)
                 unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
             ),
         },
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
         environment_state_attempts=1,
     )("final.convergence", CheckOperation.VERIFY, plan)
@@ -496,6 +608,10 @@ def test_protected_apply_journals_and_activates_both_supervisor_controllers(
             unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
         ),
     }
+    credentials = {
+        "gx10-01c7": CredentialTransport("gx10-01c7"),
+        "TRT-EAI-OLDLAB-1": CredentialTransport("TRT-EAI-OLDLAB-1"),
+    }
 
     result = MigrationEpochProtectedApplyExecutor(
         state_root=state,
@@ -505,6 +621,8 @@ def test_protected_apply_journals_and_activates_both_supervisor_controllers(
         environment_state_transport=EnvironmentState(),
         candidate_root=candidate_root,
         external_supervisor_transports=supervisors,
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
     )("final.protected-apply", CheckOperation.APPLY, plan)
 
@@ -525,6 +643,150 @@ def test_protected_apply_journals_and_activates_both_supervisor_controllers(
     } <= component_roots
 
 
+def test_protected_apply_journals_both_narrow_credentials_before_supervisor_units(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan, candidate_root, _artifacts = _bound_multi_artifacts(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    supervisors = {
+        "gx10-01c7": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("gx10-01c7")),
+        ),
+        "TRT-EAI-OLDLAB-1": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
+        ),
+    }
+    credentials = {
+        "gx10-01c7": CredentialTransport("gx10-01c7"),
+        "TRT-EAI-OLDLAB-1": CredentialTransport("TRT-EAI-OLDLAB-1"),
+    }
+
+    result = MigrationEpochProtectedApplyExecutor(
+        state_root=state,
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
+        candidate_root=candidate_root,
+        external_supervisor_transports=supervisors,
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities={
+            host: (os.geteuid(), os.getegid()) for host in credentials
+        },
+        production_defaults_request=_defaults_request,
+    )("final.protected-apply", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    roots = sorted(
+        path.name
+        for path in (state / "requests/req-alpha/attempts/1/protected-apply").iterdir()
+        if path.is_dir() and "-" in path.name
+    )
+    assert roots[6:] == [
+        "06-external-supervisor-transition-cleanup",
+        "07-external-supervisor-credential-gb10",
+        "08-external-supervisor-credential-oldlab",
+        "09-external-supervisors-gb10",
+        "10-external-supervisors-oldlab",
+    ]
+    assert all(
+        transport.calls.count("credential-publish") == 1 for transport in credentials.values()
+    )
+    assert all(
+        supervisor.calls.count("supervisor-apply") == 1 for supervisor in supervisors.values()
+    )
+
+
+def test_second_credential_failure_leaves_supervisor_units_inactive_and_keeps_first_narrow(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan, candidate_root, _artifacts = _bound_multi_artifacts(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    supervisors = {
+        "gx10-01c7": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("gx10-01c7")),
+        ),
+        "TRT-EAI-OLDLAB-1": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("TRT-EAI-OLDLAB-1")),
+        ),
+    }
+    first = CredentialTransport("gx10-01c7")
+    credentials = {
+        "gx10-01c7": first,
+        "TRT-EAI-OLDLAB-1": CredentialTransport(
+            "TRT-EAI-OLDLAB-1",
+            fail_publish=True,
+        ),
+    }
+
+    with pytest.raises(RuntimeError, match="narrow credential publication failed"):
+        MigrationEpochProtectedApplyExecutor(
+            state_root=state,
+            service_uid=os.geteuid(),
+            runner=runner,
+            gb10_transport=GB10Fleet(),
+            environment_state_transport=EnvironmentState(),
+            candidate_root=candidate_root,
+            external_supervisor_transports=supervisors,
+            external_supervisor_credential_transports=credentials,
+            external_supervisor_credential_identities={
+                host: (os.geteuid(), os.getegid()) for host in credentials
+            },
+            production_defaults_request=_defaults_request,
+        )("final.protected-apply", CheckOperation.APPLY, plan)
+
+    assert first.published_evidence is not None
+    assert first.observe() == first.published_evidence
+    assert all("supervisor-apply" not in supervisor.calls for supervisor in supervisors.values())
+
+
+@pytest.mark.parametrize("failure", ["drifted", "raise"])
+def test_credential_group_preclassification_blocks_both_publications(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan, candidate_root, _artifacts = _bound_multi_artifacts(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    credentials = {
+        "gx10-01c7": CredentialTransport("gx10-01c7"),
+        "TRT-EAI-OLDLAB-1": CredentialTransport(
+            "TRT-EAI-OLDLAB-1",
+            drifted=failure == "drifted",
+            fail_observe=failure == "raise",
+        ),
+    }
+    supervisors = {
+        host: ExternalSupervisors(unit_dir=Path(external_supervisor_unit_directory(host)))
+        for host in credentials
+    }
+
+    with pytest.raises(Exception, match=r"group live state drifted|credential classification"):
+        MigrationEpochProtectedApplyExecutor(
+            state_root=state,
+            service_uid=os.geteuid(),
+            runner=runner,
+            gb10_transport=GB10Fleet(),
+            environment_state_transport=EnvironmentState(),
+            candidate_root=candidate_root,
+            external_supervisor_transports=supervisors,
+            external_supervisor_credential_transports=credentials,
+            external_supervisor_credential_identities=_credential_identities(credentials),
+            production_defaults_request=_defaults_request,
+        )("final.protected-apply", CheckOperation.APPLY, plan)
+
+    assert all("credential-publish" not in transport.calls for transport in credentials.values())
+    assert all("supervisor-apply" not in supervisor.calls for supervisor in supervisors.values())
+
+
 def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     runner = Runner(revision="0072", epoch=8)
@@ -540,6 +802,7 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
     supervisors = ExternalSupervisors(exact=True)
     supervisors.plan_digest = plan.plan_digest
     supervisors.attestation_digest = plan.attestation_digest
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7", exact=True)}
     result = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=runner,
@@ -548,6 +811,8 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=supervisors,
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
         production_defaults_request=_defaults_request,
         environment_state_attempts=3,
         environment_state_interval_seconds=0.25,
@@ -560,6 +825,7 @@ def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:
 
 
 def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -> None:
+    credentials = {"gx10-01c7": CredentialTransport("gx10-01c7", exact=True)}
     executor = KubernetesProtectedConvergenceExecutor(
         service_uid=os.geteuid(),
         runner=Runner(revision="0072", epoch=8),
@@ -568,6 +834,8 @@ def test_convergence_rejects_mutating_or_wrong_check_operation(tmp_path: Path) -
         candidate_root=tmp_path / "candidate",
         external_supervisor_transport=ExternalSupervisors(exact=True),
         external_supervisor_execution_host="gx10-01c7",
+        external_supervisor_credential_transports=credentials,
+        external_supervisor_credential_identities=_credential_identities(credentials),
     )
     with pytest.raises(ValueError, match="operation is invalid"):
         executor("final.convergence", CheckOperation.APPLY, _plan(tmp_path))

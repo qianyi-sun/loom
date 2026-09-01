@@ -51,80 +51,51 @@ roleRef:
   kind: Role
   name: loom-external-slurm-autoscaler
 ---
-# A Deployment-managed Pod has no stable resourceName. The publisher therefore
-# binds RBAC to the one owner-verified live Pod name, while admission separately
-# confines this principal's CONNECT request to the protected non-interactive
-# witness export.
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicy
-metadata:
-  name: loom-external-slurm-autoscaler-manager-export
-spec:
-  failurePolicy: Fail
-  matchConstraints:
-    resourceRules:
-      - apiGroups: [""]
-        apiVersions: ["v1"]
-        operations: ["CONNECT"]
-        resources: ["pods/exec"]
-  matchConditions:
-    - name: exact-external-autoscaler-principal
-      expression: >-
-        request.userInfo.username ==
-        'system:serviceaccount:loom-staging:loom-external-slurm-autoscaler'
-  validations:
-    - expression: >-
-        request.namespace == 'loom-dev' &&
-        request.name.matches('^loom-capacity-manager-[a-z0-9]{1,10}-[a-z0-9]{5}$')
-      message: >-
-        external Slurm autoscaler may only exec into a capacity manager
-        Deployment pod
-    - expression: >-
-        has(object.container) && object.container == 'manager'
-      message: external Slurm autoscaler must select the manager container
-    - expression: >-
-        has(object.command) && (object.command ==
-        ['python','-I','-B','-m','loom_capacity_manager.global_execution_witness','--pool-id','gb10'] ||
-        object.command == ['python','-I','-B','-m','loom_capacity_manager.global_execution_witness','--pool-id','oldlab'])
-      message: external Slurm autoscaler may only export a reviewed pool witness
-    - expression: >-
-        (!has(object.stdin) || object.stdin == false) &&
-        (!has(object.tty) || object.tty == false) &&
-        has(object.stdout) && object.stdout == true &&
-        has(object.stderr) && object.stderr == true
-      message: external Slurm autoscaler exec must be non-interactive
----
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingAdmissionPolicyBinding
-metadata:
-  name: loom-external-slurm-autoscaler-manager-export
-spec:
-  policyName: loom-external-slurm-autoscaler-manager-export
-  validationActions: ["Deny"]
----
-# The external supervisors fetch a fresh, signed execution witness from the
-# capacity manager before every scale-up decision. Keep that cross-namespace
-# transport separate from the staging database authority above. The publisher
-# applies the RoleBinding only after this Role and the admission guard are ready.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: loom-external-slurm-autoscaler-manager-export
+  name: loom-external-slurm-autoscaler-witness
   namespace: loom-dev
 rules:
-  # `kubectl exec deployment/loom-capacity-manager` resolves the exact
-  # deployment to its current pod before opening the exec subresource.
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    resourceNames: ["loom-capacity-manager"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["loom-global-execution-witness-v1"]
     verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+subjects:
+  - kind: ServiceAccount
+    name: loom-external-slurm-autoscaler
+    namespace: loom-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loom-external-slurm-autoscaler-witness
+---
+# This supports only the credential's fail-closed self-audit. It does not
+# grant access to namespaced workload data or any subresource.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loom-external-slurm-autoscaler-namespace-audit
+rules:
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    # Applying this static manifest can only revoke exec. The publisher replaces
-    # this impossible sentinel with the one Ready, owner-verified Deployment Pod
-    # before it installs the separate RoleBinding.
-    resourceNames: ["loom-capacity-manager-publisher-must-replace"]
-    verbs: ["create"]
+    resources: ["namespaces"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-namespace-audit
+subjects:
+  - kind: ServiceAccount
+    name: loom-external-slurm-autoscaler
+    namespace: loom-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loom-external-slurm-autoscaler-namespace-audit

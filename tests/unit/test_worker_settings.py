@@ -157,6 +157,7 @@ def test_task_image_lifecycle_defaults_are_bounded(
 
     assert settings.task_image_local_ttl_hours == 168
     assert settings.task_image_min_free_gb == 20
+    assert settings.task_image_storage_probe_path is None
     assert settings.task_image_builder_idle_exit_seconds == 120
 
 

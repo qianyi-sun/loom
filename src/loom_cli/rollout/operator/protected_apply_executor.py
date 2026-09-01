@@ -45,6 +45,15 @@ from .protected_epoch_component import (
 from .protected_external_supervisor_component import (
     ProtectedExternalSupervisorComponent,
 )
+from .protected_external_supervisor_credential_component import (
+    ProtectedExternalSupervisorCredentialComponent,
+)
+from .protected_external_supervisor_credential_transport import (
+    ProtectedExternalSupervisorCredentialTransport,
+)
+from .protected_external_supervisor_transition_cleanup_component import (
+    KubernetesExternalSupervisorTransitionCleanupComponent,
+)
 from .protected_external_supervisor_transport import (
     ProtectedExternalSupervisorTransport,
 )
@@ -62,6 +71,10 @@ from .protected_production_defaults_component import (
 
 PROTECTED_KUBECONFIG_PATH = Path("/var/lib/loom-staging-rollout/kubeconfig")
 _MAX_OUTPUT_BYTES = 1024 * 1024
+_EXTERNAL_SUPERVISOR_CONTROLLER_ORDER = (
+    "gx10-01c7",
+    "TRT-EAI-OLDLAB-1",
+)
 
 
 class ProtectedApplyCommandRunner(Protocol):
@@ -270,6 +283,12 @@ class MigrationEpochProtectedApplyExecutor:
     external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
         default_factory=dict
     )
+    external_supervisor_credential_transports: Mapping[
+        str, ProtectedExternalSupervisorCredentialTransport
+    ] = field(default_factory=dict)
+    external_supervisor_credential_identities: Mapping[str, tuple[int, int]] = field(
+        default_factory=dict
+    )
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -283,6 +302,13 @@ class MigrationEpochProtectedApplyExecutor:
             or ".." in self.candidate_root.parts
             or self.service_uid < 0
             or bool(self.external_supervisor_transport) == bool(self.external_supervisor_transports)
+            or not self.external_supervisor_credential_transports
+            or set(self.external_supervisor_credential_transports)
+            != set(self.external_supervisor_credential_identities)
+            or any(
+                type(uid) is not int or type(gid) is not int or uid < 0 or gid < 0
+                for uid, gid in self.external_supervisor_credential_identities.values()
+            )
         ):
             raise ValueError("protected apply executor authority is invalid")
 
@@ -349,6 +375,23 @@ class MigrationEpochProtectedApplyExecutor:
         external_supervisors = tuple(
             supervisor.component(plan) for supervisor in supervisor_components
         )
+        external_supervisor_credentials = tuple(
+            component.component(plan)
+            for component in _external_supervisor_credential_components(
+                plan=plan,
+                epoch_guard=epoch.classify,
+                transports=self.external_supervisor_credential_transports,
+                identities=self.external_supervisor_credential_identities,
+                execution_host=self.external_supervisor_execution_host,
+            )
+        )
+        external_supervisor_transition_cleanup = (
+            KubernetesExternalSupervisorTransitionCleanupComponent(
+                runner=self.runner,
+                environment=environment,
+                epoch_guard=epoch.classify,
+            ).component(plan)
+        )
         components = (
             (
                 migration,
@@ -357,6 +400,8 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
+                external_supervisor_transition_cleanup,
+                *external_supervisor_credentials,
                 *external_supervisors,
             )
             if requires_legacy_epoch_bootstrap(plan)
@@ -367,6 +412,8 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
+                external_supervisor_transition_cleanup,
+                *external_supervisor_credentials,
                 *external_supervisors,
             )
         )
@@ -405,6 +452,12 @@ class KubernetesProtectedConvergenceExecutor:
     external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
         default_factory=dict
     )
+    external_supervisor_credential_transports: Mapping[
+        str, ProtectedExternalSupervisorCredentialTransport
+    ] = field(default_factory=dict)
+    external_supervisor_credential_identities: Mapping[str, tuple[int, int]] = field(
+        default_factory=dict
+    )
     environment_state_attempts: int = 121
     environment_state_interval_seconds: float = 5.0
     sleep: Callable[[float], None] = time.sleep
@@ -422,6 +475,13 @@ class KubernetesProtectedConvergenceExecutor:
             or not 0 <= self.environment_state_interval_seconds <= 30
             or not callable(self.sleep)
             or bool(self.external_supervisor_transport) == bool(self.external_supervisor_transports)
+            or not self.external_supervisor_credential_transports
+            or set(self.external_supervisor_credential_transports)
+            != set(self.external_supervisor_credential_identities)
+            or any(
+                type(uid) is not int or type(gid) is not int or uid < 0 or gid < 0
+                for uid, gid in self.external_supervisor_credential_identities.values()
+            )
         ):
             raise ValueError("protected convergence authority is invalid")
 
@@ -452,6 +512,18 @@ class KubernetesProtectedConvergenceExecutor:
             execution_host=self.external_supervisor_execution_host,
             transports=self.external_supervisor_transports,
         )
+        credential_components = _external_supervisor_credential_components(
+            plan=plan,
+            epoch_guard=epoch.classify,
+            transports=self.external_supervisor_credential_transports,
+            identities=self.external_supervisor_credential_identities,
+            execution_host=self.external_supervisor_execution_host,
+        )
+        transition_cleanup = KubernetesExternalSupervisorTransitionCleanupComponent(
+            runner=self.runner,
+            environment=environment,
+            epoch_guard=epoch.classify,
+        )
         observations = {
             "database-migration": KubernetesProtectedMigrationComponent(
                 runner=self.runner,
@@ -481,8 +553,14 @@ class KubernetesProtectedConvergenceExecutor:
                 epoch_guard=epoch.classify,
                 request=self.production_defaults_request,
             ).classify(plan),
+            "external-supervisor-transition-cleanup": transition_cleanup.classify(plan),
         }
         external_component_ids: list[str] = []
+        credential_component_ids: list[str] = []
+        for credential in credential_components:
+            component = credential.component(plan)
+            credential_component_ids.append(component.component_id)
+            observations[component.component_id] = component.classify(plan)
         for supervisor in supervisor_components:
             component = supervisor.component(plan)
             external_component_ids.append(component.component_id)
@@ -503,7 +581,9 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
             blockers["production-defaults"] = "protected-epoch-not-exact"
-        for component_id in external_component_ids:
+        if observations["external-supervisor-transition-cleanup"].observed_epoch != expected_epoch:
+            blockers["external-supervisor-transition-cleanup"] = "protected-epoch-not-exact"
+        for component_id in (*credential_component_ids, *external_component_ids):
             if observations[component_id].observed_epoch != expected_epoch:
                 blockers[component_id] = "protected-epoch-not-exact"
         return FinalGateResult(
@@ -550,12 +630,8 @@ def _external_supervisor_components(
     transports: Mapping[str, ProtectedExternalSupervisorTransport],
 ) -> tuple[ProtectedExternalSupervisorComponent, ...]:
     if transports:
-        controller_hosts = set(
-            parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
-        )
-        if set(transports) != controller_hosts or any(
-            not host or item is None for host, item in transports.items()
-        ):
+        controller_hosts = _controller_hosts_in_order(plan, transports)
+        if any(not host or item is None for host, item in transports.items()):
             raise ValueError("protected external supervisor transport coverage drifted")
         return tuple(
             ProtectedExternalSupervisorComponent(
@@ -565,7 +641,7 @@ def _external_supervisor_components(
                 execution_host=host,
                 unit_dir=Path(external_supervisor_unit_directory(host)),
             )
-            for host in sorted(transports)
+            for host in controller_hosts
         )
     if transport is None:
         raise ValueError("protected external supervisor transport is unavailable")
@@ -582,6 +658,63 @@ def _external_supervisor_components(
             ),
         ),
     )
+
+
+def _external_supervisor_credential_components(
+    *,
+    plan: FinalGatePlan,
+    epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+    transports: Mapping[str, ProtectedExternalSupervisorCredentialTransport],
+    identities: Mapping[str, tuple[int, int]],
+    execution_host: str | None,
+) -> tuple[ProtectedExternalSupervisorCredentialComponent, ...]:
+    if execution_host is None:
+        controller_hosts = _controller_hosts_in_order(plan, transports)
+    else:
+        bound_hosts = set(
+            parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+        )
+        if execution_host not in bound_hosts or set(transports) != {execution_host}:
+            raise ValueError("protected external supervisor credential coverage drifted")
+        controller_hosts = (execution_host,)
+    if set(identities) != set(controller_hosts) or any(
+        item is None
+        or type(identity) is not tuple
+        or len(identity) != 2
+        or type(identity[0]) is not int
+        or type(identity[1]) is not int
+        or identity[0] < 0
+        or identity[1] < 0
+        for item, identity in ((transports[host], identities[host]) for host in controller_hosts)
+    ):
+        raise ValueError("protected external supervisor credential coverage drifted")
+    return tuple(
+        ProtectedExternalSupervisorCredentialComponent(
+            transport=transports[host],
+            epoch_guard=epoch_guard,
+            execution_host=host,
+            service_uid=identities[host][0],
+            service_gid=identities[host][1],
+        )
+        for host in controller_hosts
+    )
+
+
+def _controller_hosts_in_order(
+    plan: FinalGatePlan,
+    transports: Mapping[str, object],
+) -> tuple[str, ...]:
+    controller_hosts = set(
+        parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+    )
+    if set(transports) != controller_hosts:
+        raise ValueError("protected external supervisor transport coverage drifted")
+    ordered = tuple(
+        host for host in _EXTERNAL_SUPERVISOR_CONTROLLER_ORDER if host in controller_hosts
+    )
+    if len(ordered) != len(controller_hosts):
+        raise ValueError("protected external supervisor controller is unauthorized")
+    return ordered
 
 
 def _observation_evidence_digest(

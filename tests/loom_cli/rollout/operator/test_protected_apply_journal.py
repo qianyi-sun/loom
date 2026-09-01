@@ -406,3 +406,99 @@ def test_records_secret_safe_failure_diagnostic_when_terminal_reclassification_r
         "unclassified environment-state failure: RuntimeError at "
     )
     assert "terminal-classification secret" not in (root / "failure-diagnostic.json").read_text()
+
+
+@pytest.mark.parametrize("second_failure", ["drifted", "raise"])
+def test_preapply_group_classifies_every_member_before_any_group_apply(
+    tmp_path: Path,
+    second_failure: str,
+) -> None:
+    journal = _journal(tmp_path)
+    states = {
+        "credential-gb10": ComponentState.READY,
+        "credential-oldlab": ComponentState.READY,
+    }
+    apply_calls: list[str] = []
+
+    def grouped(component_id: str, ordinal: int) -> ProtectedApplyComponent:
+        def classify(_plan):
+            if component_id == "credential-oldlab" and second_failure == "raise":
+                raise RuntimeError("credential classification failed")
+            state = (
+                ComponentState.DRIFTED
+                if component_id == "credential-oldlab" and second_failure == "drifted"
+                else states[component_id]
+            )
+            return ComponentObservation(
+                state=state,
+                evidence_digest=f"{ordinal + 1:064x}",
+                observed_epoch=8 if state is ComponentState.EXACT else 7,
+            )
+
+        def apply(_plan):
+            apply_calls.append(component_id)
+            states[component_id] = ComponentState.EXACT
+
+        return ProtectedApplyComponent(
+            component_id=component_id,
+            implementation_digest=f"{ordinal + 11:064x}",
+            input_fingerprint=f"{ordinal + 21:064x}",
+            classify=classify,
+            apply=apply,
+            preapply_group="external-supervisor-credentials",
+        )
+
+    components = (grouped("credential-gb10", 0), grouped("credential-oldlab", 1))
+
+    with pytest.raises((ProtectedApplyJournalError, RuntimeError)):
+        journal.execute(_plan(tmp_path), components)
+
+    assert apply_calls == []
+
+
+def test_preapply_group_resume_rechecks_all_members_and_keeps_first_terminal(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    states = {
+        "credential-gb10": ComponentState.READY,
+        "credential-oldlab": ComponentState.READY,
+    }
+    apply_calls: list[str] = []
+    fail_second = True
+
+    def grouped(component_id: str, ordinal: int) -> ProtectedApplyComponent:
+        def classify(_plan):
+            state = states[component_id]
+            return ComponentObservation(
+                state=state,
+                evidence_digest=f"{ordinal + 1:064x}",
+                observed_epoch=8 if state is ComponentState.EXACT else 7,
+            )
+
+        def apply(_plan):
+            nonlocal fail_second
+            apply_calls.append(component_id)
+            if component_id == "credential-oldlab" and fail_second:
+                fail_second = False
+                raise RuntimeError("unexpected second publication failure")
+            states[component_id] = ComponentState.EXACT
+
+        return ProtectedApplyComponent(
+            component_id=component_id,
+            implementation_digest=f"{ordinal + 31:064x}",
+            input_fingerprint=f"{ordinal + 41:064x}",
+            classify=classify,
+            apply=apply,
+            preapply_group="external-supervisor-credentials",
+        )
+
+    components = (grouped("credential-gb10", 0), grouped("credential-oldlab", 1))
+    with pytest.raises(RuntimeError, match="unexpected second publication failure"):
+        journal.execute(_plan(tmp_path), components)
+
+    terminals = journal.execute(_plan(tmp_path), components)
+
+    assert apply_calls == ["credential-gb10", "credential-oldlab", "credential-oldlab"]
+    assert terminals["credential-gb10"].applied is True
+    assert terminals["credential-oldlab"].applied is True

@@ -103,8 +103,7 @@ def _active_manifest_sha256(
         profile_digest=pool.profile_digest,
         slurm_executables=tuple(
             sorted(
-                (name, Path(value))
-                for name, value in pool.slurm_executables.model_dump().items()
+                (name, Path(value)) for name, value in pool.slurm_executables.model_dump().items()
             )
         ),
         executor_image=profile.executor_image,
@@ -135,9 +134,7 @@ def _active_render_fixture(
         "ownership_key_file": tmp_path / "ownership-private-key",
     }
     for name, path in secret_paths.items():
-        path.write_bytes(
-            private_key.private_bytes_raw() if name == "ownership_key_file" else b"x"
-        )
+        path.write_bytes(private_key.private_bytes_raw() if name == "ownership_key_file" else b"x")
         path.chmod(0o600)
     operator = operator_profile_fixture().model_copy(
         update={
@@ -158,9 +155,7 @@ def _active_render_fixture(
     )
     operator = OperatorLaunchProfileV2.model_validate(
         operator.model_copy(
-            update={
-                "controller_authority_sha256": canonical_launch_policy_digest(operator)
-            }
+            update={"controller_authority_sha256": canonical_launch_policy_digest(operator)}
         ).model_dump(mode="python")
     )
     inventory = original_pool.inventory.model_copy(update={"query_uid": os.geteuid()})
@@ -181,9 +176,7 @@ def _active_render_fixture(
     )
     candidate = base.model_copy(
         update={
-            "pools": tuple(
-                active_pool if item.pool_id == "oldlab" else item for item in base.pools
-            )
+            "pools": tuple(active_pool if item.pool_id == "oldlab" else item for item in base.pools)
         }
     )
     profile = CapacityPoolExecutorProfile.model_validate(candidate.model_dump(mode="python"))
@@ -354,9 +347,7 @@ def test_active_executor_renderers_bind_profiles_artifact_manifest_and_paths(
         artifact,
     )
     active_payload = json.loads(active_config)
-    assert active_payload == prepared_payload | {
-        "approved_profiles_sha256": profile_set_digest
-    }
+    assert active_payload == prepared_payload | {"approved_profiles_sha256": profile_set_digest}
     assert prepared_payload["approved_profiles_sha256"] == "0" * 64
     assert active_payload["approved_profiles_sha256"] != "0" * 64
     active_config_file = Path(pool.config_file).with_name(f"{pool.pool_id}-active.json")
@@ -791,6 +782,98 @@ def _documents() -> list[dict[str, Any]]:
     return [document for document in yaml.safe_load_all(rendered) if document]
 
 
+def test_renderer_publishes_witnesses_with_exact_configmap_authority() -> None:
+    documents = _documents()
+    by_kind_name = {
+        (document["kind"], document["metadata"]["name"]): document for document in documents
+    }
+
+    config_map = by_kind_name[("ConfigMap", "loom-global-execution-witness-v1")]
+    assert config_map["metadata"]["namespace"] == "loom-dev"
+    assert config_map["data"] == {"gb10.json": "", "oldlab.json": ""}
+
+    account = by_kind_name[("ServiceAccount", "loom-capacity-witness-publisher")]
+    assert account["metadata"]["namespace"] == "loom-dev"
+    assert account["automountServiceAccountToken"] is False
+
+    role = by_kind_name[("Role", "loom-capacity-witness-publisher")]
+    assert role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["configmaps"],
+            "resourceNames": ["loom-global-execution-witness-v1"],
+            "verbs": ["get", "patch"],
+        }
+    ]
+    binding = by_kind_name[("RoleBinding", "loom-capacity-witness-publisher")]
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-capacity-witness-publisher",
+            "namespace": "loom-dev",
+        }
+    ]
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "loom-capacity-witness-publisher",
+    }
+
+
+def test_renderer_mounts_api_token_only_into_witness_publisher() -> None:
+    manager = next(
+        document
+        for document in _documents()
+        if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager"
+    )
+    pod = manager["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["serviceAccountName"] == "loom-capacity-witness-publisher"
+    containers = {container["name"]: container for container in pod["containers"]}
+    assert set(containers) == {"manager", "witness-publisher"}
+
+    publisher = containers["witness-publisher"]
+    assert publisher["command"] == [
+        "python",
+        "-m",
+        "loom_capacity_manager.global_execution_witness_publisher",
+    ]
+    environment = {item["name"]: item["value"] for item in publisher["env"]}
+    assert environment == {
+        "LOOM_CAPACITY_WITNESS_DB_URL_FILE": (
+            "/var/run/loom-capacity-manager/runtime/credentials/database-url"
+        ),
+        "LOOM_CAPACITY_WITNESS_EXPECTED_AUTHORITY_INCARNATION": str(_AUTHORITY),
+        "LOOM_CAPACITY_WITNESS_KUBERNETES_API_SERVER": "https://192.168.50.103:6443",
+        "LOOM_CAPACITY_WITNESS_KUBERNETES_CA_FILE": ("/var/run/secrets/loom-witness/ca.crt"),
+        "LOOM_CAPACITY_WITNESS_KUBERNETES_TOKEN_FILE": ("/var/run/secrets/loom-witness/token"),
+        "LOOM_CAPACITY_WITNESS_SIGNING_KEY_FILE": (
+            "/var/run/loom-capacity-manager/runtime/credentials/global-execution-signing-key"
+        ),
+        "LOOM_CAPACITY_WITNESS_SIGNING_KEY_ID": "global-capacity-manager-2026-08",
+    }
+    publisher_mounts = {mount["name"]: mount for mount in publisher["volumeMounts"]}
+    assert publisher_mounts["witness-api"]["mountPath"] == "/var/run/secrets/loom-witness"
+    assert publisher_mounts["witness-api"]["readOnly"] is True
+    manager_mount_names = {mount["name"] for mount in containers["manager"]["volumeMounts"]}
+    assert "witness-api" not in manager_mount_names
+
+    witness_volume = next(volume for volume in pod["volumes"] if volume["name"] == "witness-api")
+    assert witness_volume["projected"] == {
+        "defaultMode": 0o440,
+        "sources": [
+            {"serviceAccountToken": {"expirationSeconds": 3600, "path": "token"}},
+            {
+                "configMap": {
+                    "name": "kube-root-ca.crt",
+                    "items": [{"key": "ca.crt", "path": "ca.crt"}],
+                }
+            },
+        ],
+    }
+
+
 def test_renderer_policy_disabled_output_is_unchanged_by_explicit_none_pair() -> None:
     profile = load_capacity_control_plane_profile(_PROFILE)
     implicit = render_capacity_control_plane_manifests(
@@ -807,9 +890,11 @@ def test_renderer_policy_disabled_output_is_unchanged_by_explicit_none_pair() ->
     )
 
     assert explicit == implicit
-    assert not any(
-        document and document["kind"] == "ConfigMap" for document in yaml.safe_load_all(explicit)
-    )
+    assert [
+        document["metadata"]["name"]
+        for document in yaml.safe_load_all(explicit)
+        if document and document["kind"] == "ConfigMap"
+    ] == ["loom-global-execution-witness-v1"]
 
 
 @pytest.mark.parametrize(
@@ -875,16 +960,10 @@ def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts(
     assert manager_peers[:-1] == [
         {
             "namespaceSelector": {},
-            "podSelector": {
-                "matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}
-            },
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}},
         },
         {"podSelector": {"matchLabels": {"app": "loom-service"}}},
-        {
-            "podSelector": {
-                "matchLabels": {"app": "loom-personal-dev-management"}
-            }
-        },
+        {"podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}}},
     ]
     assert manager_peers[-1] == {
         "namespaceSelector": {
@@ -1051,7 +1130,12 @@ def test_renderer_mounts_one_immutable_digest_addressed_execution_policy() -> No
     payload = canonical_executable_bytes(policy)
     digest = canonical_executable_digest(policy)
     documents = _policy_enabled_documents(policy)
-    config_maps = [document for document in documents if document["kind"] == "ConfigMap"]
+    config_maps = [
+        document
+        for document in documents
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"].startswith("loom-capacity-execution-policy-")
+    ]
 
     assert len(config_maps) == 1
     config_map = config_maps[0]
@@ -1110,7 +1194,8 @@ def test_renderer_mounts_one_immutable_digest_addressed_execution_policy() -> No
         "subPath": "execution-policy",
         "readOnly": True,
     }
-    assert pod["volumes"][-2] == {
+    volumes = {volume["name"]: volume for volume in pod["volumes"]}
+    assert volumes["execution-policy-projected"] == {
         "name": "execution-policy-projected",
         "configMap": {
             "name": config_map["metadata"]["name"],
@@ -1118,7 +1203,7 @@ def test_renderer_mounts_one_immutable_digest_addressed_execution_policy() -> No
             "items": [{"key": "execution-policy.json", "path": "execution-policy.json"}],
         },
     }
-    assert pod["volumes"][-1] == {
+    assert volumes["execution-policy-runtime"] == {
         "name": "execution-policy-runtime",
         "emptyDir": {"medium": "Memory", "sizeLimit": "2Mi"},
     }
@@ -1139,10 +1224,16 @@ def test_execution_policy_change_updates_config_map_and_deployment_template() ->
     original_documents = _policy_enabled_documents(original)
     changed_documents = _policy_enabled_documents(changed)
     original_config_map = next(
-        document for document in original_documents if document["kind"] == "ConfigMap"
+        document
+        for document in original_documents
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"].startswith("loom-capacity-execution-policy-")
     )
     changed_config_map = next(
-        document for document in changed_documents if document["kind"] == "ConfigMap"
+        document
+        for document in changed_documents
+        if document["kind"] == "ConfigMap"
+        and document["metadata"]["name"].startswith("loom-capacity-execution-policy-")
     )
     original_deployment = next(
         document for document in original_documents if document["kind"] == "Deployment"
@@ -1197,6 +1288,10 @@ def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
 
     assert [(document["kind"], document["metadata"]["name"]) for document in documents] == [
         ("Namespace", "loom-dev"),
+        ("ServiceAccount", "loom-capacity-witness-publisher"),
+        ("Role", "loom-capacity-witness-publisher"),
+        ("RoleBinding", "loom-capacity-witness-publisher"),
+        ("ConfigMap", "loom-global-execution-witness-v1"),
         ("Service", "loom-capacity-postgres"),
         ("StatefulSet", "loom-capacity-postgres"),
         ("Job", "loom-capacity-migrate-capacity-0014-aaaaaaaaaa-a68e4a9d64"),
@@ -1205,6 +1300,7 @@ def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
         ("NetworkPolicy", "capacity-default-deny"),
         ("NetworkPolicy", "capacity-dns-egress"),
         ("NetworkPolicy", "capacity-database-egress"),
+        ("NetworkPolicy", "capacity-witness-publisher-api-egress"),
         ("NetworkPolicy", "capacity-postgres-ingress"),
         ("NetworkPolicy", "capacity-manager-ingress"),
     ]
@@ -1474,6 +1570,16 @@ def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks()
     ]
     database = policies["capacity-database-egress"]["egress"]
     assert database[0]["ports"] == [{"protocol": "TCP", "port": 5432}]
+    assert policies["capacity-witness-publisher-api-egress"] == {
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}},
+        "policyTypes": ["Egress"],
+        "egress": [
+            {
+                "to": [{"ipBlock": {"cidr": "192.168.50.103/32"}}],
+                "ports": [{"protocol": "TCP", "port": 6443}],
+            }
+        ],
+    }
     manager_ingress = policies["capacity-manager-ingress"]["ingress"][0]
     assert manager_ingress["ports"] == [{"protocol": "TCP", "port": 8443}]
     assert manager_ingress["from"] == [
@@ -1482,19 +1588,16 @@ def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks()
             "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}},
         },
         {"podSelector": {"matchLabels": {"app": "loom-service"}}},
-        {
-            "podSelector": {
-                "matchLabels": {"app": "loom-personal-dev-management"}
-            }
-        },
+        {"podSelector": {"matchLabels": {"app": "loom-personal-dev-management"}}},
     ]
-    assert not any(
-        "ipBlock" in peer
+    assert [
+        peer["ipBlock"]
         for policy in policies.values()
         for direction in ("ingress", "egress")
         for rule in policy.get(direction, [])
         for peer in rule.get("from", rule.get("to", []))
-    )
+        if "ipBlock" in peer
+    ] == [{"cidr": "192.168.50.103/32"}]
 
 
 @pytest.mark.parametrize(

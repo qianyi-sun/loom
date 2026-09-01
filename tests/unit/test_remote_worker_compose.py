@@ -32,6 +32,7 @@ def test_remote_worker_compose_runs_only_worker() -> None:
     assert set(data["volumes"]) == {
         "remote_worker_trajectories",
         "remote_worker_benchmarks",
+        "task_image_builder_storage_probe",
     }
 
 
@@ -84,6 +85,19 @@ def test_remote_worker_compose_passes_trial_cache_registry_to_worker() -> None:
     )
 
 
+def test_remote_worker_compose_probes_docker_storage_through_named_volume() -> None:
+    data = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
+    worker = _worker_service(_COMPOSE)
+    env = _env_map(worker["environment"])
+
+    assert env["LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH"] == ("/run/loom/docker-storage-probe")
+    assert "task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro" in worker["volumes"]
+    assert data["volumes"]["task_image_builder_storage_probe"] == {
+        "name": "loom-task-image-builder-storage-probe",
+        "labels": {"loom.task-image-storage-probe": "true"},
+    }
+
+
 def test_remote_worker_compose_container_caps_passthrough() -> None:
     # #896: the worker PROCESS reads the per-container caps so it can
     # re-apply them to the trial/sidecar containers it creates. Empty
@@ -117,16 +131,10 @@ def test_remote_worker_compose_stamps_slurm_identity_and_disables_restart() -> N
     worker = _worker_service(_COMPOSE)
     env = _env_map(worker["environment"])
 
-    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == (
-        "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}"
-    )
-    assert env["LOOM_WORKER_CANDIDATE_SHA"] == (
-        "${LOOM_WORKER_CANDIDATE_SHA:-legacy}"
-    )
+    assert env["LOOM_WORKER_SANDBOX_IDENTITY"] == ("${LOOM_WORKER_SANDBOX_IDENTITY:-manual}")
+    assert env["LOOM_WORKER_CANDIDATE_SHA"] == ("${LOOM_WORKER_CANDIDATE_SHA:-legacy}")
     assert env["LOOM_WORKER_SLURM_JOB_ID"] == "${LOOM_WORKER_SLURM_JOB_ID:-none}"
-    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == (
-        "${LOOM_WORKER_COMPOSE_PROJECT:-manual}"
-    )
+    assert env["LOOM_WORKER_COMPOSE_PROJECT"] == ("${LOOM_WORKER_COMPOSE_PROJECT:-manual}")
     assert env["LOOM_WORKER_SLURM_ALLOCATED_GPUS"] == ("${LOOM_WORKER_SLURM_ALLOCATED_GPUS:--1}")
     assert worker["labels"] == {
         "loom.sandbox": "${LOOM_WORKER_SANDBOX_IDENTITY:-manual}",
@@ -172,16 +180,21 @@ def test_dev_compose_runs_loopback_task_image_builder() -> None:
     env = _env_map(builder["environment"])
     worker_env = _env_map(services["worker"]["environment"])
     assert builder["command"] == ["python", "-m", "loom_worker.task_image_builder"]
-    assert env["LOOM_WORKER_TOKEN"] == (
-        "${LOOM_TASK_IMAGE_BUILDER_TOKEN:-placeholder}"
+    assert env["LOOM_WORKER_TOKEN"] == ("${LOOM_TASK_IMAGE_BUILDER_TOKEN:-placeholder}")
+    assert (
+        "localhost:${LOOM_DEV_REGISTRY_PORT:-55000}/loom-task-images"
+        in (env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"])
     )
-    assert "localhost:${LOOM_DEV_REGISTRY_PORT:-55000}/loom-task-images" in (
-        env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"]
-    )
-    assert worker_env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
-        env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"]
+    assert (
+        worker_env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"]
+        == (env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"])
     )
     assert "/var/run/docker.sock:/var/run/docker.sock" in builder["volumes"]
+    assert env["LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH"] == ("/run/loom/docker-storage-probe")
+    assert (
+        "task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro" in builder["volumes"]
+    )
+    assert "task_image_builder_storage_probe" in data["volumes"]
     assert "build_if_missing" not in _DEV_COMPOSE.read_text(encoding="utf-8")
 
 

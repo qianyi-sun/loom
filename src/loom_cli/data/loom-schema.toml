@@ -1602,6 +1602,11 @@ python_type = "int"
 default     = 20
 description = "Free-space floor for managed-image eviction on builder and execution Docker daemons."
 
+[service_config.task_image_storage_probe_path]
+used_by     = ["worker"]
+python_type = "Path"
+description = "Optional explicit path on the Docker data filesystem used for free-space admission. Containerized builders mount an empty Docker-managed volume here; native builders default to the daemon-reported Docker root."
+
 [service_config.task_image_registry_grace_hours]
 used_by     = ["control-plane"]
 python_type = "int"

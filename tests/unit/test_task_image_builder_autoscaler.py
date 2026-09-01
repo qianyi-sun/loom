@@ -33,6 +33,7 @@ def _config() -> TaskImageBuilderPoolConfig:
         max_jobs=2,
         pending_job_cap=2,
         idle_exit_after_seconds=120,
+        failure_backoff_seconds=300,
         sbatch_path="sbatch",
         squeue_path="squeue",
         sacct_path="sacct",
@@ -59,6 +60,12 @@ def test_builder_pool_bounds_jobs_to_declared_nodes() -> None:
         replace(_config(), max_jobs=3)
     with pytest.raises(ValueError, match="pending_job_cap"):
         replace(_config(), pending_job_cap=3)
+
+
+@pytest.mark.parametrize("seconds", [0, 3601])
+def test_builder_pool_bounds_failed_allocation_backoff(seconds: int) -> None:
+    with pytest.raises(ValueError, match="backoff"):
+        replace(_config(), failure_backoff_seconds=seconds)
 
 
 @pytest.mark.parametrize(
@@ -103,9 +110,7 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
     assert "--env DOCKER_CONFIG=/run/loom/task-image-builder-docker" in request.stdin
     assert (
         "docker compose"
-        not in request.stdin.split(
-            "worker python -m loom_worker.task_image_builder"
-        )[1]
+        not in request.stdin.split("worker python -m loom_worker.task_image_builder")[1]
     )
 
 
