@@ -78,6 +78,7 @@ from loom_service.failure_taxonomy import (
     is_replaceable_by_successful_supplemental,
 )
 from loom_service.family_run_seed import prepare_family_run_state
+from loom_service.forwarders import forward, propagate
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.monitor_filters import (
     apply_batch_monitor_filters,
@@ -2655,7 +2656,8 @@ async def cancel_batch(
     request: Request,
     sc: SessionAndCtx,
     batch_id: UUID,
-) -> dict[str, Any]:
+    authorization: Annotated[str | None, Header()] = None,
+) -> Any:
     s, ctx = sc
     require_scope(ctx, "submit")
     b = (
@@ -2670,28 +2672,52 @@ async def cancel_batch(
         )
     require_team_or_admin(ctx, b.team_id)
     now = datetime.now(UTC)
+    active_rows = (
+        await s.execute(
+            select(Trial.id, Task.config)
+            .join(Task, Task.id == Trial.task_id)
+            .where(
+                Trial.batch_id == batch_id,
+                Trial.state.in_(["queued", "claimed", "running"]),
+            )
+        )
+    ).all()
+    service_execution_ids = [
+        trial_id
+        for trial_id, config in active_rows
+        if isinstance(config, dict) and config.get("service_execution") is not None
+    ]
+    legacy_ids = [
+        trial_id
+        for trial_id, config in active_rows
+        if not isinstance(config, dict) or config.get("service_execution") is None
+    ]
+
+    # Service execution has a second, provider-facing lifecycle authority.
+    # Route cancellation through the Control Plane so the Trial update, lease
+    # generation revocation, and durable actuator command commit atomically.
+    for trial_id in service_execution_ids:
+        response = await forward(
+            request.app.state.http_client,
+            method="POST",
+            path=f"/trials/{trial_id}/cancel",
+            authorization=authorization,
+        )
+        if response.status_code not in {200, 409}:
+            return propagate(response)
+
     await s.execute(
         update(Batch).where(Batch.id == batch_id).values(state="cancelled", finished_at=now),
     )
-    # Cascade-cancel still-active trials in this batch. We do
-    # NOT cancel queued trials whose worker may already be partway
-    # through claim; the CP's existing cancel endpoint (Plan 5)
-    # handles graceful interruption when called per-trial. Here we
-    # just transition the rows to `cancelled` so the SPA stops
-    # showing them as in-flight.
-    await s.execute(
-        update(Trial)
-        .where(
-            and_(
-                Trial.batch_id == batch_id,
-                Trial.state.in_(["queued", "claimed", "running"]),
+    if legacy_ids:
+        await s.execute(
+            update(Trial)
+            .where(Trial.id.in_(legacy_ids))
+            .values(
+                state="cancelled",
+                cancellation_requested_at=now,
+                finished_at=now,
             ),
         )
-        .values(
-            state="cancelled",
-            cancellation_requested_at=now,
-            finished_at=now,
-        ),
-    )
     await s.commit()
     return {"batch_id": str(batch_id), "state": "cancelled"}

@@ -221,6 +221,17 @@ variable "evidence_bucket_max_bytes" {
   }
 }
 
+variable "capacity_observer_public_key_pem" {
+  description = "PEM public key for the non-expiring capacity-observer authorized key. Keep the matching private credential only in the runtime secret store."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = startswith(trimspace(var.capacity_observer_public_key_pem), "-----BEGIN PUBLIC KEY-----")
+    error_message = "capacity_observer_public_key_pem must be a PEM public key."
+  }
+}
+
 variable "labels" {
   description = "Additional non-secret labels applied to every supported Nebius resource."
   type        = map(string)

@@ -125,6 +125,52 @@ resource "nebius_iam_v1_access_permit" "node_registry_pull" {
   labels      = local.common_labels
 }
 
+resource "nebius_iam_v1_service_account" "capacity_observer" {
+  parent_id   = var.project_id
+  name        = "${local.resource_prefix}-capacity-observer"
+  description = "Read-only quota and node-group observer for ${var.target_id}"
+  labels      = local.common_labels
+}
+
+resource "nebius_iam_v1_group" "capacity_observer" {
+  parent_id = var.tenant_id
+  name      = "${local.resource_prefix}-capacity-observer"
+  labels    = local.common_labels
+}
+
+resource "nebius_iam_v1_group_membership" "capacity_observer" {
+  parent_id = nebius_iam_v1_group.capacity_observer.id
+  member_id = nebius_iam_v1_service_account.capacity_observer.id
+  labels    = local.common_labels
+}
+
+resource "nebius_iam_v1_access_permit" "capacity_observer" {
+  parent_id = nebius_iam_v1_group.capacity_observer.id
+  # Nebius publishes the effective compute quota limits only on the tenant
+  # allowance collection. The narrower tenant auditor role cannot list that
+  # API (live permission probe returns PERMISSION_DENIED), so viewer is the
+  # least non-mutating role that can combine quota and project node-group
+  # readback in one identity.
+  resource_id = var.tenant_id
+  role        = "viewer"
+  labels      = local.common_labels
+}
+
+resource "nebius_iam_v1_auth_public_key" "capacity_observer" {
+  parent_id   = var.project_id
+  name        = "${local.resource_prefix}-capacity-observer"
+  description = "Non-expiring authorized key for the recurring capacity observer"
+  account = {
+    service_account = {
+      id = nebius_iam_v1_service_account.capacity_observer.id
+    }
+  }
+  data   = var.capacity_observer_public_key_pem
+  labels = local.common_labels
+  # expires_at is deliberately omitted. The SDK exchanges this stable key for
+  # short-lived access tokens and refreshes those tokens without an operator.
+}
+
 moved {
   from = nebius_iam_v1_group.evidence_writers
   to   = nebius_iam_v1_group.evidence_writers["development"]

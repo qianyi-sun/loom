@@ -24,14 +24,19 @@ variables {
       evidence_prefix = "nebius-eu-north1-production"
     }
   }
-  network_cidr               = "10.0.0.0/16"
-  service_cidr               = "172.20.0.0/16"
-  control_plane_etcd_size    = 1
-  public_control_plane_cidrs = []
-  system_node_count          = 1
-  execution_min_nodes        = 0
-  execution_max_nodes        = 1
-  evidence_bucket_name       = "loom-nebius-test-evidence"
+  network_cidr                     = "10.0.0.0/16"
+  service_cidr                     = "172.20.0.0/16"
+  control_plane_etcd_size          = 1
+  public_control_plane_cidrs       = []
+  system_node_count                = 1
+  execution_min_nodes              = 0
+  execution_max_nodes              = 1
+  evidence_bucket_name             = "loom-nebius-test-evidence"
+  capacity_observer_public_key_pem = <<-EOT
+    -----BEGIN PUBLIC KEY-----
+    dGVzdA==
+    -----END PUBLIC KEY-----
+  EOT
 }
 
 run "development_private_payg_plan" {
@@ -69,6 +74,12 @@ run "development_private_payg_plan" {
   assert {
     condition     = nebius_mk8s_v1_node_group.execution.template.taints[0].key == "loom.nebius/execution"
     error_message = "Execution nodes must be isolated by the accepted taint."
+  }
+
+
+  assert {
+    condition     = nebius_iam_v1_auth_public_key.capacity_observer.expires_at == null
+    error_message = "The recurring capacity observer key must not acquire a calendar expiry."
   }
 }
 

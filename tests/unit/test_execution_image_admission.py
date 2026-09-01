@@ -80,7 +80,7 @@ def test_image_admission_rejects_tamper_missing_image_and_unknown_key() -> None:
         )
 
 
-def test_image_admission_rejects_high_severity_and_expiry() -> None:
+def test_image_admission_rejects_high_severity_but_not_immutable_evidence_age() -> None:
     now = datetime.now(UTC)
     high = signed_image_admission_bundle((_TASK, _RUNTIME), now=now, severity="high")
     with pytest.raises(ImageAdmissionError, match="vulnerability"):
@@ -91,13 +91,12 @@ def test_image_admission_rejects_high_severity_and_expiry() -> None:
             now=now,
         )
     expired = signed_image_admission_bundle((_TASK, _RUNTIME), now=now - timedelta(hours=2))
-    with pytest.raises(ImageAdmissionError, match="expired"):
-        verify_execution_image_admission(
-            expired,
-            required_image_refs=(_TASK, _RUNTIME),
-            keyring=IMAGE_ADMISSION_KEYRING,
-            now=now,
-        )
+    verify_execution_image_admission(
+        expired,
+        required_image_refs=(_TASK, _RUNTIME),
+        keyring=IMAGE_ADMISSION_KEYRING,
+        now=now,
+    )
 
 
 def test_image_admission_keyring_json_is_strict_and_bounded() -> None:

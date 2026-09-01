@@ -229,8 +229,6 @@ class InClusterKubernetesCapacityReader:
             if isinstance(exc, KubernetesObservationError):
                 raise
             raise KubernetesObservationError("Kubernetes capacity list failed") from exc
-        if not nodes:
-            raise KubernetesObservationError("Kubernetes node selector matched no nodes")
         node_names = {
             str(node.metadata.name)
             for node in nodes

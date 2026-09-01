@@ -41,6 +41,7 @@ def _settings(tmp_path: Path) -> ExecutionCapacityCollectorSettings:
         namespace="loom-nebius-staging",
         node_label_selector="loom.openai.com/execution-target=nebius-eu-north1-staging",
         nebius_project_id="project-test",
+        nebius_quota_parent_id="tenant-test",
         nebius_node_group_id="nodegroup-test",
         nebius_region="eu-north1",
         nebius_credentials_file=tmp_path / "nebius.json",
@@ -297,6 +298,36 @@ async def test_kubernetes_capture_counts_selected_node_load_and_target_pending_d
 
 
 @pytest.mark.asyncio
+async def test_kubernetes_capture_accepts_scale_to_zero_inventory() -> None:
+    core = SimpleNamespace(
+        list_node=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="nodes-8")
+        ),
+        list_pod_for_all_namespaces=lambda **_: SimpleNamespace(
+            items=[], metadata=SimpleNamespace(resource_version="pods-10")
+        ),
+    )
+
+    snapshot = await InClusterKubernetesCapacityReader(core_api=core).capture(
+        namespace="loom-nebius-development",
+        target_id="nebius-eu-north1-development",
+        node_label_selector="loom.nebius/node-role=execution",
+    )
+
+    assert snapshot.source_versions == {"nodes": "nodes-8", "pods": "pods-10"}
+    assert snapshot.active_nodes == 0
+    assert snapshot.ready_nodes == 0
+    assert snapshot.provisioned == ResourceTotals(
+        cpu_millis=0,
+        memory_mib=0,
+        storage_mib=0,
+    )
+    assert snapshot.allocatable == snapshot.provisioned
+    assert snapshot.requested == snapshot.provisioned
+    assert snapshot.pending_jobs == 0
+
+
+@pytest.mark.asyncio
 async def test_kubernetes_capture_rejects_target_pod_outside_bound_node_group() -> None:
     core = SimpleNamespace(
         list_node=lambda **_: SimpleNamespace(
@@ -387,6 +418,60 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
     assert snapshot.used_memory_mib == 24 * 1024
     assert snapshot.provider_capacity_state == "available"
     assert snapshot.autoscaler_state == "scaling"
+
+
+@pytest.mark.asyncio
+async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
+    tmp_path: Path,
+) -> None:
+    gib = 1024**3
+    observed_parents: list[str] = []
+
+    async def list_quotas(request: Any, **_kwargs: Any) -> Any:
+        observed_parents.append(request.parent_id)
+        return SimpleNamespace(
+            items=[
+                _quota("non-gpu-vms", "count", 20, 3, 1),
+                _quota("non-gpu-vcpu", "vcpu", 80, 12, 2),
+                _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+            ],
+            next_page_token="",
+        )
+
+    settings = _settings(tmp_path).model_copy(
+        update={"quota_memory_name": None, "quota_memory_unit": None}
+    )
+    reader = NebiusCapacityReader(
+        settings,
+        sdk=object(),
+        quota_client=SimpleNamespace(list=list_quotas),
+        node_group_client=SimpleNamespace(
+            get=lambda *_args, **_kwargs: _awaitable(
+                SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        id="nodegroup-test",
+                        parent_id="cluster-test",
+                        resource_version=9,
+                    ),
+                    spec=SimpleNamespace(autoscaling=SimpleNamespace(max_node_count=10)),
+                    status=SimpleNamespace(
+                        state=_enum("RUNNING"),
+                        node_count=3,
+                        target_node_count=3,
+                        ready_node_count=3,
+                        reconciling=False,
+                        events=[],
+                    ),
+                )
+            )
+        ),
+    )
+    policy = await _ControlPlane().fetch_policy(target_id="x", pool_id="y")
+    snapshot = await reader.capture(policy)
+    assert observed_parents == ["tenant-test"]
+    assert snapshot.quota_memory_mib == policy.max_nodes * policy.node_memory_mib
+    assert snapshot.used_memory_mib == 3 * policy.node_memory_mib
+    assert snapshot.source_versions["quota_memory"] == "derived:policy-3:node-group-9"
 
 
 async def _return(value: Any) -> Any:
@@ -504,7 +589,20 @@ def test_collector_secret_init_creates_only_owner_files(tmp_path: Path) -> None:
     assert all((path.stat().st_mode & 0o777) == 0o600 for path in destination.iterdir())
 
 
-def test_collector_manifest_is_suspended_and_strictly_read_only() -> None:
+def test_collector_secret_init_normalizes_kubernetes_fsgroup_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "control-plane-token").write_text("token", encoding="utf-8")
+    (source / "nebius-credentials.json").write_text("{}", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir(mode=0o770)
+
+    copy_projected_credentials(source, destination)
+
+    assert oct(destination.stat().st_mode & 0o777) == "0o700"
+
+
+def test_collector_manifest_is_active_configured_and_strictly_read_only() -> None:
     documents = list(
         yaml.safe_load_all(
             (_ROOT / "deploy/k8s/nebius-capacity-collector.yaml").read_text(encoding="utf-8")
@@ -518,10 +616,46 @@ def test_collector_manifest_is_suspended_and_strictly_read_only() -> None:
             "verbs": ["get", "list"],
         }
     ]
+    config = next(row for row in documents if row["kind"] == "ConfigMap")
+    assert config["metadata"]["namespace"] == "loom-nebius-development"
+    assert config["data"] == {
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID": "nebius-eu-north1-development",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_POOL_ID": "nebius-cpu",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NAMESPACE": "loom-nebius-development",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NODE_LABEL_SELECTOR": (
+            "loom.nebius/node-role=execution"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID": (
+            "project-e00ksehzpr00ftw5pe61gt"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_QUOTA_PARENT_ID": (
+            "tenant-e00zcze7mmwb61vk7e"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_NODE_GROUP_ID": (
+            "mk8snodegroup-e00n6mbxcz8jgp8bat"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_REGION": "eu-north1",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_CONTROL_PLANE_URL": (
+            "http://loom-control-plane.loom.svc.cluster.local:8080"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_NAME": "compute.instance.count",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_NAME": (
+            "compute.instance.non-gpu.vcpu"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_NAME": (
+            "compute.disk.size.network-ssd"
+        ),
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_NODES_UNIT": "count",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_VCPU_UNIT": "count",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_STORAGE_UNIT": "byte",
+        "LOOM_EXECUTION_CAPACITY_COLLECTOR_QUOTA_SERVICE": "compute",
+    }
     cron = next(row for row in documents if row["kind"] == "CronJob")
-    assert cron["spec"]["suspend"] is True
+    assert cron["metadata"]["namespace"] == "loom-nebius-development"
+    assert cron["spec"]["suspend"] is False
     assert cron["spec"]["concurrencyPolicy"] == "Forbid"
     pod = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    assert pod["nodeSelector"] == {"loom.nebius/node-role": "system"}
     assert pod["securityContext"]["runAsUser"] == 65532
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
     assert not {

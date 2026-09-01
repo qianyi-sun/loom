@@ -169,6 +169,7 @@ def test_mint_execution_capacity_collector_token_uses_dedicated_endpoint(
 
     def _fake_post(url, **kwargs):  # type: ignore[no-untyped-def]
         captured["url"] = url
+        captured["json"] = kwargs["json"]
         return _StubResponse(
             201,
             json_data={"token": "loom_ecc_secret", "token_hash_prefix": "a1b2c3d4"},
@@ -184,10 +185,13 @@ def test_mint_execution_capacity_collector_token_uses_dedicated_endpoint(
             "mint",
             "--kind",
             "execution-capacity-collector",
+            "--expires-in-days",
+            "0",
         ]
     )
     assert rc == 0
     assert captured["url"] == "http://localhost:8080/admin/execution-capacity-collector-tokens"
+    assert captured["json"] == {}
     output = capsys.readouterr().out
     assert "execution capacity collector" in output
     assert "loom_ecc_secret" not in output

@@ -717,6 +717,7 @@ class SystemHostAdapter:
             return True
         if result in {
             CommandResult(3, "inactive\n", ""),
+            CommandResult(4, "inactive\n", ""),
             CommandResult(4, "unknown\n", ""),
         }:
             return False

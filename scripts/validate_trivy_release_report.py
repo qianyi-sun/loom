@@ -60,18 +60,12 @@ _PERL_BASE_COMPONENTS = (
     "worker",
 )
 _EMPTY_COMPONENTS = (
-    "behavior-stage1-sim",
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
     "service",
     "staging-admin-browser-smoke",
     "web",
-)
-_STAGE1_COMPONENT = "behavior-stage1-sim"
-_STAGE1_ARTIFACT = re.compile(
-    r"^loom-(?:ci-loom-behavior-stage1-sim:candidate|"
-    r"release-loom-behavior-stage1-sim:build)-[0-9a-f]{40}$"
 )
 _PERL_BASE_FINDINGS = frozenset(
     (vulnerability_id, "pkg:deb/debian/perl-base") for vulnerability_id in _PERL_CVES
@@ -198,30 +192,12 @@ def _validate_artifact_identity(
     architecture: str,
     artifact_name: str,
 ) -> None:
-    if component == _STAGE1_COMPONENT:
-        if architecture != "amd64" or _STAGE1_ARTIFACT.fullmatch(artifact_name) is None:
-            raise TrivyReportError("report artifact is inconsistent")
-        return
     expected_artifacts = {
         f"/tmp/{component}-{architecture}.docker.tar",
         f"/tmp/{component}-{architecture}.release.docker.tar",
     }
     if artifact_name not in expected_artifacts:
         raise TrivyReportError("report artifact is inconsistent")
-
-
-def _validate_stage1_platform(
-    metadata: dict[str, object],
-    results: list[object],
-) -> None:
-    os_metadata = _object(metadata.get("OS"))
-    if os_metadata.get("Family") != "ubuntu" or os_metadata.get("Name") != "24.04":
-        raise TrivyReportError("Stage 1 report OS is inconsistent")
-    if not any(
-        _object(result).get("Class") == "os-pkgs" and _object(result).get("Type") == "ubuntu"
-        for result in results
-    ):
-        raise TrivyReportError("Stage 1 report lacks its Ubuntu package inventory")
 
 
 def _validate_purl(
@@ -308,11 +284,7 @@ def validate_trivy_release_report(
     """Reject any report that does not exactly prove the controlled inventory."""
 
     expected = _EXPECTED_FINDINGS.get(component)
-    if (
-        expected is None
-        or architecture not in {"amd64", "arm64"}
-        or (component == _STAGE1_COMPONENT and architecture != "amd64")
-    ):
+    if expected is None or architecture not in {"amd64", "arm64"}:
         raise TrivyReportError("unknown component or architecture")
     _validate_release_component(component)
     if _read_regular_file(ignore_file, len(TRIVY_IGNORE_BYTES)) != TRIVY_IGNORE_BYTES:
@@ -341,9 +313,6 @@ def validate_trivy_release_report(
     results = _array(payload.get("Results"))
     if not results or len(results) > _MAX_RESULTS:
         raise TrivyReportError("report result count is invalid")
-    if component == _STAGE1_COMPONENT:
-        _validate_stage1_platform(metadata, results)
-
     observed: list[tuple[str, str]] = []
     ignore_source = str(ignore_file)
     for result_value in results:

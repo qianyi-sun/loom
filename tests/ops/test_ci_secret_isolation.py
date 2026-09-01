@@ -108,8 +108,6 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
     assert write_capable_jobs == {
         "publish",
         "publish-manifest",
-        "stage1-publish",
-        "stage1-publish-index",
     }
     assert publish["permissions"] == {
         "attestations": "write",
@@ -154,17 +152,6 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
         step.get("with", {}).get("persist-credentials") is False
         for step in _checkout_steps(manifest)
     )
-    stage1_publish = workflow["jobs"]["stage1-publish"]
-    stage1_index = workflow["jobs"]["stage1-publish-index"]
-    assert _normalized_expression(stage1_publish["if"]).startswith(
-        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
-    )
-    assert stage1_publish["permissions"] == publish["permissions"]
-    assert _normalized_expression(stage1_index["if"]).startswith(
-        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
-    )
-    assert stage1_index["permissions"] == manifest["permissions"]
-
     login = _named_step(publish, "Log in to GHCR")
     assert login["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
     assert "${{" not in login["run"]
@@ -213,7 +200,7 @@ def test_images_trusted_dispatch_is_validated_before_any_publish_job() -> None:
     assert '[[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]]' in script
     assert 'git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"' in script
     assert 'test "$(git rev-parse HEAD)" = "$HEAD_SHA"' in script
-    for job_name in ("publish", "publish-manifest", "stage1-publish", "stage1-publish-index"):
+    for job_name in ("publish", "publish-manifest"):
         assert "needs.plan.outputs.trusted_publish == 'true'" in workflow["jobs"][job_name]["if"]
 
 
@@ -285,21 +272,15 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "trivy-binary",
         "personal-dev-scanner-cache-assets",
         "build",
-        "stage1-build",
-        "candidate-index",
         "publish",
         "publish-manifest",
         "personal-dev-trusted-release",
-        "stage1-publish",
-        "stage1-publish-index",
         "images-gate",
     }
     for job_name in (
         "plan",
         "trivy-binary",
         "build",
-        "stage1-build",
-        "candidate-index",
         "images-gate",
     ):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
@@ -321,9 +302,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     }
     assert "environment" not in scanner_cache_assets
     assert "id-token" not in scanner_cache_assets["permissions"]
-    assert all(
-        value != "write" for value in scanner_cache_assets["permissions"].values()
-    )
+    assert all(value != "write" for value in scanner_cache_assets["permissions"].values())
 
     assert jobs["publish"]["permissions"] == {
         "attestations": "write",
@@ -344,13 +323,9 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "contents": "read",
         "packages": "read",
     }
-    assert jobs["stage1-publish"]["permissions"] == jobs["publish"]["permissions"]
-    assert jobs["stage1-publish-index"]["permissions"] == jobs["publish-manifest"]["permissions"]
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
     assert "environment" not in jobs["personal-dev-trusted-release"]
-    assert "environment" not in jobs["stage1-publish"]
-    assert "environment" not in jobs["stage1-publish-index"]
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -364,8 +339,6 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
     ]
 
     assert secret_references == [
-        "${{ secrets.GITHUB_TOKEN }}",
-        "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",

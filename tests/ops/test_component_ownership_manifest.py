@@ -943,7 +943,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 22
+    assert len(matrix) == 21
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -1010,15 +1010,12 @@ def test_native_builder_agent_image_has_authority_minimal_release_ownership() ->
         changed_paths=("src/loom/personal_dev_native_builder_agent.py",),
         force_all=False,
     )
-    assert (
-        {
-            "image": "personal-dev-native-builder-agent",
-            "image_name": "loom-personal-dev-native-builder-agent",
-            "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
-            "context": ".",
-        }
-        in selected
-    )
+    assert {
+        "image": "personal-dev-native-builder-agent",
+        "image_name": "loom-personal-dev-native-builder-agent",
+        "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
+        "context": ".",
+    } in selected
 
 
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
@@ -1053,10 +1050,7 @@ def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -
 def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
-    images = component_ownership.release_image_matrix_for_publisher(
-        manifest,
-        publisher="images",
-    )
+    images = component_ownership.release_image_matrix(manifest)
     matrix = component_ownership.native_release_image_matrix(images)
 
     assert len(matrix) == len(images) * 2
@@ -1070,25 +1064,29 @@ def test_native_release_image_matrix_crosses_every_image_with_both_architectures
         assert all({key: entry[key] for key in image} == image for entry in matching)
 
 
-def test_stage1_image_has_a_separate_single_platform_publisher() -> None:
+def test_behavior_stage1_image_is_dormant_and_excluded_from_ci_planning() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    images = component_ownership.release_image_matrix_for_publisher(
-        manifest,
-        publisher="behavior-stage1",
-    )
+    component = next(item for item in manifest.components if item.id == "behavior-stage1-sim")
 
-    assert images == (
-        {
-            "image": "behavior-stage1-sim",
-            "image_name": "loom-behavior-stage1-sim",
-            "dockerfile": "deploy/Dockerfile.behavior-stage1-sim",
-            "context": ".",
-        },
-    )
-    component = next(
-        item for item in manifest.release_components() if item.id == "behavior-stage1-sim"
-    )
+    assert component.ci_enabled is False
     assert component.platforms == ("linux/amd64",)
+    assert component not in manifest.release_components()
+    assert (
+        component_ownership.select_release_image_matrix(
+            manifest,
+            changed_paths=("deploy/Dockerfile.behavior-stage1-sim",),
+            force_all=False,
+        )
+        == ()
+    )
+    assert all(
+        item["image"] != "behavior-stage1-sim"
+        for item in component_ownership.select_release_image_matrix(
+            manifest,
+            changed_paths=(),
+            force_all=True,
+        )
+    )
 
 
 def test_release_image_selection_uses_manifest_source_ownership() -> None:
@@ -1254,6 +1252,41 @@ def test_root_lane_includes_previously_unexecuted_owned_directories() -> None:
 
     assert any(path.startswith("tests/loom_config/") for path in paths)
     assert any(path.startswith("tests/loom_egress_xds/") for path in paths)
+
+
+def test_behavior_tests_are_owned_but_excluded_from_ci_lanes() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
+    behavior_tests = {
+        path
+        for path in tracked_paths
+        if component_ownership._is_runnable_test_path(path)
+        and (
+            path.startswith("tests/integrations/behavior/")
+            or "behavior" in Path(path).name
+            or "stage1" in Path(path).name
+        )
+    }
+
+    assert behavior_tests
+    assert all(not manifest.test_owner_for_path(path).ci_enabled for path in behavior_tests)
+    selected = {
+        path
+        for lane in manifest.ci_lanes
+        for path in component_ownership.test_paths_for_lane(
+            manifest,
+            tracked_paths=tracked_paths,
+            lane=lane,
+        )
+    }
+    assert behavior_tests.isdisjoint(selected)
+
+
+def test_behavior_frontend_sources_are_excluded_from_coverage_gate() -> None:
+    vite_config = (REPO_ROOT / "web/vite.config.ts").read_text(encoding="utf-8")
+
+    assert '"src/components/artifacts/BehaviorRollout*.tsx"' in vite_config
+    assert '"src/components/artifacts/useBoundedJson.ts"' in vite_config
 
 
 @pytest.mark.parametrize(

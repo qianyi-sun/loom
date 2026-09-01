@@ -57,7 +57,19 @@ def _read_regular(path: Path, *, require_owner_mode: bool) -> bytes:
 def copy_projected_credentials(source: Path, destination: Path) -> None:
     source_root = source.resolve(strict=True)
     destination.mkdir(mode=0o700, parents=False, exist_ok=True)
-    if destination.is_symlink() or stat.S_IMODE(destination.stat().st_mode) != 0o700:
+    destination_metadata = destination.lstat()
+    if (
+        destination.is_symlink()
+        or not stat.S_ISDIR(destination_metadata.st_mode)
+        or destination_metadata.st_uid != os.getuid()
+    ):
+        raise ValueError("credential destination must be a 0700 directory")
+    # Kubernetes fsGroup ownership can widen an emptyDir child directory to
+    # 0770 between volume setup and the init container. This directory is
+    # owned by the non-root init identity, so normalize it before writing any
+    # credential rather than rejecting every fresh Pod.
+    destination.chmod(0o700)
+    if stat.S_IMODE(destination.stat().st_mode) != 0o700:
         raise ValueError("credential destination must be a 0700 directory")
     for name in _FILES:
         projected = source / name

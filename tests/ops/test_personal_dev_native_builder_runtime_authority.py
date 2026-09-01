@@ -2116,7 +2116,16 @@ def test_system_host_adapter_mutates_only_exact_services_and_nft_table() -> None
     ]
 
 
-def test_system_host_stop_is_idempotent_when_the_exact_unit_is_absent() -> None:
+@pytest.mark.parametrize(
+    "absent_result",
+    (
+        CommandResult(4, "inactive\n", ""),
+        CommandResult(4, "unknown\n", ""),
+    ),
+)
+def test_system_host_stop_is_idempotent_when_the_exact_unit_is_absent(
+    absent_result: CommandResult,
+) -> None:
     calls: list[tuple[str, ...]] = []
 
     class Runner:
@@ -2132,7 +2141,7 @@ def test_system_host_stop_is_idempotent_when_the_exact_unit_is_absent() -> None:
             calls.append(command)
             if command[1] != "is-active":
                 raise AssertionError("an absent unit must not be mutated")
-            return CommandResult(4, "unknown\n", "")
+            return absent_result
 
     authority_module.SystemHostAdapter(runner=Runner()).stop_agent()
 
@@ -2143,6 +2152,22 @@ def test_system_host_stop_is_idempotent_when_the_exact_unit_is_absent() -> None:
             "loom-personal-dev-native-builder-agent.service",
         )
     ]
+
+
+def test_system_host_rejects_an_unrecognized_absent_unit_result() -> None:
+    class Runner:
+        def run(
+            self,
+            argv: tuple[str, ...] | list[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            del argv, check, env
+            return CommandResult(4, "failed\n", "")
+
+    with pytest.raises(AuthorityError, match="host_state_invalid"):
+        authority_module.SystemHostAdapter(runner=Runner()).stop_agent()
 
 
 def test_runtime_builder_rejects_profile_outside_installed_policy(

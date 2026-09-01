@@ -105,7 +105,6 @@ jobs:
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
       images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
-      stage1_images: ${{ steps.plan.outputs.stage1_images || steps.event.outputs.stage1_images }}
       trusted_publish: ${{ steps.trust.outputs.trusted_publish || 'false' }}
     steps:
       - name: Classify draft event before checkout
@@ -125,7 +124,6 @@ jobs:
               echo 'required=false'
               echo 'images=[]'
               echo 'native_builds=[]'
-              echo 'stage1_images=[]'
             } >> "$GITHUB_OUTPUT"
           else
             echo 'checkout_required=true' >> "$GITHUB_OUTPUT"
@@ -283,7 +281,7 @@ jobs:
       needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
-      (needs.plan.outputs.images != '[]' || needs.plan.outputs.stage1_images != '[]')
+      needs.plan.outputs.images != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -306,17 +304,12 @@ jobs:
         shell: bash
         env:
           NATIVE_BUILDS: ${{ needs.plan.outputs.native_builds }}
-          STAGE1_IMAGES: ${{ needs.plan.outputs.stage1_images }}
         run: |
           python3 - <<'PY'
           import json
           import os
 
           builds = json.loads(os.environ["NATIVE_BUILDS"])
-          builds.extend(
-              {**item, "architecture": "amd64", "platform": "linux/amd64"}
-              for item in json.loads(os.environ.get("STAGE1_IMAGES", "[]"))
-          )
           # The live lease broker may still run the preceding merged contract.
           # Keep this new image on a hosted runner until that separately-owned
           # control-plane rollout has occurred.
@@ -365,7 +358,7 @@ jobs:
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
-      (needs.plan.outputs.images != '[]' || needs.plan.outputs.stage1_images != '[]')
+      needs.plan.outputs.images != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -701,305 +694,6 @@ jobs:
             --architecture "$ARCHITECTURE" \
             --report "$REPORT" \
             --ignore-file /tmp/loom-trivy-release.ignore.yaml
-
-      - name: Record candidate archive provenance
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        shell: bash
-        env:
-          IMAGE_NAME: ${{ matrix.image }}
-          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-          PLATFORM: ${{ matrix.platform }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
-          test -s "$archive"
-          archive_sha256=$(sha256sum "$archive" | cut -d ' ' -f 1)
-          archive_size=$(wc -c < "$archive" | tr -d ' ')
-          artifact_name="image-candidate-archive-${IMAGE_NAME}-${ARCHITECTURE}-attempt-${RUN_ATTEMPT}"
-          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
-          python3 scripts/ci_image_candidate.py record \
-            --repository "$REPOSITORY" \
-            --pull-request "$PR_NUMBER" \
-            --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA" \
-            --tree-sha "$tree_sha" \
-            --run-id "$RUN_ID" \
-            --run-attempt "$RUN_ATTEMPT" \
-            --image "$IMAGE_NAME" \
-            --image-name "$IMAGE_DIGEST_NAME" \
-            --dockerfile "$DOCKERFILE" \
-            --context "$BUILD_CONTEXT" \
-            --architecture "$ARCHITECTURE" \
-            --platform "$PLATFORM" \
-            --artifact-name "$artifact_name" \
-            --archive-sha256 "$archive_sha256" \
-            --archive-size "$archive_size" \
-            --output "/tmp/${IMAGE_NAME}-${ARCHITECTURE}-attempt-${RUN_ATTEMPT}.json"
-
-      - name: Upload reusable candidate archive
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: image-candidate-archive-${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
-          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-
-      - name: Upload candidate archive record
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: image-candidate-record-${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
-          path: /tmp/${{ matrix.image }}-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}.json
-          if-no-files-found: error
-          retention-days: 1
-
-  stage1-build:
-    name: ${{ matrix.image }} closed OLDLAB candidate
-    needs: [plan, image-route, trivy-binary]
-    if: >-
-      github.event_name != 'push' &&
-      needs.plan.outputs.trusted_publish != 'true' &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.stage1_images != '[]'
-    runs-on: ${{ fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
-    timeout-minutes: 120
-    env:
-      STAGE1_TRIVY_TIMEOUT: 45m0s
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.stage1_images) }}
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          persist-credentials: false
-
-      - name: Download exact verified Trivy binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: trivy-binaries-run-${{ github.run_id }}
-          path: /tmp/loom-trivy-binaries
-
-      - name: Build closed Stage 1 candidate without registry authority
-        id: candidate
-        shell: bash
-        env:
-          IMAGE: ${{ matrix.image }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        run: |
-          set -euo pipefail
-          python3 scripts/component_ownership.py validate-image \
-            --image "$IMAGE" --image-name "$IMAGE_NAME" \
-            --dockerfile "$DOCKERFILE" --build-context "$BUILD_CONTEXT"
-          test "$(uname -m)" = x86_64
-          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
-          source_root="$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          evidence_root="$RUNNER_TEMP/loom-stage1-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          local_image="loom-ci-${IMAGE_NAME}:candidate-${HEAD_SHA}"
-          python3 scripts/prepare_behavior_stage1_image_sources.py \
-            --repo-root . prepare --output "$source_root"
-          docker buildx build --load --platform linux/amd64 \
-            --build-context "stage1-sources=${source_root}" \
-            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}" \
-            --build-arg "LOOM_BUILD_TREE_SHA=${tree_sha}" \
-            --label "org.opencontainers.image.revision=${HEAD_SHA}" \
-            --file "$DOCKERFILE" --tag "$local_image" "$BUILD_CONTEXT"
-          mkdir -p "$evidence_root"
-          {
-            echo "local_image=$local_image"
-            echo "tree_sha=$tree_sha"
-            echo "source_root=$source_root"
-            echo "evidence_root=$evidence_root"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Prove closed non-root runtimes
-        shell: bash
-        env:
-          LOCAL_IMAGE: ${{ steps.candidate.outputs.local_image }}
-        run: |
-          set -euo pipefail
-          common=(
-            --rm --network none --read-only --cap-drop ALL
-            --security-opt no-new-privileges --user 65532:65532
-            --env OMNIGIBSON_DATA_PATH=/scratch
-            --tmpfs "/scratch:rw,nosuid,nodev,noexec,size=1g,uid=65532,gid=65532,mode=0700"
-            --tmpfs "/tmp:rw,nosuid,nodev,noexec,size=256m,uid=65532,gid=65532,mode=0700"
-          )
-          docker run "${common[@]}" "$LOCAL_IMAGE" \
-            /opt/loom/bin/sim-python -I -c \
-            'from loom.integrations.behavior.stages.rollout_backend import _load_runtime; runtime=_load_runtime(); assert runtime.version == "3.8.0"'
-          docker run "${common[@]}" "$LOCAL_IMAGE" \
-            /opt/loom/venv-vla/bin/python -I -c \
-            'from loom.integrations.behavior.vla.policy_backend import _load_runtime; runtime=_load_runtime(); assert runtime.version == "0.1.0"'
-          test "$(docker image inspect "$LOCAL_IMAGE" --format '{{.Config.User}}')" = 65532:65532
-          test "$(docker image inspect "$LOCAL_IMAGE" --format '{{json .Config.Entrypoint}}')" = null
-          test "$(docker image inspect "$LOCAL_IMAGE" --format '{{json .Config.Cmd}}')" = null
-
-      - name: Scan candidate and generate exact SPDX SBOM
-        shell: bash
-        env:
-          LOCAL_IMAGE: ${{ steps.candidate.outputs.local_image }}
-          EVIDENCE_ROOT: ${{ steps.candidate.outputs.evidence_root }}
-          IMAGE: ${{ matrix.image }}
-        run: |
-          set -euo pipefail
-          trivy_bin=/tmp/loom-trivy-binaries/amd64/trivy
-          (cd /tmp/loom-trivy-binaries/amd64 && sha256sum --check trivy.sha256)
-          chmod 0555 "$trivy_bin"
-          python3 scripts/write_trivy_release_policy.py \
-            --config-file /tmp/loom-stage1-trivy.yaml \
-            --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          set +e
-          "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
-            --timeout "$STAGE1_TRIVY_TIMEOUT" \
-            --format json --output "$EVIDENCE_ROOT/scan.json" \
-            --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
-            --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" \
-            "$LOCAL_IMAGE"
-          scan_status=$?
-          set -e
-          if (( scan_status != 0 )); then
-            python3 scripts/summarize_trivy_report.py "$EVIDENCE_ROOT/scan.json" || true
-            exit "$scan_status"
-          fi
-          python3 scripts/validate_trivy_release_report.py \
-            --component "$IMAGE" --architecture amd64 \
-            --report "$EVIDENCE_ROOT/scan.json" \
-            --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          "$trivy_bin" image --timeout "$STAGE1_TRIVY_TIMEOUT" \
-            --format spdx-json \
-            --output "$EVIDENCE_ROOT/sbom.spdx.json" \
-            --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$LOCAL_IMAGE"
-
-      - name: Seal candidate evidence
-        shell: bash
-        env:
-          LOCAL_IMAGE: ${{ steps.candidate.outputs.local_image }}
-          EVIDENCE_ROOT: ${{ steps.candidate.outputs.evidence_root }}
-          TREE_SHA: ${{ steps.candidate.outputs.tree_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          REF_NAME: ${{ github.head_ref || github.ref_name }}
-          IMAGE: ${{ matrix.image }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-        run: |
-          set -euo pipefail
-          container=$(docker create "$LOCAL_IMAGE" /bin/true)
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          docker cp "$container:/opt/loom/contracts/compatibility-manifest.json" \
-            "$EVIDENCE_ROOT/compatibility-manifest.json"
-          docker cp "$container:/opt/loom/contracts/source-evidence.json" \
-            "$EVIDENCE_ROOT/source-evidence.json"
-          docker cp "$container:/opt/loom/bin/behavior_stage1_image_contract.py" \
-            "$EVIDENCE_ROOT/preflight.py"
-          subject_digest=$(docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}')
-          python3 scripts/ci_behavior_stage1_image.py record-child \
-            --mode candidate --repository "$GITHUB_REPOSITORY" \
-            --ref-name "$REF_NAME" --head-sha "$HEAD_SHA" --tree-sha "$TREE_SHA" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --event-name "$GITHUB_EVENT_NAME" --image "$IMAGE" \
-            --image-name "$IMAGE_NAME" --dockerfile "$DOCKERFILE" \
-            --context "$BUILD_CONTEXT" --platform linux/amd64 \
-            --subject-name "$LOCAL_IMAGE" --subject-digest "$subject_digest" \
-            --scan-report "$EVIDENCE_ROOT/scan.json" \
-            --sbom "$EVIDENCE_ROOT/sbom.spdx.json" \
-            --source-evidence "$EVIDENCE_ROOT/source-evidence.json" \
-            --compatibility-manifest "$EVIDENCE_ROOT/compatibility-manifest.json" \
-            --preflight "$EVIDENCE_ROOT/preflight.py" \
-            --output "$EVIDENCE_ROOT/child-record.json"
-          python3 scripts/ci_behavior_stage1_image.py validate-child \
-            --mode candidate --record "$EVIDENCE_ROOT/child-record.json"
-
-      - name: Upload bounded Stage 1 candidate evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: stage1-image-candidate-evidence-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ steps.candidate.outputs.evidence_root }}
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Remove exact local Stage 1 candidate
-        if: always()
-        shell: bash
-        env:
-          LOCAL_IMAGE: ${{ steps.candidate.outputs.local_image }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$LOCAL_IMAGE" ]]; then docker image rm "$LOCAL_IMAGE" || true; fi
-
-  candidate-index:
-    name: verify reusable image candidate index
-    needs: [plan, build]
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.images != '[]' &&
-      needs.build.result == 'success'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-
-      - name: Download candidate archive records
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: image-candidate-record-*-attempt-*
-          path: /tmp/loom-image-candidate-records
-          merge-multiple: true
-
-      - name: Aggregate exact candidate index
-        shell: bash
-        env:
-          EXPECTED_MATRIX: ${{ needs.plan.outputs.native_builds }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
-          python3 scripts/ci_image_candidate.py aggregate \
-            --records-dir /tmp/loom-image-candidate-records \
-            --expected-matrix-json "$EXPECTED_MATRIX" \
-            --output /tmp/image-candidate-index.json
-
-      - name: Upload reusable candidate index
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: image-candidate-index-attempt-${{ github.run_attempt }}
-          path: /tmp/image-candidate-index.json
-          if-no-files-found: error
-          retention-days: 1
-
 
   publish:
     name: publish ${{ matrix.image }} (${{ matrix.platform }})
@@ -1828,421 +1522,6 @@ jobs:
               --attempts 6 --delay-seconds 2 >/dev/null
           done
 
-  stage1-publish:
-    name: publish Stage 1 linux/amd64 child
-    needs: [plan, trivy-binary]
-    if: >-
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' &&
-        needs.plan.outputs.trusted_publish == 'true')) &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.stage1_images != '[]'
-    runs-on: [self-hosted, linux, x64, loom-ci-image]
-    timeout-minutes: 120
-    env:
-      STAGE1_TRIVY_TIMEOUT: 45m0s
-    permissions:
-      attestations: write
-      contents: read
-      id-token: write
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.plan.outputs.stage1_images) }}
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Download exact verified Trivy binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: trivy-binaries-run-${{ github.run_id }}
-          path: /tmp/loom-trivy-binaries
-
-      - name: Require bounded large-image workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          required_bytes=85899345920
-          available_bytes=$(df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1 | tr -d ' ')
-          [[ "$available_bytes" =~ ^[0-9]+$ ]]
-          (( available_bytes >= required_bytes )) || {
-            echo "FAIL: Stage 1 publication requires at least 80 GiB free; observed ${available_bytes} bytes" >&2
-            exit 1
-          }
-          df -h "$RUNNER_TEMP"
-          docker system df
-
-      - name: Build, inspect, scan, and prepare Stage 1 child
-        id: child
-        shell: bash
-        env:
-          IMAGE: ${{ matrix.image }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-          HEAD_SHA: ${{ github.sha }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
-        run: |
-          set -euo pipefail
-          python3 scripts/component_ownership.py validate-image \
-            --image "$IMAGE" --image-name "$IMAGE_NAME" \
-            --dockerfile "$DOCKERFILE" --build-context "$BUILD_CONTEXT"
-          test "$(uname -m)" = x86_64
-          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
-          source_root="$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          evidence_root="$RUNNER_TEMP/loom-stage1-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          builder="loom-stage1-${IMAGE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          local_image="loom-release-${IMAGE_NAME}:build-${HEAD_SHA}"
-          python3 scripts/prepare_behavior_stage1_image_sources.py \
-            --repo-root . prepare --output "$source_root"
-          docker buildx create --name "$builder" --driver docker-container \
-            --use --bootstrap
-          docker buildx build --builder "$builder" --load --platform linux/amd64 \
-            --build-context "stage1-sources=${source_root}" \
-            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}" \
-            --build-arg "LOOM_BUILD_TREE_SHA=${tree_sha}" \
-            --label "org.opencontainers.image.revision=${HEAD_SHA}" \
-            --file "$DOCKERFILE" --tag "$local_image" "$BUILD_CONTEXT"
-          docker buildx rm "$builder"
-          python3 scripts/prepare_behavior_stage1_image_sources.py \
-            cleanup --output "$source_root"
-          common=(
-            --rm --network none --read-only --cap-drop ALL
-            --security-opt no-new-privileges --user 65532:65532
-            --env OMNIGIBSON_DATA_PATH=/scratch
-            --tmpfs "/scratch:rw,nosuid,nodev,noexec,size=1g,uid=65532,gid=65532,mode=0700"
-            --tmpfs "/tmp:rw,nosuid,nodev,noexec,size=256m,uid=65532,gid=65532,mode=0700"
-          )
-          docker run "${common[@]}" "$local_image" \
-            /opt/loom/bin/sim-python -I -c \
-            'from loom.integrations.behavior.stages.rollout_backend import _load_runtime; assert _load_runtime().version == "3.8.0"'
-          docker run "${common[@]}" "$local_image" \
-            /opt/loom/venv-vla/bin/python -I -c \
-            'from loom.integrations.behavior.vla.policy_backend import _load_runtime; assert _load_runtime().version == "0.1.0"'
-          mkdir -p "$evidence_root"
-          trivy_bin=/tmp/loom-trivy-binaries/amd64/trivy
-          (cd /tmp/loom-trivy-binaries/amd64 && sha256sum --check trivy.sha256)
-          chmod 0555 "$trivy_bin"
-          python3 scripts/write_trivy_release_policy.py \
-            --config-file /tmp/loom-stage1-trivy.yaml \
-            --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          set +e
-          "$trivy_bin" --config /tmp/loom-stage1-trivy.yaml image \
-            --timeout "$STAGE1_TRIVY_TIMEOUT" \
-            --format json --output "$evidence_root/scan.json" \
-            --ignorefile /tmp/loom-stage1-trivy.ignore.yaml \
-            --show-suppressed --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
-          scan_status=$?
-          set -e
-          if (( scan_status != 0 )); then
-            python3 scripts/summarize_trivy_report.py "$evidence_root/scan.json" || true
-            exit "$scan_status"
-          fi
-          python3 scripts/validate_trivy_release_report.py \
-            --component "$IMAGE" --architecture amd64 \
-            --report "$evidence_root/scan.json" \
-            --ignore-file /tmp/loom-stage1-trivy.ignore.yaml
-          "$trivy_bin" image --timeout "$STAGE1_TRIVY_TIMEOUT" \
-            --format spdx-json \
-            --output "$evidence_root/sbom.spdx.json" \
-            --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
-          trivy_cache="$RUNNER_TEMP/loom-trivy-cache"
-          case "$trivy_cache" in
-            "$RUNNER_TEMP"/loom-trivy-cache) rm -rf -- "$trivy_cache" ;;
-            *) echo 'FAIL: refusing unsafe Trivy cache cleanup' >&2; exit 1 ;;
-          esac
-          container=$(docker create "$local_image" /bin/true)
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
-          docker cp "$container:/opt/loom/contracts/compatibility-manifest.json" \
-            "$evidence_root/compatibility-manifest.json"
-          docker cp "$container:/opt/loom/contracts/source-evidence.json" \
-            "$evidence_root/source-evidence.json"
-          docker cp "$container:/opt/loom/bin/behavior_stage1_image_contract.py" \
-            "$evidence_root/preflight.py"
-          docker rm "$container"
-          trap - EXIT
-          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          subject_name="ghcr.io/${owner_lower}/${IMAGE_NAME}"
-          {
-            echo "local_image=$local_image"
-            echo "tree_sha=$tree_sha"
-            echo "source_root=$source_root"
-            echo "evidence_root=$evidence_root"
-            echo "subject_name=$subject_name"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Log in and publish exact Stage 1 child
-        id: push
-        shell: bash
-        env:
-          GHCR_ACTOR: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LOCAL_IMAGE: ${{ steps.child.outputs.local_image }}
-          SUBJECT_NAME: ${{ steps.child.outputs.subject_name }}
-          EVIDENCE_ROOT: ${{ steps.child.outputs.evidence_root }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
-            --username "$GHCR_ACTOR" --password-stdin
-          target="${SUBJECT_NAME}:build-${HEAD_SHA}-amd64"
-          docker tag "$LOCAL_IMAGE" "$target"
-          push_output=$(scripts/ops/docker_push_with_retry.sh "$target")
-          printf '%s\n' "$push_output"
-          mapfile -t digests < <(sed -nE \
-            's/^.*digest: (sha256:[0-9a-f]{64}) size: [0-9]+.*$/\1/p' <<< "$push_output")
-          [[ ${#digests[@]} -eq 1 ]] || {
-            echo 'FAIL: child push did not emit exactly one digest' >&2
-            exit 1
-          }
-          python3 scripts/ci_registry_readback.py raw \
-            --reference "${SUBJECT_NAME}@${digests[0]}" \
-            --expected-digest "${digests[0]}" \
-            --output "$EVIDENCE_ROOT/child-manifest.json" \
-            --attempts 6 --delay-seconds 2
-          {
-            echo "subject_name=$SUBJECT_NAME"
-            echo "subject_digest=${digests[0]}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Seal trusted child record
-        shell: bash
-        env:
-          EVIDENCE_ROOT: ${{ steps.child.outputs.evidence_root }}
-          TREE_SHA: ${{ steps.child.outputs.tree_sha }}
-          SUBJECT_NAME: ${{ steps.push.outputs.subject_name }}
-          SUBJECT_DIGEST: ${{ steps.push.outputs.subject_digest }}
-          IMAGE: ${{ matrix.image }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          DOCKERFILE: ${{ matrix.dockerfile }}
-          BUILD_CONTEXT: ${{ matrix.context }}
-        run: |
-          set -euo pipefail
-          python3 scripts/ci_behavior_stage1_image.py record-child \
-            --mode trusted-publish --repository "$GITHUB_REPOSITORY" \
-            --ref-name "$GITHUB_REF_NAME" --head-sha "$GITHUB_SHA" \
-            --tree-sha "$TREE_SHA" --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" --event-name "$GITHUB_EVENT_NAME" \
-            --image "$IMAGE" --image-name "$IMAGE_NAME" --dockerfile "$DOCKERFILE" \
-            --context "$BUILD_CONTEXT" --platform linux/amd64 \
-            --subject-name "$SUBJECT_NAME" --subject-digest "$SUBJECT_DIGEST" \
-            --scan-report "$EVIDENCE_ROOT/scan.json" \
-            --sbom "$EVIDENCE_ROOT/sbom.spdx.json" \
-            --source-evidence "$EVIDENCE_ROOT/source-evidence.json" \
-            --compatibility-manifest "$EVIDENCE_ROOT/compatibility-manifest.json" \
-            --preflight "$EVIDENCE_ROOT/preflight.py" \
-            --output "$EVIDENCE_ROOT/child-record.json"
-
-      - name: Attest Stage 1 child build provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ steps.push.outputs.subject_name }}
-          subject-digest: ${{ steps.push.outputs.subject_digest }}
-          push-to-registry: true
-
-      - name: Attest exact Stage 1 SPDX SBOM
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ steps.push.outputs.subject_name }}
-          subject-digest: ${{ steps.push.outputs.subject_digest }}
-          sbom-path: ${{ steps.child.outputs.evidence_root }}/sbom.spdx.json
-          push-to-registry: true
-
-      - name: Upload bounded trusted Stage 1 child evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: stage1-image-child-release-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ steps.child.outputs.evidence_root }}
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Remove exact local Stage 1 release image
-        if: always()
-        shell: bash
-        env:
-          IMAGE: ${{ matrix.image }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          LOCAL_IMAGE: ${{ steps.child.outputs.local_image }}
-          SUBJECT_NAME: ${{ steps.child.outputs.subject_name }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          docker logout ghcr.io || true
-          builder="loom-stage1-${IMAGE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker buildx rm "$builder" >/dev/null 2>&1 || true
-          local_image="${LOCAL_IMAGE:-loom-release-${IMAGE_NAME}:build-${HEAD_SHA}}"
-          owner_lower=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          subject_name="${SUBJECT_NAME:-ghcr.io/${owner_lower}/${IMAGE_NAME}}"
-          docker image rm "$local_image" >/dev/null 2>&1 || true
-          docker image rm "${subject_name}:build-${HEAD_SHA}-amd64" >/dev/null 2>&1 || true
-          source_root="$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python3 scripts/prepare_behavior_stage1_image_sources.py \
-            cleanup --output "$source_root"
-          for path in \
-            "$RUNNER_TEMP/loom-stage1-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            "$RUNNER_TEMP/loom-trivy-cache"; do
-            case "$path" in
-              "$RUNNER_TEMP"/loom-stage1-release-*|\
-              "$RUNNER_TEMP"/loom-trivy-cache) rm -rf -- "$path" ;;
-              *) echo "FAIL: refusing unsafe cleanup path ${path}" >&2; exit 1 ;;
-            esac
-          done
-          df -h "$RUNNER_TEMP"
-
-  stage1-publish-index:
-    name: verify and publish Stage 1 OCI index
-    needs: [plan, stage1-publish]
-    if: >-
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' &&
-        needs.plan.outputs.trusted_publish == 'true')) &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.stage1_images != '[]' &&
-      needs.stage1-publish.result == 'success'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      actions: read
-      attestations: write
-      contents: read
-      id-token: write
-      packages: write
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-
-      - name: Download exact Stage 1 child evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: stage1-image-child-release-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: /tmp/loom-stage1-child
-
-      - name: Validate and verify Stage 1 child attestations
-        id: child
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          record=/tmp/loom-stage1-child/child-record.json
-          python3 scripts/ci_behavior_stage1_image.py validate-child \
-            --mode trusted-publish --record "$record"
-          subject_name=$(jq -er .subject.name "$record")
-          subject_digest=$(jq -er .subject.digest "$record")
-          gh attestation verify "oci://${subject_name}@${subject_digest}" \
-            --bundle-from-oci --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
-            --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" \
-            --predicate-type https://slsa.dev/provenance/v1 --format json \
-            > /tmp/loom-stage1-child-provenance.json
-          gh attestation verify "oci://${subject_name}@${subject_digest}" \
-            --bundle-from-oci --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
-            --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" \
-            --predicate-type https://spdx.dev/Document/v2.3 --format json \
-            > /tmp/loom-stage1-child-sbom.json
-          {
-            echo "subject_name=$subject_name"
-            echo "subject_digest=$subject_digest"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Log in and assemble exact one-child index
-        id: index
-        shell: bash
-        env:
-          GHCR_ACTOR: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SUBJECT_NAME: ${{ steps.child.outputs.subject_name }}
-          CHILD_DIGEST: ${{ steps.child.outputs.subject_digest }}
-        run: |
-          set -euo pipefail
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
-            --username "$GHCR_ACTOR" --password-stdin
-          index_tag="${SUBJECT_NAME}:manifest-${GITHUB_SHA}"
-          docker buildx imagetools create --progress plain --tag "$index_tag" \
-            "${SUBJECT_NAME}@${CHILD_DIGEST}"
-          docker buildx imagetools inspect --raw "$index_tag" > /tmp/loom-stage1-index.json
-          index_digest="sha256:$(sha256sum /tmp/loom-stage1-index.json | awk '{print $1}')"
-          docker buildx imagetools inspect --raw "${SUBJECT_NAME}@${index_digest}" \
-            > /tmp/loom-stage1-index-readback.json
-          cmp --silent /tmp/loom-stage1-index.json /tmp/loom-stage1-index-readback.json
-          jq -e --arg child "$CHILD_DIGEST" \
-            '.mediaType == "application/vnd.oci.image.index.v1+json" and
-             (.manifests | length == 1) and
-             .manifests[0].digest == $child and
-             .manifests[0].platform.os == "linux" and
-             .manifests[0].platform.architecture == "amd64"' \
-            /tmp/loom-stage1-index.json >/dev/null
-          python3 scripts/ci_behavior_stage1_image.py record-index \
-            --child-record /tmp/loom-stage1-child/child-record.json \
-            --index-manifest /tmp/loom-stage1-index.json \
-            --subject-name "$SUBJECT_NAME" --subject-digest "$index_digest" \
-            --provenance-verification /tmp/loom-stage1-child-provenance.json \
-            --sbom-verification /tmp/loom-stage1-child-sbom.json \
-            --output /tmp/loom-stage1-index-release.json
-          {
-            echo "subject_name=$SUBJECT_NAME"
-            echo "subject_digest=$index_digest"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Attest canonical Stage 1 index release record
-        id: attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-name: ${{ steps.index.outputs.subject_name }}
-          subject-digest: ${{ steps.index.outputs.subject_digest }}
-          predicate-type: https://loom.dev/attestations/behavior-stage1-image-release/v1
-          predicate-path: /tmp/loom-stage1-index-release.json
-          push-to-registry: true
-
-      - name: Verify release record and publish immutable tags
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SUBJECT_NAME: ${{ steps.index.outputs.subject_name }}
-          SUBJECT_DIGEST: ${{ steps.index.outputs.subject_digest }}
-          BUNDLE_PATH: ${{ steps.attestation.outputs.bundle-path }}
-        run: |
-          set -euo pipefail
-          gh attestation verify "oci://${SUBJECT_NAME}@${SUBJECT_DIGEST}" \
-            --bundle "$BUNDLE_PATH" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
-            --source-digest "$GITHUB_SHA" --source-ref "$GITHUB_REF" \
-            --predicate-type https://loom.dev/attestations/behavior-stage1-image-release/v1 \
-            --deny-self-hosted-runners --format json \
-            > /tmp/loom-stage1-index-verification.json
-          sha_short="${GITHUB_SHA:0:12}"
-          docker buildx imagetools create \
-            --tag "${SUBJECT_NAME}:${sha_short}" --tag "${SUBJECT_NAME}:${GITHUB_REF_NAME}" \
-            "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
-          for tag in "$sha_short" "$GITHUB_REF_NAME"; do
-            python3 scripts/ci_registry_readback.py digest \
-              --reference "${SUBJECT_NAME}:${tag}" \
-              --expected-digest "$SUBJECT_DIGEST" \
-              --attempts 6 --delay-seconds 2 >/dev/null
-          done
-
-      - name: Upload canonical final Stage 1 release evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: stage1-image-index-release-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: |
-            /tmp/loom-stage1-index-release.json
-            /tmp/loom-stage1-index.json
-            /tmp/loom-stage1-index-verification.json
-            /tmp/loom-stage1-child-provenance.json
-            /tmp/loom-stage1-child-sbom.json
-          if-no-files-found: error
-          retention-days: 90
-
   personal-dev-trusted-release:
     name: publish protected personal-development trusted release
     needs: [plan, publish-manifest]
@@ -2694,7 +1973,7 @@ jobs:
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, build, stage1-build, candidate-index, publish, publish-manifest, personal-dev-trusted-release, stage1-publish, stage1-publish-index]
+    needs: [plan, build, publish, publish-manifest, personal-dev-trusted-release]
     steps:
       - name: Enforce selected image result
         env:
@@ -2704,24 +1983,14 @@ jobs:
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
-          CANDIDATE_INDEX_RESULT: ${{ needs.candidate-index.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           MANIFEST_RESULT: ${{ needs.publish-manifest.result }}
           PERSONAL_DEV_RELEASE_RESULT: ${{ needs.personal-dev-trusted-release.result }}
-          STAGE1_IMAGES: ${{ needs.plan.outputs.stage1_images }}
-          STAGE1_BUILD_RESULT: ${{ needs.stage1-build.result }}
-          STAGE1_PUBLISH_RESULT: ${{ needs.stage1-publish.result }}
-          STAGE1_INDEX_RESULT: ${{ needs.stage1-publish-index.result }}
           STANDARD_IMAGES: ${{ needs.plan.outputs.images }}
-          INTERNAL_PULL_REQUEST: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           TRUSTED_PUBLISH=${TRUSTED_PUBLISH:-false}
           STANDARD_IMAGES=${STANDARD_IMAGES:-'[{}]'}
-          STAGE1_IMAGES=${STAGE1_IMAGES:-'[]'}
-          STAGE1_BUILD_RESULT=${STAGE1_BUILD_RESULT:-skipped}
-          STAGE1_PUBLISH_RESULT=${STAGE1_PUBLISH_RESULT:-skipped}
-          STAGE1_INDEX_RESULT=${STAGE1_INDEX_RESULT:-skipped}
           PERSONAL_DEV_RELEASE_RESULT=${PERSONAL_DEV_RELEASE_RESULT:-skipped}
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
@@ -2766,7 +2035,6 @@ jobs:
           if [[ "$REQUIRED" == "true" ]]; then
             if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-              [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
               if [[ "$STANDARD_IMAGES" == "[]" ]]; then
                 [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
                 [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
@@ -2774,42 +2042,17 @@ jobs:
                 [[ "$PUBLISH_RESULT" == "success" ]] || exit 1
                 [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
               fi
-              [[ "$STAGE1_BUILD_RESULT" == "skipped" ]] || exit 1
-              if [[ "$STAGE1_IMAGES" == "[]" ]]; then
-                [[ "$STAGE1_PUBLISH_RESULT" == "skipped" ]] || exit 1
-                [[ "$STAGE1_INDEX_RESULT" == "skipped" ]] || exit 1
-              else
-                [[ "$STAGE1_PUBLISH_RESULT" == "success" ]] || exit 1
-                [[ "$STAGE1_INDEX_RESULT" == "success" ]] || exit 1
-              fi
             else
               if [[ "$STANDARD_IMAGES" == "[]" ]]; then
                 [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-                [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
               else
                 [[ "$BUILD_RESULT" == "success" ]] || exit 1
-                if [[ "$INTERNAL_PULL_REQUEST" == "true" ]]; then
-                  [[ "$CANDIDATE_INDEX_RESULT" == "success" ]] || exit 1
-                else
-                  [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
-                fi
-              fi
-              if [[ "$STAGE1_IMAGES" == "[]" ]]; then
-                [[ "$STAGE1_BUILD_RESULT" == "skipped" ]] || exit 1
-              else
-                [[ "$STAGE1_BUILD_RESULT" == "success" ]] || exit 1
               fi
               [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
               [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
-              [[ "$STAGE1_PUBLISH_RESULT" == "skipped" ]] || exit 1
-              [[ "$STAGE1_INDEX_RESULT" == "skipped" ]] || exit 1
             fi
           else
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
-            [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
-            [[ "$STAGE1_BUILD_RESULT" == "skipped" ]] || exit 1
-            [[ "$STAGE1_PUBLISH_RESULT" == "skipped" ]] || exit 1
-            [[ "$STAGE1_INDEX_RESULT" == "skipped" ]] || exit 1
           fi

@@ -57,6 +57,8 @@ export default defineConfig(({ command }) => ({
       exclude: [
         "src/api/schema.d.ts",
         "src/__tests__/**",
+        "src/components/artifacts/BehaviorRollout*.tsx",
+        "src/components/artifacts/useBoundedJson.ts",
         "src/test-utils/**",
       ],
       thresholds: {

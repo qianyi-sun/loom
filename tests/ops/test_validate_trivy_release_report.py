@@ -44,7 +44,6 @@ _PERL_BASE_COMPONENTS = (
     "worker",
 )
 _EMPTY_COMPONENTS = (
-    "behavior-stage1-sim",
     "execution-runtime",
     "llm-gateway-sandbox",
     "personal-dev-builder",
@@ -153,15 +152,10 @@ def _report(
         )
         for vulnerability_id, base_purl in sorted(_EXPECTED_FINDINGS[component])
     ]
-    stage1 = component == "behavior-stage1-sim"
-    artifact_name = (
-        "loom-ci-loom-behavior-stage1-sim:candidate-0123456789abcdef0123456789abcdef01234567"
-        if stage1
-        else f"/tmp/{component}-{architecture}.docker.tar"
-    )
-    os_family = "ubuntu" if stage1 else "debian"
-    os_name = "24.04" if stage1 else "13.6"
-    os_type = "ubuntu" if stage1 else "debian"
+    artifact_name = f"/tmp/{component}-{architecture}.docker.tar"
+    os_family = "debian"
+    os_name = "13.6"
+    os_type = "debian"
     return {
         "SchemaVersion": 2,
         "ArtifactName": artifact_name,
@@ -231,7 +225,7 @@ def _assert_rejected(result: subprocess.CompletedProcess[str]) -> None:
 _SUPPORTED_COMPONENT_ARCHITECTURES = tuple(
     (component, architecture)
     for component in sorted(_EXPECTED_FINDINGS)
-    for architecture in (("amd64",) if component == "behavior-stage1-sim" else ("amd64", "arm64"))
+    for architecture in ("amd64", "arm64")
 )
 
 
@@ -255,80 +249,6 @@ def test_validator_accepts_each_exact_component_inventory(
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
-
-
-def test_validator_accepts_stage1_trusted_release_identity(tmp_path: Path) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("behavior-stage1-sim", ignore_file)
-    payload["ArtifactName"] = (
-        "loom-release-loom-behavior-stage1-sim:build-fedcba9876543210fedcba9876543210fedcba98"
-    )
-
-    result = _run_validator(
-        tmp_path,
-        payload,
-        component="behavior-stage1-sim",
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.parametrize(
-    "artifact_name",
-    (
-        "loom-ci-loom-behavior-stage1-sim:candidate-dev",
-        "loom-ci-loom-behavior-stage1-sim:candidate-0123456789abcdef",
-        "loom-ci-loom-behavior-stage1-sim:candidate-0123456789ABCDEF0123456789ABCDEF01234567",
-        "loom-release-loom-behavior-stage1-sim:latest",
-        "ghcr.io/qianyi-sun/loom-behavior-stage1-sim:latest",
-        "/tmp/behavior-stage1-sim-amd64.docker.tar",
-    ),
-)
-def test_validator_rejects_unbound_stage1_artifact_identity(
-    tmp_path: Path,
-    artifact_name: str,
-) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("behavior-stage1-sim", ignore_file)
-    payload["ArtifactName"] = artifact_name
-    _assert_rejected(_run_validator(tmp_path, payload, component="behavior-stage1-sim"))
-
-
-@pytest.mark.parametrize(
-    ("family", "name"),
-    (("debian", "24.04"), ("ubuntu", "22.04"), ("ubuntu", "24.04.1")),
-)
-def test_validator_rejects_stage1_os_drift(
-    tmp_path: Path,
-    family: str,
-    name: str,
-) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("behavior-stage1-sim", ignore_file)
-    payload["Metadata"]["OS"] = {"Family": family, "Name": name}  # type: ignore[index]
-    _assert_rejected(_run_validator(tmp_path, payload, component="behavior-stage1-sim"))
-
-
-def test_validator_rejects_stage1_without_ubuntu_package_inventory(
-    tmp_path: Path,
-) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("behavior-stage1-sim", ignore_file)
-    payload["Results"][0]["Type"] = "python-pkg"  # type: ignore[index]
-    _assert_rejected(_run_validator(tmp_path, payload, component="behavior-stage1-sim"))
-
-
-def test_validator_rejects_stage1_arm64_substitution(tmp_path: Path) -> None:
-    ignore_file = tmp_path / "loom-trivy-release.ignore.yaml"
-    payload = _report("behavior-stage1-sim", ignore_file, architecture="arm64")
-    _assert_rejected(
-        _run_validator(
-            tmp_path,
-            payload,
-            component="behavior-stage1-sim",
-            architecture="arm64",
-        )
-    )
 
 
 @pytest.mark.parametrize(

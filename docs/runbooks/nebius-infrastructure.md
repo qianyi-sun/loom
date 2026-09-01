@@ -51,6 +51,13 @@ Do not print or commit the profile configuration. Automation must use a
 dedicated service account with reviewed least privilege and an authorized-key
 profile, never a copied human token.
 
+The recurring capacity observer uses a Terraform-managed authorized public key
+with no `expires_at`. Generate the key pair once in a protected directory, put
+only the public PEM in `capacity_observer_public_key_pem`, and install the full
+Nebius credential JSON through the runtime bootstrap below. The SDK exchanges
+that key for short-lived access tokens and refreshes them automatically. Do not
+substitute a copied human access token or a static registry token.
+
 The cluster needs a pre-existing versioned state bucket with object access
 limited to its operators and CI identity. Bootstrap that bucket in a separately
 approved operation, enable access logging and retention appropriate to state,
@@ -159,6 +166,37 @@ does not prove the Loom scheduler, worker, model, verifier, or artifact path.
 Use the managed cluster's default container runtime with the repository's
 restricted, non-root Pod settings. A custom sandbox RuntimeClass is optional
 defense in depth, not an admission requirement for this project.
+
+## Persistent development runtime
+
+After the platform Deployment and its database/admin Secrets exist, attach the
+development execution runtime once:
+
+```bash
+scripts/ops/apply_nebius_development_runtime.sh \
+  --kubeconfig /secure/path/development-eu-north1.kubeconfig \
+  --nebius-credentials /secure/path/capacity-observer-credentials.json
+```
+
+The operation is idempotent. It applies the development-only Control Plane
+patch that enables the `nebius-cpu` scheduler and loads its image-admission
+keyring from the existing Secret, reuses the existing single-scope Loom
+collector token, applies the active actuator and one-minute collector, and
+waits for both rollouts plus a scheduled collector Job. The provider-neutral
+base manifest stays disabled. The operation does not create a user Job or
+change the node-group target count. Subsequent users only upload/submit through
+Loom; the persisted scheduler, lease/outbox, actuator, and managed `0..1`
+autoscaler complete the connection automatically.
+
+Kubernetes rotates the actuator's projected ServiceAccount token. Nebius
+refreshes access tokens from the non-expiring authorized key. Node-group image
+pulls use the attached node service account instead of a registry login token.
+The Loom batch-runner and capacity-collector identities are non-expiring and
+single-scope. Human browser sessions and user API tokens may expire without
+interrupting an already persisted Batch. A missing/revoked key or permission
+makes the minute collector fail and capacity evidence become stale, which
+fails closed before new reservations; it is an incident, not a periodic renewal
+procedure.
 
 ## Workload placement contract
 

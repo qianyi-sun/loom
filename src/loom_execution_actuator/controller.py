@@ -22,6 +22,7 @@ from loom_control_plane.service_execution import (
     finalize_committed_service_execution,
     mark_execution_output_unavailable,
     record_kubernetes_observation,
+    refresh_execution_target_health,
 )
 from loom_execution_actuator.contracts import (
     ActuatorContractError,
@@ -150,7 +151,11 @@ class ExecutionActuator:
             observation.normalized_state == NormalizedJobState.DELETED
             and lease.desired_state in _CLEANUP_DESIRED_STATES
         ):
-            await self._close_output_before_delete(lease, now=now)
+            await self._close_output_before_delete(
+                lease,
+                now=now,
+                cancel_immediately=lease.desired_state == "cancel",
+            )
         if observation.normalized_state in _FAILURE_REASONS:
             KUBERNETES_PENDING_TOTAL.labels(reason=observation.normalized_state.value).inc()
         async with self._sessions() as session:
@@ -174,18 +179,22 @@ class ExecutionActuator:
         lease: ServiceExecutionLease,
         *,
         now: datetime,
+        cancel_immediately: bool = False,
     ) -> None:
         if lease.output_commit_state in {"committed", "unavailable"}:
             return
-        if lease.cleanup_deadline_at is None or now < lease.cleanup_deadline_at:
+        if lease.cleanup_deadline_at is None or (
+            now < lease.cleanup_deadline_at and not cancel_immediately
+        ):
             raise _ExecutionOutputPendingError("durable output window remains open")
         async with self._sessions() as session:
             await mark_execution_output_unavailable(
                 session,
                 lease_id=lease.id,
                 expected_generation=lease.generation,
-                reason="cleanup_deadline_elapsed",
+                reason=("operator_cancelled" if cancel_immediately else "cleanup_deadline_elapsed"),
                 now=now,
+                allow_cancel_before_deadline=cancel_immediately,
             )
             await session.commit()
 
@@ -231,11 +240,16 @@ class ExecutionActuator:
         observation: KubernetesJobObservation,
         *,
         now: datetime,
+        cancel_immediately: bool = False,
     ) -> None:
         self._validate_observation(lease, observation)
         if observation.job_uid is None:
             raise ActuatorContractError("cannot delete a Job without exact UID")
-        await self._close_output_before_delete(lease, now=now)
+        await self._close_output_before_delete(
+            lease,
+            now=now,
+            cancel_immediately=cancel_immediately,
+        )
         with KUBERNETES_API_SECONDS.labels(operation="delete").time():
             await self._kubernetes.delete_job(
                 namespace=self._target.namespace,
@@ -320,7 +334,12 @@ class ExecutionActuator:
             elif command.command_type in _DELETE_COMMANDS:
                 observation = await self._get(lease)
                 if observation is not None:
-                    await self._delete(lease, observation, now=now)
+                    await self._delete(
+                        lease,
+                        observation,
+                        now=now,
+                        cancel_immediately=command.command_type == "cancel",
+                    )
                 else:
                     observation = KubernetesJobObservation(
                         namespace=self._target.namespace,
@@ -441,6 +460,14 @@ class ExecutionActuator:
                 continue
         KUBERNETES_ORPHAN_COUNT.set(drift)
         KUBERNETES_RECONCILE_CONVERGED.set(1 if drift == 0 else 0)
+        if drift == 0:
+            async with self._sessions() as session:
+                await refresh_execution_target_health(
+                    session,
+                    target_id=self._target.target_id,
+                    observed_at=current_time,
+                )
+                await session.commit()
         return drift
 
     async def watch_once(self, *, timeout_seconds: int = 15) -> int:

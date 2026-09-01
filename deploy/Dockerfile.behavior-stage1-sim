@@ -81,7 +81,7 @@ COPY --chmod=0555 src/loom_worker/__init__.py \
     src/loom_worker/pipeline_live_preview.py \
     /opt/loom/python/loom_worker/
 
-# `stage1-sources` is produced by prepare_behavior_stage1_image_sources.py.
+# Dormant image source bundle; CI no longer prepares or builds this target.
 # Public sources are exact commit/tree archives.  The authorized OmniGibson
 # restore runtime is the repository-owned, projection-digested source package
 # with one explicitly omitted unsafe absolute symlink.  No checkout occurs in
