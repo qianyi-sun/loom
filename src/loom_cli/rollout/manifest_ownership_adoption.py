@@ -315,9 +315,14 @@ def ownership_adoption_argv(
     kubeconfig: Path,
     dry_run: bool,
     output_json: bool = False,
+    namespace: str = "loom-staging",
 ) -> tuple[str, ...]:
     """Return the fixed maintenance-only SSA adoption command."""
-    if not kubeconfig.is_absolute() or ".." in kubeconfig.parts:
+    if (
+        not kubeconfig.is_absolute()
+        or ".." in kubeconfig.parts
+        or namespace not in {"loom-dev", "loom-staging"}
+    ):
         raise ValueError("ownership adoption kubeconfig is invalid")
     argv = [
         "kubectl",
@@ -325,7 +330,7 @@ def ownership_adoption_argv(
         str(kubeconfig),
         "--show-managed-fields=true",
         "--namespace",
-        "loom-staging",
+        namespace,
         "apply",
         "--server-side=true",
         f"--field-manager={MANIFEST_FIELD_MANAGER}",

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.operator.manifest_apply_contract import server_side_apply_argv
+from loom_cli.rollout.operator import manifest_apply_contract as contract
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentObservation,
     ComponentState,
@@ -79,7 +79,8 @@ def test_manifest_component_converges_guard_held_published_artifact(tmp_path: Pa
         assert payload is not None
         assert list(yaml.safe_load_all(payload)) == expected_documents
     apply_argv = runner.calls[2][0]
-    assert apply_argv == server_side_apply_argv(plan.namespace)
+    assert apply_argv == contract.server_side_all_namespaces_apply_argv()
+    assert "--namespace" not in apply_argv
     assert "--server-side=true" in apply_argv
     assert "--field-manager=loom-staging-rollout" in apply_argv
     assert "--force-conflicts" not in apply_argv

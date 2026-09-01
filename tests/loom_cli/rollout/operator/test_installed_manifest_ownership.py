@@ -195,6 +195,7 @@ class _Runner:
     def __init__(self, live: list[dict[str, object]] | None = None) -> None:
         self.live = _live() if live is None else live
         self.calls: list[tuple[str, ...]] = []
+        self.apply_namespaces: list[tuple[str, str, str | None]] = []
 
     @property
     def environment(self):
@@ -233,6 +234,20 @@ class _Runner:
         self.calls.append(command)
         document = yaml.safe_load(input_payload)
         assert isinstance(document, dict)
+        metadata = document.get("metadata")
+        assert isinstance(metadata, dict)
+        command_namespace = (
+            command[command.index("--namespace") + 1]
+            if "--namespace" in command
+            else None
+        )
+        self.apply_namespaces.append(
+            (
+                str(document.get("kind")),
+                str(metadata.get("namespace", "")),
+                command_namespace,
+            )
+        )
         identity = _identity(document)
         current = next(item for item in self.live if _identity(item) == identity)
         force = "--force-conflicts" in command
@@ -388,7 +403,13 @@ def test_installed_service_loads_exact_loom_dev_witness_identities(
         lambda *args, **kwargs: SimpleNamespace(image=lambda *args: None),
     )
     monkeypatch.setattr(module, "SubprocessProtectedApplyCommandRunner", lambda **kwargs: runner)
-    monkeypatch.setattr(module, "ManifestOwnershipJournal", lambda *args, **kwargs: _Journal())
+    journal = _Journal()
+    monkeypatch.setattr(module, "ManifestOwnershipJournal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        module,
+        "ManifestOwnershipEpochClaimer",
+        lambda **kwargs: lambda epoch, request, evidence: epoch + 1,
+    )
 
     service = InstalledManifestOwnershipService(
         config=_config(tmp_path),
@@ -400,9 +421,25 @@ def test_installed_service_loads_exact_loom_dev_witness_identities(
     resources = inventory["resources"]
     assert isinstance(resources, list)
     assert len(resources) == 7
-    witness_reads = [command for command in runner.calls if "loom-dev" in command]
+    witness_reads = [
+        command for command in runner.calls if "loom-dev" in command and "get" in command
+    ]
     assert len(witness_reads) == 2
     assert all(command[3:5] == ("--namespace", "loom-dev") for command in witness_reads)
+
+    result = service.apply(
+        _candidate(),
+        artifact_bundle_sha256=_BUNDLE,
+        request_id="req-manifest-ownership-12345678",
+        approved_inventory_sha256=inventory["inventory_sha256"],  # type: ignore[arg-type]
+    )
+
+    assert result["mutation_epoch_after"] == 3
+    witness_applies = [
+        item for item in runner.apply_namespaces if item[1] == "loom-dev"
+    ]
+    assert witness_applies
+    assert all(item[2] == "loom-dev" for item in witness_applies)
 
 
 def test_installed_service_rejects_nonsealed_candidate(tmp_path: Path) -> None:

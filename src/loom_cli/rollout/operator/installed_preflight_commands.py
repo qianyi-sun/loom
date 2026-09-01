@@ -12,8 +12,9 @@ from typing import Protocol
 
 from .config import OperatorConfig
 from .manifest_apply_contract import (
+    server_side_all_namespaces_apply_argv,
+    server_side_all_namespaces_schema_validation_argv,
     server_side_apply_argv,
-    server_side_schema_validation_argv,
 )
 from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
@@ -168,8 +169,7 @@ class InstalledPreflightCommands:
         if not rendered or len(rendered.encode("utf-8")) > 16 * 1024 * 1024:
             raise ValueError("preflight manifest payload is invalid")
         return self._execute(
-            server_side_apply_argv(
-                self.config.namespace,
+            server_side_all_namespaces_apply_argv(
                 kubeconfig=self.config.kubeconfig_path,
                 dry_run=True,
             ),
@@ -213,8 +213,7 @@ class InstalledPreflightCommands:
         if not rendered or len(rendered.encode("utf-8")) > 16 * 1024 * 1024:
             raise ValueError("preflight manifest payload is invalid")
         return self._execute(
-            server_side_schema_validation_argv(
-                self.config.namespace,
+            server_side_all_namespaces_schema_validation_argv(
                 kubeconfig=self.config.kubeconfig_path,
             ),
             input=rendered,

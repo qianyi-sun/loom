@@ -185,16 +185,42 @@ class InstalledManifestOwnershipService:
             documents = _parse_documents(payload)
             results: list[Resource] = []
             for document in documents:
+                metadata = document.get("metadata")
+                api_version = document.get("apiVersion")
+                kind = document.get("kind")
+                if not isinstance(metadata, dict):
+                    raise ValueError("ownership maintenance document metadata is invalid")
+                name = metadata.get("name")
+                declared_namespace = metadata.get("namespace")
+                if (
+                    not isinstance(api_version, str)
+                    or not isinstance(kind, str)
+                    or not isinstance(name, str)
+                    or (
+                        declared_namespace is not None
+                        and not isinstance(declared_namespace, str)
+                    )
+                    or not is_admitted_manifest_identity(
+                        api_version,
+                        kind,
+                        declared_namespace or "",
+                        name,
+                        namespace=self.config.namespace,
+                    )
+                ):
+                    raise ValueError("ownership maintenance document identity drifted")
+                command_namespace = declared_namespace or self.config.namespace
                 rendered = cast(str, yaml.safe_dump(document, sort_keys=True))
                 argv = (
                     ownership_adoption_argv(
                         kubeconfig=self.config.kubeconfig_path,
                         dry_run=dry_run,
                         output_json=True,
+                        namespace=command_namespace,
                     )
                     if force
                     else server_side_apply_argv(
-                        self.config.namespace,
+                        command_namespace,
                         kubeconfig=self.config.kubeconfig_path,
                         dry_run=dry_run,
                         output_json=True,
