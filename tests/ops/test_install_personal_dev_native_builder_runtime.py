@@ -8,13 +8,16 @@ import stat
 import tarfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 import scripts.ops.install_personal_dev_native_builder_runtime as runtime_installer
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
 from scripts.ops.install_personal_dev_native_builder_runtime import (
     NativeBuilderCommandResult,
     NativeBuilderInstallContext,
@@ -33,14 +36,10 @@ _PROFILE_PATH = _ROOT / "deploy/personal-dev-native-builder/runtime-profile-v1.j
 
 
 def test_ed25519_public_key_derivation_matches_rfc_8032_vector_1() -> None:
-    seed = bytes.fromhex(
-        "9d61b19deffd5a60ba844af492ec2cc4"
-        "4449c5697b326919703bac031cae7f60"
-    )
+    seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
 
     assert runtime_installer._derive_ed25519_public_key(seed).hex() == (
-        "d75a980182b10ab7d54bfed3c964073a"
-        "0ee172f3daa62325af021a68f707511a"
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
     )
 
 
@@ -155,11 +154,7 @@ class HostRunner:
             )
         elif executable == "systemctl":
             if call[1:2] == ("is-active",):
-                active = (
-                    self.dockerd_active
-                    if "builder-dockerd" in call[2]
-                    else self.agent_active
-                )
+                active = self.dockerd_active if "builder-dockerd" in call[2] else self.agent_active
                 result = NativeBuilderCommandResult(
                     0 if active else 3,
                     "active\n" if active else "inactive\n",
@@ -187,8 +182,7 @@ class HostRunner:
         elif executable == "runsc" and call[1:] == ("--version",):
             result = NativeBuilderCommandResult(
                 0,
-                f"runsc version {self.runsc_version}\n"
-                f"spec: {self.runsc_spec_version}\n",
+                f"runsc version {self.runsc_version}\nspec: {self.runsc_spec_version}\n",
             )
         elif executable == "docker" and "-H" in call and "ps" in call:
             result = NativeBuilderCommandResult(0, "\n".join(self.dedicated_containers))
@@ -221,8 +215,7 @@ def _profile() -> NativeBuilderRuntimeProfile:
 def _small_profile() -> tuple[NativeBuilderRuntimeProfile, dict[str, bytes]]:
     profile = _profile()
     payloads = {
-        name: f"measured native payload for {name}\n".encode("ascii")
-        for name in profile.members
+        name: f"measured native payload for {name}\n".encode("ascii") for name in profile.members
     }
     members = {
         name: NativeBuilderRuntimeArchiveMember(
@@ -433,12 +426,16 @@ def test_install_is_exact_idempotent_and_inactive(tmp_path: Path) -> None:
     first = installer.install(archive)
     second = installer.install(archive)
 
-    assert first == second == {
-        "operation": "install",
-        "profile_sha256": profile.sha256,
-        "release": profile.version,
-        "state": "staged",
-    }
+    assert (
+        first
+        == second
+        == {
+            "operation": "install",
+            "profile_sha256": profile.sha256,
+            "release": profile.version,
+            "state": "staged",
+        }
+    )
     expected_files = {
         profile.profile_path: (profile.payload, 0o444),
         profile.runsc_config_path: (profile.runsc_toml, 0o444),
@@ -528,11 +525,7 @@ def test_preflight_isolates_systemd_unit_validation_from_host_units(
 
     calls = runner.calls or []
     environments = runner.environments or []
-    indexes = [
-        index
-        for index, call in enumerate(calls)
-        if Path(call[0]).name == "systemd-analyze"
-    ]
+    indexes = [index for index, call in enumerate(calls) if Path(call[0]).name == "systemd-analyze"]
     assert len(indexes) == 1
     unit_path = environments[indexes[0]].get("SYSTEMD_UNIT_PATH")
     assert unit_path
@@ -559,12 +552,29 @@ def test_install_fsyncs_files_and_publication_directories(
     assert kinds.count("directory") >= 8
 
 
+def _test_certificate(*, ca: bool, seed: int = 1) -> bytes:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"native test {seed}")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(seed)
+        .not_valid_before(datetime(2026, 1, 1, tzinfo=UTC))
+        .not_valid_after(datetime(2036, 1, 1, tzinfo=UTC))
+        .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+        .sign(private_key, algorithm=None)
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM)
+
+
 def _stage_inputs(tmp_path: Path) -> tuple[Path, Path]:
     key = tmp_path / "agent-ed25519"
     key.write_bytes(b"k" * 32)
     key.chmod(0o400)
     ca = tmp_path / "service-ca.pem"
-    ca.write_text("test CA\n", encoding="ascii")
+    ca.write_bytes(_test_certificate(ca=True, seed=1) + _test_certificate(ca=True, seed=2))
     ca.chmod(0o444)
     return key, ca
 
@@ -577,8 +587,7 @@ def test_stage_agent_renders_exact_inactive_secret_free_unit(tmp_path: Path) -> 
     arguments = {
         "agent_image": "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
         + "a" * 64,
-        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
-        + "b" * 64,
+        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64,
         "service_url": "https://loom.example.invalid",
         "agent_instance_id": "00000000-0000-0000-0000-000000000001",
         "key_id": "native-builder-v1",
@@ -596,12 +605,12 @@ def test_stage_agent_renders_exact_inactive_secret_free_unit(tmp_path: Path) -> 
     assert arguments["builder_image"] in unit
     assert arguments["service_url"] in unit
     assert "k" * 32 not in unit
-    assert "test CA" not in unit
+    assert ca.read_bytes() not in unit.encode("ascii")
     installed_key = _mapped(installer, profile.private_key_path)
     installed_ca = _mapped(installer, profile.ca_file_path)
     assert installed_key.read_bytes() == b"k" * 32
     assert stat.S_IMODE(installed_key.stat().st_mode) == profile.private_key_mode
-    assert installed_ca.read_text(encoding="ascii") == "test CA\n"
+    assert installed_ca.read_bytes() == ca.read_bytes()
     assert stat.S_IMODE(installed_ca.stat().st_mode) == 0o444
     manifest_path = _mapped(
         installer,
@@ -630,6 +639,50 @@ def test_stage_agent_renders_exact_inactive_secret_free_unit(tmp_path: Path) -> 
     }
 
 
+@pytest.mark.parametrize(
+    "invalid_bundle",
+    [
+        b"not a PEM certificate\n",
+        _test_certificate(ca=True)[:-24],
+        _test_certificate(ca=True) + _test_certificate(ca=False, seed=3),
+    ],
+    ids=["malformed-nonempty", "truncated-nonempty", "contains-non-ca"],
+)
+def test_stage_agent_rejects_invalid_ca_bundle_before_any_publication(
+    tmp_path: Path,
+    invalid_bundle: bytes,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    installer.install(archive)
+    key, ca = _stage_inputs(tmp_path)
+    ca.chmod(0o644)
+    ca.write_bytes(invalid_bundle)
+    ca.chmod(0o444)
+
+    with pytest.raises(
+        PersonalDevNativeBuilderRuntimeInstallError,
+        match="agent_material_invalid",
+    ):
+        installer.stage_agent(
+            agent_image="example.invalid/agent@sha256:" + "a" * 64,
+            builder_image="example.invalid/builder@sha256:" + "b" * 64,
+            service_url="https://loom.example.invalid",
+            agent_instance_id="00000000-0000-0000-0000-000000000001",
+            key_id="native-builder-v1",
+            private_key=key,
+            ca_file=ca,
+        )
+
+    for path in (
+        profile.private_key_path,
+        profile.ca_file_path,
+        profile.agent_service_path,
+        Path("/etc/loom/personal-dev-native-builder/agent-stage-v1.json"),
+    ):
+        assert not _mapped(installer, path).exists()
+
+
 def test_broker_stage_requires_expected_raw_ed25519_public_fingerprint(
     tmp_path: Path,
 ) -> None:
@@ -640,8 +693,7 @@ def test_broker_stage_requires_expected_raw_ed25519_public_fingerprint(
     arguments = {
         "agent_image": "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
         + "a" * 64,
-        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
-        + "b" * 64,
+        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64,
         "service_url": "https://loom.example.invalid",
         "agent_instance_id": "00000000-0000-0000-0000-000000000001",
         "key_id": "native-builder-v1",
@@ -667,10 +719,13 @@ def test_broker_stage_requires_expected_raw_ed25519_public_fingerprint(
         )
     )
     expected = hashlib.sha256(public_key).hexdigest()
-    assert installer.stage_agent_authorized(
-        **arguments,
-        expected_public_key_sha256=expected,
-    )["state"] == "staged"
+    assert (
+        installer.stage_agent_authorized(
+            **arguments,
+            expected_public_key_sha256=expected,
+        )["state"]
+        == "staged"
+    )
 
 
 def test_broker_discard_removes_only_inactive_agent_stage_files(tmp_path: Path) -> None:
@@ -679,10 +734,8 @@ def test_broker_discard_removes_only_inactive_agent_stage_files(tmp_path: Path) 
     installer.install(archive)
     key, ca = _stage_inputs(tmp_path)
     installer.stage_agent(
-        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
-        + "a" * 64,
-        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
-        + "b" * 64,
+        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "a" * 64,
+        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64,
         service_url="https://loom.example.invalid",
         agent_instance_id="00000000-0000-0000-0000-000000000001",
         key_id="native-builder-v1",
@@ -716,10 +769,8 @@ def test_broker_discard_attempts_manifest_unit_ca_key_after_each_failure(
     installer.install(archive)
     key, ca = _stage_inputs(tmp_path)
     installer.stage_agent(
-        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
-        + "a" * 64,
-        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
-        + "b" * 64,
+        agent_image="ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "a" * 64,
+        builder_image="ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64,
         service_url="https://loom.example.invalid",
         agent_instance_id="00000000-0000-0000-0000-000000000001",
         key_id="native-builder-v1",
@@ -737,9 +788,7 @@ def test_broker_discard_attempts_manifest_unit_ca_key_after_each_failure(
     original_unlink = installer._unlink
 
     def injected_read(path: Path, **arguments: object) -> bytes:
-        absolute = next(
-            item for item in ordered if _mapped(installer, item) == path
-        )
+        absolute = next(item for item in ordered if _mapped(installer, item) == path)
         observed.append(absolute)
         if failure_phase == "validate" and absolute == ordered[failure_index]:
             raise PersonalDevNativeBuilderRuntimeInstallError("injected_failure")
@@ -951,16 +1000,22 @@ def test_cli_emits_canonical_receipt_and_requires_operation_arguments(
         def verify_staged(self) -> dict[str, object]:
             return {"z": 1, "a": "safe"}
 
-    assert main(
-        ["verify-staged", "--profile", str(_PROFILE_PATH)],
-        installer_factory=lambda profile: FakeInstaller(),
-    ) == 0
+    assert (
+        main(
+            ["verify-staged", "--profile", str(_PROFILE_PATH)],
+            installer_factory=lambda profile: FakeInstaller(),
+        )
+        == 0
+    )
     assert capsys.readouterr().out == '{"a":"safe","z":1}\n'
 
-    assert main(
-        ["install", "--profile", str(_PROFILE_PATH)],
-        installer_factory=lambda profile: FakeInstaller(),
-    ) == 2
+    assert (
+        main(
+            ["install", "--profile", str(_PROFILE_PATH)],
+            installer_factory=lambda profile: FakeInstaller(),
+        )
+        == 2
+    )
     assert capsys.readouterr().err == "error:arguments_invalid\n"
 
 

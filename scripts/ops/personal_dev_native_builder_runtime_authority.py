@@ -131,16 +131,10 @@ def _load_application_modules() -> None:
 
 _load_application_modules()
 
-STATE_ROOT = Path(
-    "/var/lib/loom/personal-dev-native-builder-runtime-authority"
-)
+STATE_ROOT = Path("/var/lib/loom/personal-dev-native-builder-runtime-authority")
 STATE_PATH = STATE_ROOT / "state-v1.json"
-LOCK_PATH = Path(
-    "/run/lock/loom-personal-dev-native-builder-runtime-authority.lock"
-)
-EPHEMERAL_SECRET_ROOT = Path(
-    "/run/loom-personal-dev-native-builder-runtime-authority"
-)
+LOCK_PATH = Path("/run/lock/loom-personal-dev-native-builder-runtime-authority.lock")
+EPHEMERAL_SECRET_ROOT = Path("/run/loom-personal-dev-native-builder-runtime-authority")
 
 _POLICY_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-policy.v1"
 _RECEIPT_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-receipt.v1"
@@ -165,12 +159,11 @@ _AGENT_UNIT = "loom-personal-dev-native-builder-agent.service"
 _NFT_PATH = Path("/etc/loom/personal-dev-native-builder/provider-network.nft")
 _NFT_TABLE = "loom_personal_dev_builder"
 _INSTALLED_PROFILE_PATH = (
-    LIBRARY_ROOT
-    / "deploy"
-    / "personal-dev-native-builder"
-    / "runtime-profile-v1.json"
+    LIBRARY_ROOT / "deploy" / "personal-dev-native-builder" / "runtime-profile-v1.json"
 )
 _ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
 class AuthorityError(RuntimeError):
     """The fixed authority contract could not be satisfied."""
 
@@ -185,6 +178,12 @@ class _CommandOutputLimitError(RuntimeError):
 
 
 class _CommandSignal(BaseException):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(signum)
+
+
+class _TransactionInterruption(BaseException):
     def __init__(self, signum: int) -> None:
         self.signum = signum
         super().__init__(signum)
@@ -237,8 +236,45 @@ class BoundedSubprocessRunner:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(process.args, self.timeout_seconds)
-        process.wait(timeout=remaining)
+        self._wait_without_reaping(process, remaining)
         return bytes(chunks["stdout"]), bytes(chunks["stderr"])
+
+    @staticmethod
+    def _wait_without_reaping(
+        process: subprocess.Popen[bytes],
+        timeout: float,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while True:
+            observed = os.waitid(
+                os.P_PID,
+                process.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            )
+            if observed is not None:
+                return
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            time.sleep(0.01)
+
+    @staticmethod
+    def _group_has_other_members(process_group: int) -> bool:
+        try:
+            entries = tuple(Path("/proc").iterdir())
+        except OSError:
+            return True
+        for entry in entries:
+            if not entry.name.isdecimal() or int(entry.name) == process_group:
+                continue
+            try:
+                stat_payload = (entry / "stat").read_text(encoding="ascii")
+                fields = stat_payload[stat_payload.rindex(")") + 2 :].split()
+                member_group = int(fields[2])
+            except (OSError, ValueError, IndexError):
+                continue
+            if member_group == process_group:
+                return True
+        return False
 
     @staticmethod
     def _group_exists(process_group: int) -> bool:
@@ -247,6 +283,18 @@ class BoundedSubprocessRunner:
         except ProcessLookupError:
             return False
         return True
+
+    @classmethod
+    def _wait_for_other_group_members(
+        cls,
+        process_group: int,
+        timeout: float,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while cls._group_has_other_members(process_group):
+            if time.monotonic() >= deadline:
+                raise AuthorityError("command_cleanup_failed")
+            time.sleep(0.01)
 
     def _terminate(self, process: subprocess.Popen[bytes]) -> None:
         try:
@@ -257,27 +305,24 @@ class BoundedSubprocessRunner:
             if stream is not None:
                 stream.close()
         try:
-            process.wait(timeout=2)
+            self._wait_without_reaping(process, 2)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             try:
-                process.wait(timeout=2)
+                self._wait_without_reaping(process, 2)
             except subprocess.TimeoutExpired as exc:
                 raise AuthorityError("command_cleanup_failed") from exc
-        if self._group_exists(process.pid):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            for _ in range(100):
-                if not self._group_exists(process.pid):
-                    break
-                time.sleep(0.01)
-            else:
-                raise AuthorityError("command_cleanup_failed")
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            self._wait_for_other_group_members(process.pid, 2)
+        finally:
+            process.wait()
 
     def run(
         self,
@@ -288,23 +333,22 @@ class BoundedSubprocessRunner:
     ) -> CommandResult:
         if (
             not argv
-            or any(
-                not isinstance(value, str) or not value or "\0" in value
-                for value in argv
-            )
+            or any(not isinstance(value, str) or not value or "\0" in value for value in argv)
             or type(check) is not bool
-            or (env is not None
-            and (
-                not isinstance(env, dict)
-                or any(
-                    not isinstance(name, str)
-                    or not name
-                    or not isinstance(value, str)
-                    or "\0" in name
-                    or "\0" in value
-                    for name, value in env.items()
+            or (
+                env is not None
+                and (
+                    not isinstance(env, dict)
+                    or any(
+                        not isinstance(name, str)
+                        or not name
+                        or not isinstance(value, str)
+                        or "\0" in name
+                        or "\0" in value
+                        for name, value in env.items()
+                    )
                 )
-            ))
+            )
         ):
             raise AuthorityError("command_invalid")
         process: subprocess.Popen[bytes] | None = None
@@ -331,7 +375,7 @@ class BoundedSubprocessRunner:
                 raise _CommandSignal(signum)
 
             if threading.current_thread() is threading.main_thread():
-                for signum in (signal.SIGINT, signal.SIGTERM):
+                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
                     previous_handlers[signum] = signal.signal(signum, forward)
             stdout, stderr = self._drain(process)
         except BaseException as exc:
@@ -340,13 +384,12 @@ class BoundedSubprocessRunner:
                 pending_signal = exc.signum
 
         group_leaked = (
-            process is not None
-            and caught is None
-            and self._group_exists(process.pid)
+            process is not None and caught is None and (self._group_has_other_members(process.pid))
         )
         cleanup_failure: BaseException | None = None
         if process is not None and (caught is not None or group_leaked):
             if previous_handlers:
+
                 def defer(signum: int, _frame: object) -> None:
                     nonlocal pending_signal
                     if pending_signal is None:
@@ -358,6 +401,8 @@ class BoundedSubprocessRunner:
                 self._terminate(process)
             except BaseException as exc:
                 cleanup_failure = exc
+        elif process is not None:
+            process.wait()
 
         if previous_handlers:
             for restored_signum, handler in previous_handlers.items():
@@ -426,25 +471,25 @@ class AuthorityPolicy:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> AuthorityPolicy:
-        if set(value) != {
-            "asset_sha256",
-            "authority_source_sha",
-            "authority_source_tree",
-            "runtime_profile_sha256",
-            "schema",
-        } or value.get("schema") != _POLICY_SCHEMA:
+        if (
+            set(value)
+            != {
+                "asset_sha256",
+                "authority_source_sha",
+                "authority_source_tree",
+                "runtime_profile_sha256",
+                "schema",
+            }
+            or value.get("schema") != _POLICY_SCHEMA
+        ):
             raise AuthorityError("policy_invalid")
         assets = value.get("asset_sha256")
         if not isinstance(assets, dict):
             raise AuthorityError("policy_invalid")
         return cls(
             authority_source_sha=_validated_hex(value.get("authority_source_sha"), _HEX_40),
-            authority_source_tree=_validated_hex(
-                value.get("authority_source_tree"), _HEX_40
-            ),
-            runtime_profile_sha256=_validated_hex(
-                value.get("runtime_profile_sha256"), _HEX_64
-            ),
+            authority_source_tree=_validated_hex(value.get("authority_source_tree"), _HEX_40),
+            runtime_profile_sha256=_validated_hex(value.get("runtime_profile_sha256"), _HEX_64),
             asset_sha256=cast(dict[str, str], assets),
         )
 
@@ -532,11 +577,7 @@ def _open_directory_no_follow(
             or (
                 not components
                 and expected_mode is not None
-                and (
-                    expected_uid != 0
-                    or expected_gid != 0
-                    or root_mode != expected_mode
-                )
+                and (expected_uid != 0 or expected_gid != 0 or root_mode != expected_mode)
             )
         ):
             raise OSError("unsafe directory metadata")
@@ -552,9 +593,7 @@ def _open_directory_no_follow(
             mode = stat.S_IMODE(metadata.st_mode)
             final = index == len(components) - 1
             permitted_owner = metadata.st_uid in {0, expected_uid}
-            permitted_group = (
-                metadata.st_gid == (0 if metadata.st_uid == 0 else expected_gid)
-            )
+            permitted_group = metadata.st_gid == (0 if metadata.st_uid == 0 else expected_gid)
             sticky_root = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
             if (
                 not stat.S_ISDIR(metadata.st_mode)
@@ -1004,14 +1043,11 @@ def _validate_state(value: Mapping[str, object]) -> dict[str, object]:
         raise AuthorityError("state_invalid")
     copied = dict(value)
     phase = copied.get("phase")
-    expected_fields = (
-        _PREPARED_STATE_FIELDS if phase == "prepared" else _STAGED_STATE_FIELDS
-    )
+    expected_fields = _PREPARED_STATE_FIELDS if phase == "prepared" else _STAGED_STATE_FIELDS
     if (
         phase not in {"prepared", "staged", "active"}
         or set(copied) != expected_fields
-        or copied.get("schema")
-        != "loom.personal-dev-native-builder-runtime-authority-state.v1"
+        or copied.get("schema") != "loom.personal-dev-native-builder-runtime-authority-state.v1"
     ):
         raise AuthorityError("state_invalid")
     source_sha = _state_string(copied, "authority_source_sha")
@@ -1035,9 +1071,7 @@ def _validate_state(value: Mapping[str, object]) -> dict[str, object]:
             "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
         )
         or _HEX_64.fullmatch(current_agent.rsplit(":", 1)[-1]) is None
-        or not current_builder.startswith(
-            "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
-        )
+        or not current_builder.startswith("ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:")
         or _HEX_64.fullmatch(current_builder.rsplit(":", 1)[-1]) is None
         or _HEX_40.fullmatch(current_revision) is None
     ):
@@ -1375,11 +1409,7 @@ class EphemeralSecretFiles:
         try:
             descriptor = os.open(
                 name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_CLOEXEC
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
                 mode,
                 dir_fd=root_descriptor,
             )
@@ -1586,11 +1616,7 @@ class RootArchiveCopies:
                 raise AuthorityError("archive_invalid")
             destination_descriptor = os.open(
                 destination_name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_CLOEXEC
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=root_descriptor,
             )
@@ -1618,9 +1644,8 @@ class RootArchiveCopies:
             if os.read(source_descriptor, 1):
                 raise AuthorityError("archive_invalid")
             after = os.fstat(source_descriptor)
-            if (
-                digest.hexdigest() != expected_sha512
-                or _file_identity(before) != _file_identity(after)
+            if digest.hexdigest() != expected_sha512 or _file_identity(before) != _file_identity(
+                after
             ):
                 raise AuthorityError("archive_invalid")
             os.fsync(destination_descriptor)
@@ -1751,12 +1776,13 @@ def _defer_cleanup_signals() -> Iterator[None]:
     previous: dict[int, object] = {}
     pending: int | None = None
     if threading.current_thread() is threading.main_thread():
+
         def defer(signum: int, _frame: object) -> None:
             nonlocal pending
             if pending is None:
                 pending = signum
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous[signum] = signal.signal(signum, defer)
     try:
         yield
@@ -1769,6 +1795,38 @@ def _defer_cleanup_signals() -> Iterator[None]:
             signal.raise_signal(pending)
         elif handler != signal.SIG_IGN and callable(handler):
             cast(Callable[[int, object], object], handler)(pending, None)
+
+
+@contextmanager
+def _defer_transaction_signals() -> Iterator[None]:
+    previous: dict[int, object] = {}
+    pending: int | None = None
+    caught: BaseException | None = None
+    if threading.current_thread() is threading.main_thread():
+
+        def interrupt(signum: int, _frame: object) -> NoReturn:
+            nonlocal pending
+            if pending is None:
+                pending = signum
+            raise _TransactionInterruption(signum)
+
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, interrupt)
+    try:
+        yield
+    except BaseException as exc:
+        caught = exc
+    finally:
+        for restored_signum, handler in previous.items():
+            signal.signal(restored_signum, cast(signal.Handlers, handler))
+    if pending is not None:
+        handler = previous[pending]
+        if handler == signal.SIG_DFL:
+            signal.raise_signal(pending)
+        elif handler != signal.SIG_IGN and callable(handler):
+            cast(Callable[[int, object], object], handler)(pending, None)
+    if caught is not None:
+        raise caught
 
 
 class RuntimeAuthority:
@@ -1802,8 +1860,7 @@ class RuntimeAuthority:
         if (
             header.get("authority_source_sha") != self.policy.authority_source_sha
             or header.get("authority_source_tree") != self.policy.authority_source_tree
-            or header.get("runtime_profile_sha256")
-            != self.policy.runtime_profile_sha256
+            or header.get("runtime_profile_sha256") != self.policy.runtime_profile_sha256
         ):
             raise AuthorityError("request_identity_invalid")
 
@@ -1827,10 +1884,7 @@ class RuntimeAuthority:
                     or status_value.managed_networks < 0
                 )
             )
-            or (
-                not status_value.dockerd_active
-                and status_value.managed_networks is not None
-            )
+            or (not status_value.dockerd_active and status_value.managed_networks is not None)
         ):
             raise AuthorityError("host_identity_invalid")
         return status_value
@@ -1842,12 +1896,9 @@ class RuntimeAuthority:
         if not isinstance(snapshot, StateSnapshot):
             raise AuthorityError("state_invalid")
         if (
-            snapshot.value.get("authority_source_sha")
-            != self.policy.authority_source_sha
-            or snapshot.value.get("authority_source_tree")
-            != self.policy.authority_source_tree
-            or snapshot.value.get("runtime_profile_sha256")
-            != self.policy.runtime_profile_sha256
+            snapshot.value.get("authority_source_sha") != self.policy.authority_source_sha
+            or snapshot.value.get("authority_source_tree") != self.policy.authority_source_tree
+            or snapshot.value.get("runtime_profile_sha256") != self.policy.runtime_profile_sha256
         ):
             raise AuthorityError("state_invalid")
         return snapshot
@@ -1866,9 +1917,7 @@ class RuntimeAuthority:
                     if first_failure is None:
                         first_failure = exc
             try:
-                self._validated_host_status(
-                    self.host.verify_inert(require_empty=True)
-                )
+                self._validated_host_status(self.host.verify_inert(require_empty=True))
             except BaseException as exc:
                 if first_failure is None:
                     first_failure = exc
@@ -1957,10 +2006,7 @@ class RuntimeAuthority:
                 second_plan = dict(converger.plan())
                 first_bytes = _canonical_json(first_plan)
                 second_bytes = _canonical_json(second_plan)
-                if (
-                    len(first_bytes) > _MAX_RECEIPT_BYTES
-                    or first_bytes != second_bytes
-                ):
+                if len(first_bytes) > _MAX_RECEIPT_BYTES or first_bytes != second_bytes:
                     raise AuthorityError("convergence_plan_invalid")
                 converger.apply()
                 converger.verify()
@@ -1976,9 +2022,7 @@ class RuntimeAuthority:
                 _validate_conformance(conformance)
                 self.host.stop_dockerd()
                 self.host.delete_nft()
-                final_host = self._validated_host_status(
-                    self.host.verify_inert(require_empty=True)
-                )
+                final_host = self._validated_host_status(self.host.verify_inert(require_empty=True))
             state = self._prepared_state(header, conformance)
             snapshot = self.states.publish(state)
             if not isinstance(snapshot, StateSnapshot):
@@ -2042,10 +2086,9 @@ class RuntimeAuthority:
             header,
             phases=frozenset({"prepared"}),
         )
-        if (
-            header.get("agent_image") != prepared.value.get("current_agent")
-            or header.get("builder_image") != prepared.value.get("current_builder")
-        ):
+        if header.get("agent_image") != prepared.value.get("current_agent") or header.get(
+            "builder_image"
+        ) != prepared.value.get("current_builder"):
             raise AuthorityError("release_identity_invalid")
         self._validated_host_status(self.host.verify_inert(require_empty=True))
         mutating = False
@@ -2067,14 +2110,10 @@ class RuntimeAuthority:
                     key_id=cast(str, header["agent_key_id"]),
                     private_key=paths.private_key,
                     ca_file=paths.ca_file,
-                    expected_public_key_sha256=cast(
-                        str, header["expected_public_key_sha256"]
-                    ),
+                    expected_public_key_sha256=cast(str, header["expected_public_key_sha256"]),
                 )
                 self.installer.verify_staged()
-                final_host = self._validated_host_status(
-                    self.host.verify_inert(require_empty=True)
-                )
+                final_host = self._validated_host_status(self.host.verify_inert(require_empty=True))
             staged = dict(prepared.value)
             staged.update(
                 {
@@ -2186,13 +2225,10 @@ class RuntimeAuthority:
             removal = dict(self.installer.remove())
             if (
                 removal.get("state") != "managed-files-absent"
-                or removal.get("retained")
-                != "dedicated-image-cache-and-system-identities"
+                or removal.get("retained") != "dedicated-image-cache-and-system-identities"
             ):
                 raise AuthorityError("removal_receipt_invalid")
-            final_host = self._validated_host_status(
-                self.host.verify_inert(require_empty=True)
-            )
+            final_host = self._validated_host_status(self.host.verify_inert(require_empty=True))
             receipt = self._receipt(
                 "remove",
                 header.get("request_id"),
@@ -2253,8 +2289,8 @@ class RuntimeAuthority:
             raise AuthorityError("request_invalid") from exc
         self._verify_request_identity(request)
         operation = request.header.operation
-        snapshot = self._read_state()
         if operation == "status":
+            snapshot = self._read_state()
             host = self._host_status()
             return self._receipt(
                 operation,
@@ -2262,14 +2298,16 @@ class RuntimeAuthority:
                 snapshot,
                 host,
             )
-        if operation == "prepare":
-            return self._prepare(request, snapshot)
-        if operation == "stage-agent":
-            return self._stage_agent(request, snapshot)
-        if operation == "activate":
-            return self._activate(request, snapshot)
-        if operation == "remove":
-            return self._remove(request, snapshot)
+        with _defer_transaction_signals():
+            snapshot = self._read_state()
+            if operation == "prepare":
+                return self._prepare(request, snapshot)
+            if operation == "stage-agent":
+                return self._stage_agent(request, snapshot)
+            if operation == "activate":
+                return self._activate(request, snapshot)
+            if operation == "remove":
+                return self._remove(request, snapshot)
         raise AuthorityError("operation_unavailable")
 
 

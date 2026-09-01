@@ -7,7 +7,7 @@ import stat
 import subprocess
 from collections.abc import Iterator, Sequence
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from scripts.plan_ci_validations import HEAVY_CHECKS, plan_validations
@@ -35,7 +35,7 @@ SOURCE_FILES = (
     "deploy/personal-dev-native-builder/runtime-profile-v1.json",
 )
 SUDOERS = (
-    b'qianyi ALL=(root) NOPASSWD:NOSETENV: '
+    b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
     b'/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority ""\n'
 )
 TMPFILES = (
@@ -157,6 +157,11 @@ def authority_install(
     )
     monkeypatch.setattr(module.os, "getresuid", lambda: (0, 0, 0))
     monkeypatch.setattr(module.os, "getresgid", lambda: (0, 0, 0))
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="gx10-01c7", machine="aarch64"),
+    )
     load_validator = module._load_validator
 
     def trust_temporary_parents() -> ModuleType:
@@ -290,24 +295,34 @@ def test_bootstrap_installs_the_authoritative_inventory_and_is_idempotent(
     assert policy["authority_source_sha"] == source_sha
     assert policy["authority_source_tree"] == source_tree
 
-    assert stat.S_IMODE(
-        _installed(
-            host_root,
-            "/var/lib/loom/personal-dev-native-builder-runtime-authority",
-        ).stat().st_mode
-    ) == 0o700
+    assert (
+        stat.S_IMODE(
+            _installed(
+                host_root,
+                "/var/lib/loom/personal-dev-native-builder-runtime-authority",
+            )
+            .stat()
+            .st_mode
+        )
+        == 0o700
+    )
     lock = _installed(
         host_root,
         "/run/lock/loom-personal-dev-native-builder-runtime-authority.lock",
     )
     assert lock.read_bytes() == b""
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
-    assert stat.S_IMODE(
-        _installed(
-            host_root,
-            "/run/loom-personal-dev-native-builder-runtime-authority",
-        ).stat().st_mode
-    ) == 0o700
+    assert (
+        stat.S_IMODE(
+            _installed(
+                host_root,
+                "/run/loom-personal-dev-native-builder-runtime-authority",
+            )
+            .stat()
+            .st_mode
+        )
+        == 0o700
+    )
     assert not _installed(
         host_root,
         "/var/lib/loom/personal-dev-native-builder-runtime-authority/state-v1.json",
@@ -338,6 +353,32 @@ def test_bootstrap_rejects_non_root_before_opening_the_source(
 
     with pytest.raises(module.BootstrapError, match="direct_root_required"):
         module.bootstrap("1" * 40, "2" * 40)
+
+
+@pytest.mark.parametrize(
+    ("nodename", "machine"),
+    (("wrong-host", "aarch64"), ("gx10-01c7", "x86_64")),
+    ids=("wrong-host", "wrong-architecture"),
+)
+def test_bootstrap_rejects_wrong_target_before_any_filesystem_change(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    nodename: str,
+    machine: str,
+) -> None:
+    """Catches publishing the sealed authority on any host except the fixed GB10."""
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename=nodename, machine=machine),
+    )
+    before = _tree_snapshot(host_root)
+
+    with pytest.raises(module.BootstrapError, match="target_host_required"):
+        module.bootstrap(source_sha, source_tree)
+
+    assert _tree_snapshot(host_root) == before
 
 
 @pytest.mark.parametrize("mutation", ("symlink", "hardlink", "writable"))
@@ -474,8 +515,7 @@ def test_fsync_failure_rolls_back_the_real_transaction(
     module, host_root, source_sha, source_tree = authority_install
     temporary = _installed(
         host_root,
-        "/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority"
-        f".new-{os.getpid()}",
+        f"/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority.new-{os.getpid()}",
     )
     parent = temporary.parent
     original_fsync = module.os.fsync
@@ -507,14 +547,13 @@ def test_bootstrap_never_removes_a_preexisting_temporary_name_collision(
 ) -> None:
     module, host_root, source_sha, source_tree = authority_install
     if collision == "staged-sudoers":
-        existing = host_root / "run" / (
-            f".loom-native-authority-sudoers.validate-{os.getpid()}"
-        )
+        existing = host_root / "run" / (f".loom-native-authority-sudoers.validate-{os.getpid()}")
         expected_error = "sudoers_invalid"
     else:
-        existing = host_root / "usr/local/libexec" / (
-            ".loom-personal-dev-native-builder-runtime-authority"
-            f".new-{os.getpid()}"
+        existing = (
+            host_root
+            / "usr/local/libexec"
+            / (f".loom-personal-dev-native-builder-runtime-authority.new-{os.getpid()}")
         )
         expected_error = "installed_drift"
     existing.write_bytes(b"preexisting root data\n")
@@ -533,8 +572,7 @@ def test_temporary_cleanup_preserves_a_replacement_raced_in_after_creation(
     module, host_root, source_sha, source_tree = authority_install
     temporary = _installed(
         host_root,
-        "/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority"
-        f".new-{os.getpid()}",
+        f"/usr/local/libexec/.loom-personal-dev-native-builder-runtime-authority.new-{os.getpid()}",
     )
     displaced = host_root / "displaced-attempt-temporary"
     racer = b"replacement temporary\n"

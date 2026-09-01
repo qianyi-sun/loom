@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -110,7 +111,9 @@ def test_encode_is_canonical_and_parse_rejects_noncanonical_field_order() -> Non
 def test_rejects_duplicate_keys_and_invalid_frame_boundaries() -> None:
     """Catches ambiguous JSON and frame parsers that accept malformed input."""
     duplicate = (
-        b'{"authority_source_sha":"' + b"a" * 40 + b'","authority_source_sha":"'
+        b'{"authority_source_sha":"'
+        + b"a" * 40
+        + b'","authority_source_sha":"'
         + b"a" * 40
         + b'","authority_source_tree":"'
         + b"b" * 40
@@ -129,7 +132,9 @@ def test_rejects_duplicate_keys_and_invalid_frame_boundaries() -> None:
         b"LOOMNBR1\x00\x01",
         b"LOOMNBR1" + (65537).to_bytes(4, "big"),
         b"LOOMNBR1"
-        + len(json.dumps(wrong_version, sort_keys=True, separators=(",", ":")).encode()).to_bytes(4, "big")
+        + len(json.dumps(wrong_version, sort_keys=True, separators=(",", ":")).encode()).to_bytes(
+            4, "big"
+        )
         + json.dumps(wrong_version, sort_keys=True, separators=(",", ":")).encode(),
         encode_request(_header("status")) + b"trailing",
     ]
@@ -224,11 +229,16 @@ def test_client_status_emits_exactly_one_frame() -> None:
         sys.executable,
         str(CLIENT),
         "status",
-        "--authority-source-sha", "a" * 40,
-        "--authority-source-tree", "b" * 40,
-        "--request-id", REQUEST_ID,
-        "--runtime-profile-sha256", "c" * 64,
-        "--schema-version", "1",
+        "--authority-source-sha",
+        "a" * 40,
+        "--authority-source-tree",
+        "b" * 40,
+        "--request-id",
+        REQUEST_ID,
+        "--runtime-profile-sha256",
+        "c" * 64,
+        "--schema-version",
+        "1",
     ]
     result = subprocess.run(command, cwd=ROOT, check=False, capture_output=True)
 
@@ -239,21 +249,37 @@ def test_client_status_emits_exactly_one_frame() -> None:
 
 def _stage_agent_command(private_key_fd: int, service_ca_fd: int) -> list[str]:
     return [
-        sys.executable, str(CLIENT), "stage-agent",
-        "--authority-source-sha", "a" * 40,
-        "--authority-source-tree", "b" * 40,
-        "--request-id", REQUEST_ID,
-        "--runtime-profile-sha256", "c" * 64,
-        "--schema-version", "1",
-        "--expected-state-sha256", "d" * 64,
-        "--agent-image", _image(AGENT_REPOSITORY, "e"),
-        "--builder-image", _image(BUILDER_REPOSITORY, "f"),
-        "--service-origin", "https://agent.example",
-        "--agent-instance-id", INSTANCE_ID,
-        "--agent-key-id", "gb10-native-builder-v1",
-        "--expected-public-key-sha256", "e" * 64,
-        "--private-key-fd", str(private_key_fd),
-        "--service-ca-fd", str(service_ca_fd),
+        sys.executable,
+        str(CLIENT),
+        "stage-agent",
+        "--authority-source-sha",
+        "a" * 40,
+        "--authority-source-tree",
+        "b" * 40,
+        "--request-id",
+        REQUEST_ID,
+        "--runtime-profile-sha256",
+        "c" * 64,
+        "--schema-version",
+        "1",
+        "--expected-state-sha256",
+        "d" * 64,
+        "--agent-image",
+        _image(AGENT_REPOSITORY, "e"),
+        "--builder-image",
+        _image(BUILDER_REPOSITORY, "f"),
+        "--service-origin",
+        "https://agent.example",
+        "--agent-instance-id",
+        INSTANCE_ID,
+        "--agent-key-id",
+        "gb10-native-builder-v1",
+        "--expected-public-key-sha256",
+        "e" * 64,
+        "--private-key-fd",
+        str(private_key_fd),
+        "--service-ca-fd",
+        str(service_ca_fd),
     ]
 
 
@@ -271,9 +297,7 @@ def test_client_help_is_a_secret_free_failure_without_stdout(arguments: list[str
 
 def test_client_rejects_non_distinct_stage_agent_descriptors_without_stdout() -> None:
     """Catches a client that lets one descriptor provide both secrets."""
-    result = subprocess.run(
-        _stage_agent_command(3, 3), cwd=ROOT, check=False, capture_output=True
-    )
+    result = subprocess.run(_stage_agent_command(3, 3), cwd=ROOT, check=False, capture_output=True)
 
     assert result.returncode == 2
     assert result.stdout == b""
@@ -310,6 +334,26 @@ def test_client_rejects_over_bound_stage_secrets_without_stdout(
     assert result.returncode == 2
     assert result.stdout == b""
     assert result.stderr == CLIENT_FAILURE
+
+
+def test_client_reads_each_descriptor_in_a_bounded_loop_through_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a permitted short read being treated as the complete secret."""
+    monkeypatch.syspath_prepend(str(CLIENT.parent))
+    client = importlib.import_module("personal_dev_native_builder_runtime_authority_client")
+    chunks = iter((b"seven!!", b"remaining payload", b""))
+    requested: list[int] = []
+
+    def short_read(descriptor: int, maximum: int) -> bytes:
+        assert descriptor == 7
+        requested.append(maximum)
+        return next(chunks)
+
+    monkeypatch.setattr(client.os, "read", short_read)
+
+    assert client._read_descriptor(7, 64) == b"seven!!remaining payload"
+    assert requested == [64, 57, 40]
 
 
 def test_client_stage_agent_reads_only_open_file_descriptors(tmp_path: Path) -> None:

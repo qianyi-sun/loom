@@ -29,23 +29,17 @@ HOST_ROOT = Path("/")
 ROOT_UID = 0
 ROOT_GID = 0
 
-_INSTALLER_RELATIVE = Path(
-    "scripts/ops/install_personal_dev_native_builder_runtime_authority.py"
-)
+_INSTALLER_RELATIVE = Path("scripts/ops/install_personal_dev_native_builder_runtime_authority.py")
 _VALIDATOR_RELATIVE = Path("scripts/ops/staging_rollout_sealed_source.py")
-_LAUNCHER_RELATIVE = Path(
-    "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py"
-)
+_LAUNCHER_RELATIVE = Path("scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py")
 _SUDOERS_RELATIVE = Path(
-    "deploy/personal-dev-native-builder/"
-    "loom-personal-dev-native-builder-runtime-authority.sudoers"
+    "deploy/personal-dev-native-builder/loom-personal-dev-native-builder-runtime-authority.sudoers"
 )
 _TMPFILES_RELATIVE = Path(
-    "deploy/personal-dev-native-builder/"
-    "loom-personal-dev-native-builder-runtime-authority.tmpfiles"
+    "deploy/personal-dev-native-builder/loom-personal-dev-native-builder-runtime-authority.tmpfiles"
 )
 _SUDOERS_PAYLOAD = (
-    b'qianyi ALL=(root) NOPASSWD:NOSETENV: '
+    b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
     b'/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority ""\n'
 )
 _TMPFILES_PAYLOAD = (
@@ -103,14 +97,10 @@ class BootstrapError(RuntimeError):
         super().__init__(self.code)
 
 
-CommandRunner = Callable[
-    [Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]
-]
+CommandRunner = Callable[[Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]]
 
 
-def _run(
-    argv: Sequence[str], environment: Mapping[str, str]
-) -> subprocess.CompletedProcess[str]:
+def _run(argv: Sequence[str], environment: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         check=False,
@@ -184,8 +174,7 @@ def _read_source_file(path: Path, *, error: str = "source_asset_invalid") -> byt
             or before.st_nlink != 1
             or before.st_uid != ROOT_UID
             or before.st_gid != ROOT_GID
-            or (before.st_dev, before.st_ino)
-            != (lexical_before.st_dev, lexical_before.st_ino)
+            or (before.st_dev, before.st_ino) != (lexical_before.st_dev, lexical_before.st_ino)
             or not 0 < before.st_size <= _MAX_ASSET_BYTES
         ):
             raise BootstrapError(error)
@@ -383,9 +372,7 @@ def _capture_inventory(
         if relative in sources or installed_path in destinations:
             raise BootstrapError("source_inventory_invalid")
         payload = (
-            launcher_payload
-            if name == "launcher"
-            else _read_source_file(SOURCE_ROOT / relative)
+            launcher_payload if name == "launcher" else _read_source_file(SOURCE_ROOT / relative)
         )
         sources.add(relative)
         destinations.add(installed_path)
@@ -400,7 +387,10 @@ def _capture_inventory(
             )
         )
     by_name = {asset.name: asset for asset in assets}
-    if set(by_name) != set(specifications) or by_name["broker"].installed_path != launcher.BROKER_PATH:
+    if (
+        set(by_name) != set(specifications)
+        or by_name["broker"].installed_path != launcher.BROKER_PATH
+    ):
         raise BootstrapError("source_inventory_invalid")
     if by_name["sudoers"].payload != _SUDOERS_PAYLOAD:
         raise BootstrapError("source_inventory_invalid")
@@ -518,10 +508,7 @@ def _open_safe_directory(path: Path, *, exact_mode: int | None = None) -> int:
         lexical = os.lstat(path)
         descriptor = os.open(
             path,
-            os.O_RDONLY
-            | os.O_CLOEXEC
-            | os.O_DIRECTORY
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
         )
         opened = os.fstat(descriptor)
         mode = stat.S_IMODE(opened.st_mode)
@@ -606,10 +593,7 @@ def _remove_created_object(created: _CreatedObject) -> bool:
     try:
         parent_descriptor = os.open(
             created.path.parent,
-            os.O_RDONLY
-            | os.O_CLOEXEC
-            | os.O_DIRECTORY
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
         )
         current = os.stat(
             created.path.name,
@@ -652,10 +636,7 @@ def _ensure_directory(path: Path, mode: int, created: list[_CreatedObject]) -> b
             os.mkdir(path.name, 0o700, dir_fd=parent_descriptor)
             descriptor = os.open(
                 path.name,
-                os.O_RDONLY
-                | os.O_CLOEXEC
-                | os.O_DIRECTORY
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=parent_descriptor,
             )
             opened = os.fstat(descriptor)
@@ -674,8 +655,7 @@ def _ensure_directory(path: Path, mode: int, created: list[_CreatedObject]) -> b
             if (
                 relevant_events != ((_IN_CREATE | _IN_ISDIR, encoded_name),)
                 or not stat.S_ISDIR(opened.st_mode)
-                or (opened.st_dev, opened.st_ino)
-                != (current.st_dev, current.st_ino)
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
             ):
                 raise BootstrapError("publication_failed")
             owned = _created_object(path, opened)
@@ -825,11 +805,7 @@ def _install_file(
     try:
         descriptor = os.open(
             temporary,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_CLOEXEC
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         temporary_created = _created_object(temporary, os.fstat(descriptor))
@@ -875,11 +851,7 @@ def _stage_sudoers_payload(
     try:
         descriptor = os.open(
             staged,
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_CLOEXEC
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         staged_created = _created_object(staged, os.fstat(descriptor))
@@ -932,9 +904,7 @@ def _validate_installed_policy(
         module = _load_bytes(module_name, launcher_path, installed_payload)
         specifications = {
             asset.name: module.AssetSpec(
-                sudoers_path
-                if asset.name == "sudoers"
-                else _host_path(asset.installed_path),
+                sudoers_path if asset.name == "sudoers" else _host_path(asset.installed_path),
                 asset.mode,
             )
             for asset in assets
@@ -962,16 +932,14 @@ def _rollback(created: Sequence[_CreatedObject]) -> None:
 
 def _validate_direct_root() -> None:
     unsafe = any(
-        name in _UNSAFE_ENVIRONMENT_NAMES
-        or name.startswith(_UNSAFE_ENVIRONMENT_PREFIXES)
+        name in _UNSAFE_ENVIRONMENT_NAMES or name.startswith(_UNSAFE_ENVIRONMENT_PREFIXES)
         for name in os.environ
     )
-    if (
-        os.getresuid() != (0, 0, 0)
-        or os.getresgid() != (0, 0, 0)
-        or unsafe
-    ):
+    if os.getresuid() != (0, 0, 0) or os.getresgid() != (0, 0, 0) or unsafe:
         raise BootstrapError("direct_root_required")
+    identity = os.uname()
+    if identity.nodename != "gx10-01c7" or identity.machine != "aarch64":
+        raise BootstrapError("target_host_required")
 
 
 def _canonical_receipt(value: Mapping[str, object]) -> bytes:

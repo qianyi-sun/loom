@@ -97,6 +97,11 @@ native_authority_client=(
   "$loom_python"
   "$repository_root/scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
 )
+native_authority_client_snapshot_root="/run/loom-personal-dev-native-builder-runtime-authority-client/$merged_source_sha"
+native_authority_privileged_client=(
+  "$native_authority_client_snapshot_root/personal_dev_native_builder_runtime_authority_client.py"
+)
+native_authority_local_archive_root="/run/loom-personal-dev-native-builder-runtime-authority-archives"
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
 ssh_run() {
   local target="$1"
@@ -117,21 +122,31 @@ PY
 native_authority_stage_agent() {
   local request_id="$1"
   shift
-  sudo -n -- /bin/sh -euc '
-    key="$1"
-    ca="$2"
-    shift 2
-    exec 3<"$key"
-    exec 4<"$ca"
-    exec "$@" --private-key-fd 3 --service-ca-fd 4
-  ' sh "$agent_private_key" "$service_ca" \
-    "${native_authority_client[@]}" stage-agent \
+  sudo -n -- "${native_authority_privileged_client[@]}" stage-agent \
     --authority-source-sha "$authority_source_sha" \
     --authority-source-tree "$authority_source_tree" \
     --request-id "$request_id" \
     --runtime-profile-sha256 "$runtime_profile_sha256" \
     --schema-version 1 \
+    --private-key-path "$agent_private_key" \
+    --service-ca-path "$service_ca" \
     "$@"
+}
+install_native_authority_client_snapshot() {
+  local relative destination expected observed mode
+  sudo -n -- /usr/bin/install -d -m 0700 \
+    "$native_authority_client_snapshot_root"
+  while read -r relative destination mode; do
+    expected="$(/usr/bin/git -C "$repository_root" rev-parse \
+      "$merged_source_sha:$relative")"
+    /usr/bin/git -C "$repository_root" show "$merged_source_sha:$relative" \
+      | sudo -n -- /usr/bin/install -m "$mode" /dev/stdin "$destination"
+    observed="$(sudo -n -- /usr/bin/git hash-object "$destination")"
+    test "$observed" = "$expected"
+  done <<EOF
+scripts/ops/personal_dev_native_builder_runtime_authority_client.py ${native_authority_privileged_client[0]} 0500
+scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py $native_authority_client_snapshot_root/personal_dev_native_builder_runtime_authority_protocol.py 0400
+EOF
 }
 validate_native_authority_receipt() {
   local operation="$1"
@@ -316,16 +331,29 @@ native_authority_request() {
 native_authority_stage_archive() {
   local request_id="$1"
   local source="$2"
+  local upload_status
+  local local_dir="$native_authority_local_archive_root/$request_id"
+  local local_archive="$local_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
   local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
   local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
   [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
   test -f "$source" && test ! -L "$source"
   test "$(stat -c %u "$source")" = "$(id -u)"
   test "$(stat -c %a "$source")" = 600
-  {
+  sudo -n -- /usr/bin/install -d -m 0700 "$local_dir"
+  test ! -e "$local_archive"
+  /bin/cat -- "$source" \
+    | sudo -n -- /usr/bin/install -m 0600 /dev/stdin "$local_archive"
+  if test "$(sudo -n -- /usr/bin/sha512sum "$local_archive" | awk '{print $1}')" \
+    != "$archive_sha512"; then
+    sudo -n -- /usr/bin/rm -f -- "$local_archive"
+    sudo -n -- /usr/bin/rmdir -- "$local_dir"
+    return 1
+  fi
+  if {
     printf 'mkdir %s\n' "$remote_dir"
     printf 'chmod 700 %s\n' "$remote_dir"
-    printf 'put %s %s\n' "$source" "$remote_archive"
+    printf 'put %s %s\n' "$local_archive" "$remote_archive"
     printf 'chmod 600 %s\n' "$remote_archive"
   } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
     -o HostName=192.168.20.12 \
@@ -348,7 +376,14 @@ native_authority_stage_archive() {
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
     -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-    trt-gb10-2
+    trt-gb10-2; then
+    upload_status=0
+  else
+    upload_status=$?
+  fi
+  sudo -n -- /usr/bin/rm -f -- "$local_archive"
+  sudo -n -- /usr/bin/rmdir -- "$local_dir"
+  return "$upload_status"
 }
 native_authority_remove_staged_archive() {
   local request_id="$1"
@@ -426,6 +461,7 @@ test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = \
   "$runtime_profile_sha256"
 test "$authority_source_tree" = "$(git rev-parse HEAD^{tree})"
 validate_native_authority_transport_config
+install_native_authority_client_snapshot
 
 for path in "$trusted_release" "$reviewed_kubeconfig" "$prepared_control_profile" \
   "$rollback_shadow_manifest"; do
@@ -639,23 +675,9 @@ validate_protected_material_metadata() {
 
 validate_protected_material_metadata
 
-sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repository_root/src" \
-  "$repository_root/.venv/bin/python" - "$agent_private_key" \
-  "$agent_key_id" "$expected_public_key_sha256" <<'PY'
-import hashlib
-import sys
-from pathlib import Path
-
-from loom.personal_dev_native_builder_protocol import (
-    load_personal_dev_native_builder_signer,
-)
-
-signer = load_personal_dev_native_builder_signer(
-    Path(sys.argv[1]), key_id=sys.argv[2]
-)
-if hashlib.sha256(signer.public_key_bytes(sys.argv[2])).hexdigest() != sys.argv[3]:
-    raise SystemExit(1)
-PY
+sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
+  --private-key-path "$agent_private_key" \
+  --expected-public-key-sha256 "$expected_public_key_sha256" >/dev/null
 ```
 
 ## 2. Capture read-only before-state
@@ -824,12 +846,13 @@ rm -f "$dns_raw"
 
 ## 4. Download and stage data, then prepare through the fixed authority
 
-Download the public gVisor archive without privilege. The only archive transfer
-is the data-only SFTP upload below: it authenticates as `qianyi`, creates no
-remote shell, and has no root authority. The fixed broker opens the resulting
-owner-only file, copies it into its root-private state directory, verifies the
-digest, and performs preflight, installation, release convergence, the fixed
-two-container conformance asset, and compensation back to inert state.
+Download the public gVisor archive without privilege. An unprivileged read feeds
+a fixed root-private local copy whose digest is checked before root SFTP opens
+it; root never reopens the operator pathname. The data-only upload authenticates
+as `qianyi` and creates no remote shell. The fixed broker opens the resulting
+owner-only remote file, copies it into its root-private state directory,
+verifies the digest, and performs preflight, installation, release convergence,
+the fixed two-container conformance asset, and compensation back to inert state.
 
 ```bash
 archive="$evidence_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
@@ -872,10 +895,10 @@ material. No operator-supplied source or executable byte crosses this boundary.
 ## 6. Stage the agent and activate it through the fixed authority
 
 `stage-agent` accepts only the prepared-state digest and public agent identity.
-The local root process opens the protected key and CA as descriptors 3 and 4,
-then the client encodes their bytes directly into its stdin frame. The values,
-digests, paths, and temporary remote files are not in the client header,
-environment, command arguments, receipt, evidence, or staging directory.
+The root-owned source-commit snapshot opens the protected key and CA and encodes
+their bytes directly into its stdout frame. The values and their digests are not
+in the client header, environment, command arguments, receipt, evidence, or
+staging directory.
 
 ```bash
 stage_request_id="$(new_native_authority_request_id)"
@@ -895,21 +918,9 @@ jq -e '.phase == "staged" and .agent_service == "inactive" and
   "$evidence_dir/agent-stage.json" >/dev/null
 
 emit_public_key() {
-  sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repository_root/src" \
-    "$repository_root/.venv/bin/python" - "$agent_private_key" \
-    "$agent_key_id" <<'PY'
-import sys
-from pathlib import Path
-
-from loom.personal_dev_native_builder_protocol import (
-    load_personal_dev_native_builder_signer,
-)
-
-signer = load_personal_dev_native_builder_signer(
-    Path(sys.argv[1]), key_id=sys.argv[2]
-)
-sys.stdout.buffer.write(signer.public_key_bytes(sys.argv[2]))
-PY
+  sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
+    --private-key-path "$agent_private_key" \
+    --expected-public-key-sha256 "$expected_public_key_sha256"
 }
 
 emit_public_key \

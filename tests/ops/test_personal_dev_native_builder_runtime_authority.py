@@ -237,27 +237,14 @@ def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
     assert LIBEXEC_PATH == Path(
         "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
     )
-    assert LIBRARY_ROOT == Path(
-        "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority"
-    )
-    assert POLICY_PATH == Path(
-        "/etc/loom/personal-dev-native-builder-runtime-authority.json"
-    )
-    assert STATE_ROOT == Path(
-        "/var/lib/loom/personal-dev-native-builder-runtime-authority"
-    )
+    assert LIBRARY_ROOT == Path("/usr/local/lib/loom-personal-dev-native-builder-runtime-authority")
+    assert POLICY_PATH == Path("/etc/loom/personal-dev-native-builder-runtime-authority.json")
+    assert STATE_ROOT == Path("/var/lib/loom/personal-dev-native-builder-runtime-authority")
     assert STATE_PATH == STATE_ROOT / "state-v1.json"
-    assert LOCK_PATH == Path(
-        "/run/lock/loom-personal-dev-native-builder-runtime-authority.lock"
-    )
-    assert EPHEMERAL_SECRET_ROOT == Path(
-        "/run/loom-personal-dev-native-builder-runtime-authority"
-    )
+    assert LOCK_PATH == Path("/run/lock/loom-personal-dev-native-builder-runtime-authority.lock")
+    assert EPHEMERAL_SECRET_ROOT == Path("/run/loom-personal-dev-native-builder-runtime-authority")
     assert BROKER_PATH == (
-        LIBRARY_ROOT
-        / "scripts"
-        / "ops"
-        / "personal_dev_native_builder_runtime_authority.py"
+        LIBRARY_ROOT / "scripts" / "ops" / "personal_dev_native_builder_runtime_authority.py"
     )
     assert ASSET_SPECS["launcher"] == AssetSpec(LIBEXEC_PATH, 0o555)
     assert ASSET_SPECS["broker"] == AssetSpec(BROKER_PATH, 0o444)
@@ -322,9 +309,7 @@ def test_launcher_rejects_poisoned_application_before_top_level_code_runs(
                     "authority_source_sha": SOURCE_SHA,
                     "authority_source_tree": SOURCE_TREE,
                     "runtime_profile_sha256": PROFILE_SHA256,
-                    "schema": (
-                        "loom.personal-dev-native-builder-runtime-authority-policy.v1"
-                    ),
+                    "schema": ("loom.personal-dev-native-builder-runtime-authority-policy.v1"),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -393,9 +378,7 @@ def test_launcher_pins_validated_namespace_modules_against_later_regular_package
         "converger": "converge_personal_dev_native_builder_release.py",
         "installer": "install_personal_dev_native_builder_runtime.py",
         "protocol": "personal_dev_native_builder_runtime_authority_protocol.py",
-        "runtime_profile_helper": (
-            "personal_dev_native_builder_runtime_profile.py"
-        ),
+        "runtime_profile_helper": ("personal_dev_native_builder_runtime_profile.py"),
     }
     installed_assets: dict[str, Path] = {"launcher": installed_launcher}
     for name, filename in python_assets.items():
@@ -421,8 +404,7 @@ def test_launcher_pins_validated_namespace_modules_against_later_regular_package
     poison_scripts = poison_root / "scripts"
     poison_scripts.mkdir(parents=True)
     (poison_scripts / "__init__.py").write_text(
-        "from pathlib import Path\n"
-        f"Path({str(marker)!r}).touch()\n",
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
         encoding="ascii",
     )
     specifications = ",\n".join(
@@ -494,9 +476,7 @@ def test_launcher_registers_itself_before_loading_the_validated_broker(
                     "authority_source_sha": SOURCE_SHA,
                     "authority_source_tree": SOURCE_TREE,
                     "runtime_profile_sha256": PROFILE_SHA256,
-                    "schema": (
-                        "loom.personal-dev-native-builder-runtime-authority-policy.v1"
-                    ),
+                    "schema": ("loom.personal-dev-native-builder-runtime-authority-policy.v1"),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -566,12 +546,15 @@ def test_policy_loader_requires_canonical_root_owned_single_link_assets(
     policy_path.write_bytes(encode_policy(policy))
     policy_path.chmod(0o444)
 
-    assert load_policy(
-        policy_path=policy_path,
-        asset_specs=specs,
-        expected_uid=os.getuid(),
-        expected_gid=os.getgid(),
-    ) == policy.public()
+    assert (
+        load_policy(
+            policy_path=policy_path,
+            asset_specs=specs,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+        == policy.public()
+    )
 
     hardlink = tmp_path / "profile-hardlink"
     os.link(second, hardlink)
@@ -652,12 +635,8 @@ def test_policy_loader_rejects_an_asset_below_a_symlinked_directory(
     asset.chmod(0o444)
     linked_directory = tmp_path / "linked-library"
     linked_directory.symlink_to(real_directory, target_is_directory=True)
-    specs = MappingProxyType(
-        {"broker": AssetSpec(linked_directory / "asset", 0o444)}
-    )
-    policy = _policy(
-        assets={"broker": hashlib.sha256(b"reviewed\n").hexdigest()}
-    )
+    specs = MappingProxyType({"broker": AssetSpec(linked_directory / "asset", 0o444)})
+    policy = _policy(assets={"broker": hashlib.sha256(b"reviewed\n").hexdigest()})
     policy_path = tmp_path / "policy.json"
     policy_path.write_bytes(encode_policy(policy))
     policy_path.chmod(0o444)
@@ -736,9 +715,7 @@ def test_status_is_canonical_public_and_capacity_zero() -> None:
 
 def test_dispatch_rejects_authority_or_host_identity_drift() -> None:
     with pytest.raises(AuthorityError, match="request_identity_invalid"):
-        _runtime().dispatch(
-            _request(authority_source_sha="4" * 40, authority_source_tree="5" * 40)
-        )
+        _runtime().dispatch(_request(authority_source_sha="4" * 40, authority_source_tree="5" * 40))
     with pytest.raises(AuthorityError, match="host_identity_invalid"):
         _runtime(StatusHost(host_name="other-host")).dispatch(_request())
     with pytest.raises(AuthorityError, match="host_identity_invalid"):
@@ -832,7 +809,9 @@ def test_validated_broker_dispatches_only_after_launcher_policy_handoff(
     output = Output()
     monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002))
     monkeypatch.setattr(authority_module, "authority_lock", locked)
-    monkeypatch.setattr(authority_module, "parse_request", lambda _stream: events.append("parse") or request)
+    monkeypatch.setattr(
+        authority_module, "parse_request", lambda _stream: events.append("parse") or request
+    )
     monkeypatch.setattr(authority_module, "_build_runtime", build, raising=False)
     monkeypatch.setattr(authority_module.sys, "stdin", Input())
     monkeypatch.setattr(authority_module.sys, "stdout", output)
@@ -911,6 +890,56 @@ def test_bounded_runner_replays_termination_received_during_group_cleanup() -> N
         signal.signal(signal.SIGTERM, previous)
 
     assert replayed == [signal.SIGTERM]
+
+
+def test_bounded_runner_never_signals_a_reused_group_after_leader_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches killpg interposition onto an unrelated group reusing a reaped PID."""
+    reused_signals: list[int] = []
+
+    class Stream:
+        def close(self) -> None:
+            pass
+
+    class Process:
+        pid = 424242
+        stdout = Stream()
+        stderr = Stream()
+        args = ("fake",)
+        returncode: int | None = None
+        reaped = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.reaped = True
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    def interposed_killpg(process_group: int, signum: int) -> None:
+        assert process_group == process.pid
+        if process.reaped:
+            if signum == signal.SIGKILL:
+                reused_signals.append(signum)
+                return
+            if reused_signals:
+                raise ProcessLookupError
+
+    monkeypatch.setattr(authority_module.os, "killpg", interposed_killpg)
+    monkeypatch.setattr(
+        authority_module.os,
+        "waitid",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    authority_module.BoundedSubprocessRunner(
+        timeout_seconds=1,
+        maximum_output=1024,
+    )._terminate(process)  # type: ignore[arg-type]
+
+    assert reused_signals == []
 
 
 def test_cleanup_defers_then_replays_the_first_termination_signal(
@@ -1184,21 +1213,21 @@ def test_dockerd_start_rejects_post_start_inventory_before_returning(
         host.start_dockerd()
 
     assert active is False
-    assert calls.index(
-        ("/usr/bin/systemctl", "start", "loom-personal-dev-builder-dockerd.service")
-    ) < calls.index(
-        (
-            "/usr/bin/docker",
-            "-H",
-            "unix:///run/loom-personal-dev-builder/docker.sock",
-            "container",
-            "ls",
-            "--all",
-            "--quiet",
-            "--no-trunc",
+    assert (
+        calls.index(("/usr/bin/systemctl", "start", "loom-personal-dev-builder-dockerd.service"))
+        < calls.index(
+            (
+                "/usr/bin/docker",
+                "-H",
+                "unix:///run/loom-personal-dev-builder/docker.sock",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--no-trunc",
+            )
         )
-    ) < calls.index(
-        ("/usr/bin/systemctl", "stop", "loom-personal-dev-builder-dockerd.service")
+        < calls.index(("/usr/bin/systemctl", "stop", "loom-personal-dev-builder-dockerd.service"))
     )
 
 
@@ -1223,11 +1252,7 @@ def test_system_host_adapter_mutates_only_exact_services_and_nft_table() -> None
             command = tuple(argv)
             calls.append(command)
             if command == ("/usr/sbin/nft", "list", "tables"):
-                output = (
-                    "table inet loom_personal_dev_builder\n"
-                    if nft_present
-                    else ""
-                )
+                output = "table inet loom_personal_dev_builder\n" if nft_present else ""
                 return CommandResult(0, output, "")
             if command[:2] == ("/usr/sbin/nft", "--check"):
                 return CommandResult(0, "", "")
@@ -1424,10 +1449,7 @@ def test_runtime_builder_rejects_profile_outside_installed_policy(
         )
 
     assert observed == [
-        LIBRARY_ROOT
-        / "deploy"
-        / "personal-dev-native-builder"
-        / "runtime-profile-v1.json"
+        LIBRARY_ROOT / "deploy" / "personal-dev-native-builder" / "runtime-profile-v1.json"
     ]
 
 
@@ -1474,10 +1496,7 @@ def test_runtime_builder_wires_only_fixed_typed_adapters(
     assert runtime.secrets.private_key_mode == profile.private_key_mode
     assert isinstance(runtime.conformance, authority_module.ConformanceOperations)
     assert observed == [
-        LIBRARY_ROOT
-        / "deploy"
-        / "personal-dev-native-builder"
-        / "runtime-profile-v1.json"
+        LIBRARY_ROOT / "deploy" / "personal-dev-native-builder" / "runtime-profile-v1.json"
     ]
 
 
@@ -1506,18 +1525,10 @@ def test_broker_ast_has_no_unrelated_control_plane_executables() -> None:
     )
 
 
-CURRENT_AGENT = (
-    "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "a" * 64
-)
-CURRENT_BUILDER = (
-    "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64
-)
-PREVIOUS_AGENT = (
-    "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
-)
-PREVIOUS_BUILDER = (
-    "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "d" * 64
-)
+CURRENT_AGENT = "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "a" * 64
+CURRENT_BUILDER = "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "b" * 64
+PREVIOUS_AGENT = "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "c" * 64
+PREVIOUS_BUILDER = "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "d" * 64
 CURRENT_REVISION = "4" * 40
 PREVIOUS_REVISION = "5" * 40
 ARCHIVE_SHA512 = "6" * 128
@@ -1629,9 +1640,7 @@ class RecordingArchives:
         expected_sha512: str,
         request_id: str,
     ) -> Iterator[Path]:
-        self.events.append(
-            f"archive.copy:{source}:{expected_sha512}:{request_id}"
-        )
+        self.events.append(f"archive.copy:{source}:{expected_sha512}:{request_id}")
         self.present = True
         try:
             yield self.path
@@ -1732,9 +1741,7 @@ class RecordingHost:
             agent_active=self.agent_active,
             nft_present=self.nft_present,
             managed_containers=self.managed_containers,
-            managed_networks=(
-                self.managed_networks if self.dockerd_active else None
-            ),
+            managed_networks=(self.managed_networks if self.dockerd_active else None),
         )
 
     def verify_inert(self, *, require_empty: bool) -> HostStatus:
@@ -1745,10 +1752,7 @@ class RecordingHost:
             or self.nft_present
             or (
                 require_empty
-                and (
-                    self.managed_containers
-                    or (self.dockerd_active and self.managed_networks)
-                )
+                and (self.managed_containers or (self.dockerd_active and self.managed_networks))
             )
         ):
             raise AuthorityError("host_state_invalid")
@@ -1944,9 +1948,7 @@ def test_prepare_runs_exact_transition_and_publishes_only_after_inert_exit() -> 
     assert host.nft_present is False
     assert states.snapshot is not None
     assert dict(states.snapshot.value) == _prepared_state()
-    assert states.snapshot.sha256 == hashlib.sha256(
-        encode_state(_prepared_state())
-    ).hexdigest()
+    assert states.snapshot.sha256 == hashlib.sha256(encode_state(_prepared_state())).hexdigest()
     assert receipt["operation"] == "prepare"
     assert receipt["phase"] == "prepared"
     assert receipt["state"] == _prepared_state()
@@ -1971,9 +1973,7 @@ def test_prepare_rejects_noninert_state_before_any_mutation() -> None:
 
 
 def test_prepare_rejects_nondeterministic_plans_and_compensates() -> None:
-    runtime, events, host, states, archives, _, _ = _prepare_runtime(
-        unstable_plan=True
-    )
+    runtime, events, host, states, archives, _, _ = _prepare_runtime(unstable_plan=True)
 
     with pytest.raises(AuthorityError, match="convergence_plan_invalid"):
         runtime.dispatch(_prepare_request())
@@ -2101,9 +2101,7 @@ def test_file_state_store_atomically_fsyncs_mode_0600_and_reads_exact_hash(
     real_fsync = os.fsync
 
     def record_fsync(descriptor: int) -> None:
-        fsync_kinds.append(
-            "directory" if os.path.isdir(f"/proc/self/fd/{descriptor}") else "file"
-        )
+        fsync_kinds.append("directory" if os.path.isdir(f"/proc/self/fd/{descriptor}") else "file")
         real_fsync(descriptor)
 
     monkeypatch.setattr(authority_module.os, "fsync", record_fsync)
@@ -2151,12 +2149,8 @@ def test_file_state_store_publishes_through_retained_directory_after_path_swap(
 
     published = store.publish(_prepared_state())
 
-    assert published.sha256 == hashlib.sha256(
-        encode_state(_prepared_state())
-    ).hexdigest()
-    assert (displaced / "state-v1.json").read_bytes() == encode_state(
-        _prepared_state()
-    )
+    assert published.sha256 == hashlib.sha256(encode_state(_prepared_state())).hexdigest()
+    assert (displaced / "state-v1.json").read_bytes() == encode_state(_prepared_state())
     assert list(root.iterdir()) == []
 
 
@@ -2442,9 +2436,7 @@ def _transition_runtime(
 
 
 def test_stage_agent_splits_ephemeral_secrets_binds_public_identity_then_publishes() -> None:
-    runtime, events, host, states, installer, secrets = _transition_runtime(
-        _prepared_state()
-    )
+    runtime, events, host, states, installer, secrets = _transition_runtime(_prepared_state())
     assert states.snapshot is not None
 
     receipt = runtime.dispatch(_stage_request(states.snapshot.sha256))
@@ -2492,8 +2484,7 @@ def test_stage_agent_requires_exact_prepared_hash_and_release_identity() -> None
     request = _stage_request(states.snapshot.sha256)
     values = dict(request.header.as_mapping())
     values["agent_image"] = (
-        "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:"
-        + "e" * 64
+        "ghcr.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:" + "e" * 64
     )
     with pytest.raises(AuthorityError, match="release_identity_invalid"):
         runtime.dispatch(
@@ -2609,6 +2600,85 @@ def test_activate_failure_after_each_mutation_restores_staged_inert_state(
     assert states.snapshot == original
 
 
+@pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
+@pytest.mark.parametrize("transition", ("prepare", "stage-agent", "activate", "remove"))
+def test_default_termination_waits_for_transaction_compensation(
+    signum: signal.Signals,
+    transition: str,
+) -> None:
+    """Catches default process termination bypassing any mutating transition cleanup."""
+    read_descriptor, write_descriptor = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_descriptor)
+        signal.signal(signum, signal.SIG_DFL)
+        triggered = False
+        if transition == "prepare":
+            runtime, _, host, states, _, conformance, _ = _prepare_runtime()
+            request = _prepare_request()
+            original_boundary = conformance.run
+
+            def boundary(*args: object, **kwargs: object) -> object:
+                nonlocal triggered
+                result = original_boundary(*args, **kwargs)
+                triggered = True
+                os.kill(os.getpid(), signum)
+                return result
+
+            conformance.run = boundary  # type: ignore[method-assign]
+        else:
+            initial = _prepared_state() if transition == "stage-agent" else _staged_state()
+            active = transition == "remove"
+            if active:
+                initial = _active_state()
+            runtime, _, host, states, installer, _ = _transition_runtime(
+                initial,
+                active_host=active,
+            )
+            assert states.snapshot is not None
+            request = (
+                _stage_request(states.snapshot.sha256)
+                if transition == "stage-agent"
+                else _state_request(transition, states.snapshot.sha256)
+            )
+            target = installer if transition in {"stage-agent", "remove"} else host
+            method_name = {
+                "stage-agent": "stage_agent_authorized",
+                "activate": "start_agent",
+                "remove": "remove",
+            }[transition]
+            original_boundary = getattr(target, method_name)
+
+            def boundary(*args: object, **kwargs: object) -> object:
+                nonlocal triggered
+                result = original_boundary(*args, **kwargs)
+                triggered = True
+                os.kill(os.getpid(), signum)
+                return result
+
+            setattr(target, method_name, boundary)
+        original_verify = host.verify_inert
+
+        def verify_after_signal(*, require_empty: bool) -> HostStatus:
+            result = original_verify(require_empty=require_empty)
+            if triggered:
+                os.write(write_descriptor, b"compensated")
+            return result
+
+        host.verify_inert = verify_after_signal  # type: ignore[method-assign]
+        runtime.dispatch(request)
+        os._exit(90)
+
+    os.close(write_descriptor)
+    _, status = os.waitpid(child, 0)
+    compensation = os.read(read_descriptor, 64)
+    os.close(read_descriptor)
+
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signum
+    assert compensation == b"compensated"
+
+
 def test_remove_stops_only_exact_runtime_preserves_cache_and_removes_state_last() -> None:
     runtime, events, host, states, _, _ = _transition_runtime(
         _active_state(),
@@ -2711,8 +2781,7 @@ def test_remove_retries_same_state_hash_after_state_deletion_failure() -> None:
     assert events.count("installer.remove") == 2
 
 
-def test_remove_retry_reaches_installer_exact_absent_path_without_missing_unit_start(
-) -> None:
+def test_remove_retry_reaches_installer_exact_absent_path_without_missing_unit_start() -> None:
     events: list[str] = []
     unit_present = True
     dockerd_active = False

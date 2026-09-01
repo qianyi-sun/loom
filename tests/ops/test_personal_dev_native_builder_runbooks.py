@@ -80,7 +80,7 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
         'printf "%s\\n" "$@" > "$AUTHORITY_SSH_ARGS"\n'
         'cat > "$AUTHORITY_SSH_STDIN"\n'
         'request_id="$(sed -n \'/--request-id/{n;p;q;}\' "$AUTHORITY_CLIENT_ARGS")"\n'
-        "printf '%s' '{\"state_sha256\":\"\",\"state\":null,\"schema\":\"'\"$AUTHORITY_RECEIPT_SCHEMA\"'\",\"runtime_profile_sha256\":\"'\"$AUTHORITY_PROFILE\"'\",\"request_id\":\"'\"$request_id\"'\",\"phase\":\"inert\",\"operation\":\"status\",\"nft_table\":\"absent\",\"managed_networks\":null,\"managed_containers\":0,\"host_name\":\"gx10-01c7\",\"executable_new_capacity\":0,\"dockerd_service\":\"inactive\",\"authority_source_tree\":\"'\"$AUTHORITY_TREE\"'\",\"authority_source_sha\":\"'\"$AUTHORITY_SHA\"'\",\"architecture\":\"aarch64\",\"agent_service\":\"inactive\"}'\n",
+        'printf \'%s\' \'{"state_sha256":"","state":null,"schema":"\'"$AUTHORITY_RECEIPT_SCHEMA"\'","runtime_profile_sha256":"\'"$AUTHORITY_PROFILE"\'","request_id":"\'"$request_id"\'","phase":"inert","operation":"status","nft_table":"absent","managed_networks":null,"managed_containers":0,"host_name":"gx10-01c7","executable_new_capacity":0,"dockerd_service":"inactive","authority_source_tree":"\'"$AUTHORITY_TREE"\'","authority_source_sha":"\'"$AUTHORITY_SHA"\'","architecture":"aarch64","agent_service":"inactive"}\'\n',
         encoding="utf-8",
     )
     fake_ssh.chmod(0o700)
@@ -211,6 +211,226 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     )
 
 
+def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
+    tmp_path: Path,
+) -> None:
+    """Catches checkout replacement controlling the root stage-agent encoder."""
+    document = _read(RUNTIME)
+    stage_agent = _shell_function(document, "native_authority_stage_agent")
+    try:
+        install_snapshot = _shell_function(document, "install_native_authority_client_snapshot")
+    except ValueError:
+        install_snapshot = ""
+    repository = tmp_path / "release"
+    client = repository / "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+    protocol = repository / "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py"
+    client.parent.mkdir(parents=True)
+    client.write_text("#!/bin/sh\nprintf sealed-frame\n", encoding="utf-8")
+    client.chmod(0o755)
+    protocol.write_text("# sealed protocol\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "-q", str(repository)],
+        check=True,
+        capture_output=True,
+    )
+    git_environment = {
+        "GIT_AUTHOR_NAME": "Runbook Test",
+        "GIT_AUTHOR_EMAIL": "runbook@example.invalid",
+        "GIT_COMMITTER_NAME": "Runbook Test",
+        "GIT_COMMITTER_EMAIL": "runbook@example.invalid",
+    }
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "--all"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "sealed"],
+        check=True,
+        capture_output=True,
+        env=git_environment,
+    )
+    source_sha = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    replacement = tmp_path / "replacement-client"
+    marker = tmp_path / "checkout-client-ran-as-root"
+    replacement.write_text(
+        '#!/bin/sh\ntouch "$CHECKOUT_ROOT_MARKER"\nprintf replaced-frame\n',
+        encoding="utf-8",
+    )
+    replacement.chmod(0o755)
+    key = tmp_path / "agent-key"
+    ca = tmp_path / "service-ca"
+    key.write_bytes(b"x")
+    ca.write_bytes(b"y")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        '#!/bin/sh\ntest "$1" = -n && shift\ntest "$1" = -- && shift\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    snapshot_root = tmp_path / "root-owned-snapshot"
+    behavior = subprocess.run(
+        [
+            "bash",
+            "-seu",
+            "--",
+            str(repository),
+            source_sha,
+            str(snapshot_root),
+            str(replacement),
+            str(client),
+            str(key),
+            str(ca),
+        ],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'CHECKOUT_ROOT_MARKER="{marker}"\n'
+            "export CHECKOUT_ROOT_MARKER\n"
+            'repository_root="$1"\n'
+            'merged_source_sha="$2"\n'
+            'native_authority_client_snapshot_root="$3"\n'
+            'native_authority_client=("$5")\n'
+            + (
+                'native_authority_privileged_client=("$3/personal_dev_native_builder_runtime_authority_client.py")\n'
+                if install_snapshot
+                else 'native_authority_privileged_client=("$5")\n'
+            )
+            + 'agent_private_key="$6"\n'
+            'service_ca="$7"\n'
+            f'authority_source_sha="{"a" * 40}"\n'
+            f'authority_source_tree="{"b" * 40}"\n'
+            f'runtime_profile_sha256="{"c" * 64}"\n'
+            + install_snapshot
+            + ("\ninstall_native_authority_client_snapshot\n" if install_snapshot else "\n")
+            + 'mv -- "$4" "$5"\n'
+            + stage_agent
+            + '\nnative_authority_stage_agent "123e4567-e89b-42d3-a456-426614174000" '
+            + '--expected-state-sha256 "'
+            + "d" * 64
+            + '" --agent-image ignored --builder-image ignored --service-origin ignored '
+            + "--agent-instance-id ignored --agent-key-id ignored "
+            + '--expected-public-key-sha256 "'
+            + "e" * 64
+            + '" >/dev/null\n'
+            + 'test ! -e "$CHECKOUT_ROOT_MARKER"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert not marker.exists()
+
+
+def test_archive_upload_uses_root_private_copy_before_source_substitution(
+    tmp_path: Path,
+) -> None:
+    """Catches root SFTP reopening an operator pathname after its metadata check."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    root_only = tmp_path / "root-only"
+    root_only.write_bytes(b"unrelated protected file")
+    replacement = tmp_path / "replacement-link"
+    replacement.symlink_to(root_only)
+    uploaded = tmp_path / "uploaded"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/sftp; then shift; exec "$FAKE_SFTP" "$@"; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    fake_sftp = fake_bin / "sftp"
+    fake_sftp.write_text(
+        "#!/bin/sh\n"
+        'batch="$(mktemp)"\n'
+        'cat > "$batch"\n'
+        'mv -- "$ATTACK_REPLACEMENT" "$ATTACK_SOURCE"\n'
+        'upload_source="$(awk \'$1 == "put" { print $2; exit }\' "$batch")"\n'
+        'cat -- "$upload_source" > "$UPLOADED_ARCHIVE"\n',
+        encoding="utf-8",
+    )
+    fake_sftp.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'FAKE_SFTP="{fake_sftp}"\n'
+            f'ATTACK_SOURCE="{source}"\n'
+            f'ATTACK_REPLACEMENT="{replacement}"\n'
+            f'UPLOADED_ARCHIVE="{uploaded}"\n'
+            f'native_authority_local_archive_root="{tmp_path / "root-archive"}"\n'
+            f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
+            "export FAKE_SFTP ATTACK_SOURCE ATTACK_REPLACEMENT UPLOADED_ARCHIVE\n"
+            + stage_archive
+            + '\nnative_authority_stage_archive "$1" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert uploaded.read_bytes() == b"reviewed archive"
+
+
+def test_archive_upload_failure_removes_the_root_private_copy(
+    tmp_path: Path,
+) -> None:
+    """Catches errexit bypassing local cleanup when root SFTP rejects an upload."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/sftp; then cat >/dev/null; exit 19; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    local_root = tmp_path / "root-archive"
+
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'native_authority_local_archive_root="{local_root}"\n'
+            f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
+            + stage_archive
+            + '\nnative_authority_stage_archive "$1" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert not (local_root / request_id).exists()
+
+
 def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
     tmp_path: Path,
 ) -> None:
@@ -222,9 +442,7 @@ def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
     ssh_invoked = tmp_path / "ssh-invoked"
     fake_sudo = fake_bin / "sudo"
     fake_sudo.write_text(
-        "#!/bin/sh\n"
-        'touch "$AUTHORITY_SSH_INVOKED"\n'
-        "cat >/dev/null\n",
+        '#!/bin/sh\ntouch "$AUTHORITY_SSH_INVOKED"\ncat >/dev/null\n',
         encoding="utf-8",
     )
     fake_sudo.chmod(0o700)
@@ -239,7 +457,9 @@ def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
             "native_authority_client=(/bin/sh -c 'touch \"$AUTHORITY_CLIENT_INVOKED\"')\n"
             'authority_source_sha="' + "a" * 40 + '"\n'
             'authority_source_tree="' + "b" * 40 + '"\n'
-            'runtime_profile_sha256="' + "c" * 64 + '"\n'
+            'runtime_profile_sha256="'
+            + "c" * 64
+            + '"\n'
             + request
             + '\nnative_authority_request prepare "$3" /dev/null\n'
             + "request_status=$?\n"
@@ -413,10 +633,13 @@ def test_native_builder_runbooks_leave_no_direct_gb10_privilege_or_scp_path() ->
 
     assert re.search(r"(?im)^\s*scp\b", shell) is None
     assert 'ssh_run "$gb10_target"' not in shell
-    assert re.search(
-        r'(?im)^\s*ssh_run\b[^\n]*(?:sudo|systemctl|nft|docker|python)',
-        shell,
-    ) is None
+    assert (
+        re.search(
+            r"(?im)^\s*ssh_run\b[^\n]*(?:sudo|systemctl|nft|docker|python)",
+            shell,
+        )
+        is None
+    )
 
 
 def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> None:
@@ -428,9 +651,7 @@ def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> N
 
     fake_python = tmp_path / "python"
     fake_python.write_text(
-        "#!/bin/sh\n"
-        "printf '%s|%s|' \"$PYTHONPATH\" \"$PYTHONNOUSERSITE\"\n"
-        "printf '<%s>' \"$@\"\n",
+        '#!/bin/sh\nprintf \'%s|%s|\' "$PYTHONPATH" "$PYTHONNOUSERSITE"\nprintf \'<%s>\' "$@"\n',
         encoding="utf-8",
     )
     fake_python.chmod(0o700)
@@ -450,8 +671,7 @@ def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> N
 
     assert behavior.returncode == 0, behavior.stderr
     assert behavior.stdout == (
-        "/exact/release/src|1|<-m><loom_cli><admin>"
-        "<personal-dev-control-plane><status>"
+        "/exact/release/src|1|<-m><loom_cli><admin><personal-dev-control-plane><status>"
     )
     for runbook in (runtime, acceptance):
         assert "/.venv/bin/loom" not in _shell(runbook)
@@ -461,9 +681,7 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
     tmp_path: Path,
 ) -> None:
     verify_source = _shell_function(_read(RUNTIME), "verify_loom_cli_source")
-    assert verify_source == _shell_function(
-        _read(ACCEPTANCE), "verify_loom_cli_source"
-    )
+    assert verify_source == _shell_function(_read(ACCEPTANCE), "verify_loom_cli_source")
     release = tmp_path / "release"
     poison = tmp_path / "poison"
     for root in (release, poison):
@@ -477,9 +695,7 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
         input=(
             'repository_root="$1"\n'
             f'loom_python="{sys.executable}"\n'
-            'export PYTHONPATH="$2/src"\n'
-            + verify_source
-            + "\nverify_loom_cli_source\n"
+            'export PYTHONPATH="$2/src"\n' + verify_source + "\nverify_loom_cli_source\n"
         ),
         text=True,
         capture_output=True,
@@ -491,16 +707,12 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
     outside.mkdir()
     (outside / "__init__.py").write_text("", encoding="utf-8")
     (release / "src" / "loom_cli" / "__init__.py").unlink()
-    (release / "src" / "loom_cli" / "__init__.py").symlink_to(
-        outside / "__init__.py"
-    )
+    (release / "src" / "loom_cli" / "__init__.py").symlink_to(outside / "__init__.py")
     rejected = subprocess.run(
         ["bash", "-seu", "--", str(release)],
         input=(
             'repository_root="$1"\n'
-            f'loom_python="{sys.executable}"\n'
-            + verify_source
-            + "\nverify_loom_cli_source\n"
+            f'loom_python="{sys.executable}"\n' + verify_source + "\nverify_loom_cli_source\n"
         ),
         text=True,
         capture_output=True,
@@ -516,7 +728,10 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert "umask 077" in runbook
     assert "merged_source_sha='<merged-40-lowercase-hex>'" in runbook
     assert "trusted_release_sha256='<trusted-release-64-lowercase-hex>'" in runbook
-    assert "previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-empty>'" in runbook
+    assert (
+        "previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-empty>'"
+        in runbook
+    )
     assert "c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d" in runbook
     assert (
         "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292"
@@ -634,23 +849,16 @@ def test_native_builder_runtime_normalizes_public_dns_cidrs() -> None:
     )
 
     assert behavior.returncode == 0, behavior.stderr
-    assert behavior.stdout == (
-        "207.35.188.227/32\n2606:4700:4700::1111/128\n"
-    )
+    assert behavior.stdout == ("207.35.188.227/32\n2606:4700:4700::1111/128\n")
 
 
 def test_native_builder_runtime_rejects_non_global_dns_addresses() -> None:
-    normalizer = _shell_function(
-        _read(RUNTIME), "normalize_public_store_cidrs"
-    )
+    normalizer = _shell_function(_read(RUNTIME), "normalize_public_store_cidrs")
 
     for address in ("10.0.0.1", "::ffff:10.0.0.1", "fd00::1"):
         behavior = subprocess.run(
             ["bash", "-seu", "--", address],
-            input=(
-                normalizer
-                + "\nprintf '%s\\n' \"$1\" | normalize_public_store_cidrs\n"
-            ),
+            input=(normalizer + "\nprintf '%s\\n' \"$1\" | normalize_public_store_cidrs\n"),
             text=True,
             capture_output=True,
             check=False,
@@ -670,7 +878,7 @@ def test_native_builder_runtime_delegates_fixed_kvm_gvisor_conformance_to_broker
     assert "two-container-conformance" not in runbook
     assert "docker_native=" not in runbook
     assert "docker_primary=" not in runbook
-    assert "ssh_run \"$gb10_target\"" not in runbook
+    assert 'ssh_run "$gb10_target"' not in runbook
     assert "no qemu" in normalized.casefold()
     assert "no runc fallback" in normalized.casefold()
     assert "tonistiigi/binfmt" not in normalized.casefold()
@@ -778,8 +986,7 @@ def test_native_builder_acceptance_rejects_unobserved_platform_or_runtime(
             'simultaneous_jobs="$1"\n'
             'simultaneous_grants="$2"\n'
             'initial_native_runtime="$3"\n'
-            'simultaneous_containers="$4"\n'
-            + container_evidence
+            'simultaneous_containers="$4"\n' + container_evidence
         ),
         text=True,
         capture_output=True,
@@ -824,7 +1031,7 @@ def test_native_builder_acceptance_orders_temporary_authority_before_durable_ope
         "signed-zero-grant-readiness",
         "owner_0_deploy_pid=$!",
         "owner_0_update_pid=$!",
-        "probe_cross_owner_denial \"$owner_1_xdg\" \"$owner_1_candidate\" \"$owner_0_xdg\" \"$owner_0_name\" 1 0 destroy",
+        'probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 destroy',
         "owner-1.final-destroyed.json",
         "rollback.server-side-apply.txt",
         "rollback-shadow.status.json",
@@ -847,10 +1054,10 @@ def test_native_builder_acceptance_orders_temporary_authority_before_durable_ope
 def test_native_builder_acceptance_canonicalizes_loader_inputs_without_newlines() -> None:
     runbook = _read(ACCEPTANCE)
 
-    raw_status = runbook.index('rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"')
-    canonical_status = runbook.index(
-        'jq -cS -j . "$rollback_status_raw" > "$rollback_status"'
+    raw_status = runbook.index(
+        'rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"'
     )
+    canonical_status = runbook.index('jq -cS -j . "$rollback_status_raw" > "$rollback_status"')
     verification = runbook.index("verify-acceptance-result")
     assert raw_status < canonical_status < verification
     assert 'assert_canonical_json "$rollback_status"' in runbook
@@ -866,9 +1073,10 @@ def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() ->
     assert 'cmp -s "$rollback_shadow_recheck" "$rollback_shadow_manifest"' in runtime
     assert "fixed `remove` transition stops the agent before the dedicated daemon" in runtime
     assert "removes only byte-identical managed runtime files" in _normalized(runtime).casefold()
-    assert "dedicated image cache and system identities are retained" in _normalized(
-        runtime
-    ).casefold()
+    assert (
+        "dedicated image cache and system identities are retained"
+        in _normalized(runtime).casefold()
+    )
     assert runtime.index('remove_request_id="$(new_native_authority_request_id)"') > runtime.index(
         'kubectl --kubeconfig "$kubeconfig" apply --server-side'
     )
