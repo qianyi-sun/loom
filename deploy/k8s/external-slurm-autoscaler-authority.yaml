@@ -11,6 +11,13 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: Secret
 metadata:
+  name: loom-external-slurm-autoscaler-db
+  namespace: loom-staging
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
   name: loom-external-slurm-autoscaler-token
   namespace: loom-staging
   annotations:

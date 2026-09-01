@@ -147,6 +147,44 @@ def _artifact() -> ManifestArtifact:
     )
 
 
+def _artifact_with_witnesses() -> ManifestArtifact:
+    desired = [
+        *_desired(),
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "Role",
+            "metadata": {
+                "name": "loom-external-slurm-autoscaler-witness",
+                "namespace": "loom-dev",
+            },
+            "rules": [],
+        },
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {
+                "name": "loom-external-slurm-autoscaler-witness",
+                "namespace": "loom-dev",
+            },
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "Role",
+                "name": "loom-external-slurm-autoscaler-witness",
+            },
+            "subjects": [],
+        },
+    ]
+    rendered = yaml.safe_dump_all(desired, sort_keys=True)
+    return ManifestArtifact(
+        rendered_yaml=rendered,
+        rendered_sha256=hashlib.sha256(rendered.encode()).hexdigest(),
+        resource_count=7,
+        resource_set_digest="1" * 64,
+        image_identities={"loom-control-plane": "sha256:" + "e" * 64},
+        artifact_digest="2" * 64,
+    )
+
+
 def _identity(resource: dict[str, object]) -> str:
     metadata = resource["metadata"]
     assert isinstance(metadata, dict)
@@ -154,9 +192,10 @@ def _identity(resource: dict[str, object]) -> str:
 
 
 class _Runner:
-    def __init__(self) -> None:
-        self.live = _live()
+    def __init__(self, live: list[dict[str, object]] | None = None) -> None:
+        self.live = _live() if live is None else live
         self.calls: list[tuple[str, ...]] = []
+        self.apply_namespaces: list[tuple[str, str, str | None]] = []
 
     @property
     def environment(self):
@@ -195,6 +234,20 @@ class _Runner:
         self.calls.append(command)
         document = yaml.safe_load(input_payload)
         assert isinstance(document, dict)
+        metadata = document.get("metadata")
+        assert isinstance(metadata, dict)
+        command_namespace = (
+            command[command.index("--namespace") + 1]
+            if "--namespace" in command
+            else None
+        )
+        self.apply_namespaces.append(
+            (
+                str(document.get("kind")),
+                str(metadata.get("namespace", "")),
+                command_namespace,
+            )
+        )
         identity = _identity(document)
         current = next(item for item in self.live if _identity(item) == identity)
         force = "--force-conflicts" in command
@@ -305,6 +358,88 @@ def test_installed_service_binds_exact_publication_and_fixed_commands(
     cron = runner.live[0]["spec"]
     assert isinstance(cron, dict)
     assert cron["suspend"] is True
+
+
+def test_installed_service_loads_exact_loom_dev_witness_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_cli.rollout.operator import installed_manifest_ownership as module
+
+    artifact = _artifact_with_witnesses()
+    witnesses = list(yaml.safe_load_all(artifact.rendered_yaml))[-2:]
+    assert all(isinstance(item, dict) for item in witnesses)
+    live = _live()
+    for index, witness in enumerate(witnesses, start=len(live) + 1):
+        metadata = witness["metadata"]
+        assert isinstance(metadata, dict)
+        metadata.update(
+            {
+                "uid": f"uid-{index}",
+                "resourceVersion": str(index),
+                "managedFields": [
+                    {
+                        "manager": "loom-lifecycle-bootstrap",
+                        "operation": "Apply",
+                        "fieldsV1": {"f:rules": {}},
+                    }
+                ],
+            }
+        )
+        live.append(witness)
+    runner = _Runner(live)
+
+    class _Store:
+        def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            pass
+
+        def load(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(manifests=artifact)
+
+    monkeypatch.setattr(module, "PreflightArtifactStore", _Store)
+    monkeypatch.setattr(
+        module,
+        "InstalledPreflightCommands",
+        lambda *args, **kwargs: SimpleNamespace(image=lambda *args: None),
+    )
+    monkeypatch.setattr(module, "SubprocessProtectedApplyCommandRunner", lambda **kwargs: runner)
+    journal = _Journal()
+    monkeypatch.setattr(module, "ManifestOwnershipJournal", lambda *args, **kwargs: journal)
+    monkeypatch.setattr(
+        module,
+        "ManifestOwnershipEpochClaimer",
+        lambda **kwargs: lambda epoch, request, evidence: epoch + 1,
+    )
+
+    service = InstalledManifestOwnershipService(
+        config=_config(tmp_path),
+        service_uid=max(1, os.geteuid()),
+        read_mutation_epoch=lambda: 2,
+    )
+    inventory = service.inventory(_candidate(), artifact_bundle_sha256=_BUNDLE)
+
+    resources = inventory["resources"]
+    assert isinstance(resources, list)
+    assert len(resources) == 7
+    witness_reads = [
+        command for command in runner.calls if "loom-dev" in command and "get" in command
+    ]
+    assert len(witness_reads) == 2
+    assert all(command[3:5] == ("--namespace", "loom-dev") for command in witness_reads)
+
+    result = service.apply(
+        _candidate(),
+        artifact_bundle_sha256=_BUNDLE,
+        request_id="req-manifest-ownership-12345678",
+        approved_inventory_sha256=inventory["inventory_sha256"],  # type: ignore[arg-type]
+    )
+
+    assert result["mutation_epoch_after"] == 3
+    witness_applies = [
+        item for item in runner.apply_namespaces if item[1] == "loom-dev"
+    ]
+    assert witness_applies
+    assert all(item[2] == "loom-dev" for item in witness_applies)
 
 
 def test_installed_service_rejects_nonsealed_candidate(tmp_path: Path) -> None:

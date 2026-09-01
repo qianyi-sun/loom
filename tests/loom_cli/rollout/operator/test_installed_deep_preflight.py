@@ -25,6 +25,8 @@ from loom_cli.rollout.gb10_readiness import (
     GB10ProbeTarget,
     GB10SharedMountReadiness,
 )
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES
+from loom_cli.rollout.manifest_readiness import ManifestRenderSession
 from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
@@ -98,6 +100,15 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
+    authority_source = (
+        Path(__file__).resolve().parents[4]
+        / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+    ).read_text(encoding="utf-8")
+    authority_path = (
+        config.runner_repo / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+    )
+    authority_path.parent.mkdir(parents=True)
+    authority_path.write_text(authority_source, encoding="utf-8")
     installed_config = replace(
         config,
         runner_repo=tmp_path / "installed" / "repo",
@@ -213,6 +224,39 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     monkeypatch.setattr(
         installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
     )
+    expected_manifest_images = (
+        "loom-control-plane",
+        "loom-egress-xds",
+        "loom-family-orchestrator",
+        "loom-llm-gateway",
+        "loom-pipeline-orchestrator",
+        "loom-service",
+        "loom-web",
+        "loom-worker",
+    )
+    primary_render = """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: primary-render
+  namespace: loom-staging
+spec:
+  template:
+    spec:
+      containers:
+""" + "".join(
+        f"      - name: {name}\n        image: {name}:{candidate.image_tag}\n"
+        for name in expected_manifest_images
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "render_manifests",
+        lambda _cluster: primary_render,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "replace",
+        lambda found_cluster, **_changes: found_cluster,
+    )
 
     def capacity_source(**kwargs: object) -> SimpleNamespace:
         captured["capacity_source"] = kwargs
@@ -315,17 +359,45 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         "trajectories",
     )
     assert captured["composition"]["manifest_image_names"] == frozenset(  # type: ignore[index]
-        {
-            "loom-control-plane",
-            "loom-egress-xds",
-            "loom-family-orchestrator",
-            "loom-llm-gateway",
-            "loom-pipeline-orchestrator",
-            "loom-service",
-            "loom-web",
-            "loom-worker",
-        }
+        expected_manifest_images
     )
+    manifest_factory = captured["composition"]["render_manifest_factory"]  # type: ignore[index]
+    manifest_post_image_pin = captured["composition"]["manifest_post_image_pin"]  # type: ignore[index]
+    assert callable(manifest_factory)
+    assert callable(manifest_post_image_pin)
+    image_digests = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    registry_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-registry').encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    def render_artifact():
+        return ManifestRenderSession(
+            manifest_factory(candidate),  # type: ignore[arg-type]
+            lambda _payload: subprocess.CompletedProcess([], 0, "", ""),
+            manifest_post_image_pin=manifest_post_image_pin,  # type: ignore[arg-type]
+            image_tag=candidate.image_tag,
+            namespace=config.namespace,
+            image_digests=image_digests,
+            expected_image_names=expected_manifest_images,
+            container_registry=cluster.container_registry,
+            registry_digests=registry_digests,
+        ).render()
+
+    artifact = render_artifact()
+    assert artifact.rendered_yaml.endswith("---\n" + authority_source)
+
+    authority_with_comment = authority_source + "# exact-byte-sensitivity\n"
+    authority_path.write_text(authority_with_comment, encoding="utf-8")
+    changed_artifact = render_artifact()
+    assert changed_artifact.rendered_yaml.endswith("---\n" + authority_with_comment)
+    assert changed_artifact.rendered_sha256 != artifact.rendered_sha256
+
+    authority_path.write_text(authority_source.rsplit("---", 1)[0], encoding="utf-8")
+    with pytest.raises(ValueError, match="authority resource set is invalid"):
+        manifest_post_image_pin(manifest_factory(candidate)())  # type: ignore[operator]
 
 
 class _Artifacts:
@@ -383,6 +455,9 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
 
     def command(*_args, **_kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def manifest_post_image_pin(rendered: str) -> str:
+        return rendered + "# installed-composition-post-image-pin-sentinel\n"
 
     composition = InstalledDeepPreflightComposition(
         config=config,
@@ -446,6 +521,7 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
         read_mutation_epoch=lambda: 9,
         read_database_schema_revision=lambda: "0074",
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        manifest_post_image_pin=manifest_post_image_pin,
     )
 
     admission = composition.sources(candidate, 9, RuntimePurpose.ADMISSION)
@@ -458,6 +534,8 @@ def test_composition_uses_one_source_graph_and_loads_outputs_only_for_detached(
 
     assert admission.loaded_artifacts is None
     assert detached.loaded_artifacts is not None
+    assert admission.manifest_post_image_pin is manifest_post_image_pin
+    assert detached.manifest_post_image_pin is manifest_post_image_pin
     assert artifacts.calls == [
         {
             "bundle_digest": reference.bundle_digest,

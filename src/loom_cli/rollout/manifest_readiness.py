@@ -23,6 +23,55 @@ _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _MAX_RENDERED_BYTES = 16 * 1024 * 1024
 _MAX_RESOURCES = 512
 
+_EXTERNAL_SUPERVISOR_WITNESS_IDENTITIES = frozenset(
+    {
+        (
+            "rbac.authorization.k8s.io/v1",
+            "Role",
+            "loom-dev",
+            "loom-external-slurm-autoscaler-witness",
+        ),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+            "loom-dev",
+            "loom-external-slurm-autoscaler-witness",
+        ),
+    }
+)
+_EXTERNAL_SUPERVISOR_AUTHORITY_IDENTITIES = frozenset(
+    {
+        ("v1", "ServiceAccount", "loom-staging", "loom-external-slurm-autoscaler"),
+        ("v1", "Secret", "loom-staging", "loom-external-slurm-autoscaler-db"),
+        ("v1", "Secret", "loom-staging", "loom-external-slurm-autoscaler-token"),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "Role",
+            "loom-staging",
+            "loom-external-slurm-autoscaler",
+        ),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "RoleBinding",
+            "loom-staging",
+            "loom-external-slurm-autoscaler",
+        ),
+        *_EXTERNAL_SUPERVISOR_WITNESS_IDENTITIES,
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRole",
+            "",
+            "loom-external-slurm-autoscaler-namespace-audit",
+        ),
+        (
+            "rbac.authorization.k8s.io/v1",
+            "ClusterRoleBinding",
+            "",
+            "loom-external-slurm-autoscaler-namespace-audit",
+        ),
+    }
+)
+
 
 class CommandResult(Protocol):
     @property
@@ -32,8 +81,89 @@ class CommandResult(Protocol):
 RenderManifest = Callable[[], str]
 ServerDryRun = Callable[[str], CommandResult]
 FieldOwnershipRetryRender = Callable[[str], str]
+ManifestPostImagePin = Callable[[str], str]
 
 _LIFECYCLE_CRONJOB_NAME = "loom-staging-data-lifecycle"
+
+
+def is_admitted_manifest_identity(
+    api_version: str,
+    kind: str,
+    resource_namespace: str,
+    name: str,
+    *,
+    namespace: str,
+) -> bool:
+    """Admit primary/cluster identities plus the exact staging witness exception."""
+
+    return resource_namespace in {"", namespace} or (
+        namespace == "loom-staging"
+        and (api_version, kind, resource_namespace, name)
+        in _EXTERNAL_SUPERVISOR_WITNESS_IDENTITIES
+    )
+
+
+def compose_external_supervisor_authority(
+    rendered_yaml: str,
+    authority_yaml: str,
+) -> str:
+    """Append the exact bounded external-supervisor prerequisite resource set."""
+
+    separator = "" if rendered_yaml.endswith("\n") else "\n"
+    combined_size = len(f"{rendered_yaml}{separator}---\n{authority_yaml}".encode())
+    if (
+        not rendered_yaml.strip()
+        or not authority_yaml.strip()
+        or combined_size > _MAX_RENDERED_BYTES
+    ):
+        raise ValueError("external supervisor authority manifest is invalid")
+    try:
+        documents = tuple(yaml.safe_load_all(authority_yaml))
+    except yaml.YAMLError as exc:
+        raise ValueError("external supervisor authority manifest is invalid") from exc
+    resources = [document for document in documents if document is not None]
+    identities: set[tuple[str, str, str, str]] = set()
+    database_secret: Mapping[str, object] | None = None
+    for resource in resources:
+        if not isinstance(resource, dict):
+            raise ValueError("external supervisor authority resource set is invalid")
+        metadata = resource.get("metadata")
+        api_version = resource.get("apiVersion")
+        kind = resource.get("kind")
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(api_version, str)
+            or not isinstance(kind, str)
+            or not isinstance(metadata.get("name"), str)
+            or not isinstance(metadata.get("namespace", ""), str)
+        ):
+            raise ValueError("external supervisor authority resource set is invalid")
+        identity = (
+            api_version,
+            kind,
+            metadata.get("namespace", ""),
+            metadata["name"],
+        )
+        if identity in identities:
+            raise ValueError("external supervisor authority resource set is invalid")
+        identities.add(identity)
+        if identity == (
+            "v1",
+            "Secret",
+            "loom-staging",
+            "loom-external-slurm-autoscaler-db",
+        ):
+            database_secret = resource
+    if identities != _EXTERNAL_SUPERVISOR_AUTHORITY_IDENTITIES:
+        raise ValueError("external supervisor authority resource set is invalid")
+    if (
+        database_secret is None
+        or database_secret.get("type") != "Opaque"
+        or "data" in database_secret
+        or "stringData" in database_secret
+    ):
+        raise ValueError("external supervisor database Secret prerequisite is invalid")
+    return f"{rendered_yaml}{separator}---\n{authority_yaml}"
 
 
 def render_checkpoint_guard_field_ownership_payload(rendered_yaml: str) -> str:
@@ -108,6 +238,7 @@ class ManifestRenderSession:
         *,
         field_ownership_dry_run: ServerDryRun | None = None,
         field_ownership_retry_render: FieldOwnershipRetryRender | None = None,
+        manifest_post_image_pin: ManifestPostImagePin | None = None,
         image_tag: str,
         namespace: str,
         image_digests: Mapping[str, str],
@@ -122,6 +253,7 @@ class ManifestRenderSession:
             server_dry_run if field_ownership_dry_run is None else field_ownership_dry_run
         )
         self._field_ownership_retry_render = field_ownership_retry_render
+        self._manifest_post_image_pin = manifest_post_image_pin
         self._image_tag = image_tag
         self._namespace = namespace
         self._image_digests = dict(image_digests)
@@ -156,6 +288,8 @@ class ManifestRenderSession:
                         container_registry=self._container_registry,
                         registry_digests=self._registry_digests,
                     )
+                if self._manifest_post_image_pin is not None:
+                    rendered = self._manifest_post_image_pin(rendered)
                 self._artifact = inspect_rendered_manifests(
                     rendered,
                     image_tag=self._image_tag,
@@ -264,7 +398,15 @@ def inspect_rendered_manifests(
         ):
             raise ValueError("rendered manifest resource identity is invalid")
         resource_namespace = metadata.get("namespace")
-        if resource_namespace is not None and resource_namespace != namespace:
+        if not isinstance(resource_namespace, str) and resource_namespace is not None:
+            raise ValueError("rendered manifest namespace drifted")
+        if not is_admitted_manifest_identity(
+            api_version,
+            kind,
+            resource_namespace or "",
+            metadata["name"],
+            namespace=namespace,
+        ):
             raise ValueError("rendered manifest namespace drifted")
         identity = f"{api_version}|{kind}|{resource_namespace or namespace}|{metadata['name']}"
         if identity in identities:
@@ -646,10 +788,13 @@ def _hash_json(value: object) -> str:
 __all__ = [
     "FieldOwnershipRetryRender",
     "ManifestArtifact",
+    "ManifestPostImagePin",
     "ManifestRenderSession",
     "RenderManifest",
     "ServerDryRun",
+    "compose_external_supervisor_authority",
     "inspect_rendered_manifests",
+    "is_admitted_manifest_identity",
     "pin_rendered_manifest_images",
     "render_checkpoint_guard_field_ownership_payload",
 ]

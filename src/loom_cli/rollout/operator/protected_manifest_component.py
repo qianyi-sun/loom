@@ -17,8 +17,8 @@ from loom_cli.rollout.manifest_readiness import (
 from .final_gate_plan import FinalGatePlan
 from .manifest_apply_contract import (
     MANIFEST_APPLY_CONTRACT_DIGEST,
-    server_side_apply_argv,
-    server_side_diff_argv,
+    server_side_all_namespaces_apply_argv,
+    server_side_all_namespaces_diff_argv,
 )
 from .protected_apply_journal import (
     ComponentObservation,
@@ -118,14 +118,15 @@ class KubernetesProtectedManifestComponent:
         ):
             raise RuntimeError("protected manifest state changed before apply")
         self.runner.run_checked(
-            server_side_apply_argv(plan.namespace),
+            server_side_all_namespaces_apply_argv(),
             env=self.environment,
             input_payload=payload,
             timeout_seconds=_APPLY_TIMEOUT_SECONDS,
         )
 
     def _diff_argv(self, plan: FinalGatePlan) -> tuple[str, ...]:
-        return server_side_diff_argv(plan.namespace)
+        del plan
+        return server_side_all_namespaces_diff_argv()
 
     def _read_guarded_manifest(self, plan: FinalGatePlan) -> bytes:
         trusted = read_trusted_file(

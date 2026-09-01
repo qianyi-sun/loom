@@ -5,11 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.operator import manifest_apply_contract as contract
 from loom_cli.rollout.operator.installed_preflight_commands import InstalledPreflightCommands
 from loom_cli.rollout.operator.manifest_apply_contract import (
     MANIFEST_FIELD_MANAGER,
     server_side_apply_argv,
-    server_side_schema_validation_argv,
 )
 from loom_cli.rollout.operator.readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 from loom_cli.rollout.systemd_readiness import probe_user_manager_readonly
@@ -66,8 +66,7 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
         "KUBECONFIG": str(READONLY_KUBECONFIG_PATH),
     }
     assert calls[2]["argv"][-2:] == ("-f", "-")
-    assert calls[2]["argv"] == server_side_apply_argv(
-        config.namespace,
+    assert calls[2]["argv"] == contract.server_side_all_namespaces_apply_argv(
         kubeconfig=config.kubeconfig_path,
         dry_run=True,
     )
@@ -77,8 +76,7 @@ def test_adapters_preserve_exact_cwd_payload_and_readonly_kubeconfig(tmp_path: P
     assert "--force-conflicts" not in calls[2]["argv"]
     assert calls[2]["input"] == "apiVersion: v1\nkind: ConfigMap\n"
     assert calls[2]["timeout"] == 120
-    assert calls[3]["argv"] == server_side_schema_validation_argv(
-        config.namespace,
+    assert calls[3]["argv"] == contract.server_side_all_namespaces_schema_validation_argv(
         kubeconfig=config.kubeconfig_path,
     )
     assert "--force-conflicts" in calls[3]["argv"]

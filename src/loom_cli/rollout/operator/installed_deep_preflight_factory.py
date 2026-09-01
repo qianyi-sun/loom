@@ -29,7 +29,10 @@ from loom_cli.rollout.external_supervisor_readiness import (
 )
 from loom_cli.rollout.gb10_readiness import GB10SharedMountReadiness
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
-from loom_cli.rollout.manifest_readiness import RenderManifest
+from loom_cli.rollout.manifest_readiness import (
+    RenderManifest,
+    compose_external_supervisor_authority,
+)
 from loom_cli.rollout.preflight_artifact_store import (
     LoadedPreflightArtifacts,
     PreflightArtifactStore,
@@ -106,6 +109,9 @@ def _hash_json(value: object) -> str:
 
 
 _GB10_CONTROLLER_DEADLINE_RESERVE_SECONDS = 600
+_EXTERNAL_SUPERVISOR_AUTHORITY_MANIFEST = Path(
+    "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+)
 
 # Keep this independent from the primary release-image plan.  Some primary
 # images (currently the execution actuator and short-lived execution runtime)
@@ -668,6 +674,16 @@ def build_installed_deep_preflight_composition(
         if name != "loom-worker" or cluster.k8s_worker.enabled
     )
 
+    def manifest_post_image_pin(rendered_yaml: str) -> str:
+        authority_path = config.runner_repo / _EXTERNAL_SUPERVISOR_AUTHORITY_MANIFEST
+        if not authority_path.is_file() or authority_path.is_symlink():
+            raise ValueError("external supervisor authority manifest is unavailable")
+        try:
+            authority_yaml = authority_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError("external supervisor authority manifest is unavailable") from exc
+        return compose_external_supervisor_authority(rendered_yaml, authority_yaml)
+
     def manifest_factory(candidate: CandidateBinding) -> RenderManifest:
         def render() -> str:
             return render_manifests(replace(cluster, image_tag=candidate.image_tag))
@@ -826,6 +842,7 @@ def build_installed_deep_preflight_composition(
         systemd_analyze_run=commands.simple,
         image_run=commands.image,
         render_manifest_factory=manifest_factory,
+        manifest_post_image_pin=manifest_post_image_pin,
         manifest_image_names=manifest_image_names,
         server_schema_dry_run=commands.manifest_schema_dry_run,
         server_dry_run=commands.manifest_server_dry_run,

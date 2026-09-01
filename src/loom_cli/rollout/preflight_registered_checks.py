@@ -71,6 +71,7 @@ from loom_cli.rollout.lifecycle_protocol import (
 from loom_cli.rollout.manifest_readiness import (
     FieldOwnershipRetryRender,
     ManifestArtifact,
+    ManifestPostImagePin,
     ManifestRenderSession,
     RenderManifest,
     ServerDryRun,
@@ -2556,6 +2557,7 @@ def build_manifest_preflight_checks(
     *,
     field_ownership_dry_run: ServerDryRun | None = None,
     field_ownership_retry_render: FieldOwnershipRetryRender | None = None,
+    manifest_post_image_pin: ManifestPostImagePin | None = None,
     image_tag: str,
     namespace: str,
     expected_candidate_sha: str,
@@ -2577,6 +2579,7 @@ def build_manifest_preflight_checks(
                 server_dry_run,
                 field_ownership_dry_run=field_ownership_dry_run,
                 field_ownership_retry_render=field_ownership_retry_render,
+                manifest_post_image_pin=manifest_post_image_pin,
                 image_tag=image_tag,
                 namespace=namespace,
                 image_digests=images.image_digests,

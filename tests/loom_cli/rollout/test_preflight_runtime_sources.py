@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ import yaml
 
 import loom_cli.rollout.preflight_runtime_sources as runtime_sources_module
 from loom_cli.rollout.gb10_readiness import GB10ProbeTarget
-from loom_cli.rollout.image_readiness import ROLLOUT_IMAGES, image_plan_digest
+from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ROLLOUT_IMAGES, image_plan_digest
 from loom_cli.rollout.manifest_readiness import (
     inspect_rendered_manifests,
     render_checkpoint_guard_field_ownership_payload,
@@ -62,8 +63,324 @@ def _candidate() -> CandidateBinding:
     )
 
 
-def _result():
-    return type("Result", (), {"returncode": 0, "stdout": ""})()
+def _result(stdout: str = ""):
+    return type("Result", (), {"returncode": 0, "stdout": stdout})()
+
+
+def _runtime_sources(
+    tmp_path: Path,
+    *,
+    render_manifest,
+    image_run,
+    server_schema_dry_run,
+    manifest_post_image_pin=None,
+    loaded_artifacts: LoadedPreflightArtifacts | None = None,
+    container_registry: str = "",
+    container_registry_push: str = "",
+    gb10_candidate_source_run=None,
+    gb10_run=None,
+) -> PreflightRuntimeSources:
+    candidate = _candidate()
+    token = tmp_path / "state" / "admin"
+    return PreflightRuntimeSources(
+        config=_config(tmp_path),
+        candidate=candidate,
+        candidate_root=tmp_path,
+        artifact_store=PreflightArtifactStore(tmp_path / "state", service_uid=501),
+        service_uid=501,
+        service_gid=20,
+        runner_install_digest="1" * 64,
+        git_run=lambda *_args, **_kwargs: _result(),
+        credential_sources=(CredentialProbeSource(label="admin", path=token),),
+        executable_lookup=lambda _name: "/fixed/tool",
+        docker_runtime_run=lambda *_args, **_kwargs: _result(),
+        kubernetes_run=lambda *_args, **_kwargs: _result(),
+        kubeconfig_metadata_digest="2" * 64,
+        readonly_authority_source=lambda: ReadonlyAuthorityEvidence(
+            principal="loom-rollout-readonly",
+            environment="staging",
+            namespace="loom-staging",
+            kubernetes_verbs=("get", "list", "watch"),
+            kubernetes_resources=("deployments", "pods", "services"),
+            http_methods=("GET", "HEAD"),
+            capability_source_digest="8" * 64,
+        ),
+        capacity_source=lambda: None,  # type: ignore[arg-type,return-value]
+        backup_authority=BackupAdmissionAuthority.fresh(
+            schema_revision="0066",
+            object_inventory_root="3" * 64,
+        ),
+        database_schema_revision="0074",
+        external_supervisor_predecessor_source=lambda _context: (
+            ExternalSupervisorPredecessorSnapshot(
+                kind="legacy-manifest",
+                authority_digest="a" * 64,
+                pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                unit_sha256={
+                    "loom-autoscaler-gb10-staging.service": "b" * 64,
+                    "loom-autoscaler-gb10-staging.timer": "c" * 64,
+                },
+                live_evidence_digest="d" * 64,
+                pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+                transition_clear=True,
+                runtime_ready=True,
+                pool_identity_digest="e" * 64,
+            )
+        ),
+        systemd_run=lambda *_args, **_kwargs: _result(),
+        gb10_run=gb10_run or (lambda *_args, **_kwargs: _result()),
+        gb10_targets=(
+            GB10ProbeTarget(
+                ssh_target="trt-gb10-1",
+                node_agent_service="loom-gb10-node-agent.service",
+            ),
+        ),
+        gb10_ssh_config=tmp_path / "ssh-config",
+        gb10_identity=tmp_path / "identity",
+        gb10_ssh_config_sha256="4" * 64,
+        gb10_identity_metadata_fingerprint="5" * 64,
+        gb10_mount_source=lambda: None,  # type: ignore[arg-type,return-value]
+        gb10_mount_binding_digest="6" * 64,
+        alembic_ini=tmp_path / "alembic.ini",
+        migration_policy_path=DEFAULT_MIGRATION_POLICY,
+        migration_policy_digest=hashlib.sha256(
+            DEFAULT_MIGRATION_POLICY.read_bytes()
+        ).hexdigest(),
+        systemd_analyze_run=lambda *_args, **_kwargs: _result(),
+        image_run=image_run,
+        render_manifest=render_manifest,
+        manifest_image_names=frozenset(name for name, _path in ROLLOUT_IMAGES),
+        server_schema_dry_run=server_schema_dry_run,
+        server_dry_run=lambda *_args, **_kwargs: _result(),
+        browser_run=lambda *_args, **_kwargs: _result(),
+        browser_token_path=token,
+        baseline_probe_factory=lambda _epoch: {
+            check_id: (lambda: None)  # type: ignore[dict-item,return-value]
+            for check_id in (
+                "staging.health",
+                "staging.auth",
+                "staging.catalog-task",
+                "staging.storage-db",
+                "staging.network",
+            )
+        },
+        route="https://staging.example.invalid",
+        baseline_probe_route="https://staging.example.invalid",
+        rehearsal_actions=lambda _candidate, _checkpoint, _isolation: {
+            check_id: (lambda: None)  # type: ignore[dict-item,return-value]
+            for check_id in REHEARSAL_CHECK_IDS
+        },
+        rehearsal_identity=lambda _candidate, _checkpoint: (
+            "rehearsal-exact-checkpoint",
+            "7" * 64,
+        ),
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        loaded_artifacts=loaded_artifacts,
+        container_registry=container_registry,
+        container_registry_push=container_registry_push,
+        manifest_post_image_pin=manifest_post_image_pin,
+        gb10_candidate_source_run=gb10_candidate_source_run,
+    )
+
+
+def _check(plan, check_id: str):
+    return next(check for check in plan.registry.checks if check.spec.check_id == check_id)
+
+
+def _probe(plan, check_id: str):
+    return _check(plan, check_id).operations[CheckOperation.PROBE](plan.context)
+
+
+def test_fresh_runtime_sources_forwards_post_pin_to_manifest_session_artifact(
+    tmp_path: Path,
+) -> None:
+    """Catch omission in ``_tier1`` or ``build_manifest_preflight_checks`` forwarding."""
+    candidate = _candidate()
+    registry = "192.168.50.13:5000"
+    image_ids = {
+        name: f"sha256:{hashlib.sha256(name.encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    manifest_digests = {
+        name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
+        for name, _path in ALL_BUILD_IMAGES
+    }
+    rendered_primary = _rendered_with_lifecycle_cronjob().replace(
+        "staging-1111111",
+        candidate.image_tag,
+    )
+    render_calls: list[object] = []
+    callback_payloads: list[str] = []
+    server_payloads: list[str] = []
+
+    def image_run(argv, _cwd):
+        command = tuple(argv)
+        if command[:3] == ("docker", "image", "inspect"):
+            name = command[-1].rsplit("/", 1)[-1].split(":", 1)[0]
+            entrypoint = (
+                ["node", "/opt/loom/web/scripts/staging-admin-browser-smoke.mjs"]
+                if name == "loom-staging-admin-browser-smoke"
+                else (["docker-entrypoint.sh"] if name == "loom-rehearsal-postgres" else [])
+            )
+            return _result(
+                json.dumps(
+                    [
+                        {
+                            "Id": image_ids[name],
+                            "Os": "linux",
+                            "Architecture": "amd64",
+                            "Config": {
+                                "Entrypoint": entrypoint,
+                                "Labels": {
+                                    "org.opencontainers.image.revision": candidate.resolved_sha
+                                },
+                            },
+                        }
+                    ]
+                )
+            )
+        if command[:3] == ("docker", "manifest", "inspect"):
+            name = command[-1].rsplit("/", 1)[-1].split(":", 1)[0]
+            return _result(
+                json.dumps(
+                    {
+                        "Descriptor": {"digest": manifest_digests[name]},
+                        "SchemaV2Manifest": {"config": {"digest": image_ids[name]}},
+                    }
+                )
+            )
+        return _result()
+
+    def render_manifest() -> str:
+        render_calls.append(object())
+        return rendered_primary
+
+    def manifest_post_image_pin(rendered: str) -> str:
+        callback_payloads.append(rendered)
+        return rendered + "# gb10-manifest-post-image-pin-sentinel\n"
+
+    def server_schema_dry_run(rendered: str):
+        server_payloads.append(rendered)
+        return _result()
+
+    sources = _runtime_sources(
+        tmp_path,
+        render_manifest=render_manifest,
+        image_run=image_run,
+        server_schema_dry_run=server_schema_dry_run,
+        manifest_post_image_pin=manifest_post_image_pin,
+        container_registry=registry,
+        container_registry_push="localhost:5000",
+    )
+    plan = sources.build(mutation_epoch=9).prebackup_plan(candidate)
+
+    assert _probe(plan, "images.build").passed
+    render_probe = _probe(plan, "manifests.render")
+    server_probe = _probe(plan, "manifests.server-schema")
+
+    assert render_probe.passed
+    assert server_probe.passed
+    assert len(render_calls) == 1
+    assert len(callback_payloads) == 1
+    expected_artifact_yaml = (
+        callback_payloads[0] + "# gb10-manifest-post-image-pin-sentinel\n"
+    )
+    for name, _path in ROLLOUT_IMAGES:
+        assert f"{registry}/{name}@{manifest_digests[name]}" in callback_payloads[0]
+    assert server_payloads == [expected_artifact_yaml]
+    assert render_probe.evidence["rendered-sha256"] == hashlib.sha256(
+        expected_artifact_yaml.encode()
+    ).hexdigest()
+
+
+def test_loaded_runtime_sources_reuse_seeded_manifest_without_rematerializing(
+    tmp_path: Path,
+) -> None:
+    """Catch removal of ``artifact=loaded_artifacts.manifests`` from the session seed."""
+    candidate = _candidate()
+    images = replace(_images(), plan_digest=image_plan_digest())
+    stored_yaml = _rendered_with_lifecycle_cronjob().replace(
+        "staging-1111111",
+        candidate.image_tag,
+    ) + "# gb10-loaded-manifest-sentinel\n"
+    manifests = inspect_rendered_manifests(
+        stored_yaml,
+        image_tag=candidate.image_tag,
+        namespace="loom-staging",
+        image_digests=images.image_digests,
+    )
+    migration = _migration(
+        images,
+        candidate_tree=candidate.resolved_tree or "",
+        image_tag=candidate.image_tag,
+    )
+    production_defaults = _production_defaults(
+        candidate_tree=candidate.resolved_tree or "",
+    )
+    artifact_root = (tmp_path / "loaded-artifacts").resolve()
+    loaded = LoadedPreflightArtifacts(
+        publication=PreflightArtifactPublication(
+            candidate_sha=candidate.resolved_sha,
+            candidate_tree=candidate.resolved_tree or "",
+            mutation_epoch=9,
+            bundle_digest="8" * 64,
+            descriptor_path=artifact_root / "artifact.json",
+            rendered_manifest_path=artifact_root / "rendered.yaml",
+            migration_manifest_path=artifact_root / "migration.yaml",
+            production_defaults_path=artifact_root / "production-defaults.json",
+            image_artifact_sha256=images.artifact_digest,
+            manifest_artifact_sha256=manifests.artifact_digest,
+            rendered_manifest_sha256=manifests.rendered_sha256,
+            migration_manifest_artifact_sha256=migration.artifact_digest,
+            migration_manifest_sha256=migration.rendered_sha256,
+            migration_job_name=migration.job_name,
+            migration_image_id=migration.image_id,
+            migration_plan_sha256=migration.migration_plan_sha256,
+            migration_target_revision=migration.migration_target_revision,
+            browser_report_schema_sha256="9" * 64,
+            production_defaults_sha256=production_defaults.artifact_digest,
+        ),
+        images=images,
+        manifests=manifests,
+        migration=migration,
+        production_defaults=production_defaults,
+    )
+    render_calls: list[object] = []
+    callback_payloads: list[str] = []
+    server_payloads: list[str] = []
+
+    def render_manifest() -> str:
+        render_calls.append(object())
+        raise AssertionError("loaded manifest session rendered again")
+
+    def manifest_post_image_pin(rendered: str) -> str:
+        callback_payloads.append(rendered)
+        raise AssertionError("loaded manifest session ran post-image pin again")
+
+    def server_schema_dry_run(rendered: str):
+        server_payloads.append(rendered)
+        return _result()
+
+    sources = _runtime_sources(
+        tmp_path,
+        render_manifest=render_manifest,
+        image_run=lambda *_args, **_kwargs: _result(),
+        server_schema_dry_run=server_schema_dry_run,
+        manifest_post_image_pin=manifest_post_image_pin,
+        loaded_artifacts=loaded,
+    )
+    plan = sources.build(mutation_epoch=9).prebackup_plan(candidate)
+
+    render_probe = _probe(plan, "manifests.render")
+    server_probe = _probe(plan, "manifests.server-schema")
+
+    assert render_probe.passed
+    assert server_probe.passed
+    assert render_calls == []
+    assert callback_payloads == []
+    assert server_payloads == [stored_yaml]
+    assert render_probe.evidence["rendered-sha256"] == manifests.rendered_sha256
+    assert render_probe.evidence["artifact-digest"] == manifests.artifact_digest
 
 
 def test_fresh_authority_is_explicit_and_does_not_claim_a_lease() -> None:
@@ -107,11 +424,7 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = _config(tmp_path)
     candidate = _candidate()
-    token = tmp_path / "state" / "admin"
-    credential = CredentialProbeSource(label="admin", path=token)
-    policy_digest = hashlib.sha256(DEFAULT_MIGRATION_POLICY.read_bytes()).hexdigest()
 
     def command(*_args, **_kwargs):
         return _result()
@@ -166,98 +479,13 @@ def test_sources_build_complete_registry_and_checkpoint_manifest_probe(
     def candidate_source_command(*_args, **_kwargs):
         return _result()
 
-    sources = PreflightRuntimeSources(
-        config=config,
-        candidate=candidate,
-        candidate_root=tmp_path,
-        artifact_store=PreflightArtifactStore(tmp_path / "state", service_uid=501),
-        service_uid=501,
-        service_gid=20,
-        runner_install_digest="1" * 64,
-        git_run=command,
-        credential_sources=(credential,),
-        executable_lookup=lambda _name: "/fixed/tool",
-        docker_runtime_run=command,
-        kubernetes_run=command,
-        kubeconfig_metadata_digest="2" * 64,
-        readonly_authority_source=lambda: ReadonlyAuthorityEvidence(
-            principal="loom-rollout-readonly",
-            environment="staging",
-            namespace="loom-staging",
-            kubernetes_verbs=("get", "list", "watch"),
-            kubernetes_resources=("deployments", "pods", "services"),
-            http_methods=("GET", "HEAD"),
-            capability_source_digest="8" * 64,
-        ),
-        capacity_source=lambda: None,  # type: ignore[arg-type,return-value]
-        backup_authority=BackupAdmissionAuthority.fresh(
-            schema_revision="0066",
-            object_inventory_root="3" * 64,
-        ),
-        database_schema_revision="0074",
-        external_supervisor_predecessor_source=lambda _context: (
-            ExternalSupervisorPredecessorSnapshot(
-                kind="legacy-manifest",
-                authority_digest="a" * 64,
-                pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
-                unit_sha256={
-                    "loom-autoscaler-gb10-staging.service": "b" * 64,
-                    "loom-autoscaler-gb10-staging.timer": "c" * 64,
-                },
-                live_evidence_digest="d" * 64,
-                pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
-                transition_clear=True,
-                runtime_ready=True,
-                pool_identity_digest="e" * 64,
-            )
-        ),
-        systemd_run=command,
-        gb10_run=command,
-        gb10_targets=(
-            GB10ProbeTarget(
-                ssh_target="trt-gb10-1",
-                node_agent_service="loom-gb10-node-agent.service",
-            ),
-        ),
-        gb10_ssh_config=tmp_path / "ssh-config",
-        gb10_identity=tmp_path / "identity",
-        gb10_ssh_config_sha256="4" * 64,
-        gb10_identity_metadata_fingerprint="5" * 64,
-        gb10_mount_source=lambda: None,  # type: ignore[arg-type,return-value]
-        gb10_mount_binding_digest="6" * 64,
-        alembic_ini=tmp_path / "alembic.ini",
-        migration_policy_path=DEFAULT_MIGRATION_POLICY,
-        migration_policy_digest=policy_digest,
-        systemd_analyze_run=command,
-        image_run=command,
+    sources = _runtime_sources(
+        tmp_path,
         render_manifest=lambda: "",
-        manifest_image_names=frozenset(name for name, _path in ROLLOUT_IMAGES),
-        server_schema_dry_run=lambda _rendered: _result(),
-        server_dry_run=lambda _rendered: _result(),
-        browser_run=command,
-        browser_token_path=token,
-        baseline_probe_factory=lambda _epoch: {
-            check_id: (lambda: None)  # type: ignore[dict-item,return-value]
-            for check_id in (
-                "staging.health",
-                "staging.auth",
-                "staging.catalog-task",
-                "staging.storage-db",
-                "staging.network",
-            )
-        },
-        route="https://staging.example.invalid",
-        baseline_probe_route="https://staging.example.invalid",
-        rehearsal_actions=lambda _candidate, _checkpoint, _isolation: {
-            check_id: (lambda: None)  # type: ignore[dict-item,return-value]
-            for check_id in REHEARSAL_CHECK_IDS
-        },
-        rehearsal_identity=lambda _candidate, _checkpoint: (
-            "rehearsal-exact-checkpoint",
-            "7" * 64,
-        ),
-        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        image_run=command,
+        server_schema_dry_run=command,
         gb10_candidate_source_run=candidate_source_command,
+        gb10_run=command,
     )
 
     runtime = sources.build(mutation_epoch=9)

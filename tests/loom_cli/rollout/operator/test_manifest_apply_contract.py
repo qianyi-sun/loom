@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.operator import manifest_apply_contract as contract
 from loom_cli.rollout.operator.manifest_apply_contract import (
     MANIFEST_APPLY_CONTRACT_DIGEST,
     MANIFEST_FIELD_MANAGER,
@@ -11,6 +12,26 @@ from loom_cli.rollout.operator.manifest_apply_contract import (
     server_side_diff_argv,
     server_side_schema_validation_argv,
 )
+
+
+def test_explicitly_namespaced_artifact_contract_never_forces_one_namespace() -> None:
+    kubeconfig = Path("/var/lib/loom-staging-rollout/kubeconfig")
+
+    apply = contract.server_side_all_namespaces_apply_argv(kubeconfig=kubeconfig)
+    diff = contract.server_side_all_namespaces_diff_argv()
+    schema = contract.server_side_all_namespaces_schema_validation_argv(
+        kubeconfig=kubeconfig
+    )
+
+    for command in (apply, diff, schema):
+        assert "--namespace" not in command
+        assert "loom-staging" not in command
+        assert f"--field-manager={MANIFEST_FIELD_MANAGER}" in command
+        assert "--server-side=true" in command
+    assert "--force-conflicts" not in apply
+    assert "--force-conflicts" not in diff
+    assert "--force-conflicts" in schema
+    assert "--dry-run=server" in schema
 
 
 def test_preflight_dry_run_and_final_apply_share_one_exact_contract() -> None:
