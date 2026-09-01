@@ -183,11 +183,23 @@ class SubprocessRunner:
             except BaseException as exc:
                 cleanup_failure = exc
 
+        selected_cleanup_failure = (
+            ConformanceError("conformance failed")
+            if cleanup_failure is not None
+            else None
+        )
+        restoration_failure: BaseException | None = None
         for restored_signum, handler in previous_handlers.items():
-            signal.signal(restored_signum, cast(signal.Handlers, handler))
+            try:
+                signal.signal(restored_signum, cast(signal.Handlers, handler))
+            except BaseException as exc:
+                if restoration_failure is None:
+                    restoration_failure = exc
 
-        if cleanup_failure is not None:
-            raise ConformanceError("conformance failed") from cleanup_failure
+        if selected_cleanup_failure is not None:
+            raise selected_cleanup_failure from cleanup_failure
+        if restoration_failure is not None:
+            raise restoration_failure
         if pending_signal is not None:
             handler = previous_handlers[pending_signal]
             if handler == signal.SIG_DFL:

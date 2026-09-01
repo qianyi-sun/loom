@@ -1035,13 +1035,21 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
     restore_counts = {value: 0 for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     drain_complete = False
     handoff_delivered = False
+    restoration_delivered = False
     replayed: list[int] = []
     real_signal = signal.signal
 
+    class SimulatedTermination(BaseException):
+        pass
+
+    class Stream:
+        def close(self) -> None:
+            events.append("pipe.close")
+
     class Process:
         pid = 464646
-        stdout = object()
-        stderr = object()
+        stdout = Stream()
+        stderr = Stream()
         args = ("fake",)
         returncode: int | None = None
         reaps = 0
@@ -1058,6 +1066,9 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
     def previous(observed: int, _frame: object) -> None:
         assert observed == signum
         assert process.reaps == 1
+        if signal_window == "cleanup-adjudication":
+            events.append("signal.interposed")
+            raise SimulatedTermination
         replayed.append(observed)
         events.append("signal.replayed")
 
@@ -1067,7 +1078,7 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
         previous_handlers[value] = handler
 
     def install(observed: int, handler: object) -> object:
-        nonlocal handoff_delivered
+        nonlocal handoff_delivered, restoration_delivered
         if observed not in installed:
             return real_signal(observed, handler)  # type: ignore[arg-type]
         old = installed[observed]
@@ -1084,6 +1095,14 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
         installed[observed] = handler
         if handler is previous_handlers[observed]:
             restore_counts[observed] += 1
+            if (
+                signal_window == "cleanup-adjudication"
+                and observed == signum
+                and not restoration_delivered
+            ):
+                restoration_delivered = True
+                assert callable(handler)
+                handler(signum, None)
         return old
 
     def drain(_process: object) -> tuple[bytes, bytes]:
@@ -1097,17 +1116,28 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
         events.append("group.check")
         return signal_window == "cleanup-adjudication"
 
-    def terminate(observed: object) -> None:
+    def terminate_handoff(observed: object) -> None:
         assert observed is process
         events.append("group.cleanup")
         process.wait()
-        active = installed[signum]
-        assert callable(active)
-        active(signum, None)
-        events.append("signal.deferred")
+
+    def kill_group(process_group: int, observed: int) -> None:
+        assert process_group == process.pid
+        events.append(f"group.signal:{observed}")
+
+    def wait_without_reaping(observed: object, timeout: float) -> None:
+        assert observed is process
+        assert timeout == 2
+        events.append("leader.retained")
+
+    def fail_descendant_wait(process_group: int, timeout: float) -> None:
+        assert process_group == process.pid
+        assert timeout == 2
+        events.append("descendants.cleanup_failed")
         raise AuthorityError("command_cleanup_failed")
 
     monkeypatch.setattr(authority_module.signal, "signal", install)
+    monkeypatch.setattr(authority_module.os, "killpg", kill_group)
     monkeypatch.setattr(authority_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
     runner = authority_module.BoundedSubprocessRunner(
         timeout_seconds=1,
@@ -1115,7 +1145,10 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
     )
     monkeypatch.setattr(runner, "_drain", drain)
     monkeypatch.setattr(runner, "_group_has_other_members", group_has_other_members)
-    monkeypatch.setattr(runner, "_terminate", terminate)
+    monkeypatch.setattr(runner, "_wait_without_reaping", wait_without_reaping)
+    monkeypatch.setattr(runner, "_wait_for_other_group_members", fail_descendant_wait)
+    if signal_window == "drain-handoff":
+        monkeypatch.setattr(runner, "_terminate", terminate_handoff)
 
     expected = "command_interrupted" if signal_window == "drain-handoff" else "command_cleanup_failed"
     with pytest.raises(AuthorityError, match=expected):
@@ -1129,7 +1162,27 @@ def test_bounded_runner_keeps_signal_deferral_through_cleanup_error_selection(
     }
     assert installed == previous_handlers
     assert replayed == ([signum] if signal_window == "drain-handoff" else [])
-    assert events.index("leader.wait") < events.index("signal.deferred")
+    if signal_window == "drain-handoff":
+        assert events == [
+            "drain.complete",
+            "group.check",
+            "leader.wait",
+            "signal.deferred",
+            "signal.replayed",
+        ]
+    else:
+        assert events == [
+            "drain.complete",
+            "group.check",
+            f"group.signal:{signal.SIGTERM}",
+            "pipe.close",
+            "pipe.close",
+            "leader.retained",
+            f"group.signal:{signal.SIGKILL}",
+            "descendants.cleanup_failed",
+            "leader.wait",
+            "signal.interposed",
+        ]
 
 
 def test_cleanup_defers_then_replays_the_first_termination_signal(
@@ -1155,6 +1208,56 @@ def test_cleanup_defers_then_replays_the_first_termination_signal(
         events.append("cleanup.finished")
 
     assert events == ["cleanup.finished", "signal.replayed"]
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+def test_transaction_selects_cleanup_failure_before_restoring_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+    signum: signal.Signals,
+) -> None:
+    """Catches transaction handler restoration hiding an adjudicated cleanup error."""
+    installed: dict[int, object] = {}
+    previous_handlers: dict[int, object] = {}
+    restore_counts = {value: 0 for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    delivered = False
+    replayed: list[int] = []
+    real_signal = signal.signal
+
+    def previous(observed: int, _frame: object) -> None:
+        replayed.append(observed)
+
+    for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        handler = previous if value == signum else signal.SIG_IGN
+        installed[value] = handler
+        previous_handlers[value] = handler
+
+    def install(observed: int, handler: object) -> object:
+        nonlocal delivered
+        if observed not in installed:
+            return real_signal(observed, handler)  # type: ignore[arg-type]
+        active = installed[observed]
+        installed[observed] = handler
+        if handler is previous_handlers[observed]:
+            restore_counts[observed] += 1
+            if observed == signum and not delivered:
+                delivered = True
+                assert callable(active)
+                active(signum, None)
+        return active
+
+    monkeypatch.setattr(authority_module.signal, "signal", install)
+
+    with pytest.raises(AuthorityError, match="cleanup_failed"):
+        with authority_module._defer_transaction_signals():
+            raise AuthorityError("cleanup_failed")
+
+    assert restore_counts == {
+        signal.SIGINT: 1,
+        signal.SIGTERM: 1,
+        signal.SIGHUP: 1,
+    }
+    assert installed == previous_handlers
+    assert replayed == []
 
 
 def test_system_host_adapter_uses_only_fixed_commands_and_validates_output(
@@ -2966,8 +3069,17 @@ def test_transaction_cleanup_failure_converges_before_error_wins_over_signal(
 @pytest.mark.parametrize(
     ("transition", "unproved_step"),
     [
+        ("stage-agent", "installer.discard_agent_stage"),
         ("stage-agent", "state.republish"),
+        ("stage-agent", "state.partial_write"),
+        ("stage-agent", "state.committed_error"),
+        ("stage-agent", "state.return_validation"),
+        ("stage-agent", "state.read_validation"),
         ("activate", "state.republish"),
+        ("activate", "state.partial_write"),
+        ("activate", "state.committed_error"),
+        ("activate", "state.return_validation"),
+        ("activate", "state.read_validation"),
         *(("activate", step) for step in _COMPENSATION_HOST_STEPS),
     ],
 )
@@ -3009,20 +3121,71 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
     host = PersistentCleanupHost(events)
     runtime.host = host
 
+    class PersistentCleanupInstaller(RecordingInstaller):
+        persistent_discard_failure = False
+
+        def discard_agent_stage(self) -> None:
+            self.events.append("installer.discard_agent_stage")
+            if self.persistent_discard_failure:
+                raise AuthorityError("cleanup_persistent")
+            self.staged_present = False
+
+    installer = PersistentCleanupInstaller(events)
+    runtime.installer = installer
+
     class PersistentCleanupStates(RecordingStates):
         publish_calls = 0
+        advanced: StateSnapshot | None = None
+        validation_reads_remaining = 0
+
+        def read(self) -> StateSnapshot | None:
+            snapshot = super().read()
+            if self.publish_calls > 1 and self.validation_reads_remaining:
+                self.validation_reads_remaining -= 1
+                assert self.advanced is not None
+                return self.advanced
+            return snapshot
 
         def publish(self, value: dict[str, object]) -> StateSnapshot:
             self.publish_calls += 1
-            if self.publish_calls > 1 and unproved_step == "state.republish":
+            advanced_phase = "staged" if transition == "stage-agent" else "active"
+            if (
+                self.publish_calls > 1
+                and unproved_step == "state.republish"
+                and value.get("phase") != advanced_phase
+            ):
+                raise AuthorityError("cleanup_persistent")
+            if (
+                self.publish_calls > 1
+                and unproved_step == "state.partial_write"
+                and value.get("phase") != advanced_phase
+            ):
+                self.events.append("state.publish")
+                self.snapshot = None
                 raise AuthorityError("cleanup_persistent")
             snapshot = super().publish(value)
             if self.publish_calls == 1:
+                self.advanced = snapshot
+                if unproved_step in {"state.return_validation", "state.read_validation"}:
+                    self.validation_reads_remaining = 3
+                if unproved_step == "installer.discard_agent_stage":
+                    installer.persistent_discard_failure = True
                 if unproved_step in _COMPENSATION_HOST_STEPS:
                     host.persistent_failure = unproved_step
                 interrupt = signal.getsignal(signum)
                 assert callable(interrupt)
                 interrupt(signum, None)
+            elif (
+                unproved_step == "state.committed_error"
+                and value.get("phase") != advanced_phase
+            ):
+                raise AuthorityError("cleanup_persistent")
+            elif (
+                unproved_step == "state.return_validation"
+                and value.get("phase") != advanced_phase
+            ):
+                assert self.advanced is not None
+                return self.advanced
             return snapshot
 
     persistent_states = PersistentCleanupStates(events)
@@ -3045,15 +3208,198 @@ def test_unproved_cleanup_boundary_retains_a_fully_verified_retryable_phase(
     assert replayed == []
     assert persistent_states.snapshot is not None
     if transition == "stage-agent":
-        assert dict(persistent_states.snapshot.value) == _staged_state()
-        assert installer.staged_present
+        stage_recovery = [
+            "secret.create",
+            "installer.stage_agent_authorized",
+            "installer.verify_staged",
+            "host.verify_inert:true",
+            "secret.unlink",
+            "state.publish",
+            "state.read",
+            "host.verify_inert:true",
+        ]
+        inert_recovery = [
+            "host.stop_agent",
+            "host.stop_dockerd",
+            "host.delete_nft",
+            "host.verify_inert:true",
+        ]
+        validation_recovery = [
+            "installer.discard_agent_stage",
+            "state.read",
+            "state.publish",
+            "state.read",
+            "state.read",
+            "state.publish",
+            "state.read",
+            "state.read",
+            *inert_recovery,
+        ]
+        expected_suffixes = {
+            "installer.discard_agent_stage": [
+                "installer.discard_agent_stage",
+                "installer.discard_agent_stage",
+                *stage_recovery,
+            ],
+            "state.republish": [
+                "installer.discard_agent_stage",
+                "state.read",
+                "state.read",
+                "state.read",
+                "state.read",
+                "state.read",
+                *stage_recovery,
+            ],
+            "state.partial_write": [
+                "installer.discard_agent_stage",
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                *stage_recovery,
+            ],
+            "state.committed_error": [
+                "installer.discard_agent_stage",
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                *inert_recovery,
+            ],
+            "state.return_validation": validation_recovery,
+            "state.read_validation": validation_recovery,
+        }
+        retained_staged = unproved_step in {
+            "installer.discard_agent_stage",
+            "state.republish",
+            "state.partial_write",
+        }
+        expected_state = _staged_state() if retained_staged else _prepared_state()
+        assert dict(persistent_states.snapshot.value) == expected_state
+        assert installer.staged_present is retained_staged
         assert not host.agent_active and not host.dockerd_active and not host.nft_present
         assert not secrets.present
-        assert events.count("installer.stage_agent_authorized") == 2
+        assert events == [
+            "state.read",
+            "host.verify_inert:true",
+            "secret.create",
+            "installer.stage_agent_authorized",
+            "installer.verify_staged",
+            "host.verify_inert:true",
+            "secret.unlink",
+            "state.publish",
+            *expected_suffixes[unproved_step],
+        ]
     else:
-        assert dict(persistent_states.snapshot.value) == _active_state()
-        assert host.agent_active and host.dockerd_active and host.nft_present
-        assert events.count("installer.verify_active") == 2
+        committed_staged = unproved_step == "state.committed_error"
+        expected_state = _staged_state() if committed_staged else _active_state()
+        assert dict(persistent_states.snapshot.value) == expected_state
+        assert host.agent_active is not committed_staged
+        assert host.dockerd_active is not committed_staged
+        assert host.nft_present is not committed_staged
+        state_validation_recovery = [
+            "state.read",
+            "state.publish",
+            "state.read",
+            "state.read",
+            "state.publish",
+            "state.read",
+            "installer.verify_active",
+            "state.read",
+            "state.publish",
+            "state.read",
+        ]
+        state_restored = ["state.read", "state.publish", "state.read"]
+        active_state_recovery = [
+            "installer.verify_active",
+            "state.read",
+            "state.publish",
+            "state.read",
+        ]
+        host_cleanup_attempts = {
+            "host.stop_agent": [
+                "host.stop_agent",
+                "host.stop_dockerd",
+                "host.delete_nft",
+                "host.verify_inert:true",
+            ],
+            "host.stop_dockerd": [
+                "host.stop_agent",
+                "host.stop_dockerd",
+                "host.delete_nft",
+                "host.verify_inert:true",
+            ],
+            "host.delete_nft": [
+                "host.stop_agent",
+                "host.stop_dockerd",
+                "host.delete_nft",
+                "host.verify_inert:true",
+            ],
+            "host.verify_inert": [
+                "host.stop_agent",
+                "host.stop_dockerd",
+                "host.delete_nft",
+                "host.verify_inert",
+            ],
+        }
+        host_recovery = {
+            "host.stop_agent": ["host.load_nft", "host.start_dockerd"],
+            "host.stop_dockerd": ["host.load_nft", "host.start_agent"],
+            "host.delete_nft": ["host.start_dockerd", "host.start_agent"],
+            "host.verify_inert": [
+                "host.load_nft",
+                "host.start_dockerd",
+                "host.start_agent",
+            ],
+        }
+        expected_suffixes = {
+            "state.republish": [
+                "state.read",
+                "state.read",
+                "state.read",
+                "state.read",
+                "installer.verify_active",
+                "state.read",
+            ],
+            "state.partial_write": state_validation_recovery,
+            "state.committed_error": [
+                "state.read",
+                "state.publish",
+                "state.read",
+                "state.read",
+                "host.stop_agent",
+                "host.stop_dockerd",
+                "host.delete_nft",
+                "host.verify_inert:true",
+            ],
+            "state.return_validation": state_validation_recovery,
+            "state.read_validation": state_validation_recovery,
+        }
+        expected_suffixes.update(
+            {
+                step: [
+                    *state_restored,
+                    *attempt,
+                    *attempt,
+                    *host_recovery[step],
+                    *active_state_recovery,
+                ]
+                for step, attempt in host_cleanup_attempts.items()
+            }
+        )
+        assert events == [
+            "state.read",
+            "host.verify_inert:true",
+            "host.load_nft",
+            "host.start_dockerd",
+            "host.start_agent",
+            "installer.verify_active",
+            "state.publish",
+            *expected_suffixes[unproved_step],
+        ]
 
 
 @pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))

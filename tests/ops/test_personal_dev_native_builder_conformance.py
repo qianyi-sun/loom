@@ -1214,13 +1214,21 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
     restore_counts = {value: 0 for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     drain_complete = False
     handoff_delivered = False
+    restoration_delivered = False
     replayed: list[int] = []
     real_signal = signal.signal
 
+    class SimulatedTermination(BaseException):
+        pass
+
+    class Stream:
+        def close(self) -> None:
+            events.append("pipe.close")
+
     class Process:
         pid = 474747
-        stdout = object()
-        stderr = object()
+        stdout = Stream()
+        stderr = Stream()
         args = ("fake",)
         returncode: int | None = None
         reaps = 0
@@ -1237,6 +1245,9 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
     def previous(observed: int, _frame: object) -> None:
         assert observed == signum
         assert process.reaps == 1
+        if signal_window == "cleanup-adjudication":
+            events.append("signal.interposed")
+            raise SimulatedTermination
         replayed.append(observed)
         events.append("signal.replayed")
 
@@ -1246,7 +1257,7 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
         previous_handlers[value] = handler
 
     def install(observed: int, handler: object) -> object:
-        nonlocal handoff_delivered
+        nonlocal handoff_delivered, restoration_delivered
         if observed not in installed:
             return real_signal(observed, handler)  # type: ignore[arg-type]
         old = installed[observed]
@@ -1263,6 +1274,14 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
         installed[observed] = handler
         if handler is previous_handlers[observed]:
             restore_counts[observed] += 1
+            if (
+                signal_window == "cleanup-adjudication"
+                and observed == signum
+                and not restoration_delivered
+            ):
+                restoration_delivered = True
+                assert callable(handler)
+                handler(signum, None)
         return old
 
     def drain(_process: object) -> tuple[bytes, bytes]:
@@ -1276,21 +1295,35 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
         events.append("group.check")
         return signal_window == "cleanup-adjudication"
 
-    def terminate(observed: object) -> None:
+    def terminate_handoff(observed: object) -> None:
         assert observed is process
         events.append("group.cleanup")
         process.wait()
-        active = installed[signum]
-        assert callable(active)
-        active(signum, None)
-        events.append("signal.deferred")
+
+    def kill_group(process_group: int, observed: int) -> None:
+        assert process_group == process.pid
+        events.append(f"group.signal:{observed}")
+
+    def wait_without_reaping(observed: object, timeout: float) -> None:
+        assert observed is process
+        assert timeout == 2
+        events.append("leader.retained")
+
+    def fail_descendant_wait(process_group: int, timeout: float) -> None:
+        assert process_group == process.pid
+        assert timeout == 2
+        events.append("descendants.cleanup_failed")
         raise ConformanceError("cleanup failed")
 
     monkeypatch.setattr(conformance.signal, "signal", install)
+    monkeypatch.setattr(conformance.os, "killpg", kill_group)
     monkeypatch.setattr(conformance.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(conformance, "_drain_bounded", drain)
     monkeypatch.setattr(conformance, "_process_group_has_other_members", group_has_other_members)
-    monkeypatch.setattr(conformance, "_terminate_and_reap", terminate)
+    monkeypatch.setattr(conformance, "_wait_without_reaping", wait_without_reaping)
+    monkeypatch.setattr(conformance, "_wait_for_other_group_members", fail_descendant_wait)
+    if signal_window == "drain-handoff":
+        monkeypatch.setattr(conformance, "_terminate_and_reap", terminate_handoff)
 
     with pytest.raises(ConformanceError, match="conformance failed") as raised:
         SubprocessRunner().run(("fake",))
@@ -1303,9 +1336,28 @@ def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selectio
     }
     assert installed == previous_handlers
     assert replayed == ([signum] if signal_window == "drain-handoff" else [])
-    assert events.index("leader.wait") < events.index("signal.deferred")
     if signal_window == "cleanup-adjudication":
         assert isinstance(raised.value.__cause__, ConformanceError)
+        assert events == [
+            "drain.complete",
+            "group.check",
+            f"group.signal:{signal.SIGTERM}",
+            "pipe.close",
+            "pipe.close",
+            "leader.retained",
+            f"group.signal:{signal.SIGKILL}",
+            "descendants.cleanup_failed",
+            "leader.wait",
+            "signal.interposed",
+        ]
+    else:
+        assert events == [
+            "drain.complete",
+            "group.check",
+            "leader.wait",
+            "signal.deferred",
+            "signal.replayed",
+        ]
 
 
 def _pidfd_open(pid: int) -> int:

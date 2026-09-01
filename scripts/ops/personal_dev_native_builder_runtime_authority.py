@@ -389,13 +389,27 @@ class BoundedSubprocessRunner:
             except BaseException as exc:
                 cleanup_failure = exc
 
-        for restored_signum, handler in previous_handlers.items():
-            signal.signal(restored_signum, cast(signal.Handlers, handler))
-
+        selected_cleanup_failure: AuthorityError | None = None
         if cleanup_failure is not None:
-            if isinstance(cleanup_failure, AuthorityError):
-                raise cleanup_failure
-            raise AuthorityError("command_cleanup_failed") from cleanup_failure
+            selected_cleanup_failure = (
+                cleanup_failure
+                if isinstance(cleanup_failure, AuthorityError)
+                else AuthorityError("command_cleanup_failed")
+            )
+        restoration_failure: BaseException | None = None
+        for restored_signum, handler in previous_handlers.items():
+            try:
+                signal.signal(restored_signum, cast(signal.Handlers, handler))
+            except BaseException as exc:
+                if restoration_failure is None:
+                    restoration_failure = exc
+
+        if selected_cleanup_failure is not None:
+            if selected_cleanup_failure is cleanup_failure:
+                raise selected_cleanup_failure
+            raise selected_cleanup_failure from cleanup_failure
+        if restoration_failure is not None:
+            raise restoration_failure
         if pending_signal is not None:
             handler = previous_handlers[pending_signal]
             if handler == signal.SIG_DFL:
@@ -1799,17 +1813,28 @@ def _defer_transaction_signals() -> Iterator[None]:
         yield
     except BaseException as exc:
         caught = exc
-    finally:
-        for restored_signum, handler in previous.items():
+    selected_cleanup_failure = (
+        caught
+        if isinstance(caught, AuthorityError) and caught.code == "cleanup_failed"
+        else None
+    )
+    restoration_failure: BaseException | None = None
+    for restored_signum, handler in previous.items():
+        try:
             signal.signal(restored_signum, cast(signal.Handlers, handler))
-    if isinstance(caught, AuthorityError) and caught.code == "cleanup_failed":
-        raise caught
+        except BaseException as exc:
+            if restoration_failure is None:
+                restoration_failure = exc
+    if selected_cleanup_failure is not None:
+        raise selected_cleanup_failure
     if pending is not None:
         handler = previous[pending]
         if handler == signal.SIG_DFL:
             signal.raise_signal(pending)
         elif handler != signal.SIG_IGN and callable(handler):
             cast(Callable[[int, object], object], handler)(pending, None)
+    if restoration_failure is not None and caught is None:
+        raise restoration_failure
     if caught is not None:
         raise caught
 
@@ -1925,19 +1950,37 @@ class RuntimeAuthority:
             if first_failure is not None:
                 raise AuthorityError("cleanup_failed") from first_failure
 
-    def _restore_state_snapshot(self, previous: StateSnapshot) -> None:
-        if self._read_state() == previous:
+    def _restore_state_snapshot(
+        self,
+        previous: StateSnapshot,
+        *,
+        force_publish: bool = False,
+    ) -> None:
+        if not force_publish and self._read_state() == previous:
             return
-        restored = self.states.publish(previous.value)
-        if (
-            not isinstance(restored, StateSnapshot)
-            or restored.sha256 != previous.sha256
-            or dict(restored.value) != dict(previous.value)
-        ):
-            raise AuthorityError("cleanup_failed")
-        observed = self._read_state()
+        publication_failure: BaseException | None = None
+        try:
+            restored = self.states.publish(previous.value)
+            if (
+                not isinstance(restored, StateSnapshot)
+                or restored.sha256 != previous.sha256
+                or dict(restored.value) != dict(previous.value)
+            ):
+                publication_failure = AuthorityError("cleanup_failed")
+        except BaseException as exc:
+            publication_failure = exc
+        try:
+            observed = self._read_state()
+        except BaseException as exc:
+            if publication_failure is None:
+                publication_failure = exc
+            raise AuthorityError("cleanup_failed") from publication_failure
         if observed != previous:
-            raise AuthorityError("cleanup_failed")
+            if publication_failure is None:
+                publication_failure = AuthorityError("cleanup_failed")
+            raise AuthorityError("cleanup_failed") from publication_failure
+        if publication_failure is not None:
+            raise AuthorityError("cleanup_failed") from publication_failure
 
     def _prepared_state(
         self,
@@ -2104,10 +2147,21 @@ class RuntimeAuthority:
         previous_state: StateSnapshot | None,
         *,
         restore_staged_files: Callable[[], None],
+        restored_staged_state: StateSnapshot,
     ) -> None:
         first_failure: BaseException | None = None
         with _defer_cleanup_signals():
-            step_failure = self._retry_cleanup_step(self.installer.discard_agent_stage)
+            try:
+                step_failure = self._retry_cleanup_step(self.installer.discard_agent_stage)
+            except BaseException as cleanup_failure:
+                try:
+                    self._restore_staged_phase(
+                        restore_staged_files,
+                        restored_staged_state,
+                    )
+                except BaseException as recovery_failure:
+                    raise AuthorityError("cleanup_failed") from recovery_failure
+                raise AuthorityError("cleanup_failed") from cleanup_failure
             if step_failure is not None:
                 first_failure = step_failure
             if previous_state is not None:
@@ -2117,17 +2171,43 @@ class RuntimeAuthority:
                     )
                 except BaseException as cleanup_failure:
                     try:
-                        self._retry_cleanup_step(restore_staged_files)
-                    except BaseException as recovery_failure:
-                        raise AuthorityError("cleanup_failed") from recovery_failure
-                    raise AuthorityError("cleanup_failed") from cleanup_failure
-                if first_failure is None and step_failure is not None:
-                    first_failure = step_failure
+                        prepared_restored = self._read_state() == previous_state
+                    except BaseException:
+                        prepared_restored = False
+                    if prepared_restored:
+                        if first_failure is None:
+                            first_failure = cleanup_failure
+                    else:
+                        try:
+                            self._restore_staged_phase(
+                                restore_staged_files,
+                                restored_staged_state,
+                            )
+                        except BaseException as recovery_failure:
+                            raise AuthorityError("cleanup_failed") from recovery_failure
+                        raise AuthorityError("cleanup_failed") from cleanup_failure
+                else:
+                    if first_failure is None and step_failure is not None:
+                        first_failure = step_failure
             step_failure = self._retry_cleanup_step(self._compensate_inert)
             if first_failure is None and step_failure is not None:
                 first_failure = step_failure
             if first_failure is not None:
                 raise AuthorityError("cleanup_failed") from first_failure
+
+    def _restore_staged_phase(
+        self,
+        restore_staged_files: Callable[[], None],
+        restored_staged_state: StateSnapshot,
+    ) -> None:
+        self._retry_cleanup_step(restore_staged_files)
+        self._retry_cleanup_step(
+            lambda: self._restore_state_snapshot(
+                restored_staged_state,
+                force_publish=True,
+            )
+        )
+        self._validated_host_status(self.host.verify_inert(require_empty=True))
 
     def _stage_agent(
         self,
@@ -2145,6 +2225,21 @@ class RuntimeAuthority:
         ) != prepared.value.get("current_builder"):
             raise AuthorityError("release_identity_invalid")
         self._validated_host_status(self.host.verify_inert(require_empty=True))
+        staged = dict(prepared.value)
+        staged.update(
+            {
+                "agent_instance_id": header["agent_instance_id"],
+                "agent_key_id": header["agent_key_id"],
+                "phase": "staged",
+                "public_key_sha256": header["expected_public_key_sha256"],
+                "service_origin": header["service_origin"],
+            }
+        )
+        staged = _validate_state(staged)
+        staged_snapshot = StateSnapshot(
+            MappingProxyType(dict(staged)),
+            hashlib.sha256(encode_state(staged)).hexdigest(),
+        )
         mutating = False
         publication_started = False
         final_host: HostStatus | None = None
@@ -2169,17 +2264,6 @@ class RuntimeAuthority:
                 )
                 self.installer.verify_staged()
                 final_host = self._validated_host_status(self.host.verify_inert(require_empty=True))
-            staged = dict(prepared.value)
-            staged.update(
-                {
-                    "agent_instance_id": header["agent_instance_id"],
-                    "agent_key_id": header["agent_key_id"],
-                    "phase": "staged",
-                    "public_key_sha256": header["expected_public_key_sha256"],
-                    "service_origin": header["service_origin"],
-                }
-            )
-            staged = _validate_state(staged)
             publication_started = True
             snapshot = self.states.publish(staged)
             if not isinstance(snapshot, StateSnapshot):
@@ -2190,6 +2274,7 @@ class RuntimeAuthority:
                     self._rollback_agent_stage(
                         prepared if publication_started else None,
                         restore_staged_files=lambda: self._restore_staged_files(request, header),
+                        restored_staged_state=staged_snapshot,
                     )
                 except BaseException as cleanup_failure:
                     if isinstance(cleanup_failure, AuthorityError):
