@@ -45,9 +45,8 @@ generations cannot partially update the matrix.
 inside a fresh QEMU/KVM guest. The host does not run repository job code
 directly.
 
-The disposable guest disk is a sparse 128 GiB boundary. This is required by
-the locked Stage 1 simulator image, whose local build, vulnerability scan,
-SPDX SBOM generation, and publish readback exceed the former 64 GiB boundary.
+The disposable guest disk is a sparse 128 GiB boundary so image builds and
+their local vulnerability scans cannot exhaust the former 64 GiB boundary.
 Large-image jobs must still use a job-owned Buildx builder and remove only that
 builder, exact local tags, and job-scoped temporary directories; broad Docker
 pruning is forbidden on the shared host.
@@ -291,15 +290,16 @@ exception IDs, package scopes, statements, expiries, and resulting report
 digest. A failed scan prints a bounded, log-safe critical-finding summary
 while preserving Trivy's exit code.
 
-The hosted publisher rebuilds every architecture archive from the protected
-release commit and captures the single digest emitted by each architecture
-push. Official evidence accepts only `trusted-rebuild` and binds the release
-head, tree, ref, and current run. PR candidate archives remain untrusted CI
-evidence only and are never downloaded, loaded, scanned as release, attested,
-or published by the publisher. After immutable-digest attestation verification,
-each architecture uploads one uniquely named canonical record. The manifest job
-downloads and accepts exactly the current image's AMD64 and ARM64 records,
-verifies their recorded registry subjects, and joins only their immutable
+The untrusted PR builder keeps each architecture archive job-local, scans it
+with the controlled Trivy policy, and does not upload it. The hosted publisher
+rebuilds every architecture archive from the protected release commit and
+captures the single digest emitted by each architecture push. Official evidence
+accepts only `trusted-rebuild` and binds the release head, tree, ref, and current
+run; it never downloads, loads, attests, or publishes PR-built bytes. After
+immutable-digest attestation verification, each architecture uploads one
+uniquely named canonical record. The manifest job downloads and accepts exactly
+the current image's AMD64 and ARM64 records, verifies their recorded registry
+subjects, and joins only their immutable
 digests.
 
 Manifest creation writes only the temporary `manifest-${HEAD_SHA}` tag and
