@@ -30,6 +30,9 @@ from loom_cli.rollout.operator.protected_environment_state_component import (
 from loom_cli.rollout.operator.protected_external_supervisor_credential_transport import (
     ExternalSupervisorCredentialEvidence,
 )
+from loom_cli.rollout.operator.protected_external_supervisor_transport import (
+    ExternalSupervisorCompensationError,
+)
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_artifact,
@@ -273,7 +276,7 @@ class ExternalSupervisors:
     def reconcile_compensations(self):
         self.calls.append("supervisor-reconcile")
         if self.fail_reconcile:
-            raise RuntimeError("reconciliation blocked")
+            raise ExternalSupervisorCompensationError("transition-validation-failed")
 
 
 class CredentialTransport:
@@ -431,11 +434,26 @@ def test_executor_reconciles_old_supervisor_prefix_before_any_new_mutation(
         production_defaults_request=_defaults_request,
     )
 
-    with pytest.raises(RuntimeError, match="reconciliation blocked"):
+    with pytest.raises(ExternalSupervisorCompensationError):
         executor("final.protected-apply", CheckOperation.APPLY, plan)
 
     assert supervisors.calls == ["supervisor-reconcile"]
     assert runner.calls == []
+    diagnostic_path = (
+        state
+        / "requests/req-alpha/attempts/1/protected-apply"
+        / "00-external-supervisor-reconciliation/failure-diagnostic.json"
+    )
+    diagnostic = json.loads(diagnostic_path.read_text())
+    assert diagnostic == {
+        "component_id": "external-supervisor-reconciliation",
+        "compensation_failure_code": "transition-validation-failed",
+        "diagnostic": "classified external-supervisor compensation reconciliation failure",
+        "failure_code": "compensation-reconciliation-failed",
+        "ordinal": 0,
+        "primary_failure_code": None,
+        "schema_version": 2,
+    }
 
 
 def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path) -> None:
@@ -468,16 +486,17 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert result.observed_epoch == 1
     assert runner.calls.index("migration-apply") < runner.calls.index("epoch-apply")
     roots = sorted((state / "requests/req-alpha/attempts/1/protected-apply").iterdir())
-    assert roots[0].name == "00-database-migration"
-    assert roots[1].name == "01-mutation-epoch-claim"
-    assert roots[2].name == "02-staging-manifests"
-    assert roots[3].name == "03-external-supervisor-database-secret"
-    assert roots[4].name == "04-environment-state"
-    assert roots[5].name == "05-gb10-candidate"
-    assert roots[6].name == "06-production-defaults"
-    assert roots[7].name == "07-external-supervisor-transition-cleanup"
-    assert roots[8].name == "08-external-supervisor-credential-gb10"
-    assert roots[9].name == "09-external-supervisors-gb10"
+    assert roots[0].name == "00-external-supervisor-reconciliation"
+    assert roots[1].name == "01-database-migration"
+    assert roots[2].name == "02-mutation-epoch-claim"
+    assert roots[3].name == "03-staging-manifests"
+    assert roots[4].name == "04-external-supervisor-database-secret"
+    assert roots[5].name == "05-environment-state"
+    assert roots[6].name == "06-gb10-candidate"
+    assert roots[7].name == "07-production-defaults"
+    assert roots[8].name == "08-external-supervisor-transition-cleanup"
+    assert roots[9].name == "09-external-supervisor-credential-gb10"
+    assert roots[10].name == "10-external-supervisors-gb10"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -716,15 +735,15 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
         for path in (state / "requests/req-alpha/attempts/1/protected-apply").iterdir()
         if path.is_dir() and "-" in path.name
     )
-    assert roots[6:] == [
-        "06-production-defaults",
-        "07-external-supervisor-transition-cleanup",
-        "08-external-supervisor-credential-oldlab",
-        "09-external-supervisor-credential-gb10",
-        "10-external-supervisors-gb10",
-        "11-external-supervisors-oldlab",
+    assert roots[7:] == [
+        "07-production-defaults",
+        "08-external-supervisor-transition-cleanup",
+        "09-external-supervisor-credential-oldlab",
+        "10-external-supervisor-credential-gb10",
+        "11-external-supervisors-gb10",
+        "12-external-supervisors-oldlab",
     ]
-    assert "03-external-supervisor-database-secret" in roots
+    assert "04-external-supervisor-database-secret" in roots
     assert all(
         transport.calls.count("credential-publish") == 1 for transport in credentials.values()
     )

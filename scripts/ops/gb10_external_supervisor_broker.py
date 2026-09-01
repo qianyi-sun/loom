@@ -77,10 +77,34 @@ ROOT_UID = 0
 ROOT_GID = 0
 # Node 2 belongs to the separate exclusive task-image-builder reservation.
 _GB10_NODES = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+_CAPACITY_FAILURE_CODES = frozenset(
+    {
+        "acceptance-failed",
+        "busy-accounting-unverified",
+        "busy-node-state-unverified",
+        "node-allocation-failed",
+        "node-evidence-invalid",
+    }
+)
 
 
 class BrokerError(RuntimeError):
     """Secret-free fixed broker failure."""
+
+
+class BrokerCapacityFailureError(BrokerError):
+    """A validated typed capacity response that must retain exit status one."""
+
+    def __init__(self, response: bytes) -> None:
+        if (
+            type(response) is not bytes
+            or not response
+            or len(response) > _MAX_COMMAND_OUTPUT
+            or not response.endswith(b"\n")
+        ):
+            raise ValueError("GB10 capacity failure response is invalid")
+        self.response = response
+        super().__init__("GB10 capacity acceptance failed safely")
 
 
 class BrokerInterruptedError(BrokerError):
@@ -248,18 +272,14 @@ def render_authorized_keys(
     lines = text.splitlines()
     marked = [line for line in lines if line.rstrip().endswith(f" {_AUTHORIZED_KEY_MARKER}")]
     if predecessor_public_key is not None:
-        predecessor_algorithm, predecessor_encoded = _public_key_identity(
-            predecessor_public_key
-        )
+        predecessor_algorithm, predecessor_encoded = _public_key_identity(predecessor_public_key)
         if predecessor_encoded == encoded:
             raise BrokerError("GB10 external supervisor predecessor key is not distinct")
         predecessor_forced = (
             f'restrict,command="/usr/bin/sudo -n -- {INSTALLED_BROKER}" '
             f"{predecessor_algorithm} {predecessor_encoded} {_AUTHORIZED_KEY_MARKER}"
         )
-        predecessor_normal = (
-            f"{predecessor_algorithm} {predecessor_encoded} {_ROLLOUT_KEY_MARKER}"
-        )
+        predecessor_normal = f"{predecessor_algorithm} {predecessor_encoded} {_ROLLOUT_KEY_MARKER}"
         predecessor_matching = [line for line in lines if predecessor_encoded in line]
         controller_matching = [line for line in lines if encoded in line]
         rollout_marked = [
@@ -279,9 +299,7 @@ def render_authorized_keys(
                 raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
             migrated = text.replace(predecessor_forced, predecessor_normal, 1)
             migrated_prefix = (
-                migrated
-                if not migrated or migrated.endswith("\n")
-                else migrated + "\n"
+                migrated if not migrated or migrated.endswith("\n") else migrated + "\n"
             )
             return (migrated_prefix + expected + "\n").encode("utf-8")
         if marked and marked[0].strip() == expected:
@@ -298,9 +316,7 @@ def render_authorized_keys(
             raise BrokerError("GB10 external supervisor key is already present without force")
         if any(line.strip() != predecessor_normal for line in predecessor_matching):
             raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
-        existing_prefix = (
-            existing if not existing or existing.endswith(b"\n") else existing + b"\n"
-        )
+        existing_prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
         additions = [] if predecessor_matching else [predecessor_normal]
         additions.append(expected)
         return existing_prefix + ("\n".join(additions) + "\n").encode("ascii")
@@ -517,7 +533,8 @@ def accept_capacity(payload: bytes) -> bytes:
         )
     artifact_bytes = result.stdout.encode()
     if (
-        not artifact_bytes
+        result.stderr
+        or not artifact_bytes
         or len(artifact_bytes) > _MAX_COMMAND_OUTPUT
         or not artifact_bytes.endswith(b"\n")
     ):
@@ -526,6 +543,27 @@ def accept_capacity(payload: bytes) -> bytes:
         artifact = json.loads(artifact_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise BrokerError("GB10 acceptance authority output is invalid") from exc
+    if result.returncode == 1:
+        failure_code = artifact.get("failure_code") if isinstance(artifact, dict) else None
+        node = artifact.get("node") if isinstance(artifact, dict) else None
+        if (
+            not isinstance(artifact, dict)
+            or _canonical_json(artifact) != artifact_bytes
+            or set(artifact) != {"failure_code", "node", "schema_version", "status"}
+            or type(artifact.get("schema_version")) is not int
+            or artifact.get("schema_version") != 1
+            or artifact.get("status") != "failed"
+            or type(failure_code) is not str
+            or failure_code not in _CAPACITY_FAILURE_CODES
+            or type(node) is not str
+            or node not in nodes
+        ):
+            raise BrokerError("GB10 acceptance authority output is invalid")
+        raise BrokerCapacityFailureError(
+            _canonical_json({**artifact, "operation": "accept_capacity"})
+        )
+    if result.returncode != 0:
+        raise BrokerError("GB10 acceptance authority output is invalid")
     if (
         not isinstance(artifact, dict)
         or _canonical_json(artifact) != artifact_bytes
@@ -1393,6 +1431,7 @@ def _run_contained_authority(
                 job_state_path=job_state_path,
             ),
             timeout=launch_timeout,
+            check=False,
         )
     except BaseException as exc:
         failure = exc
@@ -2185,9 +2224,7 @@ def _main(argv: list[str] | None = None) -> int:
             _require_host_authority()
             install_forced_key(
                 Path(arguments[1]),
-                predecessor_public_key_path=(
-                    None if len(arguments) == 2 else Path(arguments[2])
-                ),
+                predecessor_public_key_path=(None if len(arguments) == 2 else Path(arguments[2])),
             )
             return 0
         if arguments:
@@ -2204,6 +2241,12 @@ def _main(argv: list[str] | None = None) -> int:
         _safe_executable(SYSTEM_PYTHON, owner_uid=0, owner_gid=0, label="system Python")
         candidate = ensure_candidate(CANDIDATES_ROOT, candidate_sha, candidate_tree)
         _exec_helper(candidate, payload)
+    except BrokerCapacityFailureError as exc:
+        try:
+            sys.stdout.buffer.write(exc.response)
+        except OSError:
+            pass
+        return 1
     except (BrokerError, OSError, KeyError, subprocess.SubprocessError):
         return 1
     return 1  # pragma: no cover - execve never returns

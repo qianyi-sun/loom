@@ -82,6 +82,15 @@ JOB_STATE_FILE_RE = re.compile(r"loom-gb10-capacity-([0-9a-f]{24})\.service\.jso
 # its own seconds exclusively for exact Slurm cancellation and readback.
 AUTHORITY_BUDGET_SECONDS = 1050.0
 CLEANUP_RESERVE_SECONDS = 60.0
+CAPACITY_FAILURE_CODES = frozenset(
+    {
+        "acceptance-failed",
+        "busy-accounting-unverified",
+        "busy-node-state-unverified",
+        "node-allocation-failed",
+        "node-evidence-invalid",
+    }
+)
 
 
 _WORKER_INPUT_VERIFIER = r"""
@@ -886,6 +895,17 @@ exec(
 
 class AcceptanceError(RuntimeError):
     """A secret-safe acceptance failure."""
+
+
+class CapacityAcceptanceError(AcceptanceError):
+    """A closed-schema, node-bound Slurm acceptance failure."""
+
+    def __init__(self, failure_code: str, *, node: str) -> None:
+        if failure_code not in CAPACITY_FAILURE_CODES or node not in SLURM_NODES:
+            raise ValueError("capacity acceptance failure is invalid")
+        self.failure_code = failure_code
+        self.node = node
+        super().__init__("capacity acceptance failed safely")
 
 
 class AuthorityInterruptedError(AcceptanceError):
@@ -2141,7 +2161,7 @@ def _probe_nodes(
         ).stdout
         partition_pattern = rf"(?:^| )Partitions=[^ ]*\b{re.escape(SLURM_PARTITION)}\b"
         if re.search(partition_pattern, node_config) is None:
-            raise AcceptanceError(f"canonical node is outside {SLURM_PARTITION} partition: {node}")
+            raise CapacityAcceptanceError("busy-node-state-unverified", node=node)
         if job_state_path is not None:
             if request_nonce is None or re.fullmatch(r"[0-9a-f]{24}", request_nonce) is None:
                 raise AcceptanceError("acceptance request nonce is invalid")
@@ -2245,14 +2265,19 @@ def _probe_nodes(
             deferred_busy.append(node)
             continue
         if result.returncode != 0:
-            raise AcceptanceError(f"node allocation failed safely: {node}")
+            failure_code = (
+                "busy-accounting-unverified"
+                if potential_unstarted_busy
+                else "node-allocation-failed"
+            )
+            raise CapacityAcceptanceError(failure_code, node=node)
         output_lines = result.stdout.splitlines()
         if len(output_lines) != 2 or output_lines[0] != ALLOCATION_START_MARKER:
-            raise AcceptanceError(f"node allocation returned invalid evidence: {node}")
+            raise CapacityAcceptanceError("node-evidence-invalid", node=node)
         try:
             payload = json.loads(output_lines[1])
         except json.JSONDecodeError as exc:
-            raise AcceptanceError(f"node allocation returned invalid evidence: {node}") from exc
+            raise CapacityAcceptanceError("node-evidence-invalid", node=node) from exc
         if payload != {
             "candidate_sha": candidate_sha,
             "node": node,
@@ -2262,10 +2287,10 @@ def _probe_nodes(
                 "repo_digest": (f"{TRIAL_CACHE_REGISTRY_REPO}@{TRIAL_CACHE_CANARY_DIGEST}"),
             },
         }:
-            raise AcceptanceError(f"node allocation evidence mismatched: {node}")
+            raise CapacityAcceptanceError("node-evidence-invalid", node=node)
         passed.append(node)
     if not passed:
-        raise AcceptanceError("no GB10 node accepted the real Slurm allocation probe")
+        raise CapacityAcceptanceError("acceptance-failed", node=SLURM_NODES[0])
     return passed, deferred_busy
 
 
@@ -2659,7 +2684,22 @@ def _main() -> int:
 def main() -> int:
     previous = _install_signal_handlers()
     try:
-        return _main()
+        try:
+            return _main()
+        except CapacityAcceptanceError as exc:
+            print(
+                json.dumps(
+                    {
+                        "failure_code": exc.failure_code,
+                        "node": exc.node,
+                        "schema_version": 1,
+                        "status": "failed",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 1
     finally:
         _restore_signal_handlers(previous)
 

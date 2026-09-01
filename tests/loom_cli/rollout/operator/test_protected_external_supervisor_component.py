@@ -44,6 +44,8 @@ from loom_cli.rollout.operator.protected_external_supervisor_component import (
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     PROTECTED_USER_UNIT_DIR,
     AtomicUserUnitStore,
+    ExternalSupervisorApplyError,
+    ExternalSupervisorCompensationError,
     ExternalSupervisorLiveObservation,
     FixedExternalSupervisorTransport,
     FixedUserSystemdControl,
@@ -1580,7 +1582,7 @@ def test_fixed_transport_detects_race_and_service_failure(tmp_path: Path) -> Non
     store.units.clear()
     control.fail_service = True
     before = transport.observe(artifact, _absent_authority())
-    with pytest.raises(RuntimeError, match="safely compensated"):
+    with pytest.raises(ExternalSupervisorApplyError, match="safely compensated") as raised:
         transport.apply(
             artifact,
             before,
@@ -1588,6 +1590,8 @@ def test_fixed_transport_detects_race_and_service_failure(tmp_path: Path) -> Non
             attestation_digest="b" * 64,
             transition_digest="c" * 64,
         )
+    assert raised.value.failure_code == "service-activation-failed"
+    assert raised.value.compensation_failure_code is None
     after = transport.observe(artifact, _absent_authority())
     assert classify_external_supervisor_live_state(artifact, after) == "ready"
 
@@ -1761,12 +1765,44 @@ def test_crash_intent_reconciliation_rejects_managed_identity_drift(
     control = _Control(artifact, store)
     transport = FixedExternalSupervisorTransport(store=store, control=control)
 
-    with pytest.raises(RuntimeError, match="reconciliation failed safely"):
+    with pytest.raises(ExternalSupervisorCompensationError) as raised:
         transport.reconcile_compensations()
 
+    assert raised.value.failure_code == "transition-validation-failed"
     assert control.calls == []
     assert [record.phase for record in store.compensations] == ["intent", "failed"]
     assert store.compensation_blockers()
+
+
+def test_crash_intent_reconciliation_classifies_systemd_operation_failure(
+    tmp_path: Path,
+) -> None:
+    _plan, _root, artifact = _bound_artifact(tmp_path)
+    supervisor = artifact.supervisors[0]
+    store = _Store()
+    store.units = {
+        supervisor.service_name: supervisor.service_unit.encode(),
+        supervisor.timer_name: supervisor.timer_unit.encode(),
+    }
+    store.record_compensation(
+        _compensation_record(
+            artifact,
+            compensation_id="e" * 32,
+            phase="intent",
+            reason="timer-activation",
+        )
+    )
+    control = _Control(artifact, store)
+    control.loaded = True
+    control.enabled = True
+    control.active = True
+    control.fail_stop = True
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+
+    with pytest.raises(ExternalSupervisorCompensationError) as raised:
+        transport.reconcile_compensations()
+
+    assert raised.value.failure_code == "transition-operation-failed"
 
 
 def test_fixed_transport_reports_unexpected_managed_unit_as_drift(tmp_path: Path) -> None:

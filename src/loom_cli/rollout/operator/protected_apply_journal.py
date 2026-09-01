@@ -10,6 +10,8 @@ blindly repeating protected work.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -26,15 +28,26 @@ from uuid import uuid4
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
 from .model import validate_safe_identifier
+from .protected_external_supervisor_transport import (
+    COMPENSATION_RECONCILIATION_FAILURE_CODES,
+    EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES,
+    ExternalSupervisorApplyError,
+    ExternalSupervisorCompensationError,
+)
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 _GB10_HOST_RE = re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$")
+_RECONCILIATION_COMPONENT_DIRECTORY_RE = re.compile(r"^\d{2}-external-supervisor-reconciliation$")
+_RECONCILIATION_OUTCOME_FILE_RE = re.compile(r"^(?P<sequence>\d{8})\.json$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
+_RENAME_NOREPLACE = 1
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_FAILURE_DIAGNOSTIC_CHARS = 512
-_FAILURE_DIAGNOSTIC_CODES = frozenset(
+_MAX_RECONCILIATION_OUTCOMES = 1024
+_MAX_RECONCILIATION_OUTCOME_BYTES = 4096
+_LEGACY_FAILURE_DIAGNOSTIC_CODES = frozenset(
     {
         "apply-failed",
         "did-not-converge",
@@ -42,6 +55,20 @@ _FAILURE_DIAGNOSTIC_CODES = frozenset(
         "pre-classify-failed",
         "terminal-classify-failed",
     }
+)
+_FAILURE_DIAGNOSTIC_CODES = _LEGACY_FAILURE_DIAGNOSTIC_CODES | {
+    "compensation-reconciliation-failed"
+}
+_EXTERNAL_SUPERVISOR_COMPONENT_IDS = frozenset(
+    {
+        "external-supervisors",
+        "external-supervisors-gb10",
+        "external-supervisors-oldlab",
+    }
+)
+_TYPED_APPLY_DIAGNOSTIC = "classified external-supervisor apply failure"
+_TYPED_COMPENSATION_DIAGNOSTIC = (
+    "classified external-supervisor compensation reconciliation failure"
 )
 
 
@@ -53,6 +80,11 @@ class ComponentState(StrEnum):
     READY = "ready"
     EXACT = "exact"
     DRIFTED = "drifted"
+
+
+class ReconciliationOutcomeStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +110,7 @@ class ProtectedApplyComponent:
     classify: Callable[[FinalGatePlan], ComponentObservation]
     apply: Callable[[FinalGatePlan], None]
     preapply_group: str | None = None
+    reconcile_before_apply: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -88,6 +121,8 @@ class ProtectedApplyComponent:
                 self.preapply_group is not None
                 and _COMPONENT_RE.fullmatch(self.preapply_group) is None
             )
+            or self.reconcile_before_apply
+            != (self.component_id == "external-supervisor-reconciliation")
         ):
             raise ValueError("protected apply component authority is invalid")
 
@@ -222,10 +257,12 @@ class ComponentFailureDiagnostic:
     ordinal: int
     failure_code: str
     diagnostic: str
+    primary_failure_code: str | None = None
+    compensation_failure_code: str | None = None
 
     def __post_init__(self) -> None:
         if (
-            self.schema_version != 1
+            self.schema_version not in {1, 2}
             or _COMPONENT_RE.fullmatch(self.component_id) is None
             or type(self.ordinal) is not int
             or not 0 <= self.ordinal < 32
@@ -235,23 +272,157 @@ class ComponentFailureDiagnostic:
             or any(ord(char) < 32 or ord(char) == 127 for char in self.diagnostic)
         ):
             raise ValueError("protected component failure diagnostic is invalid")
+        if self.schema_version == 1:
+            if (
+                self.failure_code not in _LEGACY_FAILURE_DIAGNOSTIC_CODES
+                or self.primary_failure_code is not None
+                or self.compensation_failure_code is not None
+            ):
+                raise ValueError("protected component failure diagnostic is invalid")
+        elif self.failure_code == "apply-failed":
+            if (
+                self.component_id not in _EXTERNAL_SUPERVISOR_COMPONENT_IDS
+                or self.primary_failure_code not in EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES
+                or self.diagnostic != _TYPED_APPLY_DIAGNOSTIC
+            ) or (
+                self.compensation_failure_code is not None
+                and self.compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+            ):
+                raise ValueError("protected component failure diagnostic is invalid")
+        elif (
+            self.failure_code != "compensation-reconciliation-failed"
+            or self.component_id != "external-supervisor-reconciliation"
+            or self.diagnostic != _TYPED_COMPENSATION_DIAGNOSTIC
+            or self.primary_failure_code is not None
+            or self.compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+        ):
+            raise ValueError("protected component failure diagnostic is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "ordinal": self.ordinal,
+            "failure_code": self.failure_code,
+            "diagnostic": self.diagnostic,
+        }
+        if self.schema_version == 2:
+            payload["primary_failure_code"] = self.primary_failure_code
+            payload["compensation_failure_code"] = self.compensation_failure_code
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> ComponentFailureDiagnostic:
-        if set(value) != {
+        base_fields = {
             "schema_version",
             "component_id",
             "ordinal",
             "failure_code",
             "diagnostic",
-        }:
+        }
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int:
+            raise ValueError("protected component failure diagnostic schema is invalid")
+        if set(value) != (
+            base_fields
+            if schema_version == 1
+            else base_fields | {"primary_failure_code", "compensation_failure_code"}
+        ):
             raise ValueError("protected component failure diagnostic fields are invalid")
+        primary_failure_code = value.get("primary_failure_code")
+        compensation_failure_code = value.get("compensation_failure_code")
+        if (primary_failure_code is not None and not isinstance(primary_failure_code, str)) or (
+            compensation_failure_code is not None and not isinstance(compensation_failure_code, str)
+        ):
+            raise ValueError("protected component typed failure diagnostic is invalid")
         return cls(
-            schema_version=_integer(value, "schema_version"),
+            schema_version=schema_version,
             component_id=_string(value, "component_id"),
             ordinal=_integer(value, "ordinal"),
             failure_code=_string(value, "failure_code"),
             diagnostic=_string(value, "diagnostic"),
+            primary_failure_code=primary_failure_code,
+            compensation_failure_code=compensation_failure_code,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationOutcome:
+    schema_version: int
+    component_id: str
+    sequence: int
+    status: ReconciliationOutcomeStatus
+    failure_code: str | None
+    diagnostic: str | None
+    compensation_failure_code: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.schema_version != 1
+            or self.component_id != "external-supervisor-reconciliation"
+            or type(self.sequence) is not int
+            or not 0 <= self.sequence < _MAX_RECONCILIATION_OUTCOMES
+            or not isinstance(self.status, ReconciliationOutcomeStatus)
+        ):
+            raise ValueError("protected reconciliation outcome is invalid")
+        if self.status is ReconciliationOutcomeStatus.SUCCEEDED:
+            if (
+                self.failure_code is not None
+                or self.diagnostic is not None
+                or self.compensation_failure_code is not None
+            ):
+                raise ValueError("protected reconciliation outcome is invalid")
+            return
+        if self.failure_code == "compensation-reconciliation-failed":
+            if (
+                self.diagnostic != _TYPED_COMPENSATION_DIAGNOSTIC
+                or self.compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+            ):
+                raise ValueError("protected reconciliation outcome is invalid")
+        elif (
+            self.failure_code not in _LEGACY_FAILURE_DIAGNOSTIC_CODES
+            or self.diagnostic is None
+            or not self.diagnostic
+            or len(self.diagnostic) > _MAX_FAILURE_DIAGNOSTIC_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.diagnostic)
+            or self.compensation_failure_code is not None
+        ):
+            raise ValueError("protected reconciliation outcome is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "sequence": self.sequence,
+            "status": self.status.value,
+            "failure_code": self.failure_code,
+            "diagnostic": self.diagnostic,
+            "compensation_failure_code": self.compensation_failure_code,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ReconciliationOutcome:
+        if set(value) != {
+            "schema_version",
+            "component_id",
+            "sequence",
+            "status",
+            "failure_code",
+            "diagnostic",
+            "compensation_failure_code",
+        }:
+            raise ValueError("protected reconciliation outcome fields are invalid")
+        return cls(
+            schema_version=_integer(value, "schema_version"),
+            component_id=_string(value, "component_id"),
+            sequence=_integer(value, "sequence"),
+            status=ReconciliationOutcomeStatus(_string(value, "status")),
+            failure_code=_optional_string(value, "failure_code"),
+            diagnostic=_optional_string(value, "diagnostic"),
+            compensation_failure_code=_optional_string(
+                value,
+                "compensation_failure_code",
+            ),
         )
 
 
@@ -390,6 +561,12 @@ class ProtectedApplyJournal:
                     )
                     preclassified_groups.add(component.preapply_group)
                 results[component.component_id] = self._execute_one(plan, component, ordinal)
+            for ordinal, component in enumerate(components):
+                if component.reconcile_before_apply:
+                    self._publish_or_match(
+                        self.root / f"{ordinal:02d}-{component.component_id}" / "terminal.json",
+                        results[component.component_id].to_dict(),
+                    )
             return MappingProxyType(results)
         finally:
             try:
@@ -466,7 +643,7 @@ class ProtectedApplyJournal:
             return False
 
         matches: list[tuple[int, Path]] = []
-        for ordinal in (0, 1):
+        for ordinal in (0, 1, 2):
             component_root = self.root / f"{ordinal:02d}-mutation-epoch-claim"
             try:
                 _require_directory(component_root, uid=self.service_uid)
@@ -535,6 +712,13 @@ class ProtectedApplyJournal:
         else:
             if terminal.intent_digest != intent.intent_digest:
                 raise ProtectedApplyJournalError("protected component terminal identity drifted")
+            if component.reconcile_before_apply:
+                self._apply_with_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    plan,
+                )
             observed = self._classify_with_diagnostic(
                 component_root,
                 component,
@@ -550,6 +734,14 @@ class ProtectedApplyJournal:
                 raise ProtectedApplyJournalError(
                     f"protected component {component.component_id} terminal state drifted"
                 )
+            if component.reconcile_before_apply:
+                self._append_reconciliation_outcome(
+                    component_root,
+                    status=ReconciliationOutcomeStatus.SUCCEEDED,
+                    failure_code=None,
+                    diagnostic=None,
+                    compensation_failure_code=None,
+                )
             return terminal
 
         before = self._classify_with_diagnostic(
@@ -564,36 +756,13 @@ class ProtectedApplyJournal:
                 f"protected component {component.component_id} live state drifted"
             )
         applied = False
-        if before.state is ComponentState.READY:
-            try:
-                component.apply(plan)
-            except BaseException as exc:
-                from .protected_gb10_transport import GB10FleetApplyError
-
-                if component.component_id == "gb10-candidate" and isinstance(
-                    exc, GB10FleetApplyError
-                ):
-                    failure = ComponentFailure(
-                        schema_version=1,
-                        component_id=component.component_id,
-                        failure_code="gb10-convergence-failed",
-                        failed_hosts=exc.failed_hosts,
-                    )
-                    self._publish_or_match(component_root / "failure.json", failure.to_dict())
-                else:
-                    # Every other component previously published no failure
-                    # record at all, leaving its cause a masked dead-end
-                    # (#1081). Record a coded, secret-safe reason (#1085 p1).
-                    self._publish_failure_diagnostic(
-                        component_root,
-                        component,
-                        ordinal,
-                        failure_code="apply-failed",
-                        diagnostic=unclassified_failure_diagnostic(
-                            exc, activity=component.component_id
-                        ),
-                    )
-                raise
+        if before.state is ComponentState.READY or component.reconcile_before_apply:
+            self._apply_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+            )
             applied = True
         after = self._classify_with_diagnostic(
             component_root,
@@ -603,19 +772,241 @@ class ProtectedApplyJournal:
             failure_code="post-classify-failed",
         )
         if after.state is not ComponentState.EXACT:
+            diagnostic = f"component classified {after.state.value} after apply"
             self._publish_failure_diagnostic(
                 component_root,
                 component,
                 ordinal,
                 failure_code="did-not-converge",
-                diagnostic=f"component classified {after.state.value} after apply",
+                diagnostic=diagnostic,
+            )
+            self._publish_reconciliation_outcome_best_effort(
+                component_root,
+                component,
+                status=ReconciliationOutcomeStatus.FAILED,
+                failure_code="did-not-converge",
+                diagnostic=diagnostic,
+                compensation_failure_code=None,
             )
             raise ProtectedApplyJournalError(
                 f"protected component {component.component_id} did not converge exactly"
             )
         terminal = ComponentTerminal.build(intent, after, applied=applied)
-        self._publish_or_match(terminal_path, terminal.to_dict())
+        if component.reconcile_before_apply:
+            self._append_reconciliation_outcome(
+                component_root,
+                status=ReconciliationOutcomeStatus.SUCCEEDED,
+                failure_code=None,
+                diagnostic=None,
+                compensation_failure_code=None,
+            )
+        else:
+            self._publish_or_match(terminal_path, terminal.to_dict())
         return terminal
+
+    def _apply_with_diagnostic(
+        self,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        plan: FinalGatePlan,
+    ) -> None:
+        try:
+            component.apply(plan)
+        except BaseException as exc:
+            from .protected_gb10_transport import GB10FleetApplyError
+
+            if component.component_id == "gb10-candidate" and isinstance(exc, GB10FleetApplyError):
+                failure = ComponentFailure(
+                    schema_version=1,
+                    component_id=component.component_id,
+                    failure_code="gb10-convergence-failed",
+                    failed_hosts=exc.failed_hosts,
+                )
+                self._publish_or_match(component_root / "failure.json", failure.to_dict())
+            elif isinstance(exc, ExternalSupervisorApplyError):
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="apply-failed",
+                    diagnostic=_TYPED_APPLY_DIAGNOSTIC,
+                    primary_failure_code=exc.failure_code,
+                    compensation_failure_code=exc.compensation_failure_code,
+                )
+            elif isinstance(exc, ExternalSupervisorCompensationError):
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="compensation-reconciliation-failed",
+                    diagnostic=_TYPED_COMPENSATION_DIAGNOSTIC,
+                    compensation_failure_code=exc.failure_code,
+                )
+                self._publish_reconciliation_outcome_best_effort(
+                    component_root,
+                    component,
+                    status=ReconciliationOutcomeStatus.FAILED,
+                    failure_code="compensation-reconciliation-failed",
+                    diagnostic=_TYPED_COMPENSATION_DIAGNOSTIC,
+                    compensation_failure_code=exc.failure_code,
+                )
+            else:
+                # Every other component previously published no failure record
+                # at all, leaving its cause a masked dead-end (#1081). Record a
+                # coded, secret-safe reason (#1085 p1).
+                diagnostic = unclassified_failure_diagnostic(
+                    exc,
+                    activity=component.component_id,
+                )
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="apply-failed",
+                    diagnostic=diagnostic,
+                )
+                self._publish_reconciliation_outcome_best_effort(
+                    component_root,
+                    component,
+                    status=ReconciliationOutcomeStatus.FAILED,
+                    failure_code="apply-failed",
+                    diagnostic=diagnostic,
+                    compensation_failure_code=None,
+                )
+            raise
+
+    def _publish_reconciliation_outcome_best_effort(
+        self,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        *,
+        status: ReconciliationOutcomeStatus,
+        failure_code: str,
+        diagnostic: str,
+        compensation_failure_code: str | None,
+    ) -> None:
+        if not component.reconcile_before_apply:
+            return
+        try:
+            self._append_reconciliation_outcome(
+                component_root,
+                status=status,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+                compensation_failure_code=compensation_failure_code,
+            )
+        except Exception:
+            pass
+
+    def _append_reconciliation_outcome(
+        self,
+        component_root: Path,
+        *,
+        status: ReconciliationOutcomeStatus,
+        failure_code: str | None,
+        diagnostic: str | None,
+        compensation_failure_code: str | None,
+    ) -> None:
+        outcomes_root = component_root / "reconciliation-outcomes"
+        try:
+            outcomes_root.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not create protected reconciliation outcome journal"
+            ) from exc
+        _require_directory(outcomes_root, uid=self.service_uid)
+        existing = _read_reconciliation_outcomes(
+            component_root,
+            service_uid=self.service_uid,
+        )
+        if len(existing) >= _MAX_RECONCILIATION_OUTCOMES:
+            raise ProtectedApplyJournalError(
+                "protected reconciliation outcome journal is too large"
+            )
+        sequence = len(existing)
+        outcome = ReconciliationOutcome(
+            schema_version=1,
+            component_id="external-supervisor-reconciliation",
+            sequence=sequence,
+            status=status,
+            failure_code=failure_code,
+            diagnostic=diagnostic,
+            compensation_failure_code=compensation_failure_code,
+        )
+        self._publish_reconciliation_outcome(
+            outcomes_root / f"{sequence:08d}.json",
+            outcome.to_dict(),
+        )
+
+    def _publish_reconciliation_outcome(
+        self,
+        path: Path,
+        value: Mapping[str, object],
+    ) -> None:
+        payload = _json_bytes(value)
+        if (
+            len(payload) > _MAX_RECONCILIATION_OUTCOME_BYTES
+            or path.parent.name != "reconciliation-outcomes"
+            or _RECONCILIATION_COMPONENT_DIRECTORY_RE.fullmatch(path.parent.parent.name) is None
+        ):
+            raise ProtectedApplyJournalError(
+                "protected reconciliation outcome publication is invalid"
+            )
+        source_directory_fd = _open_directory(path.parent.parent)
+        try:
+            destination_directory_fd = _open_directory(path.parent)
+        except BaseException:
+            os.close(source_directory_fd)
+            raise
+        temporary = f".{path.name}.{uuid4().hex}.tmp"
+        created = False
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                _PRIVATE_FILE_MODE,
+                dir_fd=source_directory_fd,
+            )
+            created = True
+            try:
+                os.fchmod(fd, _PRIVATE_FILE_MODE)
+                _write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _rename_noreplace(
+                source_directory_fd,
+                temporary,
+                destination_directory_fd,
+                path.name,
+            )
+            created = False
+            os.fsync(destination_directory_fd)
+            os.fsync(source_directory_fd)
+        except FileExistsError:
+            if self._read(path) != dict(value):
+                raise ProtectedApplyJournalError(
+                    "protected reconciliation outcome cannot be replaced"
+                ) from None
+        except OSError as exc:
+            raise ProtectedApplyJournalError(
+                "could not publish protected reconciliation outcome"
+            ) from exc
+        finally:
+            if created:
+                try:
+                    os.unlink(temporary, dir_fd=source_directory_fd)
+                except OSError:
+                    pass
+            os.close(destination_directory_fd)
+            os.close(source_directory_fd)
 
     def _classify_with_diagnostic(
         self,
@@ -629,15 +1020,24 @@ class ProtectedApplyJournal:
         try:
             return component.classify(plan)
         except BaseException as exc:
+            diagnostic = unclassified_failure_diagnostic(
+                exc,
+                activity=component.component_id,
+            )
             self._publish_failure_diagnostic(
                 component_root,
                 component,
                 ordinal,
                 failure_code=failure_code,
-                diagnostic=unclassified_failure_diagnostic(
-                    exc,
-                    activity=component.component_id,
-                ),
+                diagnostic=diagnostic,
+            )
+            self._publish_reconciliation_outcome_best_effort(
+                component_root,
+                component,
+                status=ReconciliationOutcomeStatus.FAILED,
+                failure_code=failure_code,
+                diagnostic=diagnostic,
+                compensation_failure_code=None,
             )
             raise
 
@@ -649,6 +1049,8 @@ class ProtectedApplyJournal:
         *,
         failure_code: str,
         diagnostic: str,
+        primary_failure_code: str | None = None,
+        compensation_failure_code: str | None = None,
     ) -> None:
         """Record *why* a component failed — durably, coded, and secret-safe.
 
@@ -662,13 +1064,19 @@ class ProtectedApplyJournal:
         writing it — including a write-once mismatch on a differing retry — is
         swallowed so the original exception still propagates unchanged.
         """
-        record = {
-            "schema_version": 1,
-            "component_id": component.component_id,
-            "ordinal": ordinal,
-            "failure_code": failure_code,
-            "diagnostic": diagnostic,
-        }
+        record = ComponentFailureDiagnostic(
+            schema_version=(
+                2
+                if primary_failure_code is not None or compensation_failure_code is not None
+                else 1
+            ),
+            component_id=component.component_id,
+            ordinal=ordinal,
+            failure_code=failure_code,
+            diagnostic=diagnostic,
+            primary_failure_code=primary_failure_code,
+            compensation_failure_code=compensation_failure_code,
+        ).to_dict()
         try:
             self._publish_or_match(component_root / "failure-diagnostic.json", record)
         except Exception:
@@ -802,6 +1210,40 @@ def _open_directory(path: Path) -> int:
     )
 
 
+def _rename_noreplace(
+    source_directory_fd: int,
+    source: str,
+    destination_directory_fd: int,
+    destination: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ProtectedApplyJournalError(
+            "atomic protected reconciliation outcome publication is unavailable"
+        )
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        source_directory_fd,
+        os.fsencode(source),
+        destination_directory_fd,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(error, os.strerror(error), destination)
+        raise OSError(error, os.strerror(error), destination)
+
+
 def _hash_json(value: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(dict(value), sort_keys=True, separators=(",", ":")).encode()
@@ -823,6 +1265,13 @@ def _integer(value: Mapping[str, object], key: str) -> int:
     item = value[key]
     if type(item) is not int:
         raise ValueError(f"protected component {key} must be an integer")
+    return item
+
+
+def _optional_string(value: Mapping[str, object], key: str) -> str | None:
+    item = value[key]
+    if item is not None and not isinstance(item, str):
+        raise ValueError(f"protected component {key} must be a string or null")
     return item
 
 
@@ -856,8 +1305,15 @@ def _read_service_component_record(
     *,
     service_uid: int,
     filename: str,
+    max_bytes: int = _MAX_RECORD_BYTES,
 ) -> dict[str, object]:
-    if not path.is_absolute() or ".." in path.parts or path.name != filename or service_uid < 0:
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or path.name != filename
+        or service_uid < 0
+        or not 0 < max_bytes <= _MAX_RECORD_BYTES
+    ):
         raise ProtectedApplyJournalError("protected component record path is invalid")
     fd = os.open(
         path,
@@ -869,12 +1325,12 @@ def _read_service_component_record(
     try:
         _require_regular(fd, uid=service_uid)
         metadata = os.fstat(fd)
-        if metadata.st_size > _MAX_RECORD_BYTES:
+        if metadata.st_size > max_bytes:
             raise ProtectedApplyJournalError("protected component record is too large")
-        payload = os.read(fd, _MAX_RECORD_BYTES + 1)
+        payload = os.read(fd, max_bytes + 1)
     finally:
         os.close(fd)
-    if len(payload) > _MAX_RECORD_BYTES:
+    if len(payload) > max_bytes:
         raise ProtectedApplyJournalError("protected component record is too large")
     try:
         value = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
@@ -919,6 +1375,72 @@ def read_component_failure_diagnostic(
         ) from exc
 
 
+def _read_reconciliation_outcomes(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> tuple[ReconciliationOutcome, ...]:
+    if (
+        not component_root.is_absolute()
+        or ".." in component_root.parts
+        or _RECONCILIATION_COMPONENT_DIRECTORY_RE.fullmatch(component_root.name) is None
+        or service_uid < 0
+    ):
+        raise ProtectedApplyJournalError("protected reconciliation outcome path is invalid")
+    _require_directory(component_root, uid=service_uid)
+    outcomes_root = component_root / "reconciliation-outcomes"
+    try:
+        _require_directory(outcomes_root, uid=service_uid)
+    except FileNotFoundError:
+        return ()
+    try:
+        entries = tuple(os.scandir(outcomes_root))
+    except OSError as exc:
+        raise ProtectedApplyJournalError(
+            "protected reconciliation outcome journal is unavailable"
+        ) from exc
+    if len(entries) > _MAX_RECONCILIATION_OUTCOMES:
+        raise ProtectedApplyJournalError("protected reconciliation outcome journal is too large")
+    paths: list[tuple[int, Path]] = []
+    for entry in entries:
+        match = _RECONCILIATION_OUTCOME_FILE_RE.fullmatch(entry.name)
+        if match is None or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise ProtectedApplyJournalError("protected reconciliation outcome journal is unsafe")
+        paths.append((int(match.group("sequence")), Path(entry.path)))
+    paths.sort()
+    if [sequence for sequence, _path in paths] != list(range(len(paths))):
+        raise ProtectedApplyJournalError("protected reconciliation outcome sequence is invalid")
+    outcomes: list[ReconciliationOutcome] = []
+    for sequence, path in paths:
+        try:
+            outcome = ReconciliationOutcome.from_dict(
+                _read_service_component_record(
+                    path,
+                    service_uid=service_uid,
+                    filename=path.name,
+                    max_bytes=_MAX_RECONCILIATION_OUTCOME_BYTES,
+                )
+            )
+        except ValueError as exc:
+            raise ProtectedApplyJournalError(
+                "protected reconciliation outcome record is invalid"
+            ) from exc
+        if outcome.sequence != sequence:
+            raise ProtectedApplyJournalError("protected reconciliation outcome identity drifted")
+        outcomes.append(outcome)
+    return tuple(outcomes)
+
+
+def read_latest_reconciliation_outcome(
+    component_root: Path,
+    *,
+    service_uid: int,
+) -> ReconciliationOutcome | None:
+    """Read the newest certified append-only reconciliation outcome."""
+    outcomes = _read_reconciliation_outcomes(component_root, service_uid=service_uid)
+    return outcomes[-1] if outcomes else None
+
+
 __all__ = [
     "ComponentFailure",
     "ComponentFailureDiagnostic",
@@ -929,6 +1451,9 @@ __all__ = [
     "ProtectedApplyComponent",
     "ProtectedApplyJournal",
     "ProtectedApplyJournalError",
+    "ReconciliationOutcome",
+    "ReconciliationOutcomeStatus",
     "read_component_failure",
     "read_component_failure_diagnostic",
+    "read_latest_reconciliation_outcome",
 ]
