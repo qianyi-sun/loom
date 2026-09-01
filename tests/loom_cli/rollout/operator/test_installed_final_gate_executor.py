@@ -13,6 +13,7 @@ import pytest
 
 import loom_cli.rollout.operator.installed_final_gate_executor as installed_module
 from loom_cli.rollout.gb10_readiness import FULL_GB10_HOSTS
+from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import environment_authority
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlan, FinalGatePlanStore
 from loom_cli.rollout.operator.installed_final_gate_executor import (
@@ -235,6 +236,7 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
         ),
     )
     current_sha = "c" * 40
+    current_tree = "d" * 40
     current_repo = environment_authority("staging").candidate_runtime_root / current_sha / "repo"
     current_config = replace(
         historical_config,
@@ -258,18 +260,36 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
         ),
     )
     resolved: list[dict[str, object]] = []
+    current_identities: list[object] = []
 
     def resolve_runtime(config: object, **bindings: object) -> object:
         resolved.append({"config": config, **bindings})
         return historical_config
 
+    def current_runtime_identity(config: object) -> CandidateIdentityEvidence:
+        current_identities.append(config)
+        return CandidateIdentityEvidence(
+            resolved_sha=current_sha,
+            resolved_tree=current_tree,
+            source_mode="merged-dev",
+            approved_base_sha=None,
+            linear_history_count=0,
+            evidence_digest="9" * 64,
+        )
+
     executor = replace(
         historical_executor,
         config=current_config,
         verify_install=lambda **_kwargs: current_install,
-        resume_runtime_upgrade=SimpleNamespace(resolve=resolve_runtime),
+        resume_runtime_upgrade=SimpleNamespace(
+            resolve=resolve_runtime,
+            current_runtime_identity=current_runtime_identity,
+        ),
     )
     captured: dict[str, object] = {}
+    gb10_controller_builds: list[dict[str, object]] = []
+    gb10_controllers = (object(), object())
+    oldlab_credential_builds: list[dict[str, object]] = []
     monkeypatch.setattr(
         installed_module,
         "load_cluster_config",
@@ -278,7 +298,10 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     monkeypatch.setattr(
         installed_module,
         "build_fixed_gb10_external_supervisor_transport",
-        lambda **_kwargs: object(),
+        lambda **kwargs: (
+            gb10_controller_builds.append(kwargs),
+            gb10_controllers[len(gb10_controller_builds) - 1],
+        )[1],
     )
     monkeypatch.setattr(
         installed_module,
@@ -288,7 +311,7 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     monkeypatch.setattr(
         installed_module,
         "FixedLocalExternalSupervisorCredentialTransport",
-        lambda **_kwargs: object(),
+        lambda **kwargs: (oldlab_credential_builds.append(kwargs), object())[1],
         raising=False,
     )
     monkeypatch.setattr(
@@ -323,6 +346,31 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
         }
     ]
     assert captured["candidate_root"] == historical_config.runner_repo
+    assert current_identities == [current_config]
+    assert gb10_controller_builds == [
+        {
+            "candidate_sha": plan.candidate_sha,
+            "candidate_tree": plan.candidate_tree,
+            "run": executor._supervisor_ssh_run,
+        },
+        {
+            "candidate_sha": current_sha,
+            "candidate_tree": current_tree,
+            "run": executor._supervisor_ssh_run,
+        },
+    ]
+    supervisor_transports = captured["external_supervisor_transports"]
+    assert supervisor_transports["gx10-01c7"] is gb10_controllers[0]
+    credential_transports = captured["external_supervisor_credential_transports"]
+    assert credential_transports["gx10-01c7"].transport is gb10_controllers[1]
+    assert oldlab_credential_builds == [
+        {
+            "candidate_root": current_config.runner_repo,
+            "execution_host": "TRT-EAI-OLDLAB-1",
+            "service_uid": os.geteuid(),
+            "service_gid": os.getegid(),
+        }
+    ]
     environment_state = captured["environment_state_transport"]
     assert isinstance(environment_state, HttpxProtectedEnvironmentStateTransport)
     assert environment_state.candidate_root == historical_config.runner_repo
