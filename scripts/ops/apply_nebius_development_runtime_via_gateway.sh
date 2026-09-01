@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --control-plane-image DIGEST_REF --service-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -11,6 +11,8 @@ ssh_key=
 known_hosts=
 cluster_id=
 nebius_credentials=
+control_plane_image=
+service_image=
 while (($#)); do
   case "$1" in
     --gateway)
@@ -38,12 +40,24 @@ while (($#)); do
       nebius_credentials=$2
       shift 2
       ;;
+    --control-plane-image)
+      (($# >= 2)) || usage
+      control_plane_image=$2
+      shift 2
+      ;;
+    --service-image)
+      (($# >= 2)) || usage
+      service_image=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
 
 [[ $gateway =~ ^[A-Za-z0-9.-]+$ ]] || usage
 [[ $cluster_id =~ ^mk8scluster-[a-z0-9]+$ ]] || usage
+[[ $control_plane_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
+[[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
 
 credential_mode=$(stat -f '%Lp' "$nebius_credentials" 2>/dev/null || stat -c '%a' "$nebius_credentials")
@@ -79,11 +93,14 @@ scp "${ssh_options[@]}" \
   "codex@$gateway:$remote_stage/"
 
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
-  "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" <<'REMOTE'
+  "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
+  "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
 remote_stage=$1
 cluster_id=$2
 credential_name=$3
+control_plane_image=$4
+service_image=$5
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
@@ -95,8 +112,16 @@ nebius mk8s cluster get-credentials \
   --no-progress
 chmod 600 "$remote_stage/kubeconfig"
 
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
+  deployment/loom-control-plane "control-plane=$control_plane_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
+  deployment/loom-control-plane --timeout=300s
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
+  deployment/loom-service "service=$service_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
+  deployment/loom-service --timeout=300s
+
 "$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" \
   --kubeconfig "$remote_stage/kubeconfig" \
   --nebius-credentials "$remote_stage/$credential_name"
 REMOTE
-
