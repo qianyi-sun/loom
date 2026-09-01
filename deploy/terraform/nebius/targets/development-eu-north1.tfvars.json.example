@@ -5,6 +5,11 @@
   "evidence_bucket_name": "loom-nebius-development-eu-north1-REPLACE",
   "evidence_bucket_max_bytes": 107374182400,
   "capacity_observer_public_key_pem": "-----BEGIN PUBLIC KEY-----\nREPLACE_WITH_CAPACITY_OBSERVER_PUBLIC_KEY\n-----END PUBLIC KEY-----",
+  "deployment_access_public_pool_id": "vpcpool-REPLACE-DEVELOPMENT-EU-NORTH1-PUBLIC",
+  "deployment_access_ssh_public_key": "ssh-ed25519 REPLACE_WITH_OPERATOR_PUBLIC_KEY",
+  "deployment_access_image_id": "computeimage-REPLACE_PINNED_UBUNTU_IMAGE",
+  "deployment_access_preset": "2vcpu-8gb",
+  "deployment_access_disk_gib": 40,
   "target": {
     "target_id": "nebius-eu-north1-development",
     "cluster_scope_id": "nebius-eu-north1-shared",

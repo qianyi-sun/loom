@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH" >&2
+  exit 2
+}
+
+gateway=
+ssh_key=
+known_hosts=
+cluster_id=
+nebius_credentials=
+while (($#)); do
+  case "$1" in
+    --gateway)
+      (($# >= 2)) || usage
+      gateway=$2
+      shift 2
+      ;;
+    --ssh-key)
+      (($# >= 2)) || usage
+      ssh_key=$2
+      shift 2
+      ;;
+    --known-hosts)
+      (($# >= 2)) || usage
+      known_hosts=$2
+      shift 2
+      ;;
+    --cluster-id)
+      (($# >= 2)) || usage
+      cluster_id=$2
+      shift 2
+      ;;
+    --nebius-credentials)
+      (($# >= 2)) || usage
+      nebius_credentials=$2
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+
+[[ $gateway =~ ^[A-Za-z0-9.-]+$ ]] || usage
+[[ $cluster_id =~ ^mk8scluster-[a-z0-9]+$ ]] || usage
+[[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
+
+credential_mode=$(stat -f '%Lp' "$nebius_credentials" 2>/dev/null || stat -c '%a' "$nebius_credentials")
+if ((10#$credential_mode % 100 != 0)); then
+  echo "Nebius credential file must not be group/world accessible" >&2
+  exit 1
+fi
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+local_stage=$(mktemp -d)
+remote_stage="/tmp/loom-nebius-runtime-$$"
+trap 'rm -rf "$local_stage"' EXIT
+
+tar -C "$repo_root" -czf "$local_stage/runtime.tar.gz" \
+  scripts/ops/apply_nebius_development_runtime.sh \
+  deploy/k8s/nebius-control-plane-development-patch.yaml \
+  deploy/k8s/nebius-execution-actuator.yaml \
+  deploy/k8s/nebius-capacity-collector.yaml \
+  deploy/k8s/network-policies.yaml
+
+ssh_options=(
+  -o BatchMode=yes
+  -o StrictHostKeyChecking=yes
+  -o "UserKnownHostsFile=$known_hosts"
+  -o ConnectTimeout=15
+  -i "$ssh_key"
+)
+
+ssh "${ssh_options[@]}" "codex@$gateway" "install -d -m 700 '$remote_stage'"
+scp "${ssh_options[@]}" \
+  "$local_stage/runtime.tar.gz" \
+  "$nebius_credentials" \
+  "codex@$gateway:$remote_stage/"
+
+ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
+  "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" <<'REMOTE'
+set -euo pipefail
+remote_stage=$1
+cluster_id=$2
+credential_name=$3
+trap 'rm -rf "$remote_stage"' EXIT
+
+chmod 600 "$remote_stage/$credential_name"
+tar -C "$remote_stage" -xzf "$remote_stage/runtime.tar.gz"
+nebius mk8s cluster get-credentials \
+  --id "$cluster_id" \
+  --internal \
+  --kubeconfig "$remote_stage/kubeconfig" \
+  --no-progress
+chmod 600 "$remote_stage/kubeconfig"
+
+"$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" \
+  --kubeconfig "$remote_stage/kubeconfig" \
+  --nebius-credentials "$remote_stage/$credential_name"
+REMOTE
+

@@ -55,3 +55,30 @@ def test_backend_credentials_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ContractError, match="credentials may not be stored"):
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
+def test_missing_persistent_deployment_access_is_rejected(tmp_path: Path) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    del document["deployment_access_public_pool_id"]
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="deployment_access_public_pool_id is required"):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
+def test_execution_nodes_remain_private_with_public_deployment_gateway(tmp_path: Path) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    module_path = nebius_root / "modules" / "execution-target" / "main.tf"
+    text = module_path.read_text(encoding="utf-8")
+    marker = 'resource "nebius_mk8s_v1_node_group" "execution"'
+    text = text.replace(
+        marker,
+        f'{marker}\n# drift\npublic_ip_address = {{}}',
+        1,
+    )
+    module_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ContractError, match="nodes must not assign public IP"):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
