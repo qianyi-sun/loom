@@ -203,7 +203,7 @@ def _case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Case:
     trivy_sha256 = hashlib.sha256(_TRIVY).hexdigest()
     value["binary_sha256"] = {
         "linux/amd64": trivy_sha256,
-        "linux/arm64": "1" * 64,
+        "linux/arm64": trivy_sha256,
     }
     value["database"] = {"image": database_ref, "layer_sha256": database_layer}
     value["java_database"] = {

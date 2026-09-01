@@ -9,6 +9,7 @@ import pytest
 from loom_cli.environment_state import (
     EnvironmentStateProfileError,
     _normalize_autoscaler_policy,
+    _normalize_task_image_builder_policy,
     apply_external_slurm_autoscaler_supervisors,
     diff_environment_state,
     diff_external_slurm_autoscaler_supervisors,
@@ -27,9 +28,7 @@ def _assert_manager_trust_arguments(supervisor: dict[str, Any], *, pool_name: st
             "--global-execution-witness-json": (
                 f"/etc/loom/credentials/global-execution/{pool_name}-witness.json"
             ),
-            "--manager-public-key": (
-                "/etc/loom/credentials/global-execution/manager-ed25519.pub"
-            ),
+            "--manager-public-key": ("/etc/loom/credentials/global-execution/manager-ed25519.pub"),
             "--expected-manager-public-key-sha256-file": (
                 "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
             ),
@@ -38,10 +37,10 @@ def _assert_manager_trust_arguments(supervisor: dict[str, Any], *, pool_name: st
             assert args[args.index(option) + 1] == value
         return
     expected = {
-        "--global-execution-manager-export": "deployment/loom-capacity-manager",
-        "--global-execution-manager-namespace": "loom-dev",
-        "--global-execution-manager-kubeconfig": (
-            "/var/lib/loom-staging-rollout/kubeconfig"
+        "--global-execution-witness-config-map": ("loom-global-execution-witness-v1"),
+        "--global-execution-witness-namespace": "loom-dev",
+        "--global-execution-witness-kubeconfig": (
+            "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
         ),
     }
     for option, value in expected.items():
@@ -49,8 +48,14 @@ def _assert_manager_trust_arguments(supervisor: dict[str, Any], *, pool_name: st
     pin = args[args.index("--expected-manager-public-key-sha256") + 1]
     assert len(pin) == 64 and set(pin) <= set("0123456789abcdef")
     assert "--global-execution-witness-json" not in args
+    assert "--global-execution-manager-export" not in args
+    assert "--global-execution-manager-namespace" not in args
+    assert "--global-execution-manager-kubeconfig" not in args
     assert "--manager-public-key" not in args
     assert "--expected-manager-public-key-sha256-file" not in args
+    assert args[args.index("--kubeconfig") + 1] == (
+        "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
+    )
 
 
 def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fields() -> None:
@@ -80,6 +85,31 @@ def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fiel
         "slurm_qos": "loom-staging-normal",
         "slurm_reservation": "loom-staging-min",
     }
+
+
+@pytest.mark.parametrize("seconds", [0, 3601, True])
+def test_task_image_builder_policy_bounds_failure_backoff(seconds: object) -> None:
+    base = {
+        "pool_name": "task-image-builder-gb10",
+        "slurm_cluster_id": "gb10",
+        "cpu_arch": "arm64",
+        "allowed_nodes": ["trt-gb10-2"],
+        "env_file": "/shared/builder.env",
+        "env_template_file": "/shared/worker.env",
+        "builder_token_file": "/shared/builder-token",
+        "repo_dir": "/shared/repo",
+        "registry_docker_config_dir": "/shared/docker",
+        "partition": "gb10",
+        "time_limit": "04:00:00",
+        "requested_cpus": 19,
+        "requested_memory_mib": 110000,
+        "max_jobs": 1,
+        "pending_job_cap": 1,
+        "failure_backoff_seconds": seconds,
+    }
+
+    with pytest.raises(EnvironmentStateProfileError, match="failure_backoff_seconds"):
+        _normalize_task_image_builder_policy(base, environment="staging", index=0)
 
 
 def _write_profile(path: Path, *, host1_intent: str = "active") -> None:
@@ -2421,12 +2451,8 @@ def test_committed_staging_profile_activates_core_and_native_builder_supervisors
         "task-image-builder-gb10-staging",
         "task-image-builder-oldlab-staging",
     }
-    assert "manager_witness_export_bootstrap" not in (
-        profile.external_slurm_runner_prerequisites
-    )
-    assert "retained_inactive_supervisor_pools" not in (
-        profile.external_slurm_runner_prerequisites
-    )
+    assert "manager_witness_export_bootstrap" not in (profile.external_slurm_runner_prerequisites)
+    assert "retained_inactive_supervisor_pools" not in (profile.external_slurm_runner_prerequisites)
 
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
@@ -2594,10 +2620,13 @@ def test_staging_manager_export_bootstrap_requires_every_supervisor_inactive() -
         {"pool_name": "oldlab", "enabled": False, "active": False},
     ]
 
-    assert staging_gb10_external_activation_blockers(
-        **base,
-        supervisors=inactive,
-    ) == ()
+    assert (
+        staging_gb10_external_activation_blockers(
+            **base,
+            supervisors=inactive,
+        )
+        == ()
+    )
     assert staging_gb10_external_activation_blockers(
         **base,
         supervisors=[*inactive, {"pool_name": "other", "enabled": True, "active": True}],

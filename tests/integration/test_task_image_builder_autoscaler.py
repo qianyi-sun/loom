@@ -34,6 +34,7 @@ def _config(namespace: str, *, cpu_arch: str = "arm64") -> TaskImageBuilderPoolC
         max_jobs=2,
         pending_job_cap=2,
         idle_exit_after_seconds=60,
+        failure_backoff_seconds=300,
         sbatch_path="sbatch",
         squeue_path="squeue",
         sacct_path="sacct",
@@ -73,6 +74,105 @@ class _MissingJobRunner(_FakeRunner):
     async def query_jobs(self, job_ids: tuple[str, ...]) -> list[object]:
         self.queried_job_ids.append(job_ids)
         return []
+
+
+async def test_recent_failed_allocation_suppresses_only_exact_pool_until_expiry(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    namespace = uuid4().hex[:8]
+    config = _config(namespace)
+    runner = _FakeRunner()
+    task_id = f"builder-autoscaler/{namespace}"
+    exact_job_id = f"failed-exact-{namespace}"
+    foreign_environment_job_id = f"failed-env-{namespace}"
+    foreign_pool_job_id = f"failed-pool-{namespace}"
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            session.add(
+                TaskImageMaterialization(
+                    id=uuid4(),
+                    materialization_key=hashlib.sha256(task_id.encode()).hexdigest(),
+                    task_id=task_id,
+                    task_checksum="e" * 64,
+                    cpu_arch=config.cpu_arch,
+                    task_config={},
+                    state="queued",
+                )
+            )
+            for job_id, environment, pool_name in (
+                (exact_job_id, config.environment, config.pool_name),
+                (foreign_environment_job_id, "foreign", config.pool_name),
+                (foreign_pool_job_id, config.environment, f"foreign-{namespace}"),
+            ):
+                session.add(
+                    SlurmWorkerJob(
+                        slurm_cluster_id=config.slurm_cluster_id,
+                        environment=environment,
+                        pool_name=pool_name,
+                        nodelist=config.allowed_nodes[0],
+                        requested_cpus=config.requested_cpus,
+                        requested_memory_mib=config.requested_memory_mib,
+                        requested_concurrency=1,
+                        requested_gpus=0,
+                        job_id=job_id,
+                        slurm_state="FAILED",
+                        state="failed",
+                        submitted_at=now - timedelta(minutes=1),
+                        finished_at=now,
+                    )
+                )
+
+        async with sessions() as session, session.begin():
+            blocked = await reconcile_task_image_builder_autoscaler_once(
+                session,
+                config=config,
+                runner=runner,
+            )
+
+        assert blocked.failure_backoff_active is True
+        assert blocked.submitted_job_ids == ()
+        assert runner.submitted_nodes == []
+
+        async with sessions() as session, session.begin():
+            await session.execute(
+                update(SlurmWorkerJob)
+                .where(SlurmWorkerJob.job_id == exact_job_id)
+                .values(
+                    finished_at=datetime.now(UTC)
+                    - timedelta(seconds=config.failure_backoff_seconds + 1)
+                )
+            )
+        async with sessions() as session, session.begin():
+            resumed = await reconcile_task_image_builder_autoscaler_once(
+                session,
+                config=config,
+                runner=runner,
+            )
+
+        assert resumed.failure_backoff_active is False
+        assert resumed.submitted_job_ids == ("10001",)
+        assert runner.submitted_nodes == [config.allowed_nodes[0]]
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(SlurmWorkerJob).where(
+                    SlurmWorkerJob.job_id.in_(
+                        (
+                            exact_job_id,
+                            foreign_environment_job_id,
+                            foreign_pool_job_id,
+                            "10001",
+                        )
+                    )
+                )
+            )
+            await session.execute(
+                delete(TaskImageMaterialization).where(TaskImageMaterialization.task_id == task_id)
+            )
+        await engine.dispose()
 
 
 async def test_reconcile_scales_from_zero_and_cancels_pending_without_demand(
@@ -221,6 +321,23 @@ async def test_reconcile_invalid_witness_mode_cancels_running_builder_capacity(
                     submitted_at=datetime.now(UTC),
                 )
             )
+            session.add(
+                SlurmWorkerJob(
+                    slurm_cluster_id="gb10",
+                    environment=config.environment,
+                    pool_name=config.pool_name,
+                    nodelist=config.allowed_nodes[1],
+                    requested_cpus=config.requested_cpus,
+                    requested_memory_mib=config.requested_memory_mib,
+                    requested_concurrency=1,
+                    requested_gpus=0,
+                    job_id=f"failed-{namespace}",
+                    slurm_state="FAILED",
+                    state="failed",
+                    submitted_at=datetime.now(UTC) - timedelta(minutes=1),
+                    finished_at=datetime.now(UTC),
+                )
+            )
 
         async with sessions() as session, session.begin():
             result = await reconcile_task_image_builder_autoscaler_once(
@@ -231,6 +348,7 @@ async def test_reconcile_invalid_witness_mode_cancels_running_builder_capacity(
             )
 
         assert result.submitted_job_ids == ()
+        assert result.failure_backoff_active is True
         assert result.cancelled_job_ids == (active_job_id,)
         assert runner.submitted_nodes == []
         assert runner.cancelled_active_jobs == [active_job_id]

@@ -59,6 +59,7 @@ _MAX_PORT_FORWARD_STARTUP_OUTPUT_BYTES = 16 * 1024
 _SLURM_AUTHORITY_TIMEOUT_SEC = 10.0
 _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC = 15.0
 _MAX_GLOBAL_EXECUTION_EXPORT_BYTES = 64 * 1024
+_MAX_GLOBAL_EXECUTION_CONFIG_MAP_BYTES = 256 * 1024
 _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES = 16 * 1024
 _KUBERNETES_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _SLURM_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
@@ -164,8 +165,14 @@ def _parser() -> argparse.ArgumentParser:
         metavar="DEPLOYMENT",
         help="Fetch a fresh witness from the protected capacity-manager deployment.",
     )
+    witness_source.add_argument(
+        "--global-execution-witness-config-map",
+        help="Fetch the signed witness from the stable protected ConfigMap.",
+    )
     parser.add_argument("--global-execution-manager-namespace")
     parser.add_argument("--global-execution-manager-kubeconfig")
+    parser.add_argument("--global-execution-witness-namespace")
+    parser.add_argument("--global-execution-witness-kubeconfig")
     parser.add_argument("--manager-public-key", type=Path)
     manager_pin = parser.add_mutually_exclusive_group(required=True)
     manager_pin.add_argument("--expected-manager-public-key-sha256")
@@ -205,8 +212,10 @@ def _stop_global_execution_export(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _run_bounded_global_execution_export(
+def _run_bounded_global_execution_command(
     command: list[str],
+    *,
+    maximum_stdout_bytes: int,
 ) -> subprocess.CompletedProcess[bytes]:
     process: subprocess.Popen[bytes] | None = None
     completed = False
@@ -222,7 +231,7 @@ def _run_bounded_global_execution_export(
         stdout = bytearray()
         stderr = bytearray()
         streams = {
-            process.stdout: (stdout, _MAX_GLOBAL_EXECUTION_EXPORT_BYTES),
+            process.stdout: (stdout, maximum_stdout_bytes),
             process.stderr: (stderr, _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES),
         }
         deadline = time.monotonic() + _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC
@@ -275,9 +284,7 @@ def _run_bounded_global_execution_export(
             bytes(stderr),
         )
     except (OSError, OverflowError, subprocess.SubprocessError) as exc:
-        raise GlobalExecutionFenceError(
-            "global execution witness export is unavailable"
-        ) from exc
+        raise GlobalExecutionFenceError("global execution witness export is unavailable") from exc
     finally:
         if process is not None:
             if not completed:
@@ -286,6 +293,35 @@ def _run_bounded_global_execution_export(
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
+
+
+def _run_bounded_global_execution_export(
+    command: list[str],
+) -> subprocess.CompletedProcess[bytes]:
+    return _run_bounded_global_execution_command(
+        command,
+        maximum_stdout_bytes=_MAX_GLOBAL_EXECUTION_EXPORT_BYTES,
+    )
+
+
+def _run_bounded_global_execution_config_map(
+    command: list[str],
+) -> subprocess.CompletedProcess[bytes]:
+    return _run_bounded_global_execution_command(
+        command,
+        maximum_stdout_bytes=_MAX_GLOBAL_EXECUTION_CONFIG_MAP_BYTES,
+    )
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    output: dict[str, object] = {}
+    for key, value in pairs:
+        if key in output:
+            raise ValueError("duplicate JSON key")
+        output[key] = value
+    return output
 
 
 def _load_current_global_execution_witness(
@@ -302,6 +338,9 @@ def _load_current_global_execution_witness(
         if (
             args.global_execution_manager_export != "deployment/loom-capacity-manager"
             or args.global_execution_witness_json is not None
+            or args.global_execution_witness_config_map is not None
+            or args.global_execution_witness_namespace is not None
+            or args.global_execution_witness_kubeconfig is not None
             or args.manager_public_key is not None
             or args.expected_manager_public_key_sha256_file is not None
             or args.global_execution_manager_namespace is None
@@ -350,11 +389,74 @@ def _load_current_global_execution_witness(
             or not 0 < len(result.stdout) <= _MAX_GLOBAL_EXECUTION_EXPORT_BYTES
             or len(result.stderr) > _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES
         ):
-            raise GlobalExecutionFenceError(
-                "global execution witness export is unavailable"
-            )
+            raise GlobalExecutionFenceError("global execution witness export is unavailable")
         return parse_global_execution_witness_export(
             result.stdout,
+            expected_manager_public_key_sha256=fingerprint,
+        )
+    if args.global_execution_witness_config_map is not None:
+        fingerprint = args.expected_manager_public_key_sha256
+        if (
+            args.global_execution_witness_config_map != "loom-global-execution-witness-v1"
+            or args.global_execution_witness_json is not None
+            or args.global_execution_manager_export is not None
+            or args.global_execution_manager_namespace is not None
+            or args.global_execution_manager_kubeconfig is not None
+            or args.manager_public_key is not None
+            or args.expected_manager_public_key_sha256_file is not None
+            or args.global_execution_witness_namespace is None
+            or args.global_execution_witness_kubeconfig is None
+            or not isinstance(fingerprint, str)
+            or _SHA256.fullmatch(fingerprint) is None
+        ):
+            raise ExternalAutoscalerConfigurationError(
+                "ConfigMap source requires exactly one reviewed public key fingerprint"
+            )
+        kubectl = str(args.kubectl).strip()
+        kubeconfig = str(args.global_execution_witness_kubeconfig).strip()
+        if not kubectl or not kubeconfig:
+            raise ExternalAutoscalerConfigurationError("ConfigMap Kubernetes transport is invalid")
+        namespace = _validated_kubernetes_name(
+            args.global_execution_witness_namespace,
+            "--global-execution-witness-namespace",
+        )
+        command = [
+            kubectl,
+            "--kubeconfig",
+            kubeconfig,
+            "--request-timeout=10s",
+            "-n",
+            namespace,
+            "get",
+            "configmap",
+            args.global_execution_witness_config_map,
+            "-o",
+            "json",
+        ]
+        result = _run_bounded_global_execution_config_map(command)
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, bytes)
+            or not isinstance(result.stderr, bytes)
+            or not 0 < len(result.stdout) <= _MAX_GLOBAL_EXECUTION_CONFIG_MAP_BYTES
+            or len(result.stderr) > _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES
+        ):
+            raise GlobalExecutionFenceError("global execution witness ConfigMap is unavailable")
+        try:
+            config_map = json.loads(
+                result.stdout,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+            data = config_map["data"]
+            encoded = data[f"{pool_id}.json"].encode("ascii")
+        except (AttributeError, KeyError, TypeError, UnicodeError, ValueError) as exc:
+            raise GlobalExecutionFenceError(
+                "global execution witness ConfigMap is unavailable"
+            ) from exc
+        if not 0 < len(encoded) <= _MAX_GLOBAL_EXECUTION_EXPORT_BYTES:
+            raise GlobalExecutionFenceError("global execution witness ConfigMap is unavailable")
+        return parse_global_execution_witness_export(
+            encoded,
             expected_manager_public_key_sha256=fingerprint,
         )
     if (
@@ -362,6 +464,9 @@ def _load_current_global_execution_witness(
         or args.manager_public_key is None
         or args.global_execution_manager_namespace is not None
         or args.global_execution_manager_kubeconfig is not None
+        or args.global_execution_witness_namespace is not None
+        or args.global_execution_witness_kubeconfig is not None
+        or args.global_execution_witness_config_map is not None
     ):
         raise ExternalAutoscalerConfigurationError(
             "global execution witness file source is incomplete"
@@ -370,9 +475,7 @@ def _load_current_global_execution_witness(
         args.global_execution_witness_json,
         manager_public_key_path=args.manager_public_key,
         expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
-        expected_manager_public_key_sha256_file=(
-            args.expected_manager_public_key_sha256_file
-        ),
+        expected_manager_public_key_sha256_file=(args.expected_manager_public_key_sha256_file),
     )
 
 
@@ -878,9 +981,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                 now=datetime.now(UTC),
             )
         except GlobalExecutionFenceError as exc:
-            raise ExternalAutoscalerError(
-                "global execution witness is unavailable"
-            ) from exc
+            raise ExternalAutoscalerError("global execution witness is unavailable") from exc
         print(
             json.dumps(
                 {

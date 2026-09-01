@@ -77,12 +77,17 @@ class ProtectedApplyComponent:
     input_fingerprint: str
     classify: Callable[[FinalGatePlan], ComponentObservation]
     apply: Callable[[FinalGatePlan], None]
+    preapply_group: str | None = None
 
     def __post_init__(self) -> None:
         if (
             _COMPONENT_RE.fullmatch(self.component_id) is None
             or _SHA256_RE.fullmatch(self.implementation_digest) is None
             or _SHA256_RE.fullmatch(self.input_fingerprint) is None
+            or (
+                self.preapply_group is not None
+                and _COMPONENT_RE.fullmatch(self.preapply_group) is None
+            )
         ):
             raise ValueError("protected apply component authority is invalid")
 
@@ -353,6 +358,7 @@ class ProtectedApplyJournal:
         plan: FinalGatePlan,
         components: Sequence[ProtectedApplyComponent],
     ) -> Mapping[str, ComponentTerminal]:
+        groups = self._validated_preapply_groups(components)
         if (
             plan.request_id != self.request_id
             or plan.attempt_number != self.attempt_number
@@ -371,7 +377,17 @@ class ProtectedApplyJournal:
             _require_regular(lock_fd, uid=self.service_uid)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             results: dict[str, ComponentTerminal] = {}
+            preclassified_groups: set[str] = set()
             for ordinal, component in enumerate(components):
+                if (
+                    component.preapply_group is not None
+                    and component.preapply_group not in preclassified_groups
+                ):
+                    self._preclassify_group(
+                        plan,
+                        groups[component.preapply_group],
+                    )
+                    preclassified_groups.add(component.preapply_group)
                 results[component.component_id] = self._execute_one(plan, component, ordinal)
             return MappingProxyType(results)
         finally:
@@ -379,6 +395,36 @@ class ProtectedApplyJournal:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
             finally:
                 os.close(lock_fd)
+
+    def _validated_preapply_groups(
+        self,
+        components: Sequence[ProtectedApplyComponent],
+    ) -> Mapping[str, tuple[ProtectedApplyComponent, ...]]:
+        members: dict[str, list[tuple[int, ProtectedApplyComponent]]] = {}
+        for ordinal, component in enumerate(components):
+            if component.preapply_group is not None:
+                members.setdefault(component.preapply_group, []).append((ordinal, component))
+        validated: dict[str, tuple[ProtectedApplyComponent, ...]] = {}
+        for group, grouped in members.items():
+            ordinals = tuple(ordinal for ordinal, _component in grouped)
+            if ordinals != tuple(range(ordinals[0], ordinals[-1] + 1)):
+                raise ProtectedApplyJournalError("protected preapply group identity is invalid")
+            validated[group] = tuple(component for _ordinal, component in grouped)
+        return MappingProxyType(validated)
+
+    def _preclassify_group(
+        self,
+        plan: FinalGatePlan,
+        components: Sequence[ProtectedApplyComponent],
+    ) -> None:
+        observations = tuple(component.classify(plan) for component in components)
+        drifted = tuple(
+            component.component_id
+            for component, observation in zip(components, observations, strict=True)
+            if observation.state is ComponentState.DRIFTED
+        )
+        if drifted:
+            raise ProtectedApplyJournalError("protected preapply group live state drifted")
 
     def has_advanced_epoch_terminal(self, plan: FinalGatePlan) -> bool:
         """Return whether this exact plan durably advanced its mutation epoch.

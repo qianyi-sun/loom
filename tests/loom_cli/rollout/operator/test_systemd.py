@@ -37,6 +37,11 @@ CANDIDATE_SHA = "a" * 40
 CANDIDATE_RUNTIME = Path(f"/opt/loom-staging-runner/candidates/{CANDIDATE_SHA}")
 CANDIDATE_REPO = CANDIDATE_RUNTIME / "repo"
 CANDIDATE_VENV = CANDIDATE_RUNTIME / "venv"
+HISTORICAL_CANDIDATE_SHA = "c" * 40
+HISTORICAL_CANDIDATE_TREE = "d" * 40
+HISTORICAL_CANDIDATE_REPO = Path(
+    f"/opt/loom-staging-runner/candidates/{HISTORICAL_CANDIDATE_SHA}/repo"
+)
 GENERATION_ONE = "1" * 32
 GENERATION_TWO = "2" * 32
 
@@ -406,6 +411,8 @@ class MutationGuardRunner:
         self.running = False
         self.evidence_pid = 4321
         self.generation: str | None = None
+        self.candidate_sha = CANDIDATE_SHA
+        self.candidate_tree = "b" * 40
         self.absence_delay = 0
         self.retain_clean_inactive_unit = False
         self.retain_failed_unit = False
@@ -416,8 +423,8 @@ class MutationGuardRunner:
         assert self.generation is not None
         evidence = MutationGuardEvidence.build(
             request_id="req-alpha",
-            candidate_sha=CANDIDATE_SHA,
-            candidate_tree="b" * 40,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
             generation=self.generation,
             mutation_epoch=100,
             guard_pid=self.evidence_pid,
@@ -439,6 +446,9 @@ class MutationGuardRunner:
         if argv[0] == "systemd-run":
             generation_index = argv.index("--generation")
             self.generation = argv[generation_index + 1]
+            if "--candidate-sha" in argv:
+                self.candidate_sha = argv[argv.index("--candidate-sha") + 1]
+                self.candidate_tree = argv[argv.index("--candidate-tree") + 1]
             self.running = True
             self._publish("ready")
             return subprocess.CompletedProcess(argv, 0, "", "")
@@ -639,6 +649,98 @@ def test_mutation_guard_release_then_reacquire_retires_only_exact_released_gener
     )
 
 
+def test_mutation_guard_reacquires_historical_candidate_after_runner_upgrade(
+    tmp_path: Path,
+) -> None:
+    systemd, runner = _mutation_guard_manager(
+        tmp_path,
+        generations=[GENERATION_TWO],
+    )
+    runner.generation = GENERATION_ONE
+    runner.candidate_sha = HISTORICAL_CANDIDATE_SHA
+    runner.candidate_tree = HISTORICAL_CANDIDATE_TREE
+    runner._publish("released")
+
+    evidence = systemd.start_mutation_guard(
+        "req-alpha",
+        candidate_sha=HISTORICAL_CANDIDATE_SHA,
+        candidate_tree=HISTORICAL_CANDIDATE_TREE,
+        runner_config_sha256="9" * 64,
+        cluster_config_path=(
+            HISTORICAL_CANDIDATE_REPO / "deploy/environments/staging.cluster.toml"
+        ),
+    )
+
+    assert evidence.candidate_sha == HISTORICAL_CANDIDATE_SHA
+    assert evidence.candidate_tree == HISTORICAL_CANDIDATE_TREE
+    assert evidence.generation == GENERATION_TWO
+    launch = next(call for call in runner.calls if call[0] == "systemd-run")
+    hold = launch[launch.index("hold") :]
+    assert hold == [
+        "hold",
+        "--request-id",
+        "req-alpha",
+        "--generation",
+        GENERATION_TWO,
+        "--candidate-sha",
+        HISTORICAL_CANDIDATE_SHA,
+        "--candidate-tree",
+        HISTORICAL_CANDIDATE_TREE,
+        "--runner-config-sha256",
+        "9" * 64,
+        "--cluster-config-path",
+        str(HISTORICAL_CANDIDATE_REPO / "deploy/environments/staging.cluster.toml"),
+    ]
+    stop_post = next(item for item in launch if item.startswith("ExecStopPost="))
+    fence = shlex.split(stop_post.removeprefix("ExecStopPost="))
+    assert fence[-8:] == [
+        "--request-id",
+        "req-alpha",
+        "--generation",
+        GENERATION_TWO,
+        "--candidate-sha",
+        HISTORICAL_CANDIDATE_SHA,
+        "--candidate-tree",
+        HISTORICAL_CANDIDATE_TREE,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("runner_config_sha256", "cluster_config_path"),
+    (
+        pytest.param(None, None, id="incomplete"),
+        pytest.param("9" * 64, Path("relative/cluster.toml"), id="invalid-path"),
+    ),
+)
+def test_mutation_guard_invalid_historical_authority_preserves_released_evidence(
+    tmp_path: Path,
+    runner_config_sha256: str | None,
+    cluster_config_path: Path | None,
+) -> None:
+    systemd, runner = _mutation_guard_manager(
+        tmp_path,
+        generations=[GENERATION_TWO],
+    )
+    runner.generation = GENERATION_ONE
+    runner.candidate_sha = HISTORICAL_CANDIDATE_SHA
+    runner.candidate_tree = HISTORICAL_CANDIDATE_TREE
+    runner._publish("released")
+    evidence_path = guard_evidence_path(systemd.config, "req-alpha")
+    original = read_mutation_guard_evidence(evidence_path, service_uid=os.getuid())
+
+    with pytest.raises(UnitLaunchError, match="candidate authority"):
+        systemd.start_mutation_guard(
+            "req-alpha",
+            candidate_sha=HISTORICAL_CANDIDATE_SHA,
+            candidate_tree=HISTORICAL_CANDIDATE_TREE,
+            runner_config_sha256=runner_config_sha256,
+            cluster_config_path=cluster_config_path,
+        )
+
+    assert read_mutation_guard_evidence(evidence_path, service_uid=os.getuid()) == original
+    assert not any(call[0] == "systemd-run" for call in runner.calls)
+
+
 @pytest.mark.parametrize(
     "unsafe_evidence",
     [
@@ -646,6 +748,7 @@ def test_mutation_guard_release_then_reacquire_retires_only_exact_released_gener
         pytest.param("malformed", id="malformed"),
         pytest.param("foreign-request", id="foreign-request"),
         pytest.param("foreign-candidate", id="foreign-candidate"),
+        pytest.param("foreign-tree", id="foreign-tree"),
     ],
 )
 def test_mutation_guard_reacquire_refuses_unsafe_preexisting_evidence(
@@ -675,7 +778,7 @@ def test_mutation_guard_reacquire_refuses_unsafe_preexisting_evidence(
         foreign = MutationGuardEvidence.build(
             request_id="req-other" if unsafe_evidence == "foreign-request" else "req-alpha",
             candidate_sha=("c" * 40 if unsafe_evidence == "foreign-candidate" else CANDIDATE_SHA),
-            candidate_tree="b" * 40,
+            candidate_tree="c" * 40 if unsafe_evidence == "foreign-tree" else "b" * 40,
             generation=GENERATION_ONE,
             mutation_epoch=100,
             guard_pid=4321,
@@ -821,6 +924,42 @@ def test_mutation_guard_fence_is_noop_after_exact_verified_release(tmp_path: Pat
     )
 
     manager.fence_mutation_guard_owners("req-alpha", GENERATION_ONE)
+
+    assert runner.calls == []
+
+
+def test_mutation_guard_fence_is_noop_for_exact_historical_candidate_release(
+    tmp_path: Path,
+) -> None:
+    manager, runner = _mutation_guard_fence_manager(
+        tmp_path,
+        owner_stdout=("loom-staging-rollout-req-alpha-1.service loaded active running attempt\n"),
+        evidence_state="missing",
+    )
+    evidence = MutationGuardEvidence.build(
+        request_id="req-alpha",
+        candidate_sha=HISTORICAL_CANDIDATE_SHA,
+        candidate_tree=HISTORICAL_CANDIDATE_TREE,
+        generation=GENERATION_ONE,
+        mutation_epoch=100,
+        guard_pid=4321,
+        database_backend_pid=9876,
+        deadline_unix_seconds=2_000_000_000,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="released",
+    )
+    path = guard_evidence_path(manager.config, "req-alpha")
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(evidence.to_dict(), sort_keys=True, separators=(",", ":")) + "\n")
+    path.chmod(0o600)
+
+    manager.fence_mutation_guard_owners(
+        "req-alpha",
+        GENERATION_ONE,
+        candidate_sha=HISTORICAL_CANDIDATE_SHA,
+        candidate_tree=HISTORICAL_CANDIDATE_TREE,
+    )
 
     assert runner.calls == []
 

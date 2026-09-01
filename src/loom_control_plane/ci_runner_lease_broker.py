@@ -23,6 +23,7 @@ from typing import cast
 
 SCHEMA_VERSION = "3"
 EXPECTED_REPOSITORY = "qianyi-sun/loom"
+GITHUB_RATE_LIMIT_RESERVE = 250
 LEGACY_GITHUB_ACTIONS_APP_ID = 15368
 WORK_CLASSES = ("normal", "image", "smoke")
 EXPECTED_CAPACITIES = {"normal": 5, "image": 4, "smoke": 2}
@@ -110,6 +111,17 @@ class RouteDecisionState(StrEnum):
     PENDING = "pending"
     PUBLISHED = "published"
     ABANDONED = "abandoned"
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubRateLimitBudget:
+    limit: int
+    remaining: int
+    reset_at: str
+    observed_at: str
+
+    def public_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 TRUSTED_WORKFLOW_EVIDENCE_KINDS = {"installed_runtime", "protected_merge"}
@@ -394,9 +406,7 @@ class PlacementAssignment:
             raise LeaseBrokerError("stored route assignment enum is invalid") from exc
         slot_value = value.get("slot")
         slot = (
-            None
-            if slot_value is None
-            else _bounded_int(slot_value, "slot", minimum=0, maximum=10)
+            None if slot_value is None else _bounded_int(slot_value, "slot", minimum=0, maximum=10)
         )
         lease_expires_at = value.get("lease_expires_at")
         released_at = value.get("released_at")
@@ -516,10 +526,7 @@ class RouteAssignmentDocument:
             raise LeaseBrokerError("stored route request digest is invalid")
         assignment_ids = [assignment.assignment_id for assignment in self.assignments]
         job_keys = [assignment.job_key for assignment in self.assignments]
-        if (
-            len(assignment_ids) != len(set(assignment_ids))
-            or len(job_keys) != len(set(job_keys))
-        ):
+        if len(assignment_ids) != len(set(assignment_ids)) or len(job_keys) != len(set(job_keys)):
             raise LeaseBrokerError("stored route response assignments are not unique")
         for assignment in self.assignments:
             if (
@@ -530,8 +537,7 @@ class RouteAssignmentDocument:
             ):
                 raise LeaseBrokerError("stored route assignment identity does not match response")
         if not self.oldlab_eligible and any(
-            assignment.target is PlacementTarget.OLDLAB
-            for assignment in self.assignments
+            assignment.target is PlacementTarget.OLDLAB for assignment in self.assignments
         ):
             raise LeaseBrokerError("ineligible stored route response selects oldlab")
 
@@ -664,8 +670,7 @@ class TrustedWorkflowGeneration:
             raise LeaseBrokerError("stored workflow blobs are not canonical")
         expected = set(WORKFLOW_CLASS_CONTRACTS)
         if set(value) != expected or any(
-            not isinstance(blob, str) or _SHA_RE.fullmatch(blob) is None
-            for blob in value.values()
+            not isinstance(blob, str) or _SHA_RE.fullmatch(blob) is None for blob in value.values()
         ):
             raise LeaseBrokerError("stored workflow blob contract is invalid")
         return cast(dict[str, str], value)
@@ -952,35 +957,25 @@ class CiRunnerLeaseBroker:
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
         route_columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(route_decisions)")
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(route_decisions)")
         }
         if "trust_generation_id" not in route_columns:
-            connection.execute(
-                "ALTER TABLE route_decisions ADD COLUMN trust_generation_id INTEGER"
-            )
+            connection.execute("ALTER TABLE route_decisions ADD COLUMN trust_generation_id INTEGER")
         if "eligibility_reason" not in route_columns:
-            connection.execute(
-                "ALTER TABLE route_decisions ADD COLUMN eligibility_reason TEXT"
-            )
+            connection.execute("ALTER TABLE route_decisions ADD COLUMN eligibility_reason TEXT")
         if "publisher_app_id" not in route_columns:
-            connection.execute(
-                "ALTER TABLE route_decisions ADD COLUMN publisher_app_id INTEGER"
-            )
+            connection.execute("ALTER TABLE route_decisions ADD COLUMN publisher_app_id INTEGER")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS route_decision_generation "
             "ON route_decisions(trust_generation_id, decision_id)"
         )
         observation_columns = {
             str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(trusted_workflow_observation)"
-            )
+            for row in connection.execute("PRAGMA table_info(trusted_workflow_observation)")
         }
         if "publisher_app_id" not in observation_columns:
             connection.execute(
-                "ALTER TABLE trusted_workflow_observation "
-                "ADD COLUMN publisher_app_id INTEGER"
+                "ALTER TABLE trusted_workflow_observation ADD COLUMN publisher_app_id INTEGER"
             )
 
     def _initialize_contract(self, connection: sqlite3.Connection) -> None:
@@ -1044,12 +1039,99 @@ class CiRunnerLeaseBroker:
         )
         return epoch
 
+    def github_rate_limit_budget(self) -> GitHubRateLimitBudget | None:
+        keys = (
+            "github_rate_limit_limit",
+            "github_rate_limit_remaining",
+            "github_rate_limit_reset_at",
+            "github_rate_limit_observed_at",
+        )
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"SELECT key, value FROM metadata WHERE key IN ({','.join('?' for _ in keys)})",
+                keys,
+            ).fetchall()
+        finally:
+            connection.close()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        if not values:
+            return None
+        if set(values) != set(keys):
+            raise LeaseBrokerError("stored GitHub rate-limit budget is incomplete")
+        try:
+            limit = int(values["github_rate_limit_limit"])
+            remaining = int(values["github_rate_limit_remaining"])
+        except ValueError as exc:
+            raise LeaseBrokerError("stored GitHub rate-limit budget is invalid") from exc
+        if limit < 1 or remaining < 0 or remaining > limit:
+            raise LeaseBrokerError("stored GitHub rate-limit budget is invalid")
+        reset_at = values["github_rate_limit_reset_at"]
+        observed_at = values["github_rate_limit_observed_at"]
+        _parse_timestamp(reset_at)
+        _parse_timestamp(observed_at)
+        return GitHubRateLimitBudget(
+            limit=limit,
+            remaining=remaining,
+            reset_at=reset_at,
+            observed_at=observed_at,
+        )
+
+    def record_github_rate_limit_budget(
+        self,
+        *,
+        limit: int,
+        remaining: int,
+        reset_at: datetime,
+        now: datetime | None = None,
+    ) -> GitHubRateLimitBudget:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 1
+            or isinstance(remaining, bool)
+            or not isinstance(remaining, int)
+            or remaining < 0
+            or remaining > limit
+        ):
+            raise LeaseBrokerError("GitHub rate-limit budget is invalid")
+        value = GitHubRateLimitBudget(
+            limit=limit,
+            remaining=remaining,
+            reset_at=_timestamp(reset_at),
+            observed_at=_timestamp(now or datetime.now(UTC)),
+        )
+        entries = {
+            "github_rate_limit_limit": str(value.limit),
+            "github_rate_limit_remaining": str(value.remaining),
+            "github_rate_limit_reset_at": value.reset_at,
+            "github_rate_limit_observed_at": value.observed_at,
+        }
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                "INSERT INTO metadata(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                entries.items(),
+            )
+            connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        stored = self.github_rate_limit_budget()
+        if stored != value:
+            raise LeaseBrokerError("GitHub rate-limit budget could not be read back")
+        return value
+
     def current_trusted_workflow_generation(self) -> TrustedWorkflowGeneration | None:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT * FROM trusted_workflow_generations "
-                "ORDER BY generation_id DESC LIMIT 1"
+                "SELECT * FROM trusted_workflow_generations ORDER BY generation_id DESC LIMIT 1"
             ).fetchone()
         finally:
             connection.close()
@@ -1097,8 +1179,7 @@ class CiRunnerLeaseBroker:
         try:
             connection.execute("BEGIN IMMEDIATE")
             current_row = connection.execute(
-                "SELECT * FROM trusted_workflow_generations "
-                "ORDER BY generation_id DESC LIMIT 1"
+                "SELECT * FROM trusted_workflow_generations ORDER BY generation_id DESC LIMIT 1"
             ).fetchone()
             current = (
                 self._trusted_workflow_generation_from_row(current_row)
@@ -1110,20 +1191,26 @@ class CiRunnerLeaseBroker:
                     raise LeaseBrokerError("initial workflow generation cannot have a predecessor")
                 predecessor_sha = None
                 if evidence.get("kind") != "installed_runtime":
-                    raise LeaseBrokerError("initial workflow generation must bind installed runtime")
+                    raise LeaseBrokerError(
+                        "initial workflow generation must bind installed runtime"
+                    )
             else:
                 if predecessor_generation_id != current.generation_id:
                     raise LeaseBrokerError("workflow generation predecessor is stale")
                 predecessor_sha = current.candidate_sha
                 if evidence.get("kind") != "protected_merge":
-                    raise LeaseBrokerError("advanced workflow generation needs protected merge evidence")
+                    raise LeaseBrokerError(
+                        "advanced workflow generation needs protected merge evidence"
+                    )
                 if candidate_sha == current.candidate_sha:
                     if (
                         candidate_tree != current.candidate_tree
                         or workflow_blobs_json != current.workflow_blobs_json
                         or evidence_json != current.evidence_json
                     ):
-                        raise LeaseBrokerError("workflow generation replay changed immutable evidence")
+                        raise LeaseBrokerError(
+                            "workflow generation replay changed immutable evidence"
+                        )
                     connection.commit()
                     return current
             generation_payload = {
@@ -1401,17 +1488,12 @@ class CiRunnerLeaseBroker:
         try:
             connection.execute("BEGIN IMMEDIATE")
             generation_row = connection.execute(
-                "SELECT * FROM trusted_workflow_generations "
-                "ORDER BY generation_id DESC LIMIT 1"
+                "SELECT * FROM trusted_workflow_generations ORDER BY generation_id DESC LIMIT 1"
             ).fetchone()
             if generation_row is None:
                 raise LeaseBrokerError("trusted workflow generation is not initialized")
-            current_generation = self._trusted_workflow_generation_from_row(
-                generation_row
-            )
-            selected_generation_id = (
-                trust_generation_id or current_generation.generation_id
-            )
+            current_generation = self._trusted_workflow_generation_from_row(generation_row)
+            selected_generation_id = trust_generation_id or current_generation.generation_id
             if selected_generation_id != current_generation.generation_id:
                 raise LeaseBrokerError("route decision trust generation is stale")
             existing = connection.execute(
@@ -1635,8 +1717,7 @@ class CiRunnerLeaseBroker:
                 "SELECT * FROM assignments WHERE state = 'assigned' ORDER BY assignment_id"
             ).fetchall()
             generation_row = connection.execute(
-                "SELECT * FROM trusted_workflow_generations "
-                "ORDER BY generation_id DESC LIMIT 1"
+                "SELECT * FROM trusted_workflow_generations ORDER BY generation_id DESC LIMIT 1"
             ).fetchone()
             observation_row = connection.execute(
                 "SELECT * FROM trusted_workflow_observation WHERE repository = ?",
@@ -1683,8 +1764,7 @@ class CiRunnerLeaseBroker:
         )
         drift = (
             cast(dict[str, bool], observation["workflow_blob_drift"])
-            if observation is not None
-            and observation["workflow_blob_drift"] is not None
+            if observation is not None and observation["workflow_blob_drift"] is not None
             else None
         )
         reason_counts = {reason: 0 for reason in sorted(ROUTE_ELIGIBILITY_REASONS)}
@@ -1702,6 +1782,12 @@ class CiRunnerLeaseBroker:
             and drift is not None
             and not any(drift.values())
         )
+        github_rate_limit_budget = self.github_rate_limit_budget()
+        github_rate_limit_healthy = bool(
+            github_rate_limit_budget is None
+            or github_rate_limit_budget.remaining > GITHUB_RATE_LIMIT_RESERVE
+            or _parse_timestamp(github_rate_limit_budget.reset_at) <= observed_at
+        )
         return {
             "schema_version": int(SCHEMA_VERSION),
             "repository": self.config.repository,
@@ -1711,11 +1797,14 @@ class CiRunnerLeaseBroker:
                 generation.public_dict() if generation is not None else None
             ),
             "trusted_workflow_observation": observation,
+            "github_rate_limit_budget": (
+                github_rate_limit_budget.public_dict()
+                if github_rate_limit_budget is not None
+                else None
+            ),
             "metrics": {
                 "generation_lag_commits": (
-                    observation["generation_lag_commits"]
-                    if observation is not None
-                    else None
+                    observation["generation_lag_commits"] if observation is not None else None
                 ),
                 "promotion_blocked": (
                     int(observation["promotion_result"] == "blocked")
@@ -1729,11 +1818,13 @@ class CiRunnerLeaseBroker:
                 ),
                 "route_decisions_by_eligibility_reason": reason_counts,
             },
+            "github_rate_limit_healthy": github_rate_limit_healthy,
             "route_generation_healthy": route_generation_healthy,
             "healthy": all(
                 cast(int, item["oldlab_assigned"]) <= cast(int, item["capacity"])
                 for item in classes.values()
-            ),
+            )
+            and github_rate_limit_healthy,
         }
 
     def active_assignments(self) -> tuple[PlacementAssignment, ...]:
@@ -1792,9 +1883,7 @@ class CiRunnerLeaseBroker:
             (observed, request_sha256),
         )
 
-    def abandon_route(
-        self, request_sha256: str, *, now: datetime | None = None
-    ) -> RouteDecision:
+    def abandon_route(self, request_sha256: str, *, now: datetime | None = None) -> RouteDecision:
         observed = _timestamp(_utc(now or datetime.now(UTC)))
         return self._update_route_decision(
             request_sha256,
@@ -1884,9 +1973,7 @@ class CiRunnerLeaseBroker:
         finally:
             connection.close()
 
-    def _trusted_workflow_generation_from_row(
-        self, row: sqlite3.Row
-    ) -> TrustedWorkflowGeneration:
+    def _trusted_workflow_generation_from_row(self, row: sqlite3.Row) -> TrustedWorkflowGeneration:
         generation = TrustedWorkflowGeneration(
             generation_id=int(row["generation_id"]),
             repository=str(row["repository"]),
@@ -1898,9 +1985,7 @@ class CiRunnerLeaseBroker:
                 else None
             ),
             predecessor_sha=(
-                str(row["predecessor_sha"])
-                if row["predecessor_sha"] is not None
-                else None
+                str(row["predecessor_sha"]) if row["predecessor_sha"] is not None else None
             ),
             workflow_blobs_json=str(row["workflow_blobs_json"]),
             evidence_json=str(row["evidence_json"]),
@@ -1916,13 +2001,12 @@ class CiRunnerLeaseBroker:
             or _SHA256_RE.fullmatch(generation.generation_digest) is None
         ):
             raise LeaseBrokerError("stored workflow generation identity is invalid")
-        if (generation.predecessor_generation_id is None) != (
-            generation.predecessor_sha is None
-        ):
+        if (generation.predecessor_generation_id is None) != (generation.predecessor_sha is None):
             raise LeaseBrokerError("stored workflow generation predecessor is inconsistent")
-        if generation.predecessor_sha is not None and _SHA_RE.fullmatch(
-            generation.predecessor_sha
-        ) is None:
+        if (
+            generation.predecessor_sha is not None
+            and _SHA_RE.fullmatch(generation.predecessor_sha) is None
+        ):
             raise LeaseBrokerError("stored workflow generation predecessor SHA is invalid")
         generation.workflow_blobs()
         evidence = generation.evidence()
@@ -1941,17 +2025,13 @@ class CiRunnerLeaseBroker:
         _parse_timestamp(generation.accepted_at)
         return generation
 
-    def _trusted_workflow_observation_from_row(
-        self, row: sqlite3.Row
-    ) -> dict[str, object]:
+    def _trusted_workflow_observation_from_row(self, row: sqlite3.Row) -> dict[str, object]:
         repository = str(row["repository"])
         runtime_sha = str(row["runtime_sha"])
         publisher_app_id = int(row["publisher_app_id"])
         trust_generation_id = int(row["trust_generation_id"])
         observed_dev_sha = (
-            str(row["observed_dev_sha"])
-            if row["observed_dev_sha"] is not None
-            else None
+            str(row["observed_dev_sha"]) if row["observed_dev_sha"] is not None else None
         )
         generation_lag_commits = (
             int(row["generation_lag_commits"])
@@ -1960,18 +2040,14 @@ class CiRunnerLeaseBroker:
         )
         promotion_result = str(row["promotion_result"])
         promotion_blocker = (
-            str(row["promotion_blocker"])
-            if row["promotion_blocker"] is not None
-            else None
+            str(row["promotion_blocker"]) if row["promotion_blocker"] is not None else None
         )
         workflow_blob_drift: dict[str, bool] | None = None
         if row["workflow_blob_drift_json"] is not None:
             try:
                 drift_value = json.loads(str(row["workflow_blob_drift_json"]))
             except json.JSONDecodeError as exc:
-                raise LeaseBrokerError(
-                    "stored trusted workflow drift is invalid JSON"
-                ) from exc
+                raise LeaseBrokerError("stored trusted workflow drift is invalid JSON") from exc
             if (
                 not isinstance(drift_value, dict)
                 or set(drift_value) != set(WORKFLOW_CLASS_CONTRACTS)
@@ -2027,19 +2103,13 @@ class CiRunnerLeaseBroker:
             response_json=str(row["response_json"]),
             oldlab_eligible=bool(row["oldlab_eligible"]),
             trust_generation_id=(
-                int(row["trust_generation_id"])
-                if row["trust_generation_id"] is not None
-                else None
+                int(row["trust_generation_id"]) if row["trust_generation_id"] is not None else None
             ),
             eligibility_reason=(
-                str(row["eligibility_reason"])
-                if row["eligibility_reason"] is not None
-                else None
+                str(row["eligibility_reason"]) if row["eligibility_reason"] is not None else None
             ),
             publisher_app_id=(
-                int(row["publisher_app_id"])
-                if row["publisher_app_id"] is not None
-                else None
+                int(row["publisher_app_id"]) if row["publisher_app_id"] is not None else None
             ),
             state=state,
             created_at=str(row["created_at"]),
@@ -2049,12 +2119,8 @@ class CiRunnerLeaseBroker:
                 else None
             ),
             dispatch_attempts=int(row["dispatch_attempts"]),
-            published_at=(
-                str(row["published_at"]) if row["published_at"] is not None else None
-            ),
-            abandoned_at=(
-                str(row["abandoned_at"]) if row["abandoned_at"] is not None else None
-            ),
+            published_at=(str(row["published_at"]) if row["published_at"] is not None else None),
+            abandoned_at=(str(row["abandoned_at"]) if row["abandoned_at"] is not None else None),
         )
         if decision.trust_generation_id is not None and decision.trust_generation_id < 1:
             raise LeaseBrokerError("stored route decision trust generation is invalid")

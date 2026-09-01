@@ -828,6 +828,129 @@ def test_unrelated_repository_artifact_burst_cannot_block_fresh_route(
     assert len(api.dispatches) == 1
 
 
+def test_rate_limit_governor_persists_headers_and_survives_restart(tmp_path: Path) -> None:
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    governor = routes.GitHubRateLimitGovernor(broker=broker, now=lambda: NOW)
+
+    governor.observe(
+        {
+            "X-RateLimit-Resource": "core",
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "249",
+            "X-RateLimit-Reset": str(int((NOW + timedelta(minutes=10)).timestamp())),
+        }
+    )
+
+    restarted = routes.GitHubRateLimitGovernor(broker=broker, now=lambda: NOW)
+    with pytest.raises(routes.RouteControllerError, match=r"safety reserve.*2026-08-20"):
+        restarted.before_request()
+    assert restarted.requests == 0
+    assert broker.status(now=NOW)["github_rate_limit_budget"] == {
+        "limit": 5000,
+        "remaining": 249,
+        "reset_at": "2026-08-20T18:10:00Z",
+        "observed_at": "2026-08-20T18:00:00Z",
+    }
+    assert broker.status(now=NOW)["github_rate_limit_healthy"] is False
+    assert broker.status(now=NOW)["healthy"] is False
+
+
+def test_rate_limit_governor_allows_reset_budget_and_bounds_each_process(
+    tmp_path: Path,
+) -> None:
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    broker.record_github_rate_limit_budget(
+        limit=5000,
+        remaining=0,
+        reset_at=NOW - timedelta(seconds=1),
+        now=NOW - timedelta(minutes=5),
+    )
+    governor = routes.GitHubRateLimitGovernor(broker=broker, now=lambda: NOW)
+
+    for _ in range(routes.MAX_GITHUB_REQUESTS_PER_RECONCILE):
+        governor.before_request()
+
+    with pytest.raises(routes.RouteControllerError, match="per-reconcile request budget"):
+        governor.before_request()
+
+
+def test_rate_limit_governor_rejects_partial_headers(tmp_path: Path) -> None:
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    governor = routes.GitHubRateLimitGovernor(broker=broker, now=lambda: NOW)
+
+    with pytest.raises(routes.RouteControllerError, match="headers are incomplete"):
+        governor.observe({"X-RateLimit-Limit": "5000"})
+
+
+def test_github_api_records_core_headers_from_real_request_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = leases.CiRunnerLeaseBroker(tmp_path / "leases.sqlite3", _config())
+    governor = routes.GitHubRateLimitGovernor(broker=broker, now=lambda: NOW)
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = {
+                "X-RateLimit-Resource": "core",
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": "4998",
+                "X-RateLimit-Reset": str(int((NOW + timedelta(hours=1)).timestamp())),
+            }
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return json.dumps({"sha": HEAD_SHA}).encode()
+
+    monkeypatch.setattr(routes.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    api = routes.GitHubRouteAPI(
+        repository="qianyi-sun/loom",
+        token="opaque",
+        rate_limit_governor=governor,
+    )
+
+    assert api.branch_head(routes.TRUSTED_BRANCH) == HEAD_SHA
+    assert governor.requests == 1
+    assert broker.github_rate_limit_budget().remaining == 4998
+
+
+def test_github_api_reuses_validated_snapshots_within_one_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    requested_paths: list[str] = []
+
+    def request(method: str, path: str, *, payload: object | None = None) -> object:
+        assert method == "GET"
+        assert payload is None
+        requested_paths.append(path)
+        if path == "/actions/runs/30000":
+            return {"id": 30000}
+        if path.startswith("/contents/"):
+            return {"sha": WORKFLOW_BLOB_SHA}
+        if "/check-runs?" in path:
+            return {"check_runs": [{"id": 70000}]}
+        if path.endswith("/attempts/1/jobs?filter=all&per_page=100"):
+            return {"jobs": [{"id": 80000}]}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", request)
+
+    for _ in range(2):
+        assert api.workflow_run(30000) == {"id": 30000}
+        assert api.content_blob_sha(routes.WORKFLOW_PATHS["CI"], HEAD_SHA) == WORKFLOW_BLOB_SHA
+        assert api.check_runs(HEAD_SHA, "repository-checks") == ({"id": 70000},)
+        assert api.workflow_jobs(30000, 1) == ({"id": 80000},)
+
+    assert len(requested_paths) == 4
+
+
 def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -892,32 +1015,24 @@ def test_github_active_run_inventory_overflow_fails_closed(
         api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0])
 
 
-def test_github_active_run_inventory_recovers_from_transient_count_race(
+def test_github_active_run_inventory_accepts_bounded_count_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
-    payloads = iter(
-        [
-            {"total_count": 2, "workflow_runs": [{"id": 30_000}]},
-            {"total_count": 1, "workflow_runs": [{"id": 30_000}]},
-        ]
-    )
     requests = 0
 
     def request(*_args: object, **_kwargs: object) -> object:
         nonlocal requests
         requests += 1
-        return next(payloads)
+        return {"total_count": 2, "workflow_runs": [{"id": 30_000}]}
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.active_workflow_runs(
-        leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
-    ) == [{"id": 30_000}]
-    assert requests == 2
+    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == [{"id": 30_000}]
+    assert requests == 1
 
 
-def test_github_active_run_inventory_persistent_malformed_fails_closed(
+def test_github_active_run_inventory_accepts_empty_count_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
@@ -927,6 +1042,23 @@ def test_github_active_run_inventory_persistent_malformed_fails_closed(
         nonlocal requests
         requests += 1
         return {"total_count": 1, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == []
+    assert requests == 1
+
+
+def test_github_active_run_inventory_persistent_structural_malformed_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    requests = 0
+
+    def request(*_args: object, **_kwargs: object) -> object:
+        nonlocal requests
+        requests += 1
+        return {"total_count": "1", "workflow_runs": []}
 
     monkeypatch.setattr(api, "_request", request)
 
@@ -1076,9 +1208,7 @@ def test_artifact_redirect_never_forwards_github_authorization(
     monkeypatch.setattr(routes.urllib.request, "build_opener", lambda *_: RedirectOpener())
     monkeypatch.setattr(routes.urllib.request, "urlopen", urlopen)
 
-    api = routes.GitHubRouteAPI(
-        repository="qianyi-sun/loom", token_provider=lambda: "top-secret"
-    )
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token_provider=lambda: "top-secret")
     assert api.download_artifact(71) == payload
 
 
@@ -1209,6 +1339,9 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
     assert "LOOM_CI_RUNNER_POOL_CANDIDATE_SHA" not in route_command
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
-    assert "OnUnitActiveSec=15s" in timer
+    assert "OnUnitActiveSec=30s" in timer
+    assert routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * (3600 // 30) == 4200
+    assert 4200 + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
+    assert routes.OLDLAB_REQUEST_MAX_AGE_SECONDS < 180
     assert "Unit=loom-ci-runner-route-controller.service" in timer
     assert "loom-ci-runner-route-controller" not in pool_service

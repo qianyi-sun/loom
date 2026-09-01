@@ -319,6 +319,11 @@
     "default": "20",
     "required": false
   },
+  "task_image_storage_probe_path": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "task_materialize_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",

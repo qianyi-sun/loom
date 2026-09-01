@@ -984,7 +984,7 @@ def test_trusted_release_requires_every_scanner_field(
     [
         lambda scanner: scanner.update(unexpected=True),
         lambda scanner: scanner.update(binary_platform="linux/arm64"),
-        lambda scanner: scanner.update(trivy_version="v0.70.1"),
+        lambda scanner: scanner.update(trivy_version="v0.74.1"),
         lambda scanner: scanner.update(binary_sha256="B" * 64),
         lambda scanner: scanner.update(lock_sha256="0" * 64),
         lambda scanner: scanner.update(database_sha256="0" * 64),

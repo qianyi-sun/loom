@@ -313,9 +313,7 @@ def test_schema_one_state_migrates_without_losing_assignments(tmp_path: Path) ->
     assignment = original.allocate(_request(1), now=NOW)
     with sqlite3.connect(state_db) as connection:
         connection.execute("DROP TABLE route_decisions")
-        connection.execute(
-            "UPDATE metadata SET value = '1' WHERE key = 'schema_version'"
-        )
+        connection.execute("UPDATE metadata SET value = '1' WHERE key = 'schema_version'")
 
     migrated = leases.CiRunnerLeaseBroker(state_db, _config())
     migrated.record_trusted_workflow_generation(
@@ -355,13 +353,10 @@ def test_schema_two_state_migrates_and_binds_frozen_outbox_to_initial_generation
     original_response = dispatched.response_json
     with sqlite3.connect(broker.state_db) as connection:
         connection.execute(
-            "UPDATE route_decisions "
-            "SET trust_generation_id = NULL, eligibility_reason = NULL"
+            "UPDATE route_decisions SET trust_generation_id = NULL, eligibility_reason = NULL"
         )
         connection.execute("DELETE FROM trusted_workflow_generations")
-        connection.execute(
-            "UPDATE metadata SET value = '2' WHERE key = 'schema_version'"
-        )
+        connection.execute("UPDATE metadata SET value = '2' WHERE key = 'schema_version'")
 
     migrated = leases.CiRunnerLeaseBroker(broker.state_db, _config())
     assert migrated.current_trusted_workflow_generation() is None
@@ -721,3 +716,22 @@ def test_cli_allocates_an_atomic_route_document(
     assert len(document["assignments"]) == 7
     assert [item["target"] for item in document["assignments"]].count("oldlab") == 5
     assert [item["target"] for item in document["assignments"]].count("github_hosted") == 2
+
+
+def test_github_rate_limit_budget_is_atomic_and_backward_compatible(tmp_path: Path) -> None:
+    broker = _broker(tmp_path)
+
+    recorded = broker.record_github_rate_limit_budget(
+        limit=5000,
+        remaining=4321,
+        reset_at=NOW + timedelta(hours=1),
+        now=NOW,
+    )
+
+    reopened = leases.CiRunnerLeaseBroker(broker.state_db, _config())
+    assert reopened.github_rate_limit_budget() == recorded
+    assert reopened.status(now=NOW)["github_rate_limit_budget"] == recorded.public_dict()
+    with sqlite3.connect(broker.state_db) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone() == ("3",)

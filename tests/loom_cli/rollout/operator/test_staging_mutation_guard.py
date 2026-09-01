@@ -960,7 +960,9 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
     path.chmod(0o600)
 
     class Systemd:
-        def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+        def start_mutation_guard(
+            self, request_id: str, **_bindings: object
+        ) -> MutationGuardEvidence:
             assert request_id == _REQUEST_ID
             return ready
 
@@ -968,7 +970,9 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
             assert request_id == _REQUEST_ID
             return type("Status", (), {"is_running": True, "main_pid": 4321})()
 
-        def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+        def stop_mutation_guard(
+            self, request_id: str, **_bindings: object
+        ) -> MutationGuardEvidence:
             assert request_id == _REQUEST_ID
             return MutationGuardEvidence.build(
                 request_id=ready.request_id,
@@ -996,6 +1000,68 @@ def test_mutation_guard_manager_binds_live_unit_pid_candidate_and_request(tmp_pa
     assert manager.release(_REQUEST_ID).state == "released"
 
 
+def test_mutation_guard_manager_acquires_verified_historical_candidate_config(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    historical_sha = "c" * 40
+    historical_tree = "d" * 40
+    historical_repo = config.runner_repo.parent.parent / historical_sha / "repo"
+    historical_config = replace(
+        config,
+        runner_repo=historical_repo,
+        cluster_config_path=historical_repo / "deploy/environments/staging.cluster.toml",
+        config_sha256="9" * 64,
+    )
+    ready = MutationGuardEvidence.build(
+        request_id=_REQUEST_ID,
+        candidate_sha=historical_sha,
+        candidate_tree=historical_tree,
+        generation=_GENERATION,
+        mutation_epoch=100,
+        guard_pid=4321,
+        database_backend_pid=9876,
+        deadline_unix_seconds=2_000_000_000,
+        cronjob_uid="50de34f1-f12b-4dce-9f1c-e049f066bc54",
+        suspended_resource_version="11",
+        state="ready",
+    )
+    starts: list[dict[str, object]] = []
+
+    class Systemd:
+        def start_mutation_guard(self, request_id: str, **bindings: object):  # type: ignore[no-untyped-def]
+            starts.append({"request_id": request_id, **bindings})
+            return ready
+
+        def show_mutation_guard(self, request_id: str):  # type: ignore[no-untyped-def]
+            raise AssertionError(request_id)
+
+        def stop_mutation_guard(self, request_id: str, **bindings: object):  # type: ignore[no-untyped-def]
+            raise AssertionError((request_id, bindings))
+
+    manager = MutationGuardManager(
+        config=config,
+        service_uid=os.getuid(),
+        systemd=Systemd(),
+        resolve_candidate=lambda selected: (
+            (historical_sha, historical_tree)
+            if selected == historical_config
+            else (_CANDIDATE_SHA, _CANDIDATE_TREE)
+        ),
+    )
+
+    assert manager.acquire(_REQUEST_ID, candidate_config=historical_config) == ready
+    assert starts == [
+        {
+            "request_id": _REQUEST_ID,
+            "candidate_sha": historical_sha,
+            "candidate_tree": historical_tree,
+            "runner_config_sha256": "9" * 64,
+            "cluster_config_path": historical_config.cluster_config_path,
+        }
+    ]
+
+
 def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_drifts(
     tmp_path: Path,
 ) -> None:
@@ -1016,13 +1082,17 @@ def test_mutation_guard_manager_releases_started_unit_when_acquired_evidence_dri
     stopped: list[str] = []
 
     class Systemd:
-        def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+        def start_mutation_guard(
+            self, request_id: str, **_bindings: object
+        ) -> MutationGuardEvidence:
             return drifted
 
         def show_mutation_guard(self, request_id: str):  # type: ignore[no-untyped-def]
             raise AssertionError(request_id)
 
-        def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+        def stop_mutation_guard(
+            self, request_id: str, **_bindings: object
+        ) -> MutationGuardEvidence:
             stopped.append(request_id)
             return MutationGuardEvidence.build(
                 request_id=drifted.request_id,
@@ -1412,6 +1482,89 @@ def test_fence_subcommand_dispatches_only_the_exact_request_bound_fence(
         == 0
     )
     assert fenced == [f"{_REQUEST_ID}:{_GENERATION}"]
+
+
+def test_hold_subcommand_authorizes_historical_candidate_before_guard_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    historical_sha = "c" * 40
+    historical_tree = "d" * 40
+    historical_repo = config.runner_repo.parent.parent / historical_sha / "repo"
+    historical_config = replace(
+        config,
+        runner_repo=historical_repo,
+        cluster_config_path=historical_repo / "deploy/environments/staging.cluster.toml",
+        config_sha256="9" * 64,
+    )
+    resolutions: list[dict[str, object]] = []
+    held: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        staging_mutation_guard.OperatorConfig,
+        "load",
+        classmethod(lambda _cls, _path: config),
+    )
+    monkeypatch.setattr(
+        staging_mutation_guard,
+        "fixed_operator_config_path",
+        lambda: Path("/etc/loom/staging-rollout.toml"),
+    )
+    monkeypatch.setattr(
+        staging_mutation_guard.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(pw_uid=os.geteuid()),
+    )
+
+    def resolve(active: object, **bindings: object) -> object:
+        resolutions.append({"config": active, **bindings})
+        return historical_config
+
+    monkeypatch.setattr(
+        staging_mutation_guard,
+        "build_installed_resume_runtime_upgrade_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(resolve=resolve),
+        raising=False,
+    )
+
+    def hold(**kwargs: object) -> object:
+        resolver = kwargs["resolve_candidate"]
+        assert callable(resolver)
+        held.append(resolver(config))
+        return object()
+
+    monkeypatch.setattr(staging_mutation_guard, "hold_request_guard", hold)
+
+    assert (
+        staging_mutation_guard.main(
+            [
+                "hold",
+                "--request-id",
+                _REQUEST_ID,
+                "--generation",
+                _GENERATION,
+                "--candidate-sha",
+                historical_sha,
+                "--candidate-tree",
+                historical_tree,
+                "--runner-config-sha256",
+                historical_config.config_sha256,
+                "--cluster-config-path",
+                str(historical_config.cluster_config_path),
+            ]
+        )
+        == 0
+    )
+    assert resolutions == [
+        {
+            "config": config,
+            "candidate_sha": historical_sha,
+            "candidate_tree": historical_tree,
+            "runner_config_sha256": historical_config.config_sha256,
+            "cluster_config_path": str(historical_config.cluster_config_path),
+        }
+    ]
+    assert held == [(historical_sha, historical_tree)]
 
 
 def test_reconcile_subcommand_wires_retry_fence_and_owner_liveness(

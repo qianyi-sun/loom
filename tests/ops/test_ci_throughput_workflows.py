@@ -626,7 +626,9 @@ def test_stage1_scans_have_bounded_large_image_timeout() -> None:
         assert scan_script.count('--timeout "$STAGE1_TRIVY_TIMEOUT"') == 2
         assert "set +e" in scan_script
         assert "scan_status=$?" in scan_script
+        assert "if (( scan_status != 0 )); then" in scan_script
         assert "scripts/summarize_trivy_report.py" in scan_script
+        assert 'exit "$scan_status"' in scan_script
 
 
 @pytest.mark.parametrize(

@@ -58,6 +58,12 @@ _MANAGER_ROUTER_NAME = "loom-capacity-manager-router"
 _MANAGER_ROUTER_HOST = "192.168.50.103"
 _MANAGER_ROUTER_NODE = "trt-eai-oldlab-1"
 _MANAGER_ROUTER_PORT = 31443
+_KUBERNETES_API_SERVER = "https://192.168.50.103:6443"
+_KUBERNETES_API_SERVER_CIDR = "192.168.50.103/32"
+_KUBERNETES_API_SERVER_PORT = 6443
+_WITNESS_CONFIG_MAP = "loom-global-execution-witness-v1"
+_WITNESS_PUBLISHER = "loom-capacity-witness-publisher"
+_WITNESS_API_DIRECTORY = "/var/run/secrets/loom-witness"
 _PRIVATE_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
@@ -543,8 +549,7 @@ def _active_profile_set_digest(
         if (
             runtime_profile.pool_id != pool.pool_id
             or runtime_profile.pool_generation != pool.pool_generation
-            or runtime_profile.controller_authority_sha256
-            != pool.controller_authority_sha256
+            or runtime_profile.controller_authority_sha256 != pool.controller_authority_sha256
             or canonical_launch_policy_digest(runtime_profile)
             != runtime_profile.controller_authority_sha256
             or runtime_profile.slurm_cluster != pool.slurm_cluster
@@ -604,8 +609,7 @@ def _validate_active_runtime_artifact(
         or execution.execution_state != "active"
         or execution.executable_new_capacity_ceiling <= 0
         or execution.executable_new_capacity_rate_per_minute <= 0
-        or execution.trusted_fleet_release_sha256
-        != profile.trusted_fleet_release_sha256
+        or execution.trusted_fleet_release_sha256 != profile.trusted_fleet_release_sha256
     ):
         raise ValueError("activation runtime artifact differs from the active execution fence")
     profiles = ApprovedLaunchProfileSetV2(profiles=artifact.profiles)
@@ -638,10 +642,7 @@ def _validate_active_runtime_artifact(
         )
     )
     configured_paths = tuple(
-        sorted(
-            (name, Path(value))
-            for name, value in pool.slurm_executables.model_dump().items()
-        )
+        sorted((name, Path(value)) for name, value in pool.slurm_executables.model_dump().items())
     )
     if (
         slurm.cluster != pool.slurm_cluster
@@ -670,12 +671,15 @@ def render_capacity_pool_executor_active_config(
     _validate_active_runtime_artifact(profile, pool, artifact)
     value = _pool_executor_config(profile, pool)
     value["approved_profiles_sha256"] = artifact.approved_profiles_sha256
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    )
 
 
 def render_capacity_pool_executor_active_service_environment(
@@ -690,9 +694,7 @@ def render_capacity_pool_executor_active_service_environment(
     pool = _pool_binding(profile, pool_id)
     expected_manifest_sha256 = _validate_active_runtime_artifact(profile, pool, artifact)
     active_config = Path(pool.config_file).with_name(f"{pool.pool_id}-active.json")
-    runtime_artifact = Path(pool.config_file).with_name(
-        f"{pool.pool_id}-activation-runtime.json"
-    )
+    runtime_artifact = Path(pool.config_file).with_name(f"{pool.pool_id}-activation-runtime.json")
     return (
         "LOOM_CAPACITY_EXECUTOR_ACTIVATION_RUNTIME_ARTIFACT="
         f"{runtime_artifact}\n"
@@ -1342,6 +1344,77 @@ def _manager_deployment(
                 },
             ]
         )
+    volumes.append(
+        {
+            "name": "witness-api",
+            "projected": {
+                "defaultMode": 0o440,
+                "sources": [
+                    {
+                        "serviceAccountToken": {
+                            "expirationSeconds": 3600,
+                            "path": "token",
+                        }
+                    },
+                    {
+                        "configMap": {
+                            "name": "kube-root-ca.crt",
+                            "items": [{"key": "ca.crt", "path": "ca.crt"}],
+                        }
+                    },
+                ],
+            },
+        }
+    )
+    publisher_environment = [
+        {"name": name, "value": value}
+        for name, value in (
+            ("LOOM_CAPACITY_WITNESS_DB_URL_FILE", f"{_CREDENTIALS}/database-url"),
+            (
+                "LOOM_CAPACITY_WITNESS_EXPECTED_AUTHORITY_INCARNATION",
+                str(authority_incarnation),
+            ),
+            (
+                "LOOM_CAPACITY_WITNESS_KUBERNETES_API_SERVER",
+                _KUBERNETES_API_SERVER,
+            ),
+            (
+                "LOOM_CAPACITY_WITNESS_KUBERNETES_CA_FILE",
+                f"{_WITNESS_API_DIRECTORY}/ca.crt",
+            ),
+            (
+                "LOOM_CAPACITY_WITNESS_KUBERNETES_TOKEN_FILE",
+                f"{_WITNESS_API_DIRECTORY}/token",
+            ),
+            (
+                "LOOM_CAPACITY_WITNESS_SIGNING_KEY_FILE",
+                f"{_CREDENTIALS}/global-execution-signing-key",
+            ),
+            (
+                "LOOM_CAPACITY_WITNESS_SIGNING_KEY_ID",
+                "global-capacity-manager-2026-08",
+            ),
+        )
+    ]
+    publisher_mounts = [
+        {
+            "name": "runtime",
+            "mountPath": f"{_CREDENTIALS}/database-url",
+            "subPath": "credentials/database-url",
+            "readOnly": True,
+        },
+        {
+            "name": "runtime",
+            "mountPath": f"{_CREDENTIALS}/global-execution-signing-key",
+            "subPath": "credentials/global-execution-signing-key",
+            "readOnly": True,
+        },
+        {
+            "name": "witness-api",
+            "mountPath": _WITNESS_API_DIRECTORY,
+            "readOnly": True,
+        },
+    ]
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -1355,6 +1428,7 @@ def _manager_deployment(
                 "metadata": {"labels": labels},
                 "spec": {
                     "automountServiceAccountToken": False,
+                    "serviceAccountName": _WITNESS_PUBLISHER,
                     "securityContext": _pod_security(65532),
                     "initContainers": init,
                     "containers": [
@@ -1385,13 +1459,74 @@ def _manager_deployment(
                             "securityContext": _container_security(read_only_root=True),
                             "resources": profile.manager_resources.kubernetes(),
                             "volumeMounts": mounts,
-                        }
+                        },
+                        {
+                            "name": "witness-publisher",
+                            "image": manager_image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": [
+                                "python",
+                                "-m",
+                                "loom_capacity_manager.global_execution_witness_publisher",
+                            ],
+                            "env": publisher_environment,
+                            "securityContext": _container_security(read_only_root=True),
+                            "resources": profile.manager_resources.kubernetes(),
+                            "volumeMounts": publisher_mounts,
+                        },
                     ],
                     "volumes": volumes,
                 },
             },
         },
     }
+
+
+def _witness_publication_documents() -> list[dict[str, Any]]:
+    return [
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": _metadata(_WITNESS_PUBLISHER),
+            "automountServiceAccountToken": False,
+        },
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "Role",
+            "metadata": _metadata(_WITNESS_PUBLISHER),
+            "rules": [
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": [_WITNESS_CONFIG_MAP],
+                    "verbs": ["get", "patch"],
+                }
+            ],
+        },
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": _metadata(_WITNESS_PUBLISHER),
+            "subjects": [
+                {
+                    "kind": "ServiceAccount",
+                    "name": _WITNESS_PUBLISHER,
+                    "namespace": "loom-dev",
+                }
+            ],
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "Role",
+                "name": _WITNESS_PUBLISHER,
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": _metadata(_WITNESS_CONFIG_MAP),
+            "data": {"gb10.json": "", "oldlab.json": ""},
+        },
+    ]
 
 
 def _component_selector(*components: str) -> dict[str, Any]:
@@ -1476,6 +1611,21 @@ def _network_policies(
         {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
+            "metadata": _metadata("capacity-witness-publisher-api-egress"),
+            "spec": {
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}},
+                "policyTypes": ["Egress"],
+                "egress": [
+                    {
+                        "to": [{"ipBlock": {"cidr": _KUBERNETES_API_SERVER_CIDR}}],
+                        "ports": [{"protocol": "TCP", "port": _KUBERNETES_API_SERVER_PORT}],
+                    }
+                ],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
             "metadata": _metadata("capacity-postgres-ingress"),
             "spec": {
                 "podSelector": {
@@ -1513,9 +1663,7 @@ def _network_policies(
                             },
                             {
                                 "podSelector": {
-                                    "matchLabels": {
-                                        "app": "loom-personal-dev-management"
-                                    }
+                                    "matchLabels": {"app": "loom-personal-dev-management"}
                                 }
                             },
                             *(
@@ -1733,6 +1881,7 @@ def render_capacity_control_plane_manifests(
             },
         },
         *((_manager_router_namespace(),) if router_enabled else ()),
+        *_witness_publication_documents(),
         *(() if execution_policy_document is None else (execution_policy_document,)),
         _postgres_service(),
         _postgres_statefulset(profile),

@@ -69,18 +69,18 @@ Work classes have explicit slot ceilings and resource shapes. The router may
 prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
 the pool is draining, or health cannot be proven. Only a route request first
-observed within 30 seconds of its GitHub artifact creation may consume oldlab
+observed within 90 seconds of its GitHub artifact creation may consume oldlab
 capacity. The controller discovers requests from the bounded inventories of the
 four active routed workflows and then performs an exact artifact-name lookup
 for each run. It does not walk repository-wide artifact history or rely on a
 global artifact cursor, so unrelated artifact bursts and one failed delivery
 cannot block newer workflows.
 
-Route reconciliation has its own fifteen-second systemd timer and state-only
+Route reconciliation has its own thirty-second systemd timer and state-only
 service. It is not a second `ExecStart` behind runner-pool reconciliation and
 does not share the pool's QEMU, Docker, cache, or 300-second service deadline.
 Pool builds, guest cleanup, GitHub JIT registration, and drain work therefore
-cannot consume the route request's 30-second freshness window.
+cannot consume the route request's 90-second freshness window.
 
 If the root-owned controller or GitHub App remains unavailable, the pinned
 route action freezes the run onto the workflow's exact GitHub-hosted label after
@@ -182,13 +182,23 @@ Install and enable `loom-ci-runner-route-controller.service` and
 service and timer. The pool unit must contain only the pool reconcile command;
 the route unit must contain only the route controller. During rollout, fail the
 preflight if either unit contains both commands or if the route timer is not
-active with a fifteen-second interval. A no-work pass performs five GitHub read
-requests (the trusted branch plus four bounded workflow inventories), keeping
-the steady-state budget at approximately 1,200 requests per hour while still
-leaving half of the 30-second freshness window for normal API and service
-latency. A transient malformed or count-inconsistent active-run inventory is
-re-read at most three times within that pass; the scan bound still fails
-immediately, and persistent inconsistency fails closed without routing work.
+active with a thirty-second interval. Each process may make at most 35 GitHub
+core requests, so even a continuously saturated timer is bounded to 4,200
+requests per hour, below the installation's 5,000-request budget. The
+controller records the core `limit`, `remaining`, and `reset` response headers
+in the existing SQLite metadata after every request. A new oneshot process
+therefore inherits the previous process's budget and stops before the final 250
+requests until the recorded reset time; it never turns a local restart into a
+rate-limit bypass. A no-work pass performs five GitHub read requests (the
+trusted branch plus four bounded workflow inventories), keeping steady-state
+use near 600 requests per hour. Repeated run, job, workflow-blob, and CheckRun
+reads within one reconcile use the first validated snapshot instead of spending
+the installation budget twice. The route freshness window is 90 seconds and
+the workflow-side bounded wait remains 180 seconds, leaving one full timer
+interval for ordinary API, artifact-publication, and service latency. A
+transient malformed or count-inconsistent active-run inventory is re-read at
+most three times within that pass; the scan bound still fails immediately, and
+persistent inconsistency fails closed without routing work.
 
 Store the App's unencrypted PEM private key at
 `/etc/loom-ci-runner-pool/route-publisher-app-private-key.pem`, owned by root
@@ -220,7 +230,7 @@ Activation is one bounded transition:
 4. Start only the route service once. Require schema-3 readback, the exact
    runtime/App/generation identities, zero generation lag/blob drift, and one
    direct App-owned CheckRun that arrives before the pinned action deadline.
-5. Enable the fifteen-second route timer and the existing pool timer. Exercise
+5. Enable the thirty-second route timer and the existing pool timer. Exercise
    one fresh normal, image, cluster-smoke, and staging-smoke route; verify the
    actual disposable runner identity and terminal lease release for every
    oldlab job.
@@ -257,7 +267,7 @@ in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 ## Release image evidence
 
 Image routing remains separate from release authority. The untrusted build and
-trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
+trusted publication scans both use pinned Trivy v0.74.0 with `scan-type: image`,
 `vuln-type: os,library`, `timeout: 20m0s`, `severity: CRITICAL`, `exit-code:
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
 each scan, a repository helper writes the fixed config and reviewed ignore file
@@ -272,7 +282,7 @@ staging-compatible PostgreSQL 17.4 rehearsal dependencies. Each structured
 exception records its exact Debian PURL scope and review statement and expires
 at 2026-09-12 UTC; policy generation fails closed at that boundary. A second
 repository-owned helper installs only
-the architecture-specific v0.70.0 release archive against its
+the architecture-specific v0.74.0 release archive against its
 repository-pinned SHA-256; this avoids relying on actions forbidden by
 repository policy. The
 signed release predicate binds every reviewed field, scanner name/version,

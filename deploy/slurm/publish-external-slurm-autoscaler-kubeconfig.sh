@@ -6,11 +6,81 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUTHORITY_MANIFEST="$SCRIPT_DIR/../k8s/external-slurm-autoscaler-authority.yaml"
 KUBECTL="${KUBECTL:-/usr/local/bin/kubectl}"
 NAMESPACE="loom-staging"
+WITNESS_NAMESPACE="loom-dev"
+WITNESS_CONFIG_MAP="loom-global-execution-witness-v1"
 SOURCE_SECRET="loom-secrets"
 TARGET_SECRET="loom-external-slurm-autoscaler-db"
 TOKEN_SECRET="loom-external-slurm-autoscaler-token"
 API_SERVER="https://192.168.50.103:6443"
 
+validate_runtime_kubeconfig() {
+  local path="$1"
+  local metadata owner_uid owner_gid mode links size kind
+  if [ -L "$path" ] || [ ! -f "$path" ]; then
+    echo "error: external supervisor credential metadata is unsafe" >&2
+    return 1
+  fi
+  metadata="$(stat -c '%u:%g:%a:%h:%s:%F' "$path")"
+  IFS=: read -r owner_uid owner_gid mode links size kind <<<"$metadata"
+  if [ "$owner_uid" != "$(id -u)" ] \
+    || [ "$owner_gid" != "$(id -g)" ] \
+    || [ "$mode" != 600 ] \
+    || [ "$links" != 1 ] \
+    || [ "$kind" != "regular file" ] \
+    || [[ ! "$size" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$size" -gt 1048576 ]; then
+    echo "error: external supervisor credential metadata is unsafe" >&2
+    return 1
+  fi
+  "$KUBECTL" --kubeconfig "$path" -n "$NAMESPACE" \
+    get secret "$TARGET_SECRET" -o name >/dev/null
+  "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
+    get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
+  validate_pods_exec_denied "$path"
+}
+
+validate_pods_exec_denied() {
+  local path="$1"
+  local authority_namespaces authority_namespace exec_allowed
+  if ! authority_namespaces="$(
+    "$KUBECTL" --kubeconfig "$path" get namespaces -o name 2>/dev/null
+  )" || [ -z "$authority_namespaces" ]; then
+    echo "error: external supervisor credential namespace audit is unavailable" >&2
+    return 1
+  fi
+  while IFS= read -r authority_namespace; do
+    case "$authority_namespace" in
+      namespace/*)
+        authority_namespace="${authority_namespace#namespace/}"
+        ;;
+      *)
+        echo "error: external supervisor credential namespace audit is unsafe" >&2
+        return 1
+        ;;
+    esac
+    if [ -z "$authority_namespace" ]; then
+      echo "error: external supervisor credential namespace audit is unsafe" >&2
+      return 1
+    fi
+    exec_allowed="$(
+      "$KUBECTL" --kubeconfig "$path" -n "$authority_namespace" \
+        auth can-i create pods/exec 2>/dev/null || true
+    )"
+    if [ "$exec_allowed" != "no" ]; then
+      echo "error: external supervisor credential has unexpected pods/exec authority" >&2
+      return 1
+    fi
+  done <<<"$authority_namespaces"
+}
+
+if [ "$#" -eq 2 ]; then
+  if [ "$1" = "--check" ]; then
+    validate_runtime_kubeconfig "$2"
+    exit 0
+  fi
+  echo "usage: $0 --check OUTPUT_KUBECONFIG" >&2
+  exit 2
+fi
 if [ "$#" -ne 1 ]; then
   echo "usage: KUBECONFIG=/path/to/admin-kubeconfig $0 OUTPUT_KUBECONFIG" >&2
   exit 2
@@ -24,13 +94,15 @@ if [ ! -f "$AUTHORITY_MANIFEST" ] || [ -L "$AUTHORITY_MANIFEST" ]; then
   echo "error: external autoscaler authority manifest is unavailable" >&2
   exit 1
 fi
-if [ -L "$output_path" ]; then
-  echo "error: output kubeconfig must not be a symlink" >&2
+if [ -e "$output_path" ] || [ -L "$output_path" ]; then
+  echo "error: output kubeconfig already exists" >&2
   exit 1
 fi
 
 umask 077
-temporary_dir="$(mktemp -d)"
+output_directory="$(dirname -- "$output_path")"
+output_name="$(basename -- "$output_path")"
+temporary_dir="$(mktemp -d -- "$output_directory/.${output_name}.publish.XXXXXXXX")"
 trap 'rm -rf -- "$temporary_dir"' EXIT
 
 "$KUBECTL" --kubeconfig "$KUBECONFIG" apply -f "$AUTHORITY_MANIFEST" >/dev/null
@@ -96,8 +168,12 @@ printf '%s\n' \
   >"$temporary_dir/kubeconfig"
 chmod 0600 "$temporary_dir/kubeconfig"
 
-"$KUBECTL" --kubeconfig "$temporary_dir/kubeconfig" -n "$NAMESPACE" \
-  get secret "$TARGET_SECRET" -o name >/dev/null
-install -m 0600 "$temporary_dir/kubeconfig" "$output_path"
+validate_runtime_kubeconfig "$temporary_dir/kubeconfig"
+if ! ln -- "$temporary_dir/kubeconfig" "$output_path"; then
+  echo "error: output kubeconfig appeared during publication" >&2
+  exit 1
+fi
+rm -f -- "$temporary_dir/kubeconfig"
+validate_runtime_kubeconfig "$output_path"
 printf 'published namespace-scoped external Slurm autoscaler kubeconfig: %s\n' \
   "$output_path"

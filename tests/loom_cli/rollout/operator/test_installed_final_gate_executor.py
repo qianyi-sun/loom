@@ -206,6 +206,18 @@ def test_installed_executor_rechecks_live_runner_install(tmp_path: Path) -> None
         executor("final.drift", CheckOperation.VERIFY, _bound_plan(tmp_path))
 
 
+def test_installed_executor_rejects_effective_group_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    actual_gid = os.getegid()
+    monkeypatch.setattr(installed_module.os, "getegid", lambda: actual_gid + 1)
+
+    with pytest.raises(ValueError, match="authority is invalid"):
+        replace(executor)
+
+
 def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -227,7 +239,8 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     current_config = replace(
         historical_config,
         runner_repo=current_repo,
-        cluster_config_path=current_repo / environment_authority("staging").candidate_cluster_config,
+        cluster_config_path=current_repo
+        / environment_authority("staging").candidate_cluster_config,
         config_sha256="f" * 64,
     )
     current_install = SimpleNamespace(
@@ -274,6 +287,12 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
     )
     monkeypatch.setattr(
         installed_module,
+        "FixedLocalExternalSupervisorCredentialTransport",
+        lambda **_kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installed_module,
         "build_fixed_gb10_ssh_transport",
         lambda *_args, **_kwargs: object(),
     )
@@ -287,9 +306,7 @@ def test_installed_executor_uses_current_helper_with_historical_rollout_config(
 
     monkeypatch.setattr(installed_module, "MigrationEpochProtectedApplyExecutor", ProtectedExecutor)
 
-    assert (
-        executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"
-    )  # type: ignore[comparison-overlap]
+    assert executor("final.protected-apply", CheckOperation.APPLY, plan) == "dispatched"  # type: ignore[comparison-overlap]
     expected_cluster_path = (
         environment_authority("staging").candidate_runtime_root
         / plan.candidate_sha
@@ -342,7 +359,9 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     executor = _executor(tmp_path)
     plan = _bound_plan(tmp_path)
     sentinel_oldlab_supervisor = object()
+    sentinel_oldlab_credential = object()
     sentinel_gb10_supervisor = object()
+    sentinel_gb10_credential = object()
     sentinel_gb10 = object()
     captured: dict[str, object] = {}
 
@@ -353,6 +372,28 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
             captured.setdefault("service_uid", service_uid),
             sentinel_oldlab_supervisor,
         )[1],
+    )
+
+    def build_oldlab_credential(**kwargs):
+        captured["oldlab_credential_builder"] = kwargs
+        return sentinel_oldlab_credential
+
+    monkeypatch.setattr(
+        installed_module,
+        "FixedLocalExternalSupervisorCredentialTransport",
+        build_oldlab_credential,
+        raising=False,
+    )
+
+    def build_gb10_credential(transport):
+        captured["gb10_credential_builder"] = transport
+        return sentinel_gb10_credential
+
+    monkeypatch.setattr(
+        installed_module,
+        "GB10ExternalSupervisorCredentialTransport",
+        build_gb10_credential,
+        raising=False,
     )
 
     def build_gb10_supervisor(**kwargs):
@@ -390,6 +431,21 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert captured["external_supervisor_transports"] == {
         "gx10-01c7": sentinel_gb10_supervisor,
         "TRT-EAI-OLDLAB-1": sentinel_oldlab_supervisor,
+    }
+    assert captured["external_supervisor_credential_transports"] == {
+        "gx10-01c7": sentinel_gb10_credential,
+        "TRT-EAI-OLDLAB-1": sentinel_oldlab_credential,
+    }
+    assert captured["gb10_credential_builder"] is sentinel_gb10_supervisor
+    assert captured["external_supervisor_credential_identities"] == {
+        "gx10-01c7": (995, 2007),
+        "TRT-EAI-OLDLAB-1": (os.geteuid(), os.getegid()),
+    }
+    assert captured["oldlab_credential_builder"] == {
+        "candidate_root": executor.config.runner_repo,
+        "execution_host": "TRT-EAI-OLDLAB-1",
+        "service_uid": os.geteuid(),
+        "service_gid": os.getegid(),
     }
     assert captured["gb10_supervisor_builder"] == {
         "candidate_sha": plan.candidate_sha,

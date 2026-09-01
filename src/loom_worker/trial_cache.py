@@ -33,6 +33,7 @@ import random
 import shutil
 import textwrap
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -640,17 +641,23 @@ _MANAGED_IMAGE_LABELS = (
     "loom.task-sidecar=true",
     "loom.trial-cache=true",
 )
+_MANAGED_IMAGE_LABEL_KEYS = tuple(label.partition("=")[0] for label in _MANAGED_IMAGE_LABELS)
+_STOPPED_CONTAINER_STATES = frozenset({"created", "dead", "exited"})
 
 
-def evict_stale_managed_images(client: Any, settings: WorkerSettings) -> None:
-    """Bound all Loom-managed Docker images by age and disk pressure."""
-    ttl_hours = int(
-        getattr(
-            settings,
-            "task_image_local_ttl_hours",
-            getattr(settings, "trial_cache_ttl_hours", 168),
-        )
-    )
+@dataclass(frozen=True, slots=True)
+class ManagedImageCleanupResult:
+    """Final local-storage evidence after bounded Loom-owned cleanup."""
+
+    docker_root: str
+    storage_probe_path: str
+    free_bytes: int
+    required_free_bytes: int
+    probe_available: bool
+    error_count: int
+
+
+def _required_managed_image_free_bytes(settings: WorkerSettings) -> int:
     min_free_gb = int(
         getattr(
             settings,
@@ -658,6 +665,107 @@ def evict_stale_managed_images(client: Any, settings: WorkerSettings) -> None:
             getattr(settings, "trial_cache_min_free_gb", 20),
         )
     )
+    return min_free_gb * 1024**3
+
+
+def _docker_labels(resource: Any) -> dict[str, str]:
+    labels = getattr(resource, "labels", None)
+    if isinstance(labels, dict):
+        return {str(key): str(value) for key, value in labels.items()}
+    attrs = getattr(resource, "attrs", None)
+    if not isinstance(attrs, dict):
+        return {}
+    config = attrs.get("Config")
+    if not isinstance(config, dict) or not isinstance(config.get("Labels"), dict):
+        return {}
+    return {str(key): str(value) for key, value in config["Labels"].items()}
+
+
+def _is_loom_managed(resource: Any) -> bool:
+    labels = _docker_labels(resource)
+    return any(labels.get(key) == "true" for key in _MANAGED_IMAGE_LABEL_KEYS)
+
+
+def _container_status(container: Any) -> str:
+    status = getattr(container, "status", None)
+    if isinstance(status, str):
+        return status.lower()
+    attrs = getattr(container, "attrs", None)
+    if isinstance(attrs, dict):
+        state = attrs.get("State")
+        if isinstance(state, dict) and isinstance(state.get("Status"), str):
+            return str(state["Status"]).lower()
+    return ""
+
+
+def _remove_stopped_managed_containers(client: Any) -> int:
+    errors = 0
+    try:
+        containers = client.containers.list(all=True)
+    except Exception as exc:
+        logger.warning("managed stopped-container list failed: %s", exc)
+        return 1
+    for container in containers:
+        try:
+            if _container_status(container) not in _STOPPED_CONTAINER_STATES:
+                continue
+            if not _is_loom_managed(container) and not _is_loom_managed(container.image):
+                continue
+            container.remove(v=False, force=False)
+        except Exception as exc:
+            errors += 1
+            logger.warning(
+                "managed stopped-container remove failed for %s: %s",
+                getattr(container, "id", "unknown"),
+                exc,
+            )
+    return errors
+
+
+def _unavailable_cleanup_result(
+    *,
+    docker_root: str,
+    storage_probe_path: str,
+    required_free_bytes: int,
+    error_count: int,
+) -> ManagedImageCleanupResult:
+    return ManagedImageCleanupResult(
+        docker_root=docker_root,
+        storage_probe_path=storage_probe_path,
+        free_bytes=0,
+        required_free_bytes=required_free_bytes,
+        probe_available=False,
+        error_count=error_count,
+    )
+
+
+def _managed_image_storage_probe_path(
+    settings: WorkerSettings,
+    *,
+    docker_root: str,
+) -> tuple[Path | None, str]:
+    configured = getattr(settings, "task_image_storage_probe_path", None)
+    path_text = str(configured) if configured is not None else docker_root
+    if not path_text:
+        return None, ""
+    path = Path(path_text)
+    return (path if path.is_absolute() else None), path_text
+
+
+def evict_stale_managed_images(
+    client: Any,
+    settings: WorkerSettings,
+) -> ManagedImageCleanupResult:
+    """Clean only Loom-owned Docker resources and return final storage evidence."""
+    error_count = _remove_stopped_managed_containers(client)
+    ttl_hours = int(
+        getattr(
+            settings,
+            "task_image_local_ttl_hours",
+            getattr(settings, "trial_cache_ttl_hours", 168),
+        )
+    )
+    required_free_bytes = _required_managed_image_free_bytes(settings)
     for label in _MANAGED_IMAGE_LABELS:
         try:
             client.images.prune(
@@ -668,20 +776,52 @@ def evict_stale_managed_images(client: Any, settings: WorkerSettings) -> None:
                 }
             )
         except APIError as exc:
+            error_count += 1
             logger.warning("managed image TTL prune failed label=%s: %s", label, exc)
 
-    docker_root = "/"
-    with contextlib.suppress(Exception):
+    docker_root = ""
+    docker_root_probe_failed = False
+    try:
         info = client.info()
         if isinstance(info, dict) and isinstance(info.get("DockerRootDir"), str):
             docker_root = info["DockerRootDir"]
+    except Exception as exc:
+        docker_root_probe_failed = True
+        error_count += 1
+        logger.warning("managed image Docker-root probe failed: %s", exc)
+    storage_probe_path, storage_probe_path_text = _managed_image_storage_probe_path(
+        settings,
+        docker_root=docker_root,
+    )
+    if storage_probe_path is None:
+        if not docker_root_probe_failed:
+            error_count += 1
+        return _unavailable_cleanup_result(
+            docker_root=docker_root,
+            storage_probe_path=storage_probe_path_text,
+            required_free_bytes=required_free_bytes,
+            error_count=error_count,
+        )
     try:
-        free_gb = shutil.disk_usage(docker_root).free / 1024**3
+        free_bytes = shutil.disk_usage(storage_probe_path).free
     except OSError as exc:
+        error_count += 1
         logger.warning("managed image disk-usage probe failed: %s", exc)
-        return
-    if free_gb >= min_free_gb:
-        return
+        return _unavailable_cleanup_result(
+            docker_root=docker_root,
+            storage_probe_path=storage_probe_path_text,
+            required_free_bytes=required_free_bytes,
+            error_count=error_count,
+        )
+    if free_bytes >= required_free_bytes:
+        return ManagedImageCleanupResult(
+            docker_root=docker_root,
+            storage_probe_path=storage_probe_path_text,
+            free_bytes=free_bytes,
+            required_free_bytes=required_free_bytes,
+            probe_available=True,
+            error_count=error_count,
+        )
 
     by_id: dict[str, Any] = {}
     try:
@@ -689,40 +829,82 @@ def evict_stale_managed_images(client: Any, settings: WorkerSettings) -> None:
             for image in client.images.list(filters={"label": label}):
                 by_id[str(image.id)] = image
     except APIError as exc:
+        error_count += 1
         logger.warning("managed image list failed: %s", exc)
-        return
+        return ManagedImageCleanupResult(
+            docker_root=docker_root,
+            storage_probe_path=storage_probe_path_text,
+            free_bytes=free_bytes,
+            required_free_bytes=required_free_bytes,
+            probe_available=True,
+            error_count=error_count,
+        )
     cached = sorted(by_id.values(), key=lambda image: image.attrs.get("Created", ""))
 
     for img in cached:
-        if free_gb >= min_free_gb:
+        if free_bytes >= required_free_bytes:
             break
         try:
             client.images.remove(img.id, force=True)
         except APIError as exc:
+            error_count += 1
             logger.debug("managed image remove failed for %s: %s", img.id, exc)
             continue
         try:
-            free_gb = shutil.disk_usage(docker_root).free / 1024**3
-        except OSError:
-            return
+            free_bytes = shutil.disk_usage(storage_probe_path).free
+        except OSError as exc:
+            error_count += 1
+            logger.warning("managed image final disk-usage probe failed: %s", exc)
+            return _unavailable_cleanup_result(
+                docker_root=docker_root,
+                storage_probe_path=storage_probe_path_text,
+                required_free_bytes=required_free_bytes,
+                error_count=error_count,
+            )
+    return ManagedImageCleanupResult(
+        docker_root=docker_root,
+        storage_probe_path=storage_probe_path_text,
+        free_bytes=free_bytes,
+        required_free_bytes=required_free_bytes,
+        probe_available=True,
+        error_count=error_count,
+    )
 
 
-def evict_stale_cache(client: Any, settings: WorkerSettings) -> None:
+def evict_stale_cache(client: Any, settings: WorkerSettings) -> ManagedImageCleanupResult:
     """Compatibility alias for the generalized managed-image eviction."""
-    evict_stale_managed_images(client, settings)
+    return evict_stale_managed_images(client, settings)
 
 
-def evict_stale_managed_images_from_env(settings: WorkerSettings) -> None:
-    """Best-effort managed-image eviction using the configured Docker daemon."""
+def evict_stale_managed_images_from_env(
+    settings: WorkerSettings,
+) -> ManagedImageCleanupResult:
+    """Run managed cleanup and return fail-closed local-storage evidence."""
+    required_free_bytes = _required_managed_image_free_bytes(settings)
+    _, storage_probe_path = _managed_image_storage_probe_path(
+        settings,
+        docker_root="",
+    )
     try:
         client = docker.from_env()
     except Exception:
         logger.exception("managed image eviction Docker client failed")
-        return
+        return _unavailable_cleanup_result(
+            docker_root="",
+            storage_probe_path=storage_probe_path,
+            required_free_bytes=required_free_bytes,
+            error_count=1,
+        )
     try:
-        evict_stale_managed_images(client, settings)
+        return evict_stale_managed_images(client, settings)
     except Exception:
         logger.exception("managed image eviction failed")
+        return _unavailable_cleanup_result(
+            docker_root="",
+            storage_probe_path=storage_probe_path,
+            required_free_bytes=required_free_bytes,
+            error_count=1,
+        )
     finally:
         with contextlib.suppress(Exception):
             client.close()
