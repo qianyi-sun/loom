@@ -205,7 +205,13 @@ def test_publisher_rejects_pods_exec_in_any_enumerated_namespace(tmp_path: Path)
 set -euo pipefail
 printf '%s\\n' \"$*\" >>\"${KUBECTL_LOG:?}\"
 case \" $* \" in
-  *\" get secret loom-external-slurm-autoscaler-db -o name \"*|*\" get configmap loom-global-execution-witness-v1 -o name \"*)
+  *\" get secret loom-external-slurm-autoscaler-db -o name \"*)
+    printf 'resource/allowed\\n'
+    ;;
+  *\" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} \"*)
+    printf 'ZGF0YWJhc2UtdXJsCg=='
+    ;;
+  *\" get configmap loom-global-execution-witness-v1 -o name \"*)
     printf 'resource/allowed\\n'
     ;;
   *\" get namespaces -o name \"*)
@@ -240,6 +246,131 @@ esac
     assert "-n loom-audit-third auth can-i create pods/exec" in call_log.read_text(encoding="utf-8")
 
 
+def test_publisher_check_requires_nonempty_dedicated_database_key(tmp_path: Path) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    kubeconfig = tmp_path / "external-supervisor.kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\n", encoding="utf-8")
+    kubeconfig.chmod(0o600)
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *" get secret loom-external-slurm-autoscaler-db -o name "*)
+    printf 'secret/loom-external-slurm-autoscaler-db\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} "*)
+    ;;
+  *" get configmap loom-global-execution-witness-v1 -o name "*)
+    printf 'configmap/loom-global-execution-witness-v1\n'
+    ;;
+  *" get namespaces -o name "*)
+    printf 'namespace/loom-staging\n'
+    ;;
+  *" auth can-i create pods/exec "*)
+    printf 'no\n'
+    ;;
+  *)
+    exit 91
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(PUBLISHER), "--check", str(kubeconfig)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"KUBECTL": str(kubectl)},
+    )
+
+    assert result.returncode != 0
+    assert "dedicated database credential is unavailable" in result.stderr
+
+
+def test_publisher_requires_protected_prerequisite_instead_of_bootstrapping_authority(
+    tmp_path: Path,
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    source = tmp_path / "rollout.kubeconfig"
+    source.write_text("protected source\n", encoding="utf-8")
+    source.chmod(0o600)
+    output = tmp_path / "external-supervisor.kubeconfig"
+    call_log = tmp_path / "kubectl.calls"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
+case " $* " in
+  *" apply -f "*)
+    if [ "${*: -1}" = "-" ]; then cat >/dev/null; fi
+    ;;
+  *" get secret loom-secrets -o jsonpath={.data.cp-db-url} "*)
+    printf 'ZGF0YWJhc2UtdXJsCg=='
+    ;;
+  *" create secret generic loom-external-slurm-autoscaler-db "*)
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.token} "*)
+    printf 'dG9rZW4='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.ca\\.crt} "*)
+    printf 'Y2E='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o name "*)
+    if [[ " $* " == *" --kubeconfig ${SOURCE_KUBECONFIG:?} "* ]]; then exit 42; fi
+    printf 'secret/loom-external-slurm-autoscaler-db\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} "*)
+    printf 'ZGF0YWJhc2UtdXJsCg=='
+    ;;
+  *" get configmap loom-global-execution-witness-v1 -o name "*)
+    printf 'configmap/loom-global-execution-witness-v1\n'
+    ;;
+  *" get namespaces -o name "*)
+    printf '%s\n' namespace/loom-staging namespace/loom-dev
+    ;;
+  *" auth can-i create pods/exec "*)
+    printf 'no\n'
+    ;;
+  *)
+    exit 93
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(PUBLISHER), str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "KUBECONFIG": str(source),
+            "KUBECTL": str(kubectl),
+            "KUBECTL_LOG": str(call_log),
+            "SOURCE_KUBECONFIG": str(source),
+        },
+    )
+
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "external-slurm-autoscaler-authority.yaml" not in call_log.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_publisher_parses_as_bash() -> None:
     bash = shutil.which("bash")
     if bash is None:
@@ -268,10 +399,12 @@ def test_publisher_race_never_clobbers_a_concurrently_appearing_destination(
     symlink_target = tmp_path / "concurrent-target"
     symlink_target.write_text("concurrent-symlink-target\n", encoding="utf-8")
     marker = tmp_path / "race-created"
+    call_log = tmp_path / "kubectl.calls"
     kubectl = tmp_path / "kubectl"
     kubectl.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
 case " $* " in
   *" apply -f "*)
     if [ "${*: -1}" = "-" ]; then cat >/dev/null; fi
@@ -288,7 +421,13 @@ case " $* " in
   *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.ca\\.crt} "*)
     printf 'Y2E='
     ;;
-  *" get secret loom-external-slurm-autoscaler-db -o name "*|*" get configmap loom-global-execution-witness-v1 -o name "*)
+  *" get secret loom-external-slurm-autoscaler-token -o name "*)
+    printf 'secret/loom-external-slurm-autoscaler-token\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o name "*)
+    printf 'secret/loom-external-slurm-autoscaler-db\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} "*|*" get configmap loom-global-execution-witness-v1 -o name "*)
     if [[ " $* " == *" --kubeconfig "*"/kubeconfig "* ]] && [ ! -e "${RACE_MARKER:?}" ]; then
       : >"$RACE_MARKER"
       if [ "${RACE_KIND:?}" = symlink ]; then
@@ -324,6 +463,7 @@ esac
         | {
             "KUBECONFIG": str(source),
             "KUBECTL": str(kubectl),
+            "KUBECTL_LOG": str(call_log),
             "OUTPUT_PATH": str(output),
             "RACE_KIND": race_kind,
             "RACE_MARKER": str(marker),
@@ -333,6 +473,9 @@ esac
 
     assert marker.exists()
     assert result.returncode != 0
+    assert "external-slurm-autoscaler-authority.yaml" not in call_log.read_text(
+        encoding="utf-8"
+    )
     if race_kind == "symlink":
         assert output.is_symlink()
         assert output.readlink() == symlink_target

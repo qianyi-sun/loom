@@ -2,8 +2,6 @@
 # Publish the narrow staging credential consumed by an external Slurm controller.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AUTHORITY_MANIFEST="$SCRIPT_DIR/../k8s/external-slurm-autoscaler-authority.yaml"
 KUBECTL="${KUBECTL:-/usr/local/bin/kubectl}"
 NAMESPACE="loom-staging"
 WITNESS_NAMESPACE="loom-dev"
@@ -15,7 +13,7 @@ API_SERVER="https://192.168.50.103:6443"
 
 validate_runtime_kubeconfig() {
   local path="$1"
-  local metadata owner_uid owner_gid mode links size kind
+  local metadata owner_uid owner_gid mode links size kind database_key
   if [ -L "$path" ] || [ ! -f "$path" ]; then
     echo "error: external supervisor credential metadata is unsafe" >&2
     return 1
@@ -32,8 +30,18 @@ validate_runtime_kubeconfig() {
     echo "error: external supervisor credential metadata is unsafe" >&2
     return 1
   fi
-  "$KUBECTL" --kubeconfig "$path" -n "$NAMESPACE" \
-    get secret "$TARGET_SECRET" -o name >/dev/null
+  if ! "$KUBECTL" --kubeconfig "$path" -n "$NAMESPACE" \
+    get secret "$TARGET_SECRET" -o name >/dev/null; then
+    echo "error: dedicated database credential is unavailable" >&2
+    return 1
+  fi
+  if ! database_key="$(
+    "$KUBECTL" --kubeconfig "$path" -n "$NAMESPACE" \
+      get secret "$TARGET_SECRET" -o 'jsonpath={.data.cp-db-url}' 2>/dev/null
+  )" || [ -z "$database_key" ]; then
+    echo "error: dedicated database credential is unavailable" >&2
+    return 1
+  fi
   "$KUBECTL" --kubeconfig "$path" -n "$WITNESS_NAMESPACE" \
     get configmap "$WITNESS_CONFIG_MAP" -o name >/dev/null
   validate_pods_exec_denied "$path"
@@ -90,10 +98,6 @@ if [ -z "${KUBECONFIG:-}" ] || [ ! -r "$KUBECONFIG" ]; then
   echo "error: a readable source KUBECONFIG is required" >&2
   exit 1
 fi
-if [ ! -f "$AUTHORITY_MANIFEST" ] || [ -L "$AUTHORITY_MANIFEST" ]; then
-  echo "error: external autoscaler authority manifest is unavailable" >&2
-  exit 1
-fi
 if [ -e "$output_path" ] || [ -L "$output_path" ]; then
   echo "error: output kubeconfig already exists" >&2
   exit 1
@@ -105,7 +109,10 @@ output_name="$(basename -- "$output_path")"
 temporary_dir="$(mktemp -d -- "$output_directory/.${output_name}.publish.XXXXXXXX")"
 trap 'rm -rf -- "$temporary_dir"' EXIT
 
-"$KUBECTL" --kubeconfig "$KUBECONFIG" apply -f "$AUTHORITY_MANIFEST" >/dev/null
+"$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" \
+  get secret "$TARGET_SECRET" -o name >/dev/null
+"$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" \
+  get secret "$TOKEN_SECRET" -o name >/dev/null
 
 # Keep the broad source credential off command lines and out of output. The
 # generated Kubernetes Secret contains only the one key the runner consumes.
