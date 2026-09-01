@@ -299,8 +299,8 @@ def test_execution_admission_policy_round_trip_and_status(app, postgres_url: str
             )
         ).all()
         assert len(events) == 2
-        assert events[-1].target_id == "pool/nebius-cpu"
-        assert events[-1].event_metadata["version"] == 2
+        assert {event.target_id for event in events} == {"pool/nebius-cpu"}
+        assert {event.event_metadata["version"] for event in events} == {1, 2}
     engine.dispose()
 
 

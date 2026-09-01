@@ -40,11 +40,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if not selected.pool_name:
         return _parser().parse_args(raw)
     pool_names = external_once._scoped_pool_names(selected.pool_name)
-    parser = (
-        builder_once._parser()
-        if pool_names == ("task-image-builder-gb10",)
-        else _parser()
-    )
+    parser = builder_once._parser() if pool_names == ("task-image-builder-gb10",) else _parser()
     return parser.parse_args(raw)
 
 
@@ -67,6 +63,15 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
         or (cluster, controller) != (_GB10_CLUSTER, _GB10_CONTROLLER)
         or args.capacity_grants_json is not None
         or args.deployment_generation is not None
+        or args.global_execution_manager_export is not None
+        or args.global_execution_manager_namespace is not None
+        or args.global_execution_manager_kubeconfig is not None
+        or args.global_execution_witness_json is not None
+        or args.global_execution_witness_config_map != "loom-global-execution-witness-v1"
+        or args.global_execution_witness_namespace != args.namespace
+        or args.global_execution_witness_kubeconfig != args.kubeconfig
+        or args.manager_public_key is not None
+        or args.expected_manager_public_key_sha256_file is not None
     ):
         raise RehearsalPolicyValidationError(
             "rehearsal external supervisor policy authority is invalid"

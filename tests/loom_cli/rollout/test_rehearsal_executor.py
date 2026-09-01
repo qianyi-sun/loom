@@ -64,6 +64,9 @@ from loom_cli.rollout.rehearsal_executor import (
 )
 from loom_cli.rollout.rehearsal_release import RehearsalReleaseArtifact
 from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
+from loom_control_plane.global_execution_fence import (
+    parse_global_execution_witness_export,
+)
 from tests.loom_cli.rollout.rehearsal_fixtures import (
     PassingGB10RehearsalTransport,
     active_external_supervisor_artifact,
@@ -102,6 +105,21 @@ def _external_policy_seed_result(plan: RehearsalPlan) -> dict[str, object]:
         "schema_version": 1,
         "status": "ready",
     }
+
+
+def _rehearsal_witness_round_trip(
+    argv: Sequence[str],
+    payload: bytes | None,
+    seeded: list[dict[str, object]],
+) -> subprocess.CompletedProcess[str] | None:
+    command = tuple(argv)
+    if payload is not None and b'"name":"loom-global-execution-witness-v1"' in payload:
+        seeded[:] = [json.loads(payload)]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(seeded[0]), "")
+    if command[0] == "kubectl" and "configmap" in command and "get" in command:
+        assert len(seeded) == 1
+        return subprocess.CompletedProcess(argv, 0, json.dumps(seeded[0]), "")
+    return None
 
 
 def _absent_external_supervisor_observation(
@@ -993,6 +1011,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         for item in yaml.safe_load_all(release.payload)
     }
     calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1013,6 +1032,9 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if "secret" in command and "get" in command:
@@ -1143,12 +1165,52 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     )
     assert actual_validation_commands == expected_validation_commands
 
+    witness_seed_payloads = [
+        payload
+        for _command, payload in calls
+        if payload is not None and b'"name":"loom-global-execution-witness-v1"' in payload
+    ]
+    assert len(witness_seed_payloads) == 1
+    witness_config_map = json.loads(witness_seed_payloads[0])
+    assert witness_config_map["apiVersion"] == "v1"
+    assert witness_config_map["kind"] == "ConfigMap"
+    assert witness_config_map["metadata"] == {
+        "annotations": {"loom.openai.dev/plan-sha256": plan.plan_digest},
+        "name": "loom-global-execution-witness-v1",
+        "namespace": plan.resources.namespace,
+    }
+    assert set(witness_config_map["data"]) == {"gb10.json", "oldlab.json"}
+    validation_by_pool = {
+        command[command.index("--pool-name") + 1]: command for command in actual_validation_commands
+    }
+    for pool_id in ("gb10", "oldlab"):
+        command = validation_by_pool[pool_id]
+        expected_fingerprint = command[command.index("--expected-manager-public-key-sha256") + 1]
+        witness = parse_global_execution_witness_export(
+            witness_config_map["data"][f"{pool_id}.json"].encode("ascii"),
+            expected_manager_public_key_sha256=expected_fingerprint,
+        )
+        assert witness.authority == "global-capacity-manager"
+        assert witness.pool_id == pool_id
+        assert witness.execution_epoch == 0
+        assert witness.execution_state == "shadow"
+        assert witness.executable_new_capacity_ceiling == 0
+
+    witness_seed_index = next(
+        index for index, (_command, payload) in enumerate(calls) if payload in witness_seed_payloads
+    )
+    witness_apply_command = calls[witness_seed_index][0]
+    assert witness_apply_command[-4:] == ("-f", "-", "-o", "json")
+    assert all(not ("get" in command and "configmap" in command) for command, _payload in calls)
+    assert policy_seed_index < witness_seed_index < validation_index
+
 
 def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() -> None:
     plan = _plan()
     artifact = _external_supervisor_artifact()
     calls: list[tuple[tuple[str, ...], bytes | None]] = []
     controller_artifacts: list[ExternalSupervisorArtifact] = []
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1161,6 +1223,9 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if command[0] == "kubectl" and "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if command[:3] == ("systemctl", "--user", "show"):
@@ -1231,10 +1296,60 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
     )
 
 
+def test_external_supervisor_validation_rejects_rehearsal_witness_readback_drift() -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+    calls: list[tuple[str, ...]] = []
+    seeded: dict[str, object] | None = None
+
+    def run(argv, payload, _timeout):
+        nonlocal seeded
+        command = tuple(argv)
+        calls.append(command)
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
+        if (
+            command[0] == "kubectl"
+            and "apply" in command
+            and payload is not None
+            and b'"name":"loom-global-execution-witness-v1"' in payload
+        ):
+            seeded = json.loads(payload)
+            observed = deepcopy(seeded)
+            observed["data"]["gb10.json"] = "{}\n"
+            return subprocess.CompletedProcess(argv, 0, json.dumps(observed), "")
+        if command[0] == "kubectl" and "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if command[0] == "kubectl" and "configmap" in command and "get" in command:
+            raise AssertionError("rehearsal credential cannot get ConfigMaps")
+        if command[:3] == ("systemctl", "--user", "show"):
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(command)
+
+    digest, blocker = IsolatedRehearsalExecutor(
+        run=run,
+        external_supervisor_artifacts=lambda _plan: artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=_absent_external_supervisor_observation,
+    )._validate_external_supervisors(plan)
+
+    assert digest is None
+    assert blocker == "external-supervisor-witness-readback-drift"
+    assert all(command[0] != "systemd-run" for command in calls)
+
+
 def test_external_supervisor_validation_accepts_repairable_gb10_controller_proof() -> None:
     plan = _plan()
     artifact = _external_supervisor_artifact()
     validation_commands: list[tuple[str, ...]] = []
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1245,6 +1360,9 @@ def test_external_supervisor_validation_accepts_repairable_gb10_controller_proof
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if command[0] == "kubectl" and "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if command[:3] == ("systemctl", "--user", "show"):
@@ -1269,6 +1387,7 @@ def test_external_supervisor_validation_accepts_repairable_gb10_controller_proof
 def test_external_supervisor_validation_fails_closed_without_gb10_controller_proof() -> None:
     plan = _plan()
     artifact = _external_supervisor_artifact()
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1279,6 +1398,9 @@ def test_external_supervisor_validation_fails_closed_without_gb10_controller_pro
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if command[0] == "kubectl" and "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         raise AssertionError("local validation must not start without controller proof")
@@ -1300,6 +1422,7 @@ def test_external_supervisor_validation_fails_closed_without_gb10_controller_pro
 def test_external_supervisor_validation_rejects_drifted_gb10_controller_state() -> None:
     plan = _plan()
     artifact = _external_supervisor_artifact()
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1310,6 +1433,9 @@ def test_external_supervisor_validation_rejects_drifted_gb10_controller_state() 
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if command[0] == "kubectl" and "apply" in command:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         raise AssertionError("local validation must not start after controller drift")
@@ -1470,6 +1596,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
     release = _release_artifact(plan)
     secrets = _secret_artifact(plan)
     calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    seeded_witnesses: list[dict[str, object]] = []
 
     def run(argv, payload, _timeout):
         command = tuple(argv)
@@ -1489,6 +1616,9 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
                 json.dumps(_external_policy_seed_result(plan)),
                 "",
             )
+        witness_result = _rehearsal_witness_round_trip(argv, payload, seeded_witnesses)
+        if witness_result is not None:
+            return witness_result
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if (
