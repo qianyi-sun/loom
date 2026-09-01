@@ -86,6 +86,7 @@ from loom_control_plane.service_execution import (
     execution_lease_projection,
     persist_execution_catalog,
     record_execution_event,
+    refresh_execution_target_health,
     request_trial_execution_cancellation,
     reserve_trial_execution,
     set_execution_target_health,
@@ -613,6 +614,57 @@ async def _reserve(
         deadline_at=now + timedelta(hours=1),
         now=now,
     )
+
+
+async def test_actuator_refreshes_target_health_without_reenabling_operator_state(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            _trial_id, target = await _seed_ready_trial(session, now=now)
+            await set_execution_target_health(
+                session,
+                target_id=target.target_id,
+                desired_state="draining",
+                observed_state="ready",
+                health_status="healthy",
+                observed_at=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=_FakeKubernetesJobApi(),
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+            ),
+            controller_id="target-health-refresh-test",
+        )
+        refreshed_at = now + timedelta(seconds=2)
+        assert await actuator.reconcile_full_once(now=refreshed_at) == 0
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionTarget, target.target_id)
+            assert persisted is not None
+            assert persisted.desired_state == "draining"
+            assert persisted.observed_state == "ready"
+            assert persisted.health_status == "healthy"
+            assert persisted.health_observed_at == refreshed_at
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="health observation regressed",
+            ):
+                await refresh_execution_target_health(
+                    session,
+                    target_id=target.target_id,
+                    observed_at=refreshed_at - timedelta(seconds=1),
+                )
+    finally:
+        await engine.dispose()
 
 
 async def test_reservation_persists_trial_lease_command_and_history_atomically(

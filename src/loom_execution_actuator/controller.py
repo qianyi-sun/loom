@@ -22,6 +22,7 @@ from loom_control_plane.service_execution import (
     finalize_committed_service_execution,
     mark_execution_output_unavailable,
     record_kubernetes_observation,
+    refresh_execution_target_health,
 )
 from loom_execution_actuator.contracts import (
     ActuatorContractError,
@@ -459,6 +460,14 @@ class ExecutionActuator:
                 continue
         KUBERNETES_ORPHAN_COUNT.set(drift)
         KUBERNETES_RECONCILE_CONVERGED.set(1 if drift == 0 else 0)
+        if drift == 0:
+            async with self._sessions() as session:
+                await refresh_execution_target_health(
+                    session,
+                    target_id=self._target.target_id,
+                    observed_at=current_time,
+                )
+                await session.commit()
         return drift
 
     async def watch_once(self, *, timeout_seconds: int = 15) -> int:

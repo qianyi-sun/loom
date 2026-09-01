@@ -341,6 +341,39 @@ async def set_execution_target_health(
     return target
 
 
+async def refresh_execution_target_health(
+    session: AsyncSession,
+    *,
+    target_id: str,
+    observed_at: datetime,
+) -> ServiceExecutionTarget:
+    """Refresh actuator-owned readiness without changing operator intent.
+
+    The actuator proves that it can list and reconcile the target namespace.
+    It must not silently re-enable a target that an operator has disabled or
+    placed into draining state, so ``desired_state`` is deliberately preserved.
+    """
+
+    target = (
+        await session.execute(
+            select(ServiceExecutionTarget)
+            .where(ServiceExecutionTarget.id == target_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise ServiceExecutionConflict("execution target not found")
+    if target.health_observed_at is not None and observed_at < target.health_observed_at:
+        raise ServiceExecutionConflict("execution target health observation regressed")
+    target.observed_state = "ready"
+    target.health_status = "healthy"
+    target.health_observed_at = observed_at
+    target.health_error_code = None
+    target.updated_at = datetime.now(UTC)
+    await session.flush()
+    return target
+
+
 def _bind_kubernetes_execution_route(
     *,
     trial: Trial,
