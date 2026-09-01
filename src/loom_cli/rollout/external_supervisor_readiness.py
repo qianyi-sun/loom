@@ -77,6 +77,12 @@ _STAGING_DATABASE_SECRETS = {
     "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
     "task-image-builder-oldlab": "loom-external-slurm-autoscaler-db",
 }
+_LEGACY_STAGING_DATABASE_SECRETS = {
+    "gb10": "loom-external-slurm-autoscaler-db",
+    "oldlab": "loom-secrets",
+    "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
+    "task-image-builder-oldlab": "loom-secrets",
+}
 _STAGING_SUPERVISOR_SCRIPTS = {
     "gb10": SCRIPT_PATH,
     "oldlab": SCRIPT_PATH,
@@ -85,6 +91,8 @@ _STAGING_SUPERVISOR_SCRIPTS = {
 }
 _STAGING_WITNESS_CONFIG_MAP = "loom-global-execution-witness-v1"
 _STAGING_WITNESS_NAMESPACE = "loom-dev"
+_STAGING_LEGACY_MANAGER_EXPORT = "deployment/loom-capacity-manager"
+_STAGING_LEGACY_MANAGER_NAMESPACE = "loom-dev"
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -129,6 +137,20 @@ _COMMON_REQUIRED_ARGUMENTS = frozenset(
         "--global-execution-witness-namespace",
         "--global-execution-witness-kubeconfig",
         "--expected-manager-public-key-sha256",
+    }
+)
+_WITNESS_ARGUMENTS = frozenset(
+    {
+        "--global-execution-witness-config-map",
+        "--global-execution-witness-namespace",
+        "--global-execution-witness-kubeconfig",
+    }
+)
+_LEGACY_MANAGER_ARGUMENTS = frozenset(
+    {
+        "--global-execution-manager-export",
+        "--global-execution-manager-namespace",
+        "--global-execution-manager-kubeconfig",
     }
 )
 _TASK_IMAGE_BUILDER_ARGUMENTS = frozenset(
@@ -294,7 +316,7 @@ def _argument_map(args: tuple[str, ...], *, pool_name: str) -> dict[str, str]:
     required = _REQUIRED_ARGUMENTS_BY_POOL.get(pool_name)
     if required is None:
         raise ValueError("external supervisor pool is unauthorized")
-    allowed = required | _OPTIONAL_ARGUMENTS
+    allowed = required | _LEGACY_MANAGER_ARGUMENTS | _OPTIONAL_ARGUMENTS
     if not args or len(args) > 64:
         raise ValueError("external supervisor args are invalid")
     if "--validate-only" in args or any(token.startswith("--validate-only=") for token in args):
@@ -315,7 +337,14 @@ def _argument_map(args: tuple[str, ...], *, pool_name: str) -> dict[str, str]:
         if flag not in allowed or flag in parsed or not value:
             raise ValueError(f"external supervisor argument {flag!r} is unauthorized")
         parsed[flag] = value
-    missing = required - set(parsed)
+    present = set(parsed)
+    witness = present & _WITNESS_ARGUMENTS
+    legacy = present & _LEGACY_MANAGER_ARGUMENTS
+    if witness and legacy:
+        raise ValueError("external supervisor global execution authority is mixed")
+    authority_required = _LEGACY_MANAGER_ARGUMENTS if legacy else _WITNESS_ARGUMENTS
+    selected_required = (required - _WITNESS_ARGUMENTS) | authority_required
+    missing = selected_required - present
     if missing:
         raise ValueError(
             "external supervisor bounded tunnel arguments are missing: "
@@ -476,13 +505,27 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor Slurm authority drifted")
         if arguments["--namespace"] != STAGING_NAMESPACE:
             raise ValueError("external supervisor staging namespace is not canonical")
-        if arguments["--kubeconfig"] != STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG:
+        legacy_manager_authority = _LEGACY_MANAGER_ARGUMENTS <= arguments.keys()
+        expected_kubeconfig = (
+            STAGING_KUBECONFIG
+            if legacy_manager_authority
+            else STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG
+        )
+        if arguments["--kubeconfig"] != expected_kubeconfig:
             raise ValueError("external supervisor staging kubeconfig is not canonical")
+        global_execution_ready = (
+            arguments["--global-execution-manager-export"] == _STAGING_LEGACY_MANAGER_EXPORT
+            and arguments["--global-execution-manager-namespace"]
+            == _STAGING_LEGACY_MANAGER_NAMESPACE
+            and arguments["--global-execution-manager-kubeconfig"] == STAGING_KUBECONFIG
+            if legacy_manager_authority
+            else arguments["--global-execution-witness-config-map"] == _STAGING_WITNESS_CONFIG_MAP
+            and arguments["--global-execution-witness-namespace"] == _STAGING_WITNESS_NAMESPACE
+            and arguments["--global-execution-witness-kubeconfig"]
+            == STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG
+        )
         if (
-            arguments["--global-execution-witness-config-map"] != _STAGING_WITNESS_CONFIG_MAP
-            or arguments["--global-execution-witness-namespace"] != _STAGING_WITNESS_NAMESPACE
-            or arguments["--global-execution-witness-kubeconfig"]
-            != STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG
+            not global_execution_ready
             or _SHA256_RE.fullmatch(arguments["--expected-manager-public-key-sha256"]) is None
             or arguments["--expected-manager-public-key-sha256"] == "0" * 64
         ):
@@ -492,13 +535,13 @@ class ExternalSupervisorIdentity:
             "--db-secret-key": "cp-db-url",
             "--scontrol": "/usr/bin/scontrol",
         }
-        if (
-            any(
-                flag in arguments and arguments[flag] != expected
-                for flag, expected in optional_authority.items()
-            )
-            or arguments.get("--db-secret-name", "loom-secrets")
-            != (_STAGING_DATABASE_SECRETS[self.pool_name])
+        if any(
+            flag in arguments and arguments[flag] != expected
+            for flag, expected in optional_authority.items()
+        ) or arguments.get("--db-secret-name", "loom-secrets") != (
+            _LEGACY_STAGING_DATABASE_SECRETS[self.pool_name]
+            if legacy_manager_authority
+            else _STAGING_DATABASE_SECRETS[self.pool_name]
         ):
             raise ValueError("external supervisor optional authority is not canonical")
         try:

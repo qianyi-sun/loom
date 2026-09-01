@@ -68,6 +68,43 @@ class CandidateIdentityEvidence:
     evidence_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class AdmittedCandidateGitRunner:
+    """Git runner carrying one explicit historical candidate verification capability."""
+
+    run: GitRunner
+    verify_candidate: Callable[[OperatorConfig, CandidateBinding], CandidateIdentityEvidence]
+
+    def __post_init__(self) -> None:
+        if not callable(self.run) or not callable(self.verify_candidate):
+            raise ValueError("admitted candidate Git runner is invalid")
+
+    def __call__(self, argv: list[str]) -> CommandResult:
+        return self.run(argv)
+
+    def identity(
+        self,
+        config: OperatorConfig,
+        binding: CandidateBinding,
+    ) -> CandidateIdentityEvidence:
+        evidence = self.verify_candidate(config, binding)
+        history_valid = (
+            evidence.linear_history_count == 0
+            if binding.source_mode == "merged-dev"
+            else 1 <= evidence.linear_history_count <= MAX_CUMULATIVE_COMMITS
+        )
+        if (
+            evidence.resolved_sha != binding.resolved_sha
+            or evidence.resolved_tree != binding.resolved_tree
+            or evidence.source_mode != binding.source_mode
+            or evidence.approved_base_sha != binding.approved_base_sha
+            or not history_valid
+            or _SHA256_RE.fullmatch(evidence.evidence_digest) is None
+        ):
+            raise CandidateBindingError("admitted candidate identity drifted")
+        return evidence
+
+
 def _service_uid(config: OperatorConfig) -> int:
     try:
         return pwd.getpwnam(config.service_user).pw_uid
@@ -484,6 +521,8 @@ def verify_bound_candidate(
     run: GitRunner,
 ) -> CandidateIdentityEvidence:
     """Prove a candidate and its currently installed protected config."""
+    if isinstance(run, AdmittedCandidateGitRunner):
+        return run.identity(config, binding)
     return _verify_bound_candidate(
         config,
         binding,
@@ -518,6 +557,7 @@ def verify_resume_runtime_candidate(
 
 
 __all__ = [
+    "AdmittedCandidateGitRunner",
     "CandidateBindingError",
     "CandidateIdentityEvidence",
     "Clock",

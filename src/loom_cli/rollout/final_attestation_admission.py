@@ -12,6 +12,7 @@ from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 from loom_cli.rollout.preflight_contract import (
     AdmissionPhase,
     CheckExecution,
+    CheckOperation,
     PreflightAttestation,
     PreflightDag,
     RegisteredCheck,
@@ -28,6 +29,7 @@ _BASELINE_CHECKS = frozenset(
         "staging.release-baseline",
     }
 )
+_RUNTIME_UPGRADE_ATTESTED_DEPENDENCIES = frozenset({"runner.install"})
 
 
 class FinalAttestationAdmissionError(ValueError):
@@ -96,6 +98,51 @@ def _identity_evidence_matches(
         == attestation.identity_evidence_hashes.get(check_id)
         for check_id in specs
     )
+
+
+def _partition_post_apply_resume_checks(
+    *,
+    checks: tuple[RegisteredCheck, ...],
+    admission: FinalAttestationAdmission,
+    plan: CandidatePreflightPlan,
+    attested_dependencies: frozenset[str],
+) -> tuple[tuple[RegisteredCheck, ...], tuple[CheckExecution, ...]]:
+    """Reuse only an explicitly admitted historical runner installation."""
+    if (
+        not isinstance(attested_dependencies, frozenset)
+        or not attested_dependencies <= _RUNTIME_UPGRADE_ATTESTED_DEPENDENCIES
+    ):
+        raise ValueError("post-apply resume attested dependencies are invalid")
+    if not attested_dependencies:
+        return checks, ()
+    if not admission.post_apply_resume:
+        raise ValueError("post-apply resume dependency requires resumed admission")
+
+    available = {check.spec.check_id: check for check in checks}
+    prior = {execution.check_id: execution for execution in admission.tier0_executions}
+    admitted: list[CheckExecution] = []
+    for check_id in sorted(attested_dependencies):
+        check = available.get(check_id)
+        execution = prior.get(check_id)
+        if (
+            check is None
+            or execution is None
+            or not execution.passed
+            or execution.failure_code != check.spec.failure_code
+            or execution.tier != check.spec.tier
+            or execution.stage is not check.spec.stage
+            or execution.operation is not CheckOperation.PROBE
+            or execution.input_fingerprint != check.input_fingerprint(plan.context)
+            or execution.implementation_digest != check.implementation_digest
+            or admission.attestation.check_implementation_digests.get(check_id)
+            != execution.implementation_digest
+            or identity_evidence_hash(check.spec, execution.evidence)
+            != admission.attestation.identity_evidence_hashes.get(check_id)
+        ):
+            raise ValueError("post-apply resume attested dependency drifted")
+        admitted.append(execution)
+    runnable = tuple(check for check in checks if check.spec.check_id not in attested_dependencies)
+    return runnable, tuple(admitted)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +280,7 @@ def validate_post_apply_attestation_drift(
     current_mutation_epoch: int,
     now: datetime,
     max_concurrency: int = 8,
+    attested_dependencies: frozenset[str] = frozenset(),
 ) -> PostApplyDriftEvidence:
     """Rerun only exact inputs from a fresh post-apply runtime plan."""
     if now.tzinfo is None or now.utcoffset() is None:
@@ -263,11 +311,22 @@ def validate_post_apply_attestation_drift(
         plan,
         AdmissionPhase.POST_APPLY,
     )
-    executions = PreflightDag(checks, max_concurrency=max_concurrency).run(
+    runnable, admitted = _partition_post_apply_resume_checks(
+        checks=checks,
+        admission=admission,
+        plan=plan,
+        attested_dependencies=attested_dependencies,
+    )
+    fresh_executions = PreflightDag(
+        runnable,
+        max_concurrency=max_concurrency,
+        attested_dependencies=attested_dependencies,
+    ).run(
         plan.context,
         through_tier=0,
         now=lambda: now,
     )
+    executions = fresh_executions + admitted
     by_id = {execution.check_id: execution for execution in executions}
     if not selected_ids <= by_id.keys() or any(not execution.passed for execution in executions):
         raise PostApplyDriftTransientError("post-apply drift evidence is incomplete")
@@ -283,7 +342,7 @@ def validate_post_apply_attestation_drift(
         for execution in executions
     ):
         raise ValueError("post-apply drift evidence implementation changed")
-    if any(execution.expires_at <= now for execution in executions):
+    if any(execution.expires_at <= now for execution in fresh_executions):
         raise PostApplyDriftTransientError("post-apply drift evidence expired")
     if not _identity_evidence_matches(
         checks=checks,
@@ -319,6 +378,7 @@ def validate_post_apply_resume_attestation(
     current_mutation_epoch: int,
     now: datetime,
     max_concurrency: int = 8,
+    attested_dependencies: frozenset[str] = frozenset(),
 ) -> FinalAttestationAdmission:
     """Re-admit an interrupted final chain after its exact protected apply."""
     attestation = prior_admission.attestation
@@ -337,12 +397,26 @@ def validate_post_apply_resume_attestation(
         current_mutation_epoch=current_mutation_epoch,
         now=now,
         max_concurrency=max_concurrency,
+        attested_dependencies=attested_dependencies,
     )
     checks = tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
-    executions = PreflightDag(checks, max_concurrency=max_concurrency).run(
-        plan.context,
-        through_tier=2,
-        now=lambda: now,
+    runnable, admitted = _partition_post_apply_resume_checks(
+        checks=checks,
+        admission=resumed,
+        plan=plan,
+        attested_dependencies=attested_dependencies,
+    )
+    executions = (
+        PreflightDag(
+            runnable,
+            max_concurrency=max_concurrency,
+            attested_dependencies=attested_dependencies,
+        ).run(
+            plan.context,
+            through_tier=2,
+            now=lambda: now,
+        )
+        + admitted
     )
     tier2 = {execution.check_id: execution for execution in executions if execution.tier == 2}
     if (

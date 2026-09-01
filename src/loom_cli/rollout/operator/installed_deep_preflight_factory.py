@@ -94,6 +94,7 @@ from .readonly_database_client import (
     probe_installed_readonly_database_baseline,
 )
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
+from .resume_runtime_upgrade import AdmittedResumeRuntimeUpgrade
 from .staging_smoke_authority import staging_smoke_authority
 from .store import RequestStore
 
@@ -587,10 +588,13 @@ def build_installed_deep_preflight_composition(
     now: Callable[[], datetime],
     rollout_runner_install_digest: str | None = None,
     installed_config: OperatorConfig | None = None,
+    resume_runtime_upgrade: AdmittedResumeRuntimeUpgrade | None = None,
 ) -> InstalledDeepPreflightComposition:
     """Return one fail-closed production graph shared by broker and worker."""
     if service_uid < 0 or service_gid < 0:
         raise ValueError("installed preflight service identity is invalid")
+    if resume_runtime_upgrade is not None and resume_runtime_upgrade.config != config:
+        raise ValueError("installed preflight resume runtime authority drifted")
     child_environment = sanitized_child_environment(
         config if installed_config is None else installed_config,
         service_uid=service_uid,
@@ -840,6 +844,7 @@ def build_installed_deep_preflight_composition(
         container_registry=str(cluster.container_registry),
         container_registry_push=str(cluster.container_registry_push),
         now=now,
+        resume_runtime_upgrade=resume_runtime_upgrade,
     )
 
 
