@@ -267,6 +267,23 @@ def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> N
     assert pod["containers"][0]["readinessProbe"]["httpGet"]["path"] == "/readyz"
 
 
+def test_development_patch_persists_service_execution_scheduler_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-control-plane-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "control-plane"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "True"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "development"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] == "nebius-cpu"
+    assert env["LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON"]["valueFrom"] == {
+        "secretKeyRef": {"name": "loom-image-admission", "key": "keyring-json"}
+    }
+
+
 def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> None:
     actuator_documents = list(
         yaml.safe_load_all(

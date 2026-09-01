@@ -288,6 +288,9 @@ read only the collector policy projection and publish capacity observations,
 and cannot mutate policy or use ordinary worker authority. The idempotent
 `scripts/ops/apply_nebius_development_runtime.sh` bootstrap creates that token
 only when its Secret is absent and never renews it on a calendar schedule. The
+same bootstrap applies the development-only Control Plane patch that binds the
+scheduler to `nebius-cpu` and the persisted image-admission keyring; the
+provider-neutral base Deployment remains disabled. The
 Nebius authorized public key deliberately has no `expires_at`; the SDK derives
 and refreshes short-lived access tokens from it. The collector uses the
 official Nebius Python SDK only for quota `list` and node group `get`; it

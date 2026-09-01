@@ -178,12 +178,15 @@ scripts/ops/apply_nebius_development_runtime.sh \
   --nebius-credentials /secure/path/capacity-observer-credentials.json
 ```
 
-The operation is idempotent. It reuses the existing single-scope Loom collector
-token, applies the active actuator and one-minute collector, and waits for a
-scheduled collector Job. It does not create a user Job or change the node-group
-target count. Subsequent users only upload/submit through Loom; the persisted
-scheduler, lease/outbox, actuator, and managed `0..1` autoscaler complete the
-connection automatically.
+The operation is idempotent. It applies the development-only Control Plane
+patch that enables the `nebius-cpu` scheduler and loads its image-admission
+keyring from the existing Secret, reuses the existing single-scope Loom
+collector token, applies the active actuator and one-minute collector, and
+waits for both rollouts plus a scheduled collector Job. The provider-neutral
+base manifest stays disabled. The operation does not create a user Job or
+change the node-group target count. Subsequent users only upload/submit through
+Loom; the persisted scheduler, lease/outbox, actuator, and managed `0..1`
+autoscaler complete the connection automatically.
 
 Kubernetes rotates the actuator's projected ServiceAccount token. Nebius
 refreshes access tokens from the non-expiring authorized key. Node-group image

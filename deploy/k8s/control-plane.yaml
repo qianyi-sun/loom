@@ -75,7 +75,7 @@ spec:
               name: loom-secrets
               key: minio-secret-key
         - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED
-          value: 'True'
+          value: 'False'
         - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT
           value: development
         - name: LOOM_CP_SERVICE_EXECUTION_SCHEDULER_INTERVAL_SEC

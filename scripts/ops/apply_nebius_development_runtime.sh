@@ -38,15 +38,12 @@ fi
 
 kubectl get namespace loom >/dev/null
 kubectl get secret -n loom loom-admin-secret >/dev/null
+kubectl get secret -n loom loom-image-admission >/dev/null
 kubectl get secret -n loom-nebius-development loom-execution-actuator-db >/dev/null
 
-scheduler_enabled=$(
-  kubectl get deployment -n loom loom-control-plane -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED")].value}'
-)
-if [[ ${scheduler_enabled,,} != true ]]; then
-  echo "control-plane service execution scheduler is not enabled" >&2
-  exit 1
-fi
+kubectl patch deployment -n loom loom-control-plane --type=strategic \
+  --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null
+kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
 
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
