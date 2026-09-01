@@ -335,18 +335,24 @@ not permission to purge its authority record.
 
 #### Kubernetes execution actuator
 
-The checked manifest at `deploy/k8s/nebius-execution-actuator.yaml` is a
-repository contract, not a deployment instruction. It has zero replicas and a
-non-runnable image placeholder. Do not apply or scale it until the separately
-authorized target has all of the following read back from its own APIs:
+The checked manifest at `deploy/k8s/nebius-execution-actuator.yaml` is the
+accepted development runtime contract: one system-node replica, the canonical
+development namespace/target, and an immutable Nebius registry digest. Apply it
+only through `scripts/ops/apply_nebius_development_runtime.sh`; the script
+validates the existing platform scheduler and Secrets, creates the collector's
+non-expiring single-scope token only when absent, applies the recurring
+collector, and waits for the first scheduled success. It never creates a Job,
+Pod, or execution node for a user trial.
+
+The initial bootstrap requires all of the following read back from its own APIs:
 
 - the exact `execution_targets` row is enabled and fresh for this environment;
 - the manifest namespace matches that target's immutable `namespace_name`;
 - the pinned actuator image digest has release provenance and scan evidence;
 - the referenced database Secret exists through the environment's secret
   authority, not through a checked-in Secret;
-- the default managed runtime or an explicitly configured optional
-  `RuntimeClass` has passed a bounded non-root Pod smoke;
+- the default managed runtime has passed a bounded non-root Pod smoke; no
+  custom sandbox `RuntimeClass` is required;
 - target capacity, NetworkPolicy, registry access, quotas, and cleanup alarms
   have passed their own gates.
 
@@ -363,16 +369,12 @@ suspended Job. It verifies create/get/list/watch/exact-UID delete and destroys
 the cluster on exit. Passing it proves API conformance only, not Nebius runtime
 support or capacity.
 
-For an authorized rollout, first substitute the exact release digest through
-the protected deployment path while retaining `replicas: 0`. Server-side dry
-run the complete render and confirm that it contains only Namespace,
-ServiceAccount, Role, RoleBinding, Deployment, and PodDisruptionBudget kinds.
-Confirm there is no ClusterRole, Secret, Pod exec/log, node, namespace-mutation,
-or wildcard permission. Scale one replica only after the environment approval,
-then require `/readyz` to return 200; it remains 503 until both a database
+For an authorized rollout, update the exact release digest in both Nebius
+manifests, server-side dry run the complete render, and run the idempotent
+bootstrap. Require `/readyz` to return 200; it remains 503 until both a database
 command poll and a full Kubernetes reconciliation have succeeded recently.
-Scale additional replicas only after duplicate-delivery and convergence
-metrics remain healthy.
+Do not scale the development actuator above one replica without a measured
+availability need.
 
 Alert on sustained command age, cleanup debt, stale target health,
 `loom_execution_actuator_kubernetes_api_errors_total`, watch restarts, nonzero orphan

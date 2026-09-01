@@ -204,7 +204,7 @@ spec:
           app: loom-gateway-router
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: loom-nebius-staging
+          kubernetes.io/metadata.name: loom-nebius-development
       podSelector:
         matchLabels:
           app.kubernetes.io/component: execution-unit

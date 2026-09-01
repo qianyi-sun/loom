@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: loom-nebius-staging
+  name: loom-nebius-development
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
@@ -10,21 +10,21 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: loom-execution-actuator
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 automountServiceAccountToken: true
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: loom-execution-attempt
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: loom-execution-actuator
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -37,11 +37,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: loom-execution-actuator
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 subjects:
   - kind: ServiceAccount
     name: loom-execution-actuator
-    namespace: loom-nebius-staging
+    namespace: loom-nebius-development
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -51,7 +51,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: loom-execution-attempt-default-deny
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 spec:
   podSelector:
     matchLabels:
@@ -64,7 +64,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: loom-execution-attempt-egress
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 spec:
   podSelector:
     matchLabels:
@@ -97,13 +97,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: loom-execution-actuator
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
   labels:
     app.kubernetes.io/name: loom-execution-actuator
     app.kubernetes.io/part-of: loom
 spec:
-  # Repository wiring is inert until a separately authorized target exists.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: loom-execution-actuator
@@ -125,7 +124,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: actuator
-          image: loom-execution-actuator:0.8
+          image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:a4c01a7a7c17871807da841d6337c95a7344428fd381e86d16a1dd7c93df4025
           imagePullPolicy: IfNotPresent
           env:
             - name: LOOM_EXECUTION_ACTUATOR_DB_URL
@@ -138,9 +137,9 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: LOOM_EXECUTION_ACTUATOR_TARGET_ID
-              value: nebius-eu-north1-staging
+              value: nebius-eu-north1-development
             - name: LOOM_EXECUTION_ACTUATOR_NAMESPACE
-              value: loom-nebius-staging
+              value: loom-nebius-development
             - name: LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR
               value: '{"loom.nebius/node-role":"execution"}'
             - name: LOOM_EXECUTION_ACTUATOR_TOLERATIONS
@@ -185,7 +184,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: loom-execution-actuator
-  namespace: loom-nebius-staging
+  namespace: loom-nebius-development
 spec:
   minAvailable: 1
   selector:

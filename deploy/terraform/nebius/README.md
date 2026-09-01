@@ -12,6 +12,13 @@ console login is not a Nebius CLI profile. Before every plan or apply, follow
 the authorization and cost gate in
 [`docs/runbooks/nebius-infrastructure.md`](../../../docs/runbooks/nebius-infrastructure.md).
 
+The capacity observer service account, tenant read-only permit, and authorized
+public key are part of this state. The public key omits `expires_at`; its private
+credential is supplied only to the Kubernetes runtime Secret and is never
+committed or printed. Nebius SDK access tokens remain short-lived and refresh
+automatically from that stable key, so a human CLI/browser login is not a
+runtime dependency.
+
 ## Layout
 
 - `modules/execution-target`: reusable, version-pinned target resources.
@@ -67,6 +74,8 @@ terraform -chdir=deploy/terraform/nebius/stack show -json /secure/path/developme
 ```
 
 Never commit populated variables, backend credentials, kubeconfigs, plan
-files, state, tokens, or private keys. Apply only the reviewed saved plan and
+files, state, tokens, or private keys. The populated variable file includes the
+non-secret public half of the capacity-observer key; keep it alongside the
+other protected exact-target inputs. Apply only the reviewed saved plan and
 only after the owner has approved its exact target, resources, maximum hourly
 and monthly cost, cleanup deadline, and residual-cost list.

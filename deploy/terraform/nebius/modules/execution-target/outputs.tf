@@ -64,3 +64,13 @@ output "evidence" {
 output "node_registry_pull_service_account_id" {
   value = nebius_iam_v1_service_account.node_registry_pull.id
 }
+
+output "capacity_observer_service_account_id" {
+  description = "Least-privilege Nebius identity used by the recurring capacity collector."
+  value       = nebius_iam_v1_service_account.capacity_observer.id
+}
+
+output "capacity_observer_public_key_id" {
+  description = "Non-expiring authorized public key used by the recurring capacity collector."
+  value       = nebius_iam_v1_auth_public_key.capacity_observer.id
+}
