@@ -97,9 +97,15 @@ kubectl rollout status -n loom-nebius-development deployment/loom-execution-actu
 
 deadline=$((SECONDS + 180))
 while ((SECONDS < deadline)); do
-  if kubectl get jobs -n loom-nebius-development \
+  desired_collector_image=$(kubectl get cronjob -n loom-nebius-development \
+    loom-execution-capacity-collector \
+    -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}')
+  latest_job=$(kubectl get jobs -n loom-nebius-development \
     -l app.kubernetes.io/name=loom-execution-capacity-collector \
-    -o jsonpath='{range .items[*]}{.status.succeeded}{"\n"}{end}' | grep -qx '1'; then
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.succeeded}{"|"}{.spec.template.spec.containers[0].image}{"\n"}{end}' \
+    | tail -n 1)
+  if [[ $latest_job == *"|1|$desired_collector_image" ]]; then
     echo "Nebius development runtime is reconciled and the recurring collector has succeeded"
     exit 0
   fi

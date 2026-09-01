@@ -358,3 +358,35 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
         for rule in minio["spec"]["ingress"]
         for peer in rule["from"]
     )
+
+
+def test_platform_network_policies_support_kube_dns_and_coredns_labels() -> None:
+    documents = list(
+        yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))
+    )
+    dns_rules = []
+    for document in documents:
+        if document.get("kind") != "NetworkPolicy":
+            continue
+        for rule in document["spec"].get("egress", []):
+            if {port.get("port") for port in rule.get("ports", [])} == {53}:
+                dns_rules.append(rule)
+
+    assert dns_rules
+    for rule in dns_rules:
+        assert rule["to"] == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                },
+                "podSelector": {
+                    "matchExpressions": [
+                        {
+                            "key": "k8s-app",
+                            "operator": "In",
+                            "values": ["kube-dns", "coredns"],
+                        }
+                    ]
+                },
+            }
+        ]

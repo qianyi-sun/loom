@@ -55,8 +55,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -110,8 +112,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -180,8 +184,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -253,8 +259,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -314,8 +322,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -380,8 +390,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -421,8 +433,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -472,8 +486,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -513,8 +529,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -580,8 +598,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -636,8 +656,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP
@@ -699,8 +721,10 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: kube-system
       podSelector:
-        matchLabels:
-          k8s-app: kube-dns
+        matchExpressions:
+        - key: k8s-app
+          operator: In
+          values: [kube-dns, coredns]
     ports:
     - port: 53
       protocol: UDP

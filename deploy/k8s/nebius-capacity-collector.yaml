@@ -61,7 +61,7 @@ spec:
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 30
   successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 10
+  failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 2
@@ -85,7 +85,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: prepare-credentials
-              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:058d866b6f23f0030e0235bc4b178d29e81cc41b5b973abe6b33e3e9a0cd8262
+              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:b1e2255831eccdb330d9f7c9566e3226647ea61e7bf26202b662cf2d935f6c3b
               imagePullPolicy: IfNotPresent
               command:
                 - python
@@ -107,7 +107,7 @@ spec:
                   drop: ["ALL"]
           containers:
             - name: collector
-              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:058d866b6f23f0030e0235bc4b178d29e81cc41b5b973abe6b33e3e9a0cd8262
+              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:b1e2255831eccdb330d9f7c9566e3226647ea61e7bf26202b662cf2d935f6c3b
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "loom_execution_capacity_collector"]
               envFrom:
