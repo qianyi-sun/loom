@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
 ACCEPTANCE = ROOT / "docs/runbooks/personal-dev-native-builder-acceptance.md"
+CONFORMANCE = ROOT / "scripts/ops/personal_dev_native_builder_conformance.sh"
 
 
 def _read(path: Path) -> str:
@@ -49,12 +50,7 @@ def test_native_builder_runtime_preserves_remote_shell_argv(tmp_path: Path) -> N
             '  test "$1" = gb10\n'
             '  test "$2" = --\n'
             '  /bin/sh -c "$3"\n'
-            "}\n"
-            + ssh_run
-            + "\n"
-            + capture_host
-            + "\n"
-            + 'capture_host "$1"\n'
+            "}\n" + ssh_run + "\n" + capture_host + "\n" + 'capture_host "$1"\n'
         ),
         text=True,
         capture_output=True,
@@ -62,13 +58,14 @@ def test_native_builder_runtime_preserves_remote_shell_argv(tmp_path: Path) -> N
     )
 
     assert behavior.returncode == 0, behavior.stderr
+    boot_id_check = '.boot_id != "" and ' if sys.platform.startswith("linux") else ""
     observed = subprocess.run(
         [
             "jq",
             "-e",
-            '.architecture != "" and .boot_id != "" and .hostname != "" '
+            f'.architecture != "" and {boot_id_check}.hostname != "" '
             'and has("agent") and has("dedicated_daemon") '
-            'and has("primary_docker")',
+            'and has("primary_docker") and has("boot_id")',
             str(output),
         ],
         text=True,
@@ -93,8 +90,8 @@ def test_native_builder_ssh_boundary_preserves_stdin_and_quoted_arguments() -> N
             + ssh_run
             + "\n"
             + "printf 'payload\\n' | ssh_run gb10 /bin/sh -euc "
-            + "'read -r payload; printf \"%s|%s\\n\" \"$1\" \"$payload\"' "
-            + "sh \"owner's branch\"\n"
+            + '\'read -r payload; printf "%s|%s\\n" "$1" "$payload"\' '
+            + 'sh "owner\'s branch"\n'
         ),
         text=True,
         capture_output=True,
@@ -109,12 +106,15 @@ def test_native_builder_runbooks_route_ssh_through_argv_boundary() -> None:
     runtime = _read(RUNTIME)
     acceptance = _read(ACCEPTANCE)
 
-    assert _shell_function(runtime, "ssh_run") == _shell_function(
-        acceptance, "ssh_run"
-    )
+    assert _shell_function(runtime, "ssh_run") == _shell_function(acceptance, "ssh_run")
     for runbook in (runtime, acceptance):
         shell = _shell(runbook)
         assert shell.count('ssh "${ssh_options[@]}"') == 1
+        for line in runbook.splitlines():
+            if 'ssh_run "$gb10_target" sudo' in line:
+                assert 'sudo "$native_runtime_authority"' in line
+    assert runtime.count('ssh_run "$gb10_target" sudo "$native_runtime_authority"') == 5
+    assert acceptance.count('ssh_run "$gb10_target" sudo "$native_runtime_authority"') == 2
 
 
 def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> None:
@@ -126,9 +126,7 @@ def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> N
 
     fake_python = tmp_path / "python"
     fake_python.write_text(
-        "#!/bin/sh\n"
-        "printf '%s|%s|' \"$PYTHONPATH\" \"$PYTHONNOUSERSITE\"\n"
-        "printf '<%s>' \"$@\"\n",
+        '#!/bin/sh\nprintf \'%s|%s|\' "$PYTHONPATH" "$PYTHONNOUSERSITE"\nprintf \'<%s>\' "$@"\n',
         encoding="utf-8",
     )
     fake_python.chmod(0o700)
@@ -148,8 +146,7 @@ def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> N
 
     assert behavior.returncode == 0, behavior.stderr
     assert behavior.stdout == (
-        "/exact/release/src|1|<-m><loom_cli><admin>"
-        "<personal-dev-control-plane><status>"
+        "/exact/release/src|1|<-m><loom_cli><admin><personal-dev-control-plane><status>"
     )
     for runbook in (runtime, acceptance):
         assert "/.venv/bin/loom" not in _shell(runbook)
@@ -159,9 +156,7 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
     tmp_path: Path,
 ) -> None:
     verify_source = _shell_function(_read(RUNTIME), "verify_loom_cli_source")
-    assert verify_source == _shell_function(
-        _read(ACCEPTANCE), "verify_loom_cli_source"
-    )
+    assert verify_source == _shell_function(_read(ACCEPTANCE), "verify_loom_cli_source")
     release = tmp_path / "release"
     poison = tmp_path / "poison"
     for root in (release, poison):
@@ -175,9 +170,7 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
         input=(
             'repository_root="$1"\n'
             f'loom_python="{sys.executable}"\n'
-            'export PYTHONPATH="$2/src"\n'
-            + verify_source
-            + "\nverify_loom_cli_source\n"
+            'export PYTHONPATH="$2/src"\n' + verify_source + "\nverify_loom_cli_source\n"
         ),
         text=True,
         capture_output=True,
@@ -189,16 +182,12 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
     outside.mkdir()
     (outside / "__init__.py").write_text("", encoding="utf-8")
     (release / "src" / "loom_cli" / "__init__.py").unlink()
-    (release / "src" / "loom_cli" / "__init__.py").symlink_to(
-        outside / "__init__.py"
-    )
+    (release / "src" / "loom_cli" / "__init__.py").symlink_to(outside / "__init__.py")
     rejected = subprocess.run(
         ["bash", "-seu", "--", str(release)],
         input=(
             'repository_root="$1"\n'
-            f'loom_python="{sys.executable}"\n'
-            + verify_source
-            + "\nverify_loom_cli_source\n"
+            f'loom_python="{sys.executable}"\n' + verify_source + "\nverify_loom_cli_source\n"
         ),
         text=True,
         capture_output=True,
@@ -214,7 +203,10 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert "umask 077" in runbook
     assert "merged_source_sha='<merged-40-lowercase-hex>'" in runbook
     assert "trusted_release_sha256='<trusted-release-64-lowercase-hex>'" in runbook
-    assert "previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-empty>'" in runbook
+    assert (
+        "previous_trusted_release_sha256='<previous-trusted-release-64-lowercase-hex-or-empty>'"
+        in runbook
+    )
     assert "c193873a276ace659a27ff9318d4b8322b487f83a68f5d100d18bc6935eb477d" in runbook
     assert (
         "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292"
@@ -261,29 +253,26 @@ def test_native_builder_runtime_validates_protected_material_as_root() -> None:
 
 def test_native_builder_runtime_orders_inert_stage_before_activation() -> None:
     runbook = _read(RUNTIME)
+    authority = _read(ROOT / "scripts/ops/personal_dev_native_runtime_authority.py")
     normalized = _normalized(runbook)
-    semantic = normalized.replace('"', "").replace("\\ ", "")
 
     milestones = (
-        "install_personal_dev_native_builder_runtime.py preflight",
-        "install_personal_dev_native_builder_runtime.py install",
-        "install_personal_dev_native_builder_runtime.py verify-staged",
-        "systemctl start loom-personal-dev-builder-dockerd.service",
-        "converge_personal_dev_native_builder_release.py plan",
-        "converge_personal_dev_native_builder_release.py apply",
-        "converge_personal_dev_native_builder_release.py verify",
-        "two-container-conformance",
-        "install_personal_dev_native_builder_runtime.py stage-agent",
-        "systemctl start loom-personal-dev-native-builder-agent.service",
+        "native-runtime-prepare.json",
+        "native-runtime-stage-agent.json",
+        "native-builder-public-key.apply.txt",
+        "native-runtime-activate.json",
+        "native-runtime-check-active.json",
         "signed-zero-grant-readiness",
     )
-    offsets = [semantic.index(milestone) for milestone in milestones]
+    offsets = [runbook.index(milestone) for milestone in milestones]
     assert offsets == sorted(offsets)
-    assert "systemctl is-active --quiet loom-personal-dev-builder-dockerd.service && exit 1" in normalized
-    assert "systemctl is-active --quiet loom-personal-dev-native-builder-agent.service && exit 1" in normalized
-    assert 'systemctl is-enabled "$service"' in normalized
-    assert "for service in loom-personal-dev-builder-dockerd.service" in normalized
-    assert "loom-personal-dev-native-builder-agent.service; do" in normalized
+    assert "_unit_inactive_disabled(DAEMON_UNIT, run)" in authority
+    assert "_unit_inactive_disabled(AGENT_UNIT, run)" in authority
+    assert runbook.count('ssh_run "$gb10_target" sudo "$native_runtime_authority"') == 5
+    assert 'ssh_run "$gb10_target" sudo systemctl' not in runbook
+    assert 'ssh_run "$gb10_target" sudo nft' not in runbook
+    assert 'ssh_run "$gb10_target" sudo env' not in runbook
+    assert "$host_stage" not in runbook
     assert "current and previous" in runbook.casefold()
     assert "docker image prune" not in normalized
     assert "docker system prune" not in normalized
@@ -339,23 +328,16 @@ def test_native_builder_runtime_normalizes_public_dns_cidrs() -> None:
     )
 
     assert behavior.returncode == 0, behavior.stderr
-    assert behavior.stdout == (
-        "207.35.188.227/32\n2606:4700:4700::1111/128\n"
-    )
+    assert behavior.stdout == ("207.35.188.227/32\n2606:4700:4700::1111/128\n")
 
 
 def test_native_builder_runtime_rejects_non_global_dns_addresses() -> None:
-    normalizer = _shell_function(
-        _read(RUNTIME), "normalize_public_store_cidrs"
-    )
+    normalizer = _shell_function(_read(RUNTIME), "normalize_public_store_cidrs")
 
     for address in ("10.0.0.1", "::ffff:10.0.0.1", "fd00::1"):
         behavior = subprocess.run(
             ["bash", "-seu", "--", address],
-            input=(
-                normalizer
-                + "\nprintf '%s\\n' \"$1\" | normalize_public_store_cidrs\n"
-            ),
+            input=(normalizer + "\nprintf '%s\\n' \"$1\" | normalize_public_store_cidrs\n"),
             text=True,
             capture_output=True,
             check=False,
@@ -366,42 +348,41 @@ def test_native_builder_runtime_rejects_non_global_dns_addresses() -> None:
 
 def test_native_builder_runtime_proves_two_separate_kvm_gvisor_sandboxes() -> None:
     runbook = _read(RUNTIME)
-    normalized = _normalized(runbook)
+    conformance = _read(CONFORMANCE)
+    normalized = _normalized(conformance)
 
-    assert "runsc-personal-dev-native" in runbook
-    assert "/dev/kvm" in runbook
-    assert "linux/arm64" in runbook
-    assert "buildkit-" in runbook
-    assert "loom-native-conformance-client" in runbook
+    assert "runsc-personal-dev-native" in conformance
+    assert "/dev/kvm" in conformance
+    assert "linux/arm64" in conformance
+    assert "buildkit-" in conformance
+    assert "loom-native-conformance-client" in conformance
     assert "two-container-conformance" in runbook
-    assert '"$current_builder" "$current_agent" "$reviewed_public_store_origin"' in runbook
-    assert "docker_primary=(docker -H unix:///var/run/docker.sock)" in runbook
-    assert "foreign_client_name=loom-native-conformance-foreign-client" in runbook
-    assert "socket.create_connection((sys.argv[1],1234),timeout=2)" in normalized
-    assert "host_to_provider=denied" in runbook
-    assert "foreign_to_provider=denied" in runbook
-    assert "--subnet 172.28.0.0/24" in runbook
-    assert "--subnet 172.28.1.0/24" in runbook
-    assert "172.28.250.0/24" not in runbook
-    assert "172.28.251.0/24" not in runbook
-    assert 'buildkit_container_id="$("${docker_native[@]}" create' in runbook
-    assert 'foreign_client_id="$("${docker_primary[@]}" create' in runbook
-    assert '"${docker_native[@]}" rm -f "$client_container_id"' in runbook
-    assert '"${docker_primary[@]}" rm -f "$foreign_client_id"' in runbook
-    assert 'rm -f "$client_name"' not in runbook
-    assert 'rm -f "$foreign_client_name"' not in runbook
-    assert 'test "$buildkit_container_id" != "$client_container_id"' in runbook
-    assert 'test "$buildkit_sandbox_id" != "$client_sandbox_id"' in runbook
-    assert "Runtime=runsc-personal-dev-native" in runbook
-    assert "io.kubernetes.cri-o.TTY=/dev/kvm" not in runbook
-    assert "no qemu" in normalized.casefold()
-    assert "no runc fallback" in normalized.casefold()
+    assert "docker_primary=(/usr/bin/docker -H unix:///var/run/docker.sock)" in conformance
+    assert "foreign_client_name=loom-native-conformance-foreign-client" in conformance
+    assert "socket.create_connection((sys.argv[1], 1234), timeout=2)" in normalized
+    assert "host_to_provider=denied" in conformance
+    assert "foreign_to_provider=denied" in conformance
+    assert "--subnet 172.28.0.0/24" in conformance
+    assert "--subnet 172.28.1.0/24" in conformance
+    assert "172.28.250.0/24" not in conformance
+    assert "172.28.251.0/24" not in conformance
+    assert 'buildkit_container_id="$("${docker_native[@]}" create' in conformance
+    assert 'foreign_client_id="$("${docker_primary[@]}" create' in conformance
+    assert '"${docker_native[@]}" rm -f "$client_container_id"' in conformance
+    assert '"${docker_primary[@]}" rm -f "$foreign_client_id"' in conformance
+    assert 'rm -f "$client_name"' not in conformance
+    assert 'rm -f "$foreign_client_name"' not in conformance
+    assert 'test "$buildkit_container_id" != "$client_container_id"' in conformance
+    assert "Runtime=runsc-personal-dev-native" in conformance
+    assert "io.kubernetes.cri-o.TTY=/dev/kvm" not in conformance
+    assert "qemu" not in normalized.casefold()
+    assert "runc" not in normalized.casefold()
     assert "tonistiigi/binfmt" not in normalized.casefold()
 
 
 def test_native_builder_runbooks_contain_no_forbidden_mutation_or_secret_capture() -> None:
     combined = _read(RUNTIME) + "\n" + _read(ACCEPTANCE)
-    shell = _shell(combined)
+    shell = _shell(combined) + "\n" + _read(CONFORMANCE)
     normalized = _normalized(shell).casefold()
 
     forbidden = (
@@ -426,6 +407,15 @@ def test_native_builder_runbooks_contain_no_forbidden_mutation_or_secret_capture
     assert "secret values" in combined.casefold()
     assert "--token" not in normalized
     assert "authorization:" not in normalized
+
+
+def test_native_builder_runtime_keeps_one_conformance_implementation() -> None:
+    runbook = _read(RUNTIME)
+    authority = _read(ROOT / "scripts/ops/personal_dev_native_runtime_authority.py")
+
+    assert "network_name=loom-native-conformance" not in runbook
+    assert "personal_dev_native_builder_conformance.sh" in authority
+    assert authority.count("personal_dev_native_builder_conformance.sh") == 1
 
 
 def test_native_builder_acceptance_proves_concurrent_native_platforms_and_routes() -> None:
@@ -468,6 +458,10 @@ def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_o
     assert 'XDG_CONFIG_HOME="$owner_0_xdg" loom_cli dev destroy "$owner_0_name"' in normalized
     assert 'XDG_CONFIG_HOME="$owner_1_xdg" loom_cli dev destroy "$owner_1_name"' in normalized
     assert "--format json" in normalized
+    assert 'action == "observe-agent"' in runbook
+    assert 'action == "observe-containers"' in runbook
+    assert '(.receipts|keys) == ["agent-active-evidence"]' in runbook
+    assert '(.receipts|keys) == ["container-evidence"]' in runbook
     assert 'cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"' in runbook
     assert runbook.index('cmp -s "$shadow_recheck_after" "$rollback_shadow_manifest"') < (
         runbook.index("verify-acceptance-result")
@@ -492,7 +486,7 @@ def test_native_builder_acceptance_orders_temporary_authority_before_durable_ope
         "signed-zero-grant-readiness",
         "owner_0_deploy_pid=$!",
         "owner_0_update_pid=$!",
-        "probe_cross_owner_denial \"$owner_1_xdg\" \"$owner_1_candidate\" \"$owner_0_xdg\" \"$owner_0_name\" 1 0 destroy",
+        'probe_cross_owner_denial "$owner_1_xdg" "$owner_1_candidate" "$owner_0_xdg" "$owner_0_name" 1 0 destroy',
         "owner-1.final-destroyed.json",
         "rollback.server-side-apply.txt",
         "rollback-shadow.status.json",
@@ -515,10 +509,10 @@ def test_native_builder_acceptance_orders_temporary_authority_before_durable_ope
 def test_native_builder_acceptance_canonicalizes_loader_inputs_without_newlines() -> None:
     runbook = _read(ACCEPTANCE)
 
-    raw_status = runbook.index('rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"')
-    canonical_status = runbook.index(
-        'jq -cS -j . "$rollback_status_raw" > "$rollback_status"'
+    raw_status = runbook.index(
+        'rollback_status_raw="$evidence_dir/rollback-shadow.status.raw.json"'
     )
+    canonical_status = runbook.index('jq -cS -j . "$rollback_status_raw" > "$rollback_status"')
     verification = runbook.index("verify-acceptance-result")
     assert raw_status < canonical_status < verification
     assert 'assert_canonical_json "$rollback_status"' in runbook
@@ -534,9 +528,10 @@ def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() ->
     assert 'cmp -s "$rollback_shadow_recheck" "$rollback_shadow_manifest"' in runtime
     assert "stop the agent before disabling the dedicated daemon" in runtime.casefold()
     assert "remove only byte-identical managed runtime files" in _normalized(runtime).casefold()
-    assert "dedicated image cache and system identities are retained" in _normalized(
-        runtime
-    ).casefold()
+    assert (
+        "dedicated image cache and system identities are retained"
+        in _normalized(runtime).casefold()
+    )
     assert acceptance.index("verify-acceptance-result") < acceptance.index("render-operational")
     for runbook in (runtime, acceptance):
         assert "evidence-index.sha256" in runbook
