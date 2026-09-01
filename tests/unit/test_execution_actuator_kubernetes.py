@@ -276,6 +276,7 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
     container = patch["spec"]["template"]["spec"]["containers"][0]
     assert container["name"] == "control-plane"
     env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "True"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "development"
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] == "nebius-cpu"
