@@ -32,6 +32,9 @@ ROOT_GID = 0
 _INSTALLER_RELATIVE = Path("scripts/ops/install_personal_dev_native_builder_runtime_authority.py")
 _VALIDATOR_RELATIVE = Path("scripts/ops/staging_rollout_sealed_source.py")
 _LAUNCHER_RELATIVE = Path("scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py")
+_MATERIAL_CLIENT_RELATIVE = Path(
+    "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py"
+)
 _SUDOERS_RELATIVE = Path(
     "deploy/personal-dev-native-builder/loom-personal-dev-native-builder-runtime-authority.sudoers"
 )
@@ -328,6 +331,10 @@ def _source_relative(
         if path != launcher.LIBEXEC_PATH or mode != 0o555:
             raise BootstrapError("source_inventory_invalid")
         return _LAUNCHER_RELATIVE
+    if name == "material_client":
+        if path != launcher.MATERIAL_CLIENT_PATH or mode != 0o555:
+            raise BootstrapError("source_inventory_invalid")
+        return _MATERIAL_CLIENT_RELATIVE
     if name == "sudoers":
         if path != launcher.ASSET_SPECS["sudoers"].path or mode != 0o440:
             raise BootstrapError("source_inventory_invalid")

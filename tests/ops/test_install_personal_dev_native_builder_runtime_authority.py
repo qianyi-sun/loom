@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
 import stat
 import subprocess
+import sys
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -18,8 +20,11 @@ SOURCE_FILES = (
     "scripts/ops/install_personal_dev_native_builder_runtime.py",
     "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
     "scripts/ops/personal_dev_native_builder_conformance.py",
+    "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
     "scripts/ops/personal_dev_native_builder_runtime_authority.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
     "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py",
     "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
     "scripts/ops/personal_dev_native_builder_runtime_profile.py",
     "scripts/ops/staging_rollout_sealed_source.py",
@@ -33,6 +38,20 @@ SOURCE_FILES = (
     "deploy/personal-dev-native-builder/provider-network.nft",
     "deploy/personal-dev-native-builder/runsc.toml",
     "deploy/personal-dev-native-builder/runtime-profile-v1.json",
+)
+
+ROOT_EXECUTION_PYTHON = (
+    "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
+    "scripts/ops/install_personal_dev_native_builder_runtime.py",
+    "scripts/ops/personal_dev_native_builder_runtime_profile.py",
+    "scripts/ops/converge_personal_dev_native_builder_release.py",
+    "scripts/ops/personal_dev_native_builder_conformance.py",
+    "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
+    "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py",
 )
 SUDOERS = (
     b"qianyi ALL=(root) NOPASSWD:NOSETENV: "
@@ -50,6 +69,102 @@ def _module() -> ModuleType:
     return importlib.import_module(
         "scripts.ops.install_personal_dev_native_builder_runtime_authority"
     )
+
+
+def test_root_execution_import_closure_is_stdlib_or_policy_bound() -> None:
+    """Catches an ambient Python package entering any root execution path."""
+    policy_modules = {
+        f"scripts.ops.{Path(relative).stem}" for relative in ROOT_EXECUTION_PYTHON
+    } | {"scripts", "scripts.ops"}
+    ambient: set[str] = set()
+    for relative in ROOT_EXECUTION_PYTHON:
+        tree = ast.parse((REPO_ROOT / relative).read_bytes(), filename=relative)
+        for node in ast.walk(tree):
+            names: tuple[str, ...]
+            if isinstance(node, ast.Import):
+                names = tuple(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                names = (node.module,)
+            else:
+                continue
+            for name in names:
+                root = name.partition(".")[0]
+                if root not in sys.stdlib_module_names and name not in policy_modules:
+                    ambient.add(name)
+
+    assert ambient == set()
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ("bootstrap", "broker", "client", "material-client"),
+)
+def test_root_execution_rejects_ambient_import_resolution(entrypoint: str) -> None:
+    """Catches bootstrap, broker, or client loading code outside the sealed closure."""
+    child = f"""
+import hashlib
+import importlib.abc
+import os
+import pathlib
+import sys
+
+root = pathlib.Path({str(REPO_ROOT)!r})
+allowed_repository = {{"scripts", "scripts.ops"}} | {{
+    "scripts.ops." + pathlib.Path(value).stem
+    for value in {ROOT_EXECUTION_PYTHON!r}
+}} | {{
+    pathlib.Path(value).stem for value in {ROOT_EXECUTION_PYTHON!r}
+}}
+
+class RejectAmbient(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        root_name = fullname.partition(".")[0]
+        if (
+            root_name not in sys.stdlib_module_names
+            and root_name != "org"
+            and fullname not in allowed_repository
+        ):
+            raise RuntimeError(f"ambient import blocked: {{fullname}}")
+        return None
+
+sys.meta_path.insert(0, RejectAmbient())
+sys.path[:0] = [str(root), str(root / "scripts" / "ops")]
+
+if {entrypoint!r} == "bootstrap":
+    from scripts.ops import install_personal_dev_native_builder_runtime_authority as module
+    module.ROOT_UID = os.getuid()
+    module.ROOT_GID = os.getgid()
+    module.SOURCE_ROOT = root
+    module._read_source_file = lambda path, **_kwargs: path.read_bytes()
+    with module._pinned_source_contract():
+        pass
+elif {entrypoint!r} == "broker":
+    from scripts.ops import personal_dev_native_builder_runtime_authority
+elif {entrypoint!r} == "client":
+    import personal_dev_native_builder_runtime_authority_client as module
+    seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc4"
+                         "4449c5697b326919703bac031cae7f60")
+    public = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a"
+                           "0ee172f3daa62325af021a68f707511a")
+    module._read_descriptor = lambda *_args: seed
+    emitted = module._emit_public_key([
+        "--private-key-fd", "3",
+        "--expected-public-key-sha256", hashlib.sha256(public).hexdigest(),
+    ])
+    if emitted != public:
+        raise SystemExit(3)
+else:
+    from scripts.ops import personal_dev_native_builder_runtime_authority_material_client
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -214,9 +329,11 @@ def test_sudoers_and_tmpfiles_assets_have_the_only_authorized_rules() -> None:
         "scripts/ops/install_personal_dev_native_builder_runtime.py",
         "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",
         "scripts/ops/personal_dev_native_builder_conformance.py",
+        "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
         "scripts/ops/personal_dev_native_builder_runtime_authority.py",
         "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
         "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py",
+        "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py",
         "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
         "scripts/ops/personal_dev_native_builder_runtime_profile.py",
         "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
@@ -246,11 +363,14 @@ def test_bootstrap_installs_the_authoritative_inventory_and_is_idempotent(
     assert second == {**first, "changed": False}
     assert _tree_snapshot(host_root) == after_first
     assert set(first["asset_sha256"]) == {
+        "authority_client",
         "broker",
         "conformance",
         "converger",
+        "crypto_helper",
         "installer",
         "launcher",
+        "material_client",
         "protocol",
         "runtime_asset_agent_service_template",
         "runtime_asset_dockerd_config",
@@ -271,15 +391,21 @@ def test_bootstrap_installs_the_authoritative_inventory_and_is_idempotent(
         host_root,
         "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
     )
+    material_client = _installed(
+        host_root,
+        "/usr/local/libexec/"
+        "loom-personal-dev-native-builder-runtime-authority-material-client",
+    )
     broker = _installed(
         host_root,
         "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops/"
         "personal_dev_native_builder_runtime_authority.py",
     )
     assert stat.S_IMODE(launcher.stat().st_mode) == 0o555
+    assert stat.S_IMODE(material_client.stat().st_mode) == 0o555
     assert stat.S_IMODE(broker.stat().st_mode) == 0o444
     for path in host_root.rglob("*"):
-        if path.is_file() and path != launcher:
+        if path.is_file() and path not in {launcher, material_client}:
             assert stat.S_IMODE(path.stat().st_mode) & 0o111 == 0
         if path.is_file():
             assert path.stat().st_nlink == 1

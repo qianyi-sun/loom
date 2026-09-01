@@ -132,10 +132,30 @@ direct-root bootstrap; an operator request cannot update the broker.
 ### Operator encoder and pinned transport
 
 `scripts/ops/personal_dev_native_builder_runtime_authority_client.py` validates
-an owner-only request file and writes the binary frame to stdout. For agent
-staging it is invoked locally under sudo so it can read the root-owned private
-key and CA through file descriptors. It writes no diagnostics or secret data
-to stderr and never includes secret paths or values in the request header.
+an owner-only request file and writes the binary frame to stdout. It accepts
+private material only through distinct already-open descriptors numbered at
+least `3`, including descriptor-based public-key emission; it has no key or CA
+pathname option.
+
+The separately installed
+`personal_dev_native_builder_runtime_authority_material_client.py` is a sealed,
+policy-bound root asset. It opens only two fixed administrator-provisioned
+material paths, validates their metadata without following links, and invokes
+the FD-only client from the validated installed library. The operator cannot
+select either pathname, and no checkout or runbook shell is executed as root.
+Its root-owned entrypoint necessarily starts before it can validate itself,
+but its pre-validation module body is stdlib-only and performs no material I/O
+or application-module load. It validates the complete installed policy before
+opening either material file or loading the encoder, so splitting another
+pre-validation launcher would not reduce the operator-controlled trust surface.
+
+The material client's local `sudo` invocation uses the separately provisioned
+protected-operator-host authorization already required by the fixed root-local
+SSH and SFTP transport. It is not another GB10 authority sudo target: the
+authority sudoers asset continues to authorize only the empty-argument remote
+broker launcher.
+Neither component writes secret data to diagnostics or includes secret paths
+or values in the request header.
 
 The runbook invokes root-local `/usr/bin/ssh` with:
 

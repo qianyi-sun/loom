@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,6 +59,7 @@ from scripts.ops.personal_dev_native_builder_runtime_authority_launcher import (
 from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
     AuthorityRequest,
     AuthorityRequestHeader,
+    ProtocolError,
 )
 
 SOURCE_SHA = "1" * 40
@@ -263,10 +265,13 @@ def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
     assert ASSET_SPECS["launcher"] == AssetSpec(LIBEXEC_PATH, 0o555)
     assert ASSET_SPECS["broker"] == AssetSpec(BROKER_PATH, 0o444)
     assert set(ASSET_SPECS) == {
+        "authority_client",
         "launcher",
+        "material_client",
         "broker",
         "conformance",
         "converger",
+        "crypto_helper",
         "installer",
         "protocol",
         "runtime_asset_agent_service_template",
@@ -390,6 +395,7 @@ def test_launcher_pins_validated_namespace_modules_against_later_regular_package
         "broker": "personal_dev_native_builder_runtime_authority.py",
         "conformance": "personal_dev_native_builder_conformance.py",
         "converger": "converge_personal_dev_native_builder_release.py",
+        "crypto_helper": "personal_dev_native_builder_runtime_crypto.py",
         "installer": "install_personal_dev_native_builder_runtime.py",
         "protocol": "personal_dev_native_builder_runtime_authority_protocol.py",
         "runtime_profile_helper": ("personal_dev_native_builder_runtime_profile.py"),
@@ -833,13 +839,63 @@ def test_validated_broker_dispatches_only_after_launcher_policy_handoff(
     authority_module.serve_validated(policy.public())
 
     assert events == [
-        "lock.enter",
         "parse",
+        "lock.enter",
         "build",
         "dispatch",
         "lock.exit",
     ]
     assert output.buffer.getvalue() == encode_receipt(receipt)
+
+
+def test_incomplete_request_frame_never_holds_the_lifecycle_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches an authorized partial writer blocking every lifecycle operation."""
+    import pwd
+
+    parse_started = threading.Event()
+    release_parse = threading.Event()
+    lock_entered = threading.Event()
+    failures: list[BaseException] = []
+
+    class Input:
+        buffer = io.BytesIO(b"LOOMNBR1")
+
+    def incomplete_parse(_stream: object) -> AuthorityRequest:
+        parse_started.set()
+        if not release_parse.wait(timeout=2):
+            raise AssertionError("test did not release incomplete parse")
+        raise ProtocolError("truncated request")
+
+    @contextmanager
+    def locked() -> Iterator[None]:
+        lock_entered.set()
+        yield
+
+    def serve() -> None:
+        try:
+            authority_module.serve_validated(_policy().public())
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=1001, pw_gid=1002))
+    monkeypatch.setattr(authority_module, "parse_request", incomplete_parse)
+    monkeypatch.setattr(authority_module, "authority_lock", locked)
+    monkeypatch.setattr(authority_module.sys, "stdin", Input())
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        assert parse_started.wait(timeout=2)
+        assert not lock_entered.is_set()
+    finally:
+        release_parse.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], ProtocolError)
+    assert not lock_entered.is_set()
 
 
 def test_bounded_runner_rejects_output_past_its_limit() -> None:

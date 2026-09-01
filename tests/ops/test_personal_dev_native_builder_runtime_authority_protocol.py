@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,6 +20,10 @@ from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+MATERIAL_CLIENT = (
+    ROOT
+    / "scripts/ops/personal_dev_native_builder_runtime_authority_material_client.py"
+)
 CLIENT_FAILURE = b"native runtime authority request failed\n"
 REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000"
 INSTANCE_ID = "123e4567-e89b-42d3-a456-426614174001"
@@ -384,3 +389,176 @@ def test_client_stage_agent_reads_only_open_file_descriptors(tmp_path: Path) -> 
     assert request.payload == key + ca
     assert "private_key_fd" not in request.header.as_mapping()
     assert "service_ca_fd" not in request.header.as_mapping()
+
+
+@pytest.mark.parametrize(
+    ("descriptor_option", "path_option"),
+    (
+        ("--private-key-fd", "--private-key-path"),
+        ("--service-ca-fd", "--service-ca-path"),
+    ),
+)
+def test_client_stage_agent_rejects_every_secret_path_option(
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_option: str,
+    path_option: str,
+) -> None:
+    """Catches any pathname alternative widening the descriptor-only CLI."""
+    monkeypatch_path = "/caller-selected-secret"
+    arguments = _stage_agent_command(3, 4)[2:]
+    option_index = arguments.index(descriptor_option)
+    arguments[option_index : option_index + 2] = [path_option, monkeypatch_path]
+    monkeypatch.syspath_prepend(str(CLIENT.parent))
+    client = importlib.import_module("personal_dev_native_builder_runtime_authority_client")
+
+    with pytest.raises(client.ClientError):
+        client._parser().parse_args(arguments)
+
+
+def test_client_public_key_emission_is_descriptor_only(tmp_path: Path) -> None:
+    """Catches public-key emission reopening a caller-selected pathname."""
+    seed = bytes.fromhex(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+    )
+    public = bytes.fromhex(
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    )
+    private_key = tmp_path / "key"
+    private_key.write_bytes(seed)
+    descriptor = os.open(private_key, os.O_RDONLY)
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(CLIENT),
+                "emit-public-key",
+                "--private-key-fd",
+                str(descriptor),
+                "--expected-public-key-sha256",
+                hashlib.sha256(public).hexdigest(),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert completed.returncode == 0
+    assert completed.stdout == public
+    assert completed.stderr == b""
+
+
+def test_client_public_key_emission_rejects_secret_path_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a path-only compatibility branch surviving public-key emission."""
+    monkeypatch.syspath_prepend(str(CLIENT.parent))
+    client = importlib.import_module("personal_dev_native_builder_runtime_authority_client")
+    seed = b"k" * 32
+    public = client.derive_ed25519_public_key(seed)
+    monkeypatch.setattr(client, "_read_root_file", lambda *_args: seed, raising=False)
+
+    with pytest.raises(client.ClientError):
+        client._emit_public_key(
+            [
+                "--private-key-path",
+                "/caller-selected-secret",
+                "--expected-public-key-sha256",
+                hashlib.sha256(public).hexdigest(),
+            ]
+        )
+
+
+def test_policy_bound_material_client_passes_only_inherited_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a root material opener passing pathnames instead of opened FDs."""
+    specification = importlib.util.spec_from_file_location(
+        "tested_native_authority_material_client",
+        MATERIAL_CLIENT,
+    )
+    assert specification is not None and specification.loader is not None
+    material_client = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = material_client
+    try:
+        specification.loader.exec_module(material_client)
+    finally:
+        sys.modules.pop(specification.name, None)
+
+    key_path = tmp_path / "agent-ed25519"
+    ca_path = tmp_path / "service-ca.pem"
+    key_path.write_bytes(b"k" * 32)
+    ca_path.write_bytes(b"certificate bundle")
+    key_path.chmod(0o400)
+    ca_path.chmod(0o444)
+    monkeypatch.setattr(material_client, "PRIVATE_KEY_PATH", key_path)
+    monkeypatch.setattr(material_client, "SERVICE_CA_PATH", ca_path)
+    monkeypatch.setattr(material_client, "ROOT_UID", os.getuid())
+    monkeypatch.setattr(material_client, "ROOT_GID", os.getgid())
+    calls: list[list[str]] = []
+    observed: list[tuple[bytes, bytes | None]] = []
+
+    class Client:
+        @staticmethod
+        def main(arguments: list[str]) -> int:
+            calls.append(arguments)
+            key_fd = int(arguments[arguments.index("--private-key-fd") + 1])
+            assert key_fd >= 3
+            key = os.read(key_fd, 64)
+            if arguments[0] == "stage-agent":
+                ca_fd = int(arguments[arguments.index("--service-ca-fd") + 1])
+                assert ca_fd >= 3 and ca_fd != key_fd
+                observed.append((key, os.read(ca_fd, 64)))
+            else:
+                observed.append((key, None))
+            return 0
+
+    monkeypatch.setattr(material_client, "_load_validated_client", lambda: Client)
+
+    assert material_client._run(["stage-agent", "--public-field", "value"]) == 0
+    assert material_client._run(["emit-public-key", "--public-field", "value"]) == 0
+
+    assert observed == [(b"k" * 32, b"certificate bundle"), (b"k" * 32, None)]
+    assert all("path" not in argument for call in calls for argument in call)
+
+
+def test_policy_bound_material_client_rejects_group_writable_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches protected material traversal through a group-writable directory."""
+    specification = importlib.util.spec_from_file_location(
+        "tested_native_authority_material_client_unsafe_parent",
+        MATERIAL_CLIENT,
+    )
+    assert specification is not None and specification.loader is not None
+    material_client = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = material_client
+    try:
+        specification.loader.exec_module(material_client)
+    finally:
+        sys.modules.pop(specification.name, None)
+
+    unsafe_parent = tmp_path / "group-writable"
+    unsafe_parent.mkdir()
+    unsafe_parent.chmod(0o770)
+    private_key = unsafe_parent / "agent-ed25519"
+    private_key.write_bytes(b"k" * 32)
+    private_key.chmod(0o400)
+    monkeypatch.setattr(material_client, "ROOT_UID", os.getuid())
+    monkeypatch.setattr(material_client, "ROOT_GID", os.getgid())
+    descriptor: int | None = None
+    try:
+        with pytest.raises(material_client.MaterialClientError, match="material invalid"):
+            descriptor = material_client._open_fixed_file(
+                private_key,
+                mode=0o400,
+                minimum=32,
+                maximum=32,
+            )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)

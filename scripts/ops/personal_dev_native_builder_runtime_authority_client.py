@@ -6,17 +6,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from personal_dev_native_builder_runtime_authority_protocol import (
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve(strict=True).parents[2]))
+
+from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
     PRIVATE_KEY_LENGTH,
     SERVICE_CA_MAX_BYTES,
     ProtocolError,
     encode_request,
+)
+from scripts.ops.personal_dev_native_builder_runtime_crypto import (
+    derive_ed25519_public_key,
 )
 
 
@@ -68,12 +73,8 @@ def _add_stage_agent_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent-instance-id", required=True)
     parser.add_argument("--agent-key-id", required=True)
     parser.add_argument("--expected-public-key-sha256", required=True)
-    private_key = parser.add_mutually_exclusive_group(required=True)
-    private_key.add_argument("--private-key-fd", type=int)
-    private_key.add_argument("--private-key-path", type=Path)
-    service_ca = parser.add_mutually_exclusive_group(required=True)
-    service_ca.add_argument("--service-ca-fd", type=int)
-    service_ca.add_argument("--service-ca-path", type=Path)
+    parser.add_argument("--private-key-fd", required=True, type=int)
+    parser.add_argument("--service-ca-fd", required=True, type=int)
 
 
 def _add_state_arguments(parser: argparse.ArgumentParser) -> None:
@@ -110,81 +111,13 @@ def _read_descriptor(fd: int, bound: int) -> bytes:
         raise ClientError("descriptor is unreadable") from exc
 
 
-def _read_root_file(path: Path, bound: int, mode: int) -> bytes:
-    descriptor: int | None = None
-    try:
-        lexical = os.lstat(path)
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
-        )
-        before = os.fstat(descriptor)
-        payload = _read_descriptor(descriptor, bound)
-        after = os.fstat(descriptor)
-        lexical_after = os.lstat(path)
-        identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_nlink,
-            before.st_uid,
-            before.st_gid,
-            before.st_size,
-        )
-        if (
-            not stat.S_ISREG(lexical.st_mode)
-            or not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != mode
-            or before.st_nlink != 1
-            or before.st_uid != 0
-            or before.st_gid != 0
-            or identity
-            != (
-                after.st_dev,
-                after.st_ino,
-                after.st_mode,
-                after.st_nlink,
-                after.st_uid,
-                after.st_gid,
-                after.st_size,
-            )
-            or identity
-            != (
-                lexical_after.st_dev,
-                lexical_after.st_ino,
-                lexical_after.st_mode,
-                lexical_after.st_nlink,
-                lexical_after.st_uid,
-                lexical_after.st_gid,
-                lexical_after.st_size,
-            )
-        ):
-            raise ClientError("protected file is invalid")
-        return payload
-    except (OSError, ValueError) as exc:
-        if isinstance(exc, ClientError):
-            raise
-        raise ClientError("protected file is invalid") from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-
-
 def _stage_payload(args: argparse.Namespace, header: dict[str, object]) -> bytes:
     private_key_fd = args.private_key_fd
     service_ca_fd = args.service_ca_fd
-    if private_key_fd is not None and private_key_fd == service_ca_fd:
+    if private_key_fd == service_ca_fd:
         raise ClientError("descriptors must differ")
-    private_key = (
-        _read_descriptor(private_key_fd, PRIVATE_KEY_LENGTH + 1)
-        if private_key_fd is not None
-        else _read_root_file(args.private_key_path, PRIVATE_KEY_LENGTH + 1, 0o400)
-    )
-    service_ca = (
-        _read_descriptor(service_ca_fd, SERVICE_CA_MAX_BYTES + 1)
-        if service_ca_fd is not None
-        else _read_root_file(args.service_ca_path, SERVICE_CA_MAX_BYTES + 1, 0o444)
-    )
+    private_key = _read_descriptor(private_key_fd, PRIVATE_KEY_LENGTH + 1)
+    service_ca = _read_descriptor(service_ca_fd, SERVICE_CA_MAX_BYTES + 1)
     if len(private_key) != PRIVATE_KEY_LENGTH:
         raise ClientError("private key is invalid")
     if not 1 <= len(service_ca) <= SERVICE_CA_MAX_BYTES:
@@ -231,27 +164,13 @@ def _request(args: argparse.Namespace) -> bytes:
 
 def _emit_public_key(argv: Sequence[str]) -> bytes:
     parser = _Parser(add_help=False)
-    parser.add_argument("--private-key-path", required=True, type=Path)
+    parser.add_argument("--private-key-fd", required=True, type=int)
     parser.add_argument("--expected-public-key-sha256", required=True)
     args = parser.parse_args(argv)
-    private_key = _read_root_file(
-        args.private_key_path,
-        PRIVATE_KEY_LENGTH + 1,
-        0o400,
-    )
+    private_key = _read_descriptor(args.private_key_fd, PRIVATE_KEY_LENGTH + 1)
     if len(private_key) != PRIVATE_KEY_LENGTH:
         raise ClientError("private key is invalid")
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    public_key = (
-        Ed25519PrivateKey.from_private_bytes(private_key)
-        .public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
-    )
+    public_key = derive_ed25519_public_key(private_key)
     if hashlib.sha256(public_key).hexdigest() != args.expected_public_key_sha256:
         raise ClientError("public key is invalid")
     return public_key

@@ -20,6 +20,10 @@ from typing import NoReturn, cast
 LIBEXEC_PATH = Path(
     "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
 )
+MATERIAL_CLIENT_PATH = Path(
+    "/usr/local/libexec/"
+    "loom-personal-dev-native-builder-runtime-authority-material-client"
+)
 LIBRARY_ROOT = Path(
     "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority"
 )
@@ -84,6 +88,8 @@ class AssetSpec:
 
 
 _PYTHON_ASSETS = {
+    "authority_client": "personal_dev_native_builder_runtime_authority_client.py",
+    "crypto_helper": "personal_dev_native_builder_runtime_crypto.py",
     "protocol": "personal_dev_native_builder_runtime_authority_protocol.py",
     "installer": "install_personal_dev_native_builder_runtime.py",
     "runtime_profile_helper": "personal_dev_native_builder_runtime_profile.py",
@@ -105,6 +111,7 @@ _RUNTIME_ASSETS = {
 ASSET_SPECS: Mapping[str, AssetSpec] = MappingProxyType(
     {
         "launcher": AssetSpec(LIBEXEC_PATH, 0o555),
+        "material_client": AssetSpec(MATERIAL_CLIENT_PATH, 0o555),
         "broker": AssetSpec(BROKER_PATH, 0o444),
         **{
             name: AssetSpec(LIBRARY_ROOT / "scripts" / "ops" / filename, 0o444)
@@ -487,6 +494,7 @@ __all__ = [
     "BROKER_PATH",
     "LIBEXEC_PATH",
     "LIBRARY_ROOT",
+    "MATERIAL_CLIENT_PATH",
     "POLICY_PATH",
     "AssetSpec",
     "LauncherError",

@@ -2663,8 +2663,8 @@ def serve_validated(policy_value: Mapping[str, object]) -> None:
     except (AttributeError, TypeError, ValueError) as exc:
         raise AuthorityError("policy_invalid") from exc
     operator = pwd.getpwnam("qianyi")
+    request = parse_request(cast(BinaryIO, sys.stdin.buffer))
     with authority_lock():
-        request = parse_request(cast(BinaryIO, sys.stdin.buffer))
         runtime = _build_runtime(
             policy,
             operator_uid=operator.pw_uid,

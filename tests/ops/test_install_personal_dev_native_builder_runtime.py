@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -569,6 +570,39 @@ def _test_certificate(*, ca: bool, seed: int = 1) -> bytes:
     return certificate.public_bytes(serialization.Encoding.PEM)
 
 
+def _mutated_test_certificate(original: bytes, replacement: bytes) -> bytes:
+    payload = _test_certificate(ca=True)
+    encoded = b"".join(payload.splitlines()[1:-1])
+    der = base64.b64decode(encoded, validate=True)
+    assert original in der
+    invalid = der.replace(original, replacement, 1)
+    assert invalid != der
+    invalid_encoded = base64.b64encode(invalid)
+    body = b"\n".join(
+        invalid_encoded[index : index + 64]
+        for index in range(0, len(invalid_encoded), 64)
+    )
+    return b"-----BEGIN CERTIFICATE-----\n" + body + b"\n-----END CERTIFICATE-----\n"
+
+
+def _test_certificate_with_invalid_month() -> bytes:
+    return _mutated_test_certificate(b"260101000000Z", b"261301000000Z")
+
+
+def _test_certificate_with_invalid_name_tag() -> bytes:
+    return _mutated_test_certificate(
+        b"\x31\x16\x30\x14\x06\x03\x55\x04\x03",
+        b"\xb1\x16\x30\x14\x06\x03\x55\x04\x03",
+    )
+
+
+def _test_certificate_with_invalid_name_value_tag() -> bytes:
+    return _mutated_test_certificate(
+        b"\x0c\x0dnative test 1",
+        b"\x04\x0dnative test 1",
+    )
+
+
 def _stage_inputs(tmp_path: Path) -> tuple[Path, Path]:
     key = tmp_path / "agent-ed25519"
     key.write_bytes(b"k" * 32)
@@ -639,25 +673,27 @@ def test_stage_agent_renders_exact_inactive_secret_free_unit(tmp_path: Path) -> 
     }
 
 
-@pytest.mark.parametrize(
-    "invalid_bundle",
-    [
-        b"not a PEM certificate\n",
-        _test_certificate(ca=True)[:-24],
-        _test_certificate(ca=True) + _test_certificate(ca=False, seed=3),
-    ],
-    ids=["malformed-nonempty", "truncated-nonempty", "contains-non-ca"],
-)
+_INVALID_CA_BUNDLES = {
+    "malformed-nonempty": b"not a PEM certificate\n",
+    "truncated-nonempty": _test_certificate(ca=True)[:-24],
+    "contains-non-ca": _test_certificate(ca=True) + _test_certificate(ca=False, seed=3),
+    "invalid-calendar-time": _test_certificate_with_invalid_month(),
+    "invalid-name-tag": _test_certificate_with_invalid_name_tag(),
+    "invalid-name-value-tag": _test_certificate_with_invalid_name_value_tag(),
+}
+
+
+@pytest.mark.parametrize("invalid_kind", tuple(_INVALID_CA_BUNDLES))
 def test_stage_agent_rejects_invalid_ca_bundle_before_any_publication(
     tmp_path: Path,
-    invalid_bundle: bytes,
+    invalid_kind: str,
 ) -> None:
     profile, archive = _archive(tmp_path)
     installer = _installer(tmp_path, profile)
     installer.install(archive)
     key, ca = _stage_inputs(tmp_path)
     ca.chmod(0o644)
-    ca.write_bytes(invalid_bundle)
+    ca.write_bytes(_INVALID_CA_BUNDLES[invalid_kind])
     ca.chmod(0o444)
 
     with pytest.raises(

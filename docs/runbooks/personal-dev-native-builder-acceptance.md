@@ -33,6 +33,11 @@ export LC_ALL=C
 test "$(id -u)" != 0
 
 repository_root="$(pwd -P)"
+native_authority_git=(
+  /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  /usr/bin/git --no-replace-objects -C "$repository_root"
+)
 merged_source_sha='<merged-40-lowercase-hex>'
 trusted_release='<absolute-owner-only-trusted-release.json>'
 trusted_release_sha256='<trusted-release-64-lowercase-hex>'
@@ -318,14 +323,20 @@ owner_1_name='<owner-1-personal-name>'
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-native-two-owner-$merged_source_sha"
 authority_source_sha="$merged_source_sha"
-authority_source_tree="$(git rev-parse HEAD^{tree})"
-test "$(git rev-parse --show-toplevel)" = "$repository_root"
-test "$(git rev-parse HEAD)" = "$merged_source_sha"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
+authority_source_tree="$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
+test "$("${native_authority_git[@]}" rev-parse --show-toplevel)" = \
+  "$repository_root"
+test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
+  "$merged_source_sha"
+test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
 test -x "${native_authority_client[1]}"
 verify_loom_cli_source
-test "$authority_source_tree" = "$(git rev-parse HEAD^{tree})"
+test "$authority_source_tree" = "$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
 validate_native_authority_transport_config
 for path in "$trusted_release" "$profile" "$acceptance_plan" \
   "$rollback_shadow_manifest" "$reviewed_kubeconfig" \

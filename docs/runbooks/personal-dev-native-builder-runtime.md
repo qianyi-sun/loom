@@ -28,7 +28,8 @@ The ordering is intentional:
 
 Secret values are never printed, placed in command arguments, copied into the
 repository, or included in evidence. Paths, ownership, modes, public-key
-digests, CA digests, and bounded Secret key-name inventories may be recorded.
+digests, and bounded Secret key-name inventories may be recorded. Private-key
+and CA bytes or digests are prohibited in evidence and issue comments.
 
 ## 1. Bind the exact source, release, profile, and evidence authority
 
@@ -60,8 +61,6 @@ prepared_control_profile='<absolute-owner-only-prepared-schema-3-profile.toml>'
 prepared_control_profile_sha256='<prepared-profile-64-lowercase-hex>'
 archive_url='https://storage.googleapis.com/gvisor/releases/release/20260810/aarch64/gvisor.tar.bz2'
 archive_sha512='dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7'
-agent_private_key='<absolute-root-owned-mode-0400-ed25519-private-key>'
-service_ca='<absolute-root-owned-mode-0444-service-ca>'
 rollback_shadow_manifest='<absolute-byte-reviewed-schema-4-shadow-manifest>'
 rollback_shadow_sha256='<rollback-shadow-64-lowercase-hex>'
 
@@ -104,9 +103,8 @@ native_authority_client=(
   "$loom_python"
   "$repository_root/scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
 )
-native_authority_client_snapshot_root="/run/loom-personal-dev-native-builder-runtime-authority-client/$merged_source_sha"
 native_authority_privileged_client=(
-  "$native_authority_client_snapshot_root/personal_dev_native_builder_runtime_authority_client.py"
+  /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority-material-client
 )
 native_authority_local_archive_root="/run/loom-personal-dev-native-builder-runtime-authority-archives"
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
@@ -135,43 +133,7 @@ native_authority_stage_agent() {
     --request-id "$request_id" \
     --runtime-profile-sha256 "$runtime_profile_sha256" \
     --schema-version 1 \
-    --private-key-path "$agent_private_key" \
-    --service-ca-path "$service_ca" \
     "$@"
-}
-install_native_authority_client_snapshot() {
-  local relative destination expected observed mode observed_commit observed_tree
-  observed_commit="$(
-    "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{commit}"
-  )"
-  test "$observed_commit" = "$merged_source_sha"
-  test "$("${native_authority_git[@]}" cat-file -t "$observed_commit")" = commit
-  observed_tree="$(
-    "${native_authority_git[@]}" rev-parse --verify "$observed_commit^{tree}"
-  )"
-  test "$observed_tree" = "$authority_source_tree"
-  test "$("${native_authority_git[@]}" cat-file -t "$observed_tree")" = tree
-  sudo -n -- /usr/bin/install -d -m 0700 \
-    "$native_authority_client_snapshot_root"
-  while read -r relative destination mode; do
-    expected="$(
-      "${native_authority_git[@]}" rev-parse --verify \
-        "$authority_source_tree:$relative"
-    )"
-    test "$("${native_authority_git[@]}" cat-file -t "$expected")" = blob
-    "${native_authority_git[@]}" cat-file blob "$expected" \
-      | sudo -n -- /usr/bin/install -m "$mode" /dev/stdin "$destination"
-    observed="$(
-      sudo -n -- /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-        GIT_DIR=/nonexistent /usr/bin/git --no-replace-objects \
-        hash-object --no-filters "$destination"
-    )"
-    test "$observed" = "$expected"
-  done <<EOF
-scripts/ops/personal_dev_native_builder_runtime_authority_client.py ${native_authority_privileged_client[0]} 0500
-scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py $native_authority_client_snapshot_root/personal_dev_native_builder_runtime_authority_protocol.py 0400
-EOF
 }
 validate_native_authority_receipt() {
   local operation="$1"
@@ -470,6 +432,35 @@ native_authority_remove_staged_archive() {
     -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
     trt-gb10-2
 }
+native_authority_prepare() {
+  (
+    local request_id="$1"
+    local source="$2"
+    local output="$3"
+    shift 3
+    cleanup_native_authority_remote_archive() {
+      local primary_status=$?
+      local cleanup_status=0
+      trap - EXIT HUP INT TERM
+      trap '' HUP INT TERM
+      if native_authority_remove_staged_archive "$request_id"; then
+        :
+      else
+        cleanup_status=$?
+      fi
+      if test "$primary_status" -ne 0; then
+        exit "$primary_status"
+      fi
+      exit "$cleanup_status"
+    }
+    trap cleanup_native_authority_remote_archive EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    native_authority_stage_archive "$request_id" "$source"
+    native_authority_request prepare "$request_id" "$output" "$@"
+  )
+}
 new_native_authority_request_id() {
   python3 - <<'PY'
 from uuid import uuid4
@@ -505,10 +496,11 @@ validate_native_authority_transport_config() {
 test "$merged_source_sha" != '<merged-40-lowercase-hex>'
 test "$trusted_release_sha256" != '<trusted-release-64-lowercase-hex>'
 test "$runtime_window_id" != '<authorized-native-runtime-window-id>'
-test "$(git rev-parse --show-toplevel)" = "$repository_root"
+test "$("${native_authority_git[@]}" rev-parse --show-toplevel)" = \
+  "$repository_root"
 test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
   "$merged_source_sha"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
 test -x "${native_authority_client[1]}"
 verify_loom_cli_source
@@ -518,7 +510,6 @@ test "$authority_source_tree" = "$(
   "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
 )"
 validate_native_authority_transport_config
-install_native_authority_client_snapshot
 
 for path in "$trusted_release" "$reviewed_kubeconfig" "$prepared_control_profile" \
   "$rollback_shadow_manifest"; do
@@ -688,7 +679,7 @@ fi
 
 jq -cnS \
   --arg source "$merged_source_sha" \
-  --arg tree "$(git rev-parse HEAD^{tree})" \
+  --arg tree "$authority_source_tree" \
   --arg release "$trusted_release_sha256" \
   --arg previous_release "$previous_trusted_release_sha256" \
   --arg profile "$runtime_profile_sha256" \
@@ -704,36 +695,28 @@ jq -cnS \
 chmod 0600 "$evidence_dir/immutable-inputs.json"
 ```
 
-Validate the private material only on the protected operator host. Do not
-record either file's bytes or private-key digest in issue comments.
+Before the runtime window opens, a direct-root administrator on the protected
+operator host must install the policy-bound material client from the same
+approved authority inventory and provision exactly these fixed inputs:
+
+- `/etc/loom/personal-dev-native-builder-authority-material/agent-ed25519`, a
+  root-owned, root-group, single-link regular file with mode `0400` and exactly
+  32 bytes;
+- `/etc/loom/personal-dev-native-builder-authority-material/service-ca.pem`, a
+  root-owned, root-group, single-link regular file with mode `0444` and a size
+  from 1 byte through 1 MiB.
+
+The material client validates the complete installed inventory, opens those
+fixed files without following links, and gives the FD-only encoder distinct
+descriptors numbered at least `3`. The operator does not provide either
+pathname. Its local `sudo` authorization is part of the separately provisioned
+protected-operator-host transport authority; it is not granted by the GB10
+authority sudoers asset, which remains limited to the empty-argument remote
+broker. Neither CA bytes nor a CA digest may be recorded; private-key bytes and
+digests are prohibited by the same evidence rule.
 
 ```bash
-validate_protected_material_metadata() {
-  sudo /bin/sh -euc '
-    key="$1"
-    ca="$2"
-    test -f "$key"
-    test ! -L "$key"
-    test "$(realpath -e "$key")" = "$key"
-    test "$(stat -c %u "$key")" = 0
-    test "$(stat -c %g "$key")" = 0
-    test "$(stat -c %a "$key")" = 400
-    test "$(stat -c %s "$key")" = 32
-    test "$(stat -c %h "$key")" = 1
-    test -f "$ca"
-    test ! -L "$ca"
-    test "$(realpath -e "$ca")" = "$ca"
-    test "$(stat -c %u "$ca")" = 0
-    test "$(stat -c %g "$ca")" = 0
-    test "$(stat -c %a "$ca")" = 444
-    test "$(stat -c %h "$ca")" = 1
-  ' sh "$agent_private_key" "$service_ca"
-}
-
-validate_protected_material_metadata
-
 sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
-  --private-key-path "$agent_private_key" \
   --expected-public-key-sha256 "$expected_public_key_sha256" >/dev/null
 ```
 
@@ -923,8 +906,7 @@ mv -T "$archive_part" "$archive"
 
 prepare_request_id="$(new_native_authority_request_id)"
 prepare_archive="/var/tmp/loom-personal-dev-native-builder/$prepare_request_id/gvisor-release-20260810.0-aarch64.tar.bz2"
-native_authority_stage_archive "$prepare_request_id" "$archive"
-native_authority_request prepare "$prepare_request_id" \
+native_authority_prepare "$prepare_request_id" "$archive" \
   "$evidence_dir/runtime-prepare.json" \
   --archive-path "$prepare_archive" \
   --archive-sha512 "$archive_sha512" \
@@ -933,7 +915,6 @@ native_authority_request prepare "$prepare_request_id" \
   --current-revision "$current_revision" \
   "${previous_args[@]}" \
   --public-store-origin "$reviewed_public_store_origin"
-native_authority_remove_staged_archive "$prepare_request_id"
 prepared_state_sha256="$(jq -er .state_sha256 "$evidence_dir/runtime-prepare.json")"
 jq -e '.phase == "prepared" and .agent_service == "inactive" and
   .dockerd_service == "inactive" and .nft_table == "absent" and
@@ -952,10 +933,10 @@ material. No operator-supplied source or executable byte crosses this boundary.
 ## 6. Stage the agent and activate it through the fixed authority
 
 `stage-agent` accepts only the prepared-state digest and public agent identity.
-The root-owned source-commit snapshot opens the protected key and CA and encodes
-their bytes directly into its stdout frame. The values and their digests are not
-in the client header, environment, command arguments, receipt, evidence, or
-staging directory.
+The sealed installed material client opens the two fixed protected inputs and
+passes distinct descriptors to the FD-only encoder. The values and their
+digests are not in the client header, environment, command arguments, receipt,
+evidence, or staging directory.
 
 ```bash
 stage_request_id="$(new_native_authority_request_id)"
@@ -976,7 +957,6 @@ jq -e '.phase == "staged" and .agent_service == "inactive" and
 
 emit_public_key() {
   sudo -n -- "${native_authority_privileged_client[@]}" emit-public-key \
-    --private-key-path "$agent_private_key" \
     --expected-public-key-sha256 "$expected_public_key_sha256"
 }
 

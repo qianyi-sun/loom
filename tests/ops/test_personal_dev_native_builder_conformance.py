@@ -409,13 +409,24 @@ def test_runs_fixed_two_sandbox_conformance_without_a_shell() -> None:
     assert all("qemu" not in " ".join(call).lower() for call in runner.calls)
     assert all("runc" not in " ".join(call).lower() for call in runner.calls)
     assert all(
-        call[:3] == ("docker", "-H", NATIVE_ENDPOINT)
+        call[:3] == ("/usr/bin/docker", "-H", NATIVE_ENDPOINT)
         for call in runner.calls
-        if call[0] == "docker" and PRIMARY_ENDPOINT not in call
+        if call[0] == "/usr/bin/docker" and PRIMARY_ENDPOINT not in call
     )
     assert all(
         env == {"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"} for env in runner.environments
     )
+
+
+def test_every_docker_call_uses_the_fixed_absolute_executable() -> None:
+    """Catches conformance resolving its privileged Docker client through PATH."""
+    runner = RecordingDockerRunner()
+
+    run_conformance(_inputs(), runner)
+
+    docker_calls = [call for call in runner.calls if len(call) >= 3 and call[1] == "-H"]
+    assert docker_calls
+    assert {call[0] for call in docker_calls} == {"/usr/bin/docker"}
 
 
 def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
@@ -426,7 +437,7 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
     normalized_calls = [_without_reconciliation_labels(call) for call in runner.calls]
 
     assert (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         NATIVE_ENDPOINT,
         "network",
@@ -440,7 +451,7 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
         "loom-native-conformance",
     ) in normalized_calls
     assert (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         NATIVE_ENDPOINT,
         "network",
@@ -459,7 +470,7 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
         if "loom-native-conformance-buildkit" in call and "create" in call
     )
     assert buildkit == (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         NATIVE_ENDPOINT,
         "create",
@@ -513,7 +524,7 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
         if "loom-native-conformance-client" in call and "create" in call
     )
     assert client[:30] == (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         NATIVE_ENDPOINT,
         "create",
@@ -565,7 +576,7 @@ def test_uses_exact_names_networks_limits_and_python_client_program() -> None:
         if "loom-native-conformance-foreign-client" in call and "create" in call
     )
     assert foreign[:22] == (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         PRIMARY_ENDPOINT,
         "create",
@@ -614,7 +625,7 @@ def test_verifies_both_platforms_labels_every_container_and_readies_denial_serve
     platforms = [call for call in runner.calls if call[3:5] == ("image", "inspect")]
     assert platforms == [
         (
-            "docker",
+            "/usr/bin/docker",
             "-H",
             NATIVE_ENDPOINT,
             "image",
@@ -624,7 +635,7 @@ def test_verifies_both_platforms_labels_every_container_and_readies_denial_serve
             BUILDER,
         ),
         (
-            "docker",
+            "/usr/bin/docker",
             "-H",
             PRIMARY_ENDPOINT,
             "image",
@@ -639,7 +650,7 @@ def test_verifies_both_platforms_labels_every_container_and_readies_denial_serve
     assert all(("--platform", "linux/arm64") in pairwise(call) for call in creates)
     assert all(("--label", MANAGED_LABEL) in pairwise(call) for call in creates)
     assert (
-        "docker",
+        "/usr/bin/docker",
         "-H",
         NATIVE_ENDPOINT,
         "exec",
@@ -786,9 +797,9 @@ def test_each_primary_failure_cleans_only_recorded_ids_in_reverse_order(
         DENIED_NETWORK_ID: NATIVE_ENDPOINT,
     }
     assert cleanup == [
-        ("docker", "-H", endpoint_for[identifier], "network", "rm", identifier)
+        ("/usr/bin/docker", "-H", endpoint_for[identifier], "network", "rm", identifier)
         if identifier in {PROVIDER_NETWORK_ID, DENIED_NETWORK_ID}
-        else ("docker", "-H", endpoint_for[identifier], "rm", "-f", identifier)
+        else ("/usr/bin/docker", "-H", endpoint_for[identifier], "rm", "-f", identifier)
         for identifier in reversed(runner.created)
     ]
 

@@ -406,7 +406,7 @@ def _origin(value: object) -> bool:
 
 
 def _docker(endpoint: str, *arguments: str) -> tuple[str, ...]:
-    return ("docker", "-H", endpoint, *arguments)
+    return ("/usr/bin/docker", "-H", endpoint, *arguments)
 
 
 def _run(runner: Runner, argv: tuple[str, ...], *, allow_failure: bool = False) -> CommandResult:

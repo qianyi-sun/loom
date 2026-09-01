@@ -23,8 +23,10 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NoReturn, Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from scripts.ops.personal_dev_native_builder_runtime_crypto import (
+    derive_ed25519_public_key,
+    is_ca_certificate_bundle,
+)
 from scripts.ops.personal_dev_native_builder_runtime_profile import (
     NativeBuilderRuntimeArchiveMember,
     NativeBuilderRuntimeProfile,
@@ -476,57 +478,12 @@ def _normalized_nftables(payload: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
-_ED25519_FIELD = 2**255 - 19
-_ED25519_D = (-121665 * pow(121666, _ED25519_FIELD - 2, _ED25519_FIELD)) % _ED25519_FIELD
-_ED25519_BASE = (
-    15112221349535400772501151409588531511454012693041857206046113283949847762202,
-    46316835694926478169428394003475163141307993866256225615783033603165251855960,
-    1,
-    46827403850823179245072216630277197565144205554125654976674165829533817101731,
-)
-
-
-def _ed25519_add(
-    left: tuple[int, int, int, int],
-    right: tuple[int, int, int, int],
-) -> tuple[int, int, int, int]:
-    x1, y1, z1, t1 = left
-    x2, y2, z2, t2 = right
-    field = _ED25519_FIELD
-    a = (y1 - x1) * (y2 - x2) % field
-    b = (y1 + x1) * (y2 + x2) % field
-    c = 2 * _ED25519_D * t1 * t2 % field
-    d = 2 * z1 * z2 % field
-    e = b - a
-    f = d - c
-    g = d + c
-    h = b + a
-    return (e * f % field, g * h % field, f * g % field, e * h % field)
-
-
 def _derive_ed25519_public_key(private_seed: bytes) -> bytes:
     """Derive the RFC 8032 compressed public key using only sealed stdlib."""
-    if not isinstance(private_seed, bytes) or len(private_seed) != 32:
-        raise PersonalDevNativeBuilderRuntimeInstallError("public_key_invalid")
-    expanded = hashlib.sha512(private_seed).digest()
-    scalar_bytes = bytearray(expanded[:32])
-    scalar_bytes[0] &= 248
-    scalar_bytes[31] &= 63
-    scalar_bytes[31] |= 64
-    scalar = int.from_bytes(scalar_bytes, "little")
-    result = (0, 1, 1, 0)
-    addend = _ED25519_BASE
-    while scalar:
-        if scalar & 1:
-            result = _ed25519_add(result, addend)
-        addend = _ed25519_add(addend, addend)
-        scalar >>= 1
-    x, y, z, _ = result
-    inverse_z = pow(z, _ED25519_FIELD - 2, _ED25519_FIELD)
-    affine_x = x * inverse_z % _ED25519_FIELD
-    affine_y = y * inverse_z % _ED25519_FIELD
-    encoded = affine_y | ((affine_x & 1) << 255)
-    return encoded.to_bytes(32, "little")
+    try:
+        return derive_ed25519_public_key(private_seed)
+    except ValueError as exc:
+        raise PersonalDevNativeBuilderRuntimeInstallError("public_key_invalid") from exc
 
 
 def _public_key_sha256(private_seed: bytes) -> str:
@@ -534,22 +491,7 @@ def _public_key_sha256(private_seed: bytes) -> str:
 
 
 def _is_ca_bundle(payload: bytes) -> bool:
-    try:
-        certificates = x509.load_pem_x509_certificates(payload)
-        if (
-            not certificates
-            or b"".join(
-                certificate.public_bytes(serialization.Encoding.PEM) for certificate in certificates
-            )
-            != payload
-        ):
-            return False
-        return all(
-            certificate.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
-            for certificate in certificates
-        )
-    except (ValueError, x509.ExtensionNotFound):
-        return False
+    return is_ca_certificate_bundle(payload)
 
 
 class PersonalDevNativeBuilderRuntimeInstaller:

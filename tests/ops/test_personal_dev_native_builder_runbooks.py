@@ -34,6 +34,14 @@ def _shell_function(document: str, name: str) -> str:
     return shell[start:end]
 
 
+def _shell_array(document: str, name: str) -> str:
+    shell = _shell(document)
+    match = re.search(rf"^{re.escape(name)}=\(\n.*?^\)$", shell, flags=re.MULTILINE | re.DOTALL)
+    if match is None:
+        raise ValueError(f"array {name} is absent")
+    return match.group(0)
+
+
 def _native_authority_request(document: str) -> str:
     return (
         _shell_function(document, "validate_native_authority_receipt")
@@ -211,148 +219,63 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     )
 
 
-def _assert_stage_agent_uses_sealed_snapshot(
-    tmp_path: Path, *, replace_commit: bool
+
+def test_privileged_material_flow_uses_installed_no_path_client(
+    tmp_path: Path,
 ) -> None:
-    document = _read(RUNTIME)
-    stage_agent = _shell_function(document, "native_authority_stage_agent")
-    try:
-        install_snapshot = _shell_function(document, "install_native_authority_client_snapshot")
-    except ValueError:
-        install_snapshot = ""
-    repository = tmp_path / "release"
-    client = repository / "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
-    protocol = repository / "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py"
-    client.parent.mkdir(parents=True)
-    client.write_text("#!/bin/sh\nprintf sealed-frame\n", encoding="utf-8")
-    client.chmod(0o755)
-    protocol.write_text("# sealed protocol\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "init", "-q", str(repository)],
-        check=True,
-        capture_output=True,
-    )
-    git_environment = {
-        "GIT_AUTHOR_NAME": "Runbook Test",
-        "GIT_AUTHOR_EMAIL": "runbook@example.invalid",
-        "GIT_COMMITTER_NAME": "Runbook Test",
-        "GIT_COMMITTER_EMAIL": "runbook@example.invalid",
-    }
-    subprocess.run(
-        ["git", "-C", str(repository), "add", "--all"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repository), "commit", "-q", "-m", "sealed"],
-        check=True,
-        capture_output=True,
-        env=git_environment,
-    )
-    source_sha = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    source_tree = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    replacement = tmp_path / "replacement-client"
-    marker = tmp_path / "checkout-client-ran-as-root"
-    replacement.write_text(
-        '#!/bin/sh\ntouch "$CHECKOUT_ROOT_MARKER"\nprintf replaced-frame\n',
-        encoding="utf-8",
-    )
-    replacement.chmod(0o755)
-    if replace_commit:
-        client.write_bytes(replacement.read_bytes())
-        subprocess.run(
-            ["git", "-C", str(repository), "add", "--all"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(repository), "commit", "-q", "-m", "attacker"],
-            check=True,
-            capture_output=True,
-            env=git_environment,
-        )
-        attacker_sha = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        subprocess.run(
-            ["git", "-C", str(repository), "replace", source_sha, attacker_sha],
-            check=True,
-            capture_output=True,
-        )
-    key = tmp_path / "agent-key"
-    ca = tmp_path / "service-ca"
-    key.write_bytes(b"x")
-    ca.write_bytes(b"y")
+    """Catches stage/public-key flow passing secret pathnames in privileged argv."""
+    runbook = _read(RUNTIME)
+    stage_agent = _shell_function(runbook, "native_authority_stage_agent")
+    emit_public_key = _shell_function(runbook, "emit_public_key")
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    argument_log = tmp_path / "arguments"
     fake_sudo = fake_bin / "sudo"
     fake_sudo.write_text(
-        '#!/bin/sh\ntest "$1" = -n && shift\ntest "$1" = -- && shift\nexec "$@"\n',
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'exec "$@"\n',
         encoding="utf-8",
     )
     fake_sudo.chmod(0o755)
-    snapshot_root = tmp_path / "root-owned-snapshot"
+    fake_client = fake_bin / "material-client"
+    fake_client.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" >> "$MATERIAL_ARGUMENT_LOG"\n'
+        'case "$1" in\n'
+        '  stage-agent) printf frame ;;\n'
+        '  emit-public-key) printf public ;;\n'
+        '  *) exit 2 ;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    fake_client.chmod(0o755)
     behavior = subprocess.run(
-        [
-            "bash",
-            "-seu",
-            "--",
-            str(repository),
-            source_sha,
-            str(snapshot_root),
-            str(replacement),
-            str(client),
-            str(key),
-            str(ca),
-        ],
+        ["bash", "-seu", "--", str(fake_client)],
         input=(
             f'PATH="{fake_bin}:$PATH"\n'
-            f'CHECKOUT_ROOT_MARKER="{marker}"\n'
-            "export CHECKOUT_ROOT_MARKER\n"
-            'repository_root="$1"\n'
-            'native_authority_git=(/usr/bin/env -i HOME=/nonexistent '
-            'PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_NOSYSTEM=1 '
-            'GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-replace-objects '
-            '-C "$repository_root")\n'
-            'merged_source_sha="$2"\n'
-            'native_authority_client_snapshot_root="$3"\n'
-            'native_authority_client=("$5")\n'
-            + (
-                'native_authority_privileged_client=("$3/personal_dev_native_builder_runtime_authority_client.py")\n'
-                if install_snapshot
-                else 'native_authority_privileged_client=("$5")\n'
-            )
-            + 'agent_private_key="$6"\n'
-            'service_ca="$7"\n'
+            f'MATERIAL_ARGUMENT_LOG="{argument_log}"\n'
+            "export MATERIAL_ARGUMENT_LOG\n"
+            'native_authority_privileged_client=("$1")\n'
+            'agent_private_key="/caller-selected-key"\n'
+            'service_ca="/caller-selected-ca"\n'
             f'authority_source_sha="{"a" * 40}"\n'
-            f'authority_source_tree="{source_tree}"\n'
+            f'authority_source_tree="{"b" * 40}"\n'
             f'runtime_profile_sha256="{"c" * 64}"\n'
-            + install_snapshot
-            + ("\ninstall_native_authority_client_snapshot\n" if install_snapshot else "\n")
-            + ('\n:\n' if replace_commit else 'mv -- "$4" "$5"\n')
+            f'expected_public_key_sha256="{"d" * 64}"\n'
             + stage_agent
+            + "\n"
+            + emit_public_key
             + '\nnative_authority_stage_agent "123e4567-e89b-42d3-a456-426614174000" '
             + '--expected-state-sha256 "'
-            + "d" * 64
-            + '" --agent-image ignored --builder-image ignored --service-origin ignored '
-            + "--agent-instance-id ignored --agent-key-id ignored "
-            + '--expected-public-key-sha256 "'
             + "e" * 64
+            + '" --agent-image ignored --builder-image ignored '
+            + '--service-origin ignored --agent-instance-id ignored '
+            + '--agent-key-id ignored --expected-public-key-sha256 "'
+            + "d" * 64
             + '" >/dev/null\n'
-            + 'test ! -e "$CHECKOUT_ROOT_MARKER"\n'
+            + "emit_public_key >/dev/null\n"
         ),
         text=True,
         capture_output=True,
@@ -360,21 +283,17 @@ def _assert_stage_agent_uses_sealed_snapshot(
     )
 
     assert behavior.returncode == 0, behavior.stderr
-    assert not marker.exists()
-
-
-def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
-    tmp_path: Path,
-) -> None:
-    """Catches checkout replacement controlling the root stage-agent encoder."""
-    _assert_stage_agent_uses_sealed_snapshot(tmp_path, replace_commit=False)
-
-
-def test_stage_agent_snapshot_ignores_git_replace_for_authorized_commit(
-    tmp_path: Path,
-) -> None:
-    """Catches a replace ref substituting the tree behind an authorized commit."""
-    _assert_stage_agent_uses_sealed_snapshot(tmp_path, replace_commit=True)
+    arguments = argument_log.read_text(encoding="utf-8")
+    assert "--private-key-path" not in arguments
+    assert "--service-ca-path" not in arguments
+    assert "/caller-selected-key" not in arguments
+    assert "/caller-selected-ca" not in arguments
+    assert (
+        "/usr/local/libexec/"
+        "loom-personal-dev-native-builder-runtime-authority-material-client"
+    ) in runbook
+    assert "install_native_authority_client_snapshot" not in runbook
+    assert "sudo /bin/sh" not in runbook
 
 
 def test_archive_upload_uses_root_private_copy_before_source_substitution(
@@ -556,6 +475,101 @@ def test_archive_stage_always_removes_exact_root_private_copy(
         observed_statuses.add(-(expected_status - 128))
     assert behavior.returncode in observed_statuses, behavior.stderr
     assert not (local_root / request_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "cleanup_status", "expected_status"),
+    (
+        ("prepare-failure", 31, 23),
+        ("signal-HUP", 31, 129),
+        ("signal-INT", 31, 130),
+        ("signal-TERM", 31, 143),
+        ("success", 0, 0),
+        ("success", 31, 31),
+    ),
+)
+def test_prepare_transaction_always_removes_exact_remote_archive(
+    tmp_path: Path,
+    scenario: str,
+    cleanup_status: int,
+    expected_status: int,
+) -> None:
+    """Catches prepare failure or interruption bypassing request-scoped remote cleanup."""
+    prepare = _shell_function(_read(RUNTIME), "native_authority_prepare")
+    cleanup_log = tmp_path / "cleanup"
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id],
+        input=(
+            f'PREPARE_SCENARIO="{scenario}"\n'
+            f'PREPARE_CLEANUP_STATUS="{cleanup_status}"\n'
+            f'PREPARE_CLEANUP_LOG="{cleanup_log}"\n'
+            "export PREPARE_SCENARIO PREPARE_CLEANUP_STATUS PREPARE_CLEANUP_LOG\n"
+            "native_authority_stage_archive() { return 0; }\n"
+            "native_authority_request() {\n"
+            "  case \"$PREPARE_SCENARIO\" in\n"
+            "    prepare-failure) return 23 ;;\n"
+            "    signal-*) kill -s \"${PREPARE_SCENARIO#signal-}\" \"$BASHPID\"; "
+            "sleep 0.1; return 99 ;;\n"
+            "    success) return 0 ;;\n"
+            "  esac\n"
+            "}\n"
+            "native_authority_remove_staged_archive() {\n"
+            "  printf '%s\\n' \"$1\" >> \"$PREPARE_CLEANUP_LOG\"\n"
+            "  return \"$PREPARE_CLEANUP_STATUS\"\n"
+            "}\n"
+            + prepare
+            + '\nnative_authority_prepare "$1" /reviewed/archive /evidence/prepare.json '
+            + "--archive-path ignored\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode == expected_status, behavior.stderr
+    assert cleanup_log.read_text(encoding="utf-8").splitlines() == [request_id]
+
+
+def test_remote_archive_remover_targets_only_the_request_archive(
+    tmp_path: Path,
+) -> None:
+    """Catches cleanup broadening beyond the exact request archive and directory."""
+    remover = _shell_function(_read(RUNTIME), "native_authority_remove_staged_archive")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    batch_log = tmp_path / "batch"
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'test "$1" = /usr/bin/sftp\n'
+        'cat > "$REMOTE_BATCH_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", request_id],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'REMOTE_BATCH_LOG="{batch_log}"\n'
+            "export REMOTE_BATCH_LOG\n"
+            + remover
+            + '\nnative_authority_remove_staged_archive "$1"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    remote_dir = f"/var/tmp/loom-personal-dev-native-builder/{request_id}"
+    assert behavior.returncode == 0, behavior.stderr
+    assert batch_log.read_text(encoding="utf-8") == (
+        f"rm {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n"
+        f"rmdir {remote_dir}\n"
+    )
 
 
 def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
@@ -848,6 +862,83 @@ def test_native_builder_runbooks_reject_cli_module_provenance_drift(
     assert rejected.returncode != 0
 
 
+def test_every_runbook_source_identity_ignores_git_replacement_objects(
+    tmp_path: Path,
+) -> None:
+    """Catches acceptance or evidence deriving source identity through ambient Git."""
+    repository = tmp_path / "release"
+    repository.mkdir()
+    git_environment = {
+        "GIT_AUTHOR_NAME": "Runbook Test",
+        "GIT_AUTHOR_EMAIL": "runbook@example.invalid",
+        "GIT_COMMITTER_NAME": "Runbook Test",
+        "GIT_COMMITTER_EMAIL": "runbook@example.invalid",
+    }
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    source = repository / "source"
+    source.write_text("reviewed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "source"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "reviewed"],
+        check=True,
+        env=git_environment,
+    )
+    reviewed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    reviewed_tree = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source.write_text("replacement\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "source"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "replacement"],
+        check=True,
+        env=git_environment,
+    )
+    replacement = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repository), "replace", reviewed, replacement],
+        check=True,
+    )
+
+    arrays = [
+        _shell_array(_read(runbook), "native_authority_git")
+        for runbook in (RUNTIME, ACCEPTANCE)
+    ]
+    assert arrays[0] == arrays[1]
+    for assignment in arrays:
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", str(repository), reviewed],
+            input=(
+                'repository_root="$1"\n'
+                + assignment
+                + '\n"${native_authority_git[@]}" rev-parse --verify "$2^{tree}"\n'
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert behavior.returncode == 0, behavior.stderr
+        assert behavior.stdout.strip() == reviewed_tree
+
+    runtime = _read(RUNTIME)
+    combined_shell = _shell(runtime + "\n" + _read(ACCEPTANCE))
+    assert '$(git ' not in combined_shell
+    assert '--arg tree "$authority_source_tree"' in runtime
+
+
 def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() -> None:
     runbook = _read(RUNTIME)
 
@@ -867,7 +958,10 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert "/usr/bin/git --no-replace-objects -C \"$repository_root\"" in runbook
     assert "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null" in runbook
     assert 'rev-parse --verify HEAD^{commit})" = \\' in runbook
-    assert 'test -z "$(git status --porcelain=v1 --untracked-files=all)"' in runbook
+    assert (
+        'test -z "$("${native_authority_git[@]}" status '
+        '--porcelain=v1 --untracked-files=all)"'
+    ) in runbook
     assert 'sha256sum "$trusted_release"' in runbook
     assert 'sha256sum "$previous_trusted_release"' in runbook
     assert "previous_trusted_release_sha256:$previous_release" in runbook
@@ -884,25 +978,14 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
     assert runbook.count('> "$evidence_dir/immutable-inputs.json"') == 1
 
 
-def test_native_builder_runtime_validates_protected_material_as_root() -> None:
+def test_native_builder_runtime_delegates_material_validation_to_installed_asset() -> None:
     runbook = _read(RUNTIME)
-    try:
-        validator = _shell_function(runbook, "validate_protected_material_metadata")
-    except ValueError:
-        validator = ""
 
-    assert validator.startswith("validate_protected_material_metadata() {")
-    assert "sudo /bin/sh -euc" in validator
-    assert 'test "$(stat -c %u "$key")" = 0' in validator
-    assert 'test "$(stat -c %g "$key")" = 0' in validator
-    assert 'test "$(stat -c %a "$key")" = 400' in validator
-    assert 'test "$(stat -c %s "$key")" = 32' in validator
-    assert 'test "$(stat -c %h "$key")" = 1' in validator
-    assert 'test "$(stat -c %u "$ca")" = 0' in validator
-    assert 'test "$(stat -c %g "$ca")" = 0' in validator
-    assert 'test "$(stat -c %a "$ca")" = 444' in validator
-    assert 'test "$(stat -c %h "$ca")" = 1' in validator
-    assert 'sh "$agent_private_key" "$service_ca"' in validator
+    assert "validate_protected_material_metadata" not in runbook
+    assert "sudo /bin/sh" not in runbook
+    assert "agent_private_key=" not in runbook
+    assert "service_ca=" not in runbook
+    assert "policy-bound material client" in runbook
 
 
 def test_native_builder_runtime_orders_receipt_bound_inert_stage_before_activation() -> None:
@@ -1040,6 +1123,17 @@ def test_native_builder_runbooks_contain_no_forbidden_mutation_or_secret_capture
     assert "secret values" in combined.casefold()
     assert "--token" not in normalized
     assert "authorization:" not in normalized
+
+
+def test_native_builder_runtime_evidence_policy_prohibits_ca_digests() -> None:
+    """Catches evidence prose authorizing a prohibited CA digest."""
+    runbook = _read(RUNTIME)
+
+    assert "CA digests" not in runbook
+    assert "Neither CA bytes nor a CA digest may be recorded" in runbook
+    assert runbook.index("Neither CA bytes nor a CA digest may be recorded") < runbook.index(
+        "emit-public-key"
+    )
 
 
 def test_native_builder_acceptance_proves_concurrent_native_platforms_and_routes() -> None:
