@@ -62,7 +62,10 @@ from .model import (
 from .policy import sanitized_child_environment
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
-from .resume_runtime_upgrade import build_installed_resume_runtime_upgrade_authority
+from .resume_runtime_upgrade import (
+    AdmittedResumeRuntimeUpgrade,
+    build_installed_resume_runtime_upgrade_authority,
+)
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore
 from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
@@ -1109,6 +1112,7 @@ def _default_dependencies(
     installed_config: OperatorConfig | None = None,
     runner_install_digest: str | None = None,
     mutation_guard: MutationGuardManager | None = None,
+    resume_runtime_upgrade: AdmittedResumeRuntimeUpgrade | None = None,
 ) -> WorkerDependencies:
     from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 
@@ -1149,6 +1153,7 @@ def _default_dependencies(
         now=clock,
         rollout_runner_install_digest=runner_install_digest,
         installed_config=control_config,
+        resume_runtime_upgrade=resume_runtime_upgrade,
     )
     deep_preflight = composition.authority()
     detached_preflight = build_installed_detached_preflight_runner(
@@ -1322,6 +1327,19 @@ def _default_attempt_dependencies(
             or guard_evidence.state != "ready"
         ):
             raise ValueError("staging mutation guard binding drifted")
+        admitted_runtime_upgrade = None
+        if effective_config != installed_config:
+            if resume_runtime_upgrade is None:
+                raise ValueError("worker resume runtime upgrade authority is unavailable")
+            admitted_runtime_upgrade = resume_runtime_upgrade.admit(
+                installed_config,
+                candidate_sha=envelope.resolved_sha,
+                candidate_tree=envelope.resolved_tree,
+                runner_config_sha256=envelope.runner_config_sha256,
+                cluster_config_path=envelope.cluster_config_path,
+            )
+            if admitted_runtime_upgrade.config != effective_config:
+                raise ValueError("worker resume runtime upgrade authority drifted")
         attestation = PreflightAttestationStore(installed_config.state_root).read(
             envelope.preflight_attestation_sha256
         )
@@ -1343,6 +1361,7 @@ def _default_attempt_dependencies(
             installed_config=installed_config,
             runner_install_digest=bindings.runner_install_hash,
             mutation_guard=mutation_guard,
+            resume_runtime_upgrade=admitted_runtime_upgrade,
         )
     except BaseException:
         if mutation_guard is not None:

@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
 from loom_cli.rollout.operator.config import OperatorConfig, environment_authority
+from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from tests.loom_cli.rollout.operator.test_broker import make_config
 
 CURRENT_SHA = "c" * 40
@@ -22,7 +24,7 @@ def _runtime_config(tmp_path: Path) -> tuple[OperatorConfig, bytes, bytes]:
     current_repo = authority.candidate_runtime_root / CURRENT_SHA / "repo"
     current_cluster = current_repo / authority.candidate_cluster_config
     payload = (
-        'schema_version = 1\n'
+        "schema_version = 1\n"
         f'runner_repo = "{current_repo}"\n'
         f'cluster_config_path = "{current_cluster}"\n'
         'environment = "staging"\n'
@@ -68,15 +70,77 @@ def test_runtime_upgrade_authority_reconstructs_exact_historical_config(
     )
 
     expected_repo = (
-        environment_authority("staging").candidate_runtime_root
-        / HISTORICAL_SHA
-        / "repo"
+        environment_authority("staging").candidate_runtime_root / HISTORICAL_SHA / "repo"
     )
     assert resolved.runner_repo == expected_repo
     assert resolved.cluster_config_path == (
         expected_repo / environment_authority("staging").candidate_cluster_config
     )
     assert resolved.config_sha256 == hashlib.sha256(historical_payload).hexdigest()
+
+
+def test_runtime_upgrade_authority_admits_exact_historical_candidate_rechecks(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("loom_cli.rollout.operator.resume_runtime_upgrade")
+    config, current_payload, historical_payload = _runtime_config(tmp_path)
+    cluster_payload = b"container_registry = 'registry.internal'\n"
+    verified: list[tuple[str, str | None]] = []
+
+    def verify_runtime(
+        _config: OperatorConfig,
+        candidate_sha: str,
+        candidate_tree: str | None,
+    ) -> CandidateIdentityEvidence:
+        verified.append((candidate_sha, candidate_tree))
+        return CandidateIdentityEvidence(
+            resolved_sha=candidate_sha,
+            resolved_tree=candidate_tree or "d" * 40,
+            source_mode="merged-dev",
+            approved_base_sha=None,
+            linear_history_count=0,
+            evidence_digest="e" * 64,
+        )
+
+    authority = module.ResumeRuntimeUpgradeAuthority(
+        current_config_payload=current_payload,
+        verify_runtime=verify_runtime,
+        prove_ancestor=lambda _repo, historical, current: (
+            historical == HISTORICAL_SHA and current == CURRENT_SHA
+        ),
+        read_cluster_config=lambda _path: cluster_payload,
+    )
+    admitted = authority.admit(
+        config,
+        candidate_sha=HISTORICAL_SHA,
+        candidate_tree=HISTORICAL_TREE,
+        runner_config_sha256=hashlib.sha256(historical_payload).hexdigest(),
+        cluster_config_path=str(
+            environment_authority("staging").candidate_runtime_root
+            / HISTORICAL_SHA
+            / "repo"
+            / environment_authority("staging").candidate_cluster_config
+        ),
+    )
+    candidate = CandidateBinding(
+        remote_url=APPROVED_REMOTE_URL,
+        target_ref="origin/dev",
+        resolved_sha=HISTORICAL_SHA,
+        image_tag=f"staging-{HISTORICAL_SHA[:7]}",
+        fetched_at="2026-08-31T22:00:00Z",
+        resolved_tree=HISTORICAL_TREE,
+    )
+
+    identity = admitted.verify_candidate(candidate)
+
+    assert admitted.config.runner_repo.parent.name == HISTORICAL_SHA
+    assert identity.resolved_sha == HISTORICAL_SHA
+    assert identity.resolved_tree == HISTORICAL_TREE
+    assert verified == [
+        (CURRENT_SHA, None),
+        (HISTORICAL_SHA, HISTORICAL_TREE),
+        (HISTORICAL_SHA, HISTORICAL_TREE),
+    ]
 
 
 def test_installed_runtime_upgrade_authority_uses_trusted_candidate_evidence(
@@ -168,7 +232,9 @@ def test_runtime_upgrade_authority_rejects_every_unproven_transition(
             raise FileNotFoundError("historical runtime is unavailable")
 
     authority = module.ResumeRuntimeUpgradeAuthority(
-        current_config_payload=(current_payload + b"# drift\n" if drift == "config" else current_payload),
+        current_config_payload=(
+            current_payload + b"# drift\n" if drift == "config" else current_payload
+        ),
         verify_runtime=verify_runtime,
         prove_ancestor=lambda _repo, _historical, _current: drift != "ancestry",
         read_cluster_config=lambda path: (

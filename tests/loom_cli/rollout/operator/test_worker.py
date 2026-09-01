@@ -1341,7 +1341,21 @@ def test_default_attempt_dependencies_compose_historical_runtime_under_current_g
         "MutationGuardManager",
         bind_guard,
     )
-    authority = object()
+    admitted_upgrade = SimpleNamespace(config=historical_config)
+
+    class Authority:
+        def admit(self, config: object, **bindings: object) -> object:
+            order.append("admit")
+            assert config == installed_config
+            assert bindings == {
+                "candidate_sha": envelope.resolved_sha,
+                "candidate_tree": envelope.resolved_tree,
+                "runner_config_sha256": envelope.runner_config_sha256,
+                "cluster_config_path": envelope.cluster_config_path,
+            }
+            return admitted_upgrade
+
+    authority = Authority()
     monkeypatch.setattr(
         worker_module,
         "build_installed_resume_runtime_upgrade_authority",
@@ -1398,6 +1412,7 @@ def test_default_attempt_dependencies_compose_historical_runtime_under_current_g
         assert kwargs["installed_config"] == installed_config
         assert kwargs["runner_install_digest"] == "9" * 64
         assert kwargs["mutation_guard"] is guard
+        assert kwargs["resume_runtime_upgrade"] is admitted_upgrade
         return composed
 
     monkeypatch.setattr(worker_module, "_default_dependencies", compose)
@@ -1413,7 +1428,7 @@ def test_default_attempt_dependencies_compose_historical_runtime_under_current_g
     resolver = guard_bindings[0]["resolve_candidate"]
     assert callable(resolver)
     assert resolver(installed_config) == (envelope.resolved_sha, envelope.resolved_tree)
-    assert order == ["resolve", "guard", "attestation", "compose"]
+    assert order == ["resolve", "guard", "admit", "attestation", "compose"]
     monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", lambda *_args, **_kwargs: 1)
 
     assert worker_main(["run-attempt", "--envelope", str(path)], dependencies=dependencies) == 0

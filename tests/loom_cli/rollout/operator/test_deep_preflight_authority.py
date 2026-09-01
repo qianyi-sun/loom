@@ -254,6 +254,7 @@ def test_post_apply_resume_admission_rechecks_the_advanced_epoch(
         attestation_store=Store(),  # type: ignore[arg-type]
         read_mutation_epoch=lambda: 8,
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+        post_apply_attested_dependencies=frozenset({"runner.install"}),
     )
 
     result = authority.admit_post_apply_resume(
@@ -269,3 +270,4 @@ def test_post_apply_resume_admission_rechecks_the_advanced_epoch(
     assert captured["candidate"] == candidate
     assert captured["current_mutation_epoch"] == 8
     assert captured["plan"].candidate == candidate  # type: ignore[union-attr]
+    assert captured["attested_dependencies"] == frozenset({"runner.install"})

@@ -182,6 +182,29 @@ def _task_image_builder_args(
     return args
 
 
+def _legacy_manager_args(*, port: int = 15451, pool_name: str = "gb10") -> list[str]:
+    args = _args(port=port, pool_name=pool_name)
+    replacements = {
+        "--global-execution-witness-config-map": (
+            "--global-execution-manager-export",
+            "deployment/loom-capacity-manager",
+        ),
+        "--global-execution-witness-namespace": (
+            "--global-execution-manager-namespace",
+            "loom-dev",
+        ),
+        "--global-execution-witness-kubeconfig": (
+            "--global-execution-manager-kubeconfig",
+            STAGING_KUBECONFIG,
+        ),
+    }
+    for current, (legacy, value) in replacements.items():
+        index = args.index(current)
+        args[index : index + 2] = [legacy, value]
+    args[args.index("--kubeconfig") + 1] = STAGING_KUBECONFIG
+    return args
+
+
 def _toml_string(value: str) -> str:
     return json.dumps(value)
 
@@ -770,6 +793,56 @@ def test_artifact_selects_one_controller_without_losing_candidate_binding(
 
     with pytest.raises(ValueError, match="execution host"):
         artifact.for_execution_host("foreign-controller")
+
+
+def test_builder_accepts_exact_legacy_manager_authority_for_resume(tmp_path: Path) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[_supervisor(args=_legacy_manager_args())],
+        )
+    )
+
+    assert artifact.supervisors[0].args == tuple(_legacy_manager_args())
+
+
+def test_builder_rejects_mixed_or_partial_legacy_manager_authority(tmp_path: Path) -> None:
+    mixed = [
+        *_legacy_manager_args(),
+        "--global-execution-witness-config-map",
+        "loom-global-execution-witness-v1",
+    ]
+    with pytest.raises(ValueError, match="authority is mixed"):
+        _build(_candidate(tmp_path / "mixed", supervisors=[_supervisor(args=mixed)]))
+
+    partial = _legacy_manager_args()
+    flag_index = partial.index("--global-execution-manager-namespace")
+    del partial[flag_index : flag_index + 2]
+    with pytest.raises(ValueError, match="arguments are missing"):
+        _build(_candidate(tmp_path / "partial", supervisors=[_supervisor(args=partial)]))
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--global-execution-manager-export", "deployment/foreign", "global execution"),
+        ("--global-execution-manager-namespace", "foreign-manager", "global execution"),
+        ("--global-execution-manager-kubeconfig", "/tmp/kubeconfig", "global execution"),
+        ("--kubeconfig", _EXTERNAL_SUPERVISOR_KUBECONFIG, "staging kubeconfig"),
+        ("--db-secret-name", "loom-secrets", "optional authority"),
+    ],
+)
+def test_builder_rejects_noncanonical_legacy_manager_authority(
+    tmp_path: Path,
+    flag: str,
+    value: str,
+    message: str,
+) -> None:
+    args = _legacy_manager_args()
+    args[args.index(flag) + 1] = value
+
+    with pytest.raises(ValueError, match=message):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
 
 
 def test_artifact_rejects_live_port_without_rehearsal_offset_capacity(
