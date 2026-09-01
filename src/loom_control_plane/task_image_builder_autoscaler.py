@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from sqlalchemy import and_, func, or_, select, text
@@ -54,6 +54,7 @@ class TaskImageBuilderPoolConfig:
     slurm_qos: str = ""
     slurm_reservation: str = ""
     job_output_dir: str = ""
+    failure_backoff_seconds: int = 300
 
     def __post_init__(self) -> None:
         if not self.exclusive:
@@ -105,6 +106,13 @@ class TaskImageBuilderPoolConfig:
                 raise ValueError(f"task image builder {name} must be positive")
         if self.command_timeout_seconds <= 0:
             raise ValueError("task image builder command timeout must be positive")
+        if (
+            type(self.failure_backoff_seconds) is not int
+            or not 1 <= self.failure_backoff_seconds <= 3600
+        ):
+            raise ValueError(
+                "task image builder failure backoff must be an integer from 1 to 3600 seconds"
+            )
 
 
 @dataclass(frozen=True)
@@ -112,6 +120,7 @@ class TaskImageBuilderAutoscalerResult:
     queued_materializations: int
     submitted_job_ids: tuple[str, ...]
     cancelled_job_ids: tuple[str, ...]
+    failure_backoff_active: bool
 
 
 class TaskImageBuilderSlurmRunner(Protocol):
@@ -344,6 +353,28 @@ async def _load_active_jobs(
     )
 
 
+async def _failure_backoff_active(
+    session: AsyncSession,
+    config: TaskImageBuilderPoolConfig,
+    *,
+    now: datetime,
+) -> bool:
+    latest_failure = await session.scalar(
+        select(SlurmWorkerJob.finished_at)
+        .where(
+            SlurmWorkerJob.environment == config.environment,
+            SlurmWorkerJob.pool_name == config.pool_name,
+            SlurmWorkerJob.state == "failed",
+            SlurmWorkerJob.finished_at.is_not(None),
+        )
+        .order_by(SlurmWorkerJob.finished_at.desc(), SlurmWorkerJob.id.desc())
+        .limit(1)
+    )
+    return latest_failure is not None and latest_failure > now - timedelta(
+        seconds=config.failure_backoff_seconds
+    )
+
+
 async def reconcile_task_image_builder_autoscaler_once(
     session: AsyncSession,
     *,
@@ -371,6 +402,11 @@ async def reconcile_task_image_builder_autoscaler_once(
         active_jobs = await _load_active_jobs(session, config)
 
     now = datetime.now(UTC)
+    failure_backoff_active = await _failure_backoff_active(
+        session,
+        config,
+        now=now,
+    )
     queued = int(
         await session.scalar(
             select(func.count(TaskImageMaterialization.id)).where(
@@ -408,7 +444,9 @@ async def reconcile_task_image_builder_autoscaler_once(
             cancellation_reason = "cancelled after task image backlog drained"
         else:
             await runner.cancel_job(job.job_id)
-            cancellation_reason = "cancelled because global execution witness forbids builder capacity"
+            cancellation_reason = (
+                "cancelled because global execution witness forbids builder capacity"
+            )
         job.state = "cancelled"
         job.slurm_state = "CANCELLED"
         job.pending_reason = cancellation_reason
@@ -418,9 +456,13 @@ async def reconcile_task_image_builder_autoscaler_once(
     active_jobs = [job for job in active_jobs if job.state in ACTIVE_STATES]
     pending_count = sum(job.state == "pending" for job in active_jobs)
     active_nodes = {job.nodelist for job in active_jobs}
-    submission_count = min(
-        max(0, target_jobs - len(active_jobs)),
-        max(0, config.pending_job_cap - pending_count),
+    submission_count = (
+        0
+        if failure_backoff_active
+        else min(
+            max(0, target_jobs - len(active_jobs)),
+            max(0, config.pending_job_cap - pending_count),
+        )
     )
     nodes = [node for node in config.allowed_nodes if node not in active_nodes][:submission_count]
     submitted: list[str] = []
@@ -458,6 +500,7 @@ async def reconcile_task_image_builder_autoscaler_once(
         queued_materializations=queued,
         submitted_job_ids=tuple(submitted),
         cancelled_job_ids=tuple(cancelled),
+        failure_backoff_active=failure_backoff_active,
     )
 
 

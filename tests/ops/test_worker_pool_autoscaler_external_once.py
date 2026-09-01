@@ -100,6 +100,34 @@ def _direct_args(module: Any, *extra: str, pin: str = "a" * 64):
     )
 
 
+def _config_map_args(module: Any, *extra: str, pin: str = "a" * 64):
+    return module._parser().parse_args(
+        [
+            "--environment",
+            "staging",
+            "--pool-name",
+            "gb10",
+            "--expected-slurm-cluster-name",
+            "trt-gb10",
+            "--expected-slurm-controller-host",
+            "gx10-01c7",
+            "--namespace",
+            "loom-staging",
+            "--kubeconfig",
+            "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig",
+            "--global-execution-witness-config-map",
+            "loom-global-execution-witness-v1",
+            "--global-execution-witness-namespace",
+            "loom-dev",
+            "--global-execution-witness-kubeconfig",
+            "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig",
+            "--expected-manager-public-key-sha256",
+            pin,
+            *extra,
+        ]
+    )
+
+
 def _authority(module: Any) -> Any:
     return module.SlurmAuthority(
         cluster_name="trt-gb10",
@@ -199,9 +227,7 @@ def test_parser_accepts_manager_export_without_local_witness_files(module: Any) 
     assert args.manager_public_key is None
     assert args.expected_manager_public_key_sha256 == "a" * 64
     assert args.global_execution_manager_namespace == "loom-dev"
-    assert args.global_execution_manager_kubeconfig == (
-        "/var/lib/loom-staging-rollout/kubeconfig"
-    )
+    assert args.global_execution_manager_kubeconfig == ("/var/lib/loom-staging-rollout/kubeconfig")
 
     with pytest.raises(SystemExit):
         _direct_args(
@@ -209,6 +235,21 @@ def test_parser_accepts_manager_export_without_local_witness_files(module: Any) 
             "--global-execution-witness-json",
             "/run/loom/witness.json",
         )
+
+
+def test_parser_accepts_stable_config_map_without_local_witness_files(
+    module: Any,
+) -> None:
+    args = _config_map_args(module)
+
+    assert args.global_execution_witness_config_map == ("loom-global-execution-witness-v1")
+    assert args.global_execution_witness_namespace == "loom-dev"
+    assert args.global_execution_witness_kubeconfig == (
+        "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
+    )
+    assert args.global_execution_witness_json is None
+    assert args.global_execution_manager_export is None
+    assert args.manager_public_key is None
 
 
 def test_file_witness_source_rejects_manager_export_transport_arguments(module: Any) -> None:
@@ -221,6 +262,21 @@ def test_file_witness_source_rejects_manager_export_transport_arguments(module: 
     with pytest.raises(
         module.ExternalAutoscalerConfigurationError,
         match="file source",
+    ):
+        module._load_current_global_execution_witness(args, pool_id="gb10")
+
+
+def test_witness_sources_reject_mixed_file_and_config_map_arguments(module: Any) -> None:
+    args = _args(module)
+    args.global_execution_witness_config_map = "loom-global-execution-witness-v1"
+    args.global_execution_witness_namespace = "loom-dev"
+    args.global_execution_witness_kubeconfig = (
+        "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
+    )
+
+    with pytest.raises(
+        module.ExternalAutoscalerConfigurationError,
+        match="source",
     ):
         module._load_current_global_execution_witness(args, pool_id="gb10")
 
@@ -329,6 +385,128 @@ def test_manager_export_uses_fixed_shell_free_bounded_kubernetes_command(
         "--pool-id",
         "gb10",
     ]
+
+
+def test_config_map_reader_uses_exact_shell_free_bounded_kubernetes_command(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([54]) * 32)
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    pin = hashlib.sha256(public_key).hexdigest()
+    encoded = build_global_execution_witness_export(
+        private_key=private_key,
+        signing_key_id="global-capacity-manager-2026-08",
+        pool_id="gb10",
+        execution_epoch=0,
+        execution_state="shadow",
+        executable_new_capacity_ceiling=0,
+        expires_at=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    config_map = json.dumps(
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "loom-global-execution-witness-v1"},
+            "data": {
+                "gb10.json": encoded.decode("ascii"),
+                "oldlab.json": "not-selected",
+            },
+        }
+    ).encode("ascii")
+    captured: dict[str, object] = {}
+
+    def run(argv: list[str]) -> object:
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=config_map, stderr=b"")
+
+    monkeypatch.setattr(module, "_run_bounded_global_execution_config_map", run)
+
+    witness = module._load_current_global_execution_witness(
+        _config_map_args(module, pin=pin),
+        pool_id="gb10",
+    )
+
+    assert witness.pool_id == "gb10"
+    assert captured["argv"] == [
+        "/usr/local/bin/kubectl",
+        "--kubeconfig",
+        "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig",
+        "--request-timeout=10s",
+        "-n",
+        "loom-dev",
+        "get",
+        "configmap",
+        "loom-global-execution-witness-v1",
+        "-o",
+        "json",
+    ]
+
+
+def test_config_map_subprocess_reader_stops_oversized_output(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "_MAX_GLOBAL_EXECUTION_CONFIG_MAP_BYTES", 8)
+    monkeypatch.setattr(module, "_GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC", 1.0)
+
+    with pytest.raises(module.GlobalExecutionFenceError, match="unavailable"):
+        module._run_bounded_global_execution_config_map(
+            [sys.executable, "-c", "import os; os.write(1, b'x' * 9)"]
+        )
+
+
+@pytest.mark.parametrize(
+    "config_map",
+    [
+        b"{",
+        b'{"data":{}}',
+        b'{"data":{"gb10.json":1}}',
+        b'{"data":{"gb10.json":"not-ascii-\\u2603"}}',
+        b'{"data":{"gb10.json":"{}\\n","gb10.json":"{}\\n"}}',
+    ],
+)
+def test_config_map_reader_rejects_malformed_or_ambiguous_data(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    config_map: bytes,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "_run_bounded_global_execution_config_map",
+        lambda _argv: SimpleNamespace(returncode=0, stdout=config_map, stderr=b""),
+        raising=False,
+    )
+
+    with pytest.raises(module.GlobalExecutionFenceError, match="unavailable"):
+        module._load_current_global_execution_witness(
+            _config_map_args(module),
+            pool_id="gb10",
+        )
+
+
+def test_config_map_reader_preserves_signature_validation(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(
+        {"data": {"gb10.json": '{"schema_version":1,"signature":"invalid"}\n'}}
+    ).encode("ascii")
+    monkeypatch.setattr(
+        module,
+        "_run_bounded_global_execution_config_map",
+        lambda _argv: SimpleNamespace(returncode=0, stdout=payload, stderr=b""),
+        raising=False,
+    )
+
+    with pytest.raises(module.GlobalExecutionFenceError):
+        module._load_current_global_execution_witness(
+            _config_map_args(module),
+            pool_id="gb10",
+        )
 
 
 def test_slurm_authority_probe_accepts_exact_local_cluster_and_controller(

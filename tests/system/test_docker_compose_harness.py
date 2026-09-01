@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -17,12 +18,8 @@ def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
     services = compose["services"]
 
-    gateway_key = services["llm-gateway"]["environment"][
-        "LOOM_GW_STEP_JWT_SIGNING_KEY"
-    ]
-    control_plane_key = services["control-plane"]["environment"][
-        "LOOM_CP_STEP_JWT_SIGNING_KEY"
-    ]
+    gateway_key = services["llm-gateway"]["environment"]["LOOM_GW_STEP_JWT_SIGNING_KEY"]
+    control_plane_key = services["control-plane"]["environment"]["LOOM_CP_STEP_JWT_SIGNING_KEY"]
 
     assert gateway_key == control_plane_key
     assert "do-not-use-in-prod" in gateway_key
@@ -34,29 +31,21 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     worker = compose["services"]["worker"]
     builder = services["task-image-builder"]
 
-    assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == (
-        "/app/tests/fixtures/tasks"
-    )
-    assert worker["environment"][
-        "LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"
-    ] == "0.1"
-    assert worker["environment"][
-        "LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED"
-    ] == "false"
+    assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == ("/app/tests/fixtures/tasks")
+    assert worker["environment"]["LOOM_WORKER_TRIAL_CANCEL_POLL_INTERVAL_SEC"] == "0.1"
+    assert worker["environment"]["LOOM_WORKER_SETUP_HEALTH_GUARD_ENABLED"] == "false"
     assert "../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro" in worker["volumes"]
 
     hello_dockerfile = (
-        docker_compose.REPO_ROOT
-        / "tests/fixtures/tasks/hello-world/environment/Dockerfile"
+        docker_compose.REPO_ROOT / "tests/fixtures/tasks/hello-world/environment/Dockerfile"
     ).read_text(encoding="utf-8")
     assert "pytest-jsonreport" not in hello_dockerfile
     assert "pytest-json-report" in hello_dockerfile
 
     hello_task = tomllib.loads(
-        (
-            docker_compose.REPO_ROOT
-            / "tests/fixtures/tasks/hello-world/task.toml"
-        ).read_text(encoding="utf-8"),
+        (docker_compose.REPO_ROOT / "tests/fixtures/tasks/hello-world/task.toml").read_text(
+            encoding="utf-8"
+        ),
     )
     assert hello_task["environment"]["cpu_arch"] == "any"
     assert services["registry"]["ports"] == ["55000:5000"]
@@ -68,21 +57,25 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
     assert builder["environment"]["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
         "localhost:55000/loom-task-images"
     )
-    assert builder["environment"][
-        "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS"
-    ] == "120"
+    assert builder["environment"]["LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS"] == "120"
+    assert (
+        builder["environment"]["LOOM_WORKER_TASK_IMAGE_STORAGE_PROBE_PATH"]
+        == "/run/loom/docker-storage-probe"
+    )
     assert builder["profiles"] == ["task-image-builder"]
     assert "/var/run/docker.sock:/var/run/docker.sock" in builder["volumes"]
+    assert (
+        "task_image_builder_storage_probe:/run/loom/docker-storage-probe:ro" in builder["volumes"]
+    )
+    assert "task_image_builder_storage_probe" in compose["volumes"]
 
 
 def test_worker_image_installs_direct_benchmark_runtime_dependency() -> None:
-    worker_dockerfile = (
-        docker_compose.REPO_ROOT / "deploy/Dockerfile.worker"
-    ).read_text(encoding="utf-8")
-
-    assert "pip install --no-cache-dir -e ./packages/loom-benchmarks" in (
-        worker_dockerfile
+    worker_dockerfile = (docker_compose.REPO_ROOT / "deploy/Dockerfile.worker").read_text(
+        encoding="utf-8"
     )
+
+    assert "pip install --no-cache-dir -e ./packages/loom-benchmarks" in (worker_dockerfile)
 
 
 def test_stack_up_migrates_blank_database_before_starting_services(
@@ -174,9 +167,7 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         docker_compose._CANARY_MAX_TIMEOUT_SEC,
     )
     builder_env = next(
-        env
-        for args, env in compose_envs
-        if args and args[-1] == "task-image-builder"
+        env for args, env in compose_envs if args and args[-1] == "task-image-builder"
     )
     worker_env = next(env for args, env in compose_envs if args and args[-1] == "worker")
     assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token"}
@@ -201,6 +192,50 @@ def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> No
 
     assert timeouts
     assert 0 < timeouts[0] <= docker_compose._COMPOSE_INSPECT_TIMEOUT_SEC
+
+
+def test_wait_materialization_fails_fast_when_builder_container_exits(
+    monkeypatch: Any,
+) -> None:
+    class _Connection:
+        def __enter__(self) -> _Connection:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, _statement: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                one_or_none=lambda: SimpleNamespace(
+                    state="queued",
+                    failure_message=None,
+                ),
+            )
+
+    class _Engine:
+        def connect(self) -> _Connection:
+            return _Connection()
+
+        def dispose(self) -> None:
+            return None
+
+    clock = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(docker_compose, "create_engine", lambda _url: _Engine())
+    monkeypatch.setattr(docker_compose.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(docker_compose.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(docker_compose.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        docker_compose,
+        "_task_image_builder_container_running",
+        lambda: False,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="builder container exited before claiming"):
+        docker_compose._wait_task_image_materialization_ready(
+            "hello-world",
+            timeout_sec=1.0,
+        )
 
 
 def test_stack_up_cleans_partial_compose_state_on_setup_failure(
@@ -306,8 +341,7 @@ def test_worker_claim_canary_claims_cancels_and_waits_for_terminal(
     ]
     assert calls[0][2]["json"]["task_id"] == "hello-world"
     assert all(
-        call[2]["headers"]["Authorization"] == "Bearer loom_team_do-not-leak"
-        for call in calls
+        call[2]["headers"]["Authorization"] == "Bearer loom_team_do-not-leak" for call in calls
     )
 
 
@@ -385,9 +419,12 @@ def test_worker_claim_canary_tolerates_bounded_inspection_timeout(
         lambda *args, **kwargs: (_ for _ in ()).throw(timeout),
     )
 
-    assert docker_compose._worker_container_running(
-        deadline=docker_compose.time.monotonic() + 1.0,
-    ) is None
+    assert (
+        docker_compose._worker_container_running(
+            deadline=docker_compose.time.monotonic() + 1.0,
+        )
+        is None
+    )
     docker_compose._require_worker_running(
         deadline=docker_compose.time.monotonic() + 1.0,
     )
@@ -520,6 +557,39 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     assert "[REDACTED:signed-url]" in payload
 
 
+def test_preserve_diagnostics_keeps_first_failure_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    diagnostics = tmp_path / "system-smoke.log"
+    diagnostics.write_text("first failure evidence\n", encoding="utf-8")
+    monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
+    monkeypatch.setattr(
+        docker_compose,
+        "_compose",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="later mocked output\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        docker_compose.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="later docker output\n",
+            stderr="",
+        ),
+    )
+
+    docker_compose.preserve_compose_diagnostics()
+
+    assert diagnostics.read_text(encoding="utf-8") == "first failure evidence\n"
+
+
 def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -549,10 +619,10 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
 
 
 def test_workflow_prints_runner_temp_diagnostics_before_cleanup() -> None:
-    workflow = (
-        docker_compose.REPO_ROOT / ".github/workflows/staging-smoke.yml"
-    ).read_text(encoding="utf-8")
-    diagnostics = '${{ runner.temp }}/system-smoke-compose.log'
+    workflow = (docker_compose.REPO_ROOT / ".github/workflows/staging-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    diagnostics = "${{ runner.temp }}/system-smoke-compose.log"
 
     assert workflow.count(f"LOOM_SYSTEM_SMOKE_DIAGNOSTICS: {diagnostics}") == 2
     capture_index = workflow.index("preserve_compose_diagnostics()")

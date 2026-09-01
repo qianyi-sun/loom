@@ -72,13 +72,19 @@ def _compose(
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        cmd, check=check, cwd=REPO_ROOT, capture_output=True, text=True,
-        env=env, timeout=timeout_sec,
+        cmd,
+        check=check,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout_sec,
     )
 
 
 def _wait_services_healthy(
-    services: list[str], timeout_sec: float,
+    services: list[str],
+    timeout_sec: float,
 ) -> None:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
@@ -96,11 +102,7 @@ def _wait_services_healthy(
         except subprocess.TimeoutExpired:
             time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
             continue
-        statuses = [
-            json.loads(line)
-            for line in ps.stdout.splitlines()
-            if line.strip()
-        ]
+        statuses = [json.loads(line) for line in ps.stdout.splitlines() if line.strip()]
         observed = {s.get("Service"): s for s in statuses}
         healthy = all(
             observed.get(name, {}).get("Health") in (None, "", "healthy")
@@ -164,16 +166,23 @@ def _stack_up(
 
     # Stage 3: mint a team + worker token (and seed the fixture).
     seed = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py",
-         "--task-id", task_id, "--print", "system"],
-        check=True, cwd=REPO_ROOT, capture_output=True, text=True,
+        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", "system"],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
     team_token, worker_token, builder_token = seed.stdout.strip().splitlines()[:3]
 
     # Stage 4: build and publish the native task image before a trial worker is
     # allowed to claim the Dockerfile-backed canary.
     _compose(
-        "--profile", "task-image-builder", "up", "-d", "--build", "--no-deps",
+        "--profile",
+        "task-image-builder",
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
         "task-image-builder",
         env_extra={"LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
     )
@@ -181,7 +190,13 @@ def _stack_up(
 
     # Stage 5: start the worker with the ordinary trial token wired in.
     _compose(
-        "--profile", "worker", "up", "-d", "--build", "--no-deps", "worker",
+        "--profile",
+        "worker",
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
+        "worker",
         env_extra={"LOOM_WORKER_TOKEN": worker_token},
     )
     _wait_services_healthy(["worker"], timeout_sec=60.0)
@@ -205,8 +220,9 @@ def _wait_task_image_materialization_ready(
 
     engine = create_engine(DB_URL)
     deadline = time.monotonic() + timeout_sec
+    next_builder_probe = 0.0
     try:
-        while time.monotonic() < deadline:
+        while (observed_at := time.monotonic()) < deadline:
             with engine.connect() as connection:
                 row = connection.execute(
                     select(
@@ -224,13 +240,56 @@ def _wait_task_image_materialization_ready(
                     "system-smoke task image materialization failed: "
                     f"{row.failure_message or 'no diagnostic'}"
                 )
+            if observed_at >= next_builder_probe:
+                builder_running = _task_image_builder_container_running()
+                if builder_running is False:
+                    raise RuntimeError(
+                        "system-smoke task image builder container exited before "
+                        "claiming the materialization"
+                    )
+                next_builder_probe = observed_at + 1.0
             time.sleep(0.25)
     finally:
         engine.dispose()
     raise RuntimeError(
-        "system-smoke task image materialization did not become ready "
-        f"within {timeout_sec}s"
+        f"system-smoke task image materialization did not become ready within {timeout_sec}s"
     )
+
+
+def _task_image_builder_container_running() -> bool | None:
+    try:
+        result = _compose(
+            "--profile",
+            "task-image-builder",
+            "ps",
+            "-a",
+            "--format",
+            "json",
+            "task-image-builder",
+            check=False,
+            timeout_sec=_COMPOSE_INSPECT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        decoded = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(decoded, dict):
+        statuses = [decoded]
+    elif isinstance(decoded, list):
+        statuses = [row for row in decoded if isinstance(row, dict)]
+    else:
+        return None
+    builder = next(
+        (row for row in statuses if row.get("Service") == "task-image-builder"),
+        None,
+    )
+    if builder is None:
+        return None
+    return str(builder.get("State", "")).lower() == "running"
 
 
 def stack_down() -> None:
@@ -330,8 +389,7 @@ def _worker_container_running(*, deadline: float) -> bool | None:
             statuses = [
                 row
                 for line in result.stdout.splitlines()
-                if line.strip()
-                and isinstance((row := json.loads(line)), dict)
+                if line.strip() and isinstance((row := json.loads(line)), dict)
             ]
         except json.JSONDecodeError:
             return None
@@ -395,8 +453,7 @@ def _verify_worker_claim_canary(
         )
         if response.status_code != 201:
             raise RuntimeError(
-                "worker claim canary trial submission failed "
-                f"with HTTP {response.status_code}",
+                f"worker claim canary trial submission failed with HTTP {response.status_code}",
             )
         submitted = _response_json(response, operation="submission")
         raw_trial_id = submitted.get("trial_id")
@@ -414,8 +471,7 @@ def _verify_worker_claim_canary(
             )
             if response.status_code != 200:
                 raise RuntimeError(
-                    "worker claim canary status read failed "
-                    f"with HTTP {response.status_code}",
+                    f"worker claim canary status read failed with HTTP {response.status_code}",
                 )
             status = _response_json(response, operation="status read")
             attempt_count = status.get("attempt_count")
@@ -447,8 +503,7 @@ def _verify_worker_claim_canary(
         )
         if response.status_code not in (200, 409):
             raise RuntimeError(
-                "worker claim canary cancellation failed "
-                f"with HTTP {response.status_code}",
+                f"worker claim canary cancellation failed with HTTP {response.status_code}",
             )
 
         while time.monotonic() < deadline:
@@ -540,7 +595,10 @@ def preserve_compose_diagnostics() -> None:
     payload = _redact_diagnostics("\n\n".join(sections)) + "\n"
     destination = os.environ.get(DIAGNOSTICS_ENV)
     if destination:
-        Path(destination).write_text(payload, encoding="utf-8")
+        destination_path = Path(destination)
+        if destination_path.exists() and destination_path.stat().st_size > 0:
+            return
+        destination_path.write_text(payload, encoding="utf-8")
     else:
         print(payload, file=sys.stderr, end="")
 
@@ -554,8 +612,7 @@ def stack_down_with_diagnostics(*, failed: bool) -> None:
                 preserve_compose_diagnostics()
             except Exception as exc:  # diagnostics must not mask the test failure
                 print(
-                    "warning: failed to preserve Compose diagnostics: "
-                    f"{redact_text(str(exc))}",
+                    f"warning: failed to preserve Compose diagnostics: {redact_text(str(exc))}",
                     file=sys.stderr,
                 )
     finally:
@@ -572,8 +629,12 @@ def start_service(name: str, worker_token: str | None = None) -> None:
     env_extra = {"LOOM_WORKER_TOKEN": worker_token} if worker_token else None
     if name == "worker":
         _compose(
-            "--profile", "worker", "start", name,
-            check=False, env_extra=env_extra,
+            "--profile",
+            "worker",
+            "start",
+            name,
+            check=False,
+            env_extra=env_extra,
         )
     else:
         _compose("start", name, check=False, env_extra=env_extra)
@@ -587,8 +648,10 @@ def run_seed(task_id: str = "hello-world", which: str = "team") -> str:
     token (stripped). `which` is forwarded to --print.
     """
     out = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py",
-         "--task-id", task_id, "--print", which],
-        check=True, cwd=REPO_ROOT, capture_output=True, text=True,
+        [sys.executable, "scripts/seed_test_data.py", "--task-id", task_id, "--print", which],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
     return out.stdout.strip()

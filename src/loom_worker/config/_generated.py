@@ -84,6 +84,7 @@ class WorkerSettings(BaseSettings):
     task_image_builder_idle_exit_seconds: int = 120
     task_image_local_ttl_hours: int = 168
     task_image_min_free_gb: int = 20
+    task_image_storage_probe_path: Path | None = None
     task_materialize_timeout_sec: float = 300.0
     token: SecretStr
     trajectories_bucket: str = "trajectories"

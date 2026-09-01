@@ -19,6 +19,9 @@ from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
+from loom_cli.rollout.operator.protected_external_supervisor_credential_transport import (
+    ExternalSupervisorCredentialEvidence,
+)
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
@@ -202,6 +205,20 @@ def _capacity_response(acceptance: dict[str, object]) -> str:
     )
 
 
+def _credential_evidence() -> ExternalSupervisorCredentialEvidence:
+    return ExternalSupervisorCredentialEvidence(
+        execution_host="gx10-01c7",
+        kubeconfig_sha256="d" * 64,
+        uid=995,
+        gid=2007,
+        mode=0o600,
+        size=4096,
+        database_secret_readable=True,
+        witness_config_map_readable=True,
+        pods_exec_denied=True,
+    )
+
+
 def test_remote_capacity_accepts_normal_nodes_without_exclusive_builder(
     tmp_path: Path,
 ) -> None:
@@ -340,6 +357,45 @@ def test_remote_apply_and_reconcile_expose_only_typed_operations(tmp_path: Path)
             transition_digest="c" * 64,
             nodes=NORMAL_GB10_WORKER_HOSTS,
         )
+
+
+def test_remote_credential_operations_carry_only_non_secret_fixed_evidence(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    evidence = _credential_evidence()
+    run = _Run(
+        remote._encode_helper_response(
+            "observe_credential",
+            credential=evidence,
+        )
+    )
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    assert transport.observe_credential() == evidence
+    observe_request = json.loads(run.calls[0][1])
+    assert observe_request == {
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "operation": "observe_credential",
+        "schema_version": 1,
+    }
+
+    run.response = remote._encode_helper_response(
+        "publish_credential",
+        credential=evidence,
+    )
+    assert transport.publish_credential() == evidence
+    publish_request = json.loads(run.calls[1][1])
+    assert publish_request == {
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "operation": "publish_credential",
+        "schema_version": 1,
+    }
+    wire = json.dumps([observe_request, publish_request, evidence.to_dict()], sort_keys=True)
+    for forbidden in ("token", "certificate", "kubeconfig_bytes", "path", "command"):
+        assert forbidden not in wire
 
 
 def test_remote_capacity_acceptance_round_trips_candidate_bound_evidence(
@@ -544,3 +600,55 @@ def test_candidate_helper_dispatches_existing_local_transport_without_reimplemen
 
     assert remote._decode_helper_observation(response) == observation
     assert local.calls == [("observe", artifact, _authority())]
+
+
+def test_candidate_helper_dispatches_credential_operations_to_local_transport(
+    tmp_path: Path,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    evidence = _credential_evidence()
+
+    class _CredentialTransport:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def observe(self):
+            self.calls.append("observe")
+            return None
+
+        def publish(self):
+            self.calls.append("publish")
+            return evidence
+
+    local = _CredentialTransport()
+    observe_request = remote._encode_helper_request(
+        operation="observe_credential",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+    )
+    publish_request = remote._encode_helper_request(
+        operation="publish_credential",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+    )
+
+    observed = remote._decode_helper_credential(
+        remote._handle_helper_request(
+            observe_request,
+            transport=None,
+            credential_transport=local,
+        ),
+        operation="observe_credential",
+    )
+    published = remote._decode_helper_credential(
+        remote._handle_helper_request(
+            publish_request,
+            transport=None,
+            credential_transport=local,
+        ),
+        operation="publish_credential",
+    )
+
+    assert observed is None
+    assert published == evidence
+    assert local.calls == ["observe", "publish"]
