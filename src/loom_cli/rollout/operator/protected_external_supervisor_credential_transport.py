@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
 import re
+import secrets
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -154,6 +157,7 @@ class FixedLocalExternalSupervisorCredentialTransport:
     service_gid: int
     source_kubeconfig: Path = _SOURCE_KUBECONFIG
     output_kubeconfig: Path = _CREDENTIAL_PATH
+    promote_existing_source: bool = False
     run: CredentialCommandRunner = _subprocess_run
 
     def __post_init__(self) -> None:
@@ -169,6 +173,8 @@ class FixedLocalExternalSupervisorCredentialTransport:
             or not self.output_kubeconfig.is_absolute()
             or ".." in self.output_kubeconfig.parts
             or self.source_kubeconfig == self.output_kubeconfig
+            or type(self.promote_existing_source) is not bool
+            or (self.promote_existing_source and self.execution_host != "gx10-01c7")
             or not callable(self.run)
             or not self.output_kubeconfig.parent.exists()
             or not publisher.exists()
@@ -184,7 +190,7 @@ class FixedLocalExternalSupervisorCredentialTransport:
 
     def observe(self) -> ExternalSupervisorCredentialEvidence | None:
         try:
-            before = self._metadata()
+            before = self._metadata(self.output_kubeconfig)
         except FileNotFoundError:
             return None
         self._run_checked(
@@ -192,7 +198,7 @@ class FixedLocalExternalSupervisorCredentialTransport:
             environment=self._environment(include_source=False),
             failure="external supervisor credential check failed safely",
         )
-        after = self._metadata()
+        after = self._metadata(self.output_kubeconfig)
         if after != before:
             raise RuntimeError("external supervisor credential changed during check")
         return self._evidence(after)
@@ -201,19 +207,98 @@ class FixedLocalExternalSupervisorCredentialTransport:
         current = self.observe()
         if current is not None:
             return current
-        self._run_checked(
-            (str(self.publisher), str(self.output_kubeconfig)),
-            environment=self._environment(include_source=True),
-            failure="external supervisor credential publication failed safely",
-        )
+        if self.promote_existing_source:
+            self._promote_existing_source()
+        else:
+            self._run_checked(
+                (str(self.publisher), str(self.output_kubeconfig)),
+                environment=self._environment(include_source=True),
+                failure="external supervisor credential publication failed safely",
+            )
         published = self.observe()
         if published is None:
             raise RuntimeError("external supervisor credential publication failed safely")
         return published
 
-    def _metadata(self) -> _CredentialMetadata:
+    def _promote_existing_source(self) -> None:
+        before = self._metadata(self.source_kubeconfig)
+        self._run_checked(
+            (str(self.publisher), "--check", str(self.source_kubeconfig)),
+            environment=self._environment(include_source=False),
+            failure="external supervisor credential publication failed safely",
+        )
+        after, payload = self._read_credential(
+            self.source_kubeconfig,
+            include_payload=True,
+        )
+        if after != before or payload is None:
+            raise RuntimeError("external supervisor credential publication failed safely")
+        temporary_name = f".{self.output_kubeconfig.name}.publish.{secrets.token_hex(16)}"
+        temporary = self.output_kubeconfig.with_name(temporary_name)
+        directory = -1
+        descriptor = -1
+        try:
+            directory = os.open(
+                self.output_kubeconfig.parent,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory,
+            )
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise RuntimeError("external supervisor credential publication failed safely")
+                offset += written
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            staged = self._metadata(temporary)
+            if staged.sha256 != after.sha256 or staged.size != after.size:
+                raise RuntimeError("external supervisor credential publication failed safely")
+            _rename_noreplace(
+                directory,
+                temporary_name,
+                self.output_kubeconfig.name,
+            )
+            os.fsync(directory)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("external supervisor credential publication failed safely") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if directory >= 0:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                os.close(directory)
+
+    def _metadata(self, path: Path) -> _CredentialMetadata:
+        metadata, _payload = self._read_credential(path, include_payload=False)
+        return metadata
+
+    def _read_credential(
+        self,
+        path: Path,
+        *,
+        include_payload: bool,
+    ) -> tuple[_CredentialMetadata, bytes | None]:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(self.output_kubeconfig, flags)
+        descriptor = os.open(path, flags)
         try:
             metadata = os.fstat(descriptor)
             mode = stat.S_IMODE(metadata.st_mode)
@@ -227,12 +312,15 @@ class FixedLocalExternalSupervisorCredentialTransport:
             ):
                 raise ValueError("external supervisor credential metadata is unsafe")
             digest = hashlib.sha256()
+            chunks: list[bytes] = []
             remaining = metadata.st_size
             while remaining:
                 payload = os.read(descriptor, min(65536, remaining))
                 if not payload:
                     raise ValueError("external supervisor credential metadata is unsafe")
                 digest.update(payload)
+                if include_payload:
+                    chunks.append(payload)
                 remaining -= len(payload)
             stable = _CredentialMetadata(
                 device=metadata.st_dev,
@@ -249,7 +337,7 @@ class FixedLocalExternalSupervisorCredentialTransport:
             after = os.fstat(descriptor)
             if _stable_stat(after, sha256=stable.sha256) != stable:
                 raise RuntimeError("external supervisor credential changed during read")
-            return stable
+            return stable, b"".join(chunks) if include_payload else None
         except OSError as exc:
             raise ValueError("external supervisor credential metadata is unsafe") from exc
         finally:
@@ -315,6 +403,37 @@ def _stable_stat(metadata: os.stat_result, *, sha256: str) -> _CredentialMetadat
         ctime_ns=metadata.st_ctime_ns,
         sha256=sha256,
     )
+
+
+def _rename_noreplace(directory_fd: int, source: str, destination: str) -> None:
+    library = ctypes.CDLL(None, use_errno=True)
+    try:
+        rename = library.renameat2
+    except AttributeError as exc:
+        raise OSError(errno.ENOSYS, "atomic credential publication is unavailable") from exc
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    if (
+        rename(
+            directory_fd,
+            os.fsencode(source),
+            directory_fd,
+            os.fsencode(destination),
+            1,
+        )
+        == 0
+    ):
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(error_number, "credential destination exists")
+    raise OSError(error_number, "atomic credential publication failed")
 
 
 __all__ = [

@@ -502,3 +502,63 @@ def test_preapply_group_resume_rechecks_all_members_and_keeps_first_terminal(
     assert apply_calls == ["credential-gb10", "credential-oldlab", "credential-oldlab"]
     assert terminals["credential-gb10"].applied is True
     assert terminals["credential-oldlab"].applied is True
+
+
+def test_partial_failed_journal_rejects_reordered_component_chain(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    states = {
+        "credential-gb10": ComponentState.READY,
+        "credential-oldlab": ComponentState.READY,
+    }
+    apply_calls: list[str] = []
+
+    def grouped(
+        component_id: str,
+        *,
+        implementation_digest: str,
+        fail_apply: bool = False,
+    ) -> ProtectedApplyComponent:
+        def classify(_plan):
+            state = states[component_id]
+            return ComponentObservation(
+                state=state,
+                evidence_digest=("1" if component_id == "credential-gb10" else "2") * 64,
+                observed_epoch=8 if state is ComponentState.EXACT else 7,
+            )
+
+        def apply(_plan):
+            apply_calls.append(component_id)
+            if fail_apply:
+                raise RuntimeError("legacy credential publication failed")
+            states[component_id] = ComponentState.EXACT
+
+        return ProtectedApplyComponent(
+            component_id=component_id,
+            implementation_digest=implementation_digest,
+            input_fingerprint=("3" if component_id == "credential-gb10" else "4") * 64,
+            classify=classify,
+            apply=apply,
+            preapply_group="external-supervisor-credentials",
+        )
+
+    legacy = (
+        grouped("credential-gb10", implementation_digest="5" * 64),
+        grouped(
+            "credential-oldlab",
+            implementation_digest="5" * 64,
+            fail_apply=True,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="legacy credential publication failed"):
+        journal.execute(_plan(tmp_path), legacy)
+
+    reordered = (
+        grouped("credential-oldlab", implementation_digest="6" * 64),
+        grouped("credential-gb10", implementation_digest="6" * 64),
+    )
+    with pytest.raises(ProtectedApplyJournalError, match="chain identity drifted"):
+        journal.execute(_plan(tmp_path), reordered)
+
+    assert apply_calls == ["credential-gb10", "credential-oldlab"]

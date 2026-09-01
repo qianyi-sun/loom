@@ -170,9 +170,14 @@ components. Do not remove these objects manually or restore them during
 rollback.
 
 The protected apply in step 3 owns this convergence. It first publishes and
-checks the narrow credential locally on `gx10-01c7` through the fixed forced
-broker operation, then locally on `TRT-EAI-OLDLAB-1`, before either controller
-may write or start a supervisor unit. Do not invoke the publisher manually,
+checks the narrow credential locally on `TRT-EAI-OLDLAB-1`; this also converges
+the shared scoped service-account authority and dedicated database Secret. It
+then invokes the fixed forced broker operation on `gx10-01c7`, which checks the
+retained legacy narrow source and atomically copies it to the distinct
+supervisor output path. The legacy source remains narrow while the old units
+still reference it, and no broad rollout kubeconfig is installed on GB10 or
+sent through SSH. Both credential components finish before either controller
+may write or start a new supervisor unit. Do not invoke the publisher manually,
 copy `$ROLLOUT_KUBECONFIG`, or repair the output with `chown` or `chmod`: an
 absent fixed-path credential is repairable only by that protected path, while
 any present unsafe credential is drift and leaves scale-up closed.

@@ -652,3 +652,26 @@ def test_candidate_helper_dispatches_credential_operations_to_local_transport(
     assert observed is None
     assert published == evidence
     assert local.calls == ["observe", "publish"]
+
+
+def test_gb10_local_credential_transport_promotes_the_legacy_narrow_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    expected = object()
+
+    def build(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        remote,
+        "FixedLocalExternalSupervisorCredentialTransport",
+        build,
+    )
+
+    actual = remote._fixed_local_credential_transport("a" * 40)
+
+    assert actual is expected
+    assert captured["execution_host"] == "gx10-01c7"
+    assert captured["promote_existing_source"] is True
