@@ -781,8 +781,14 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
         await engine.dispose()
 
 
-async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
+@pytest.mark.parametrize(
+    ("batch_backend", "expects_lease"),
+    [("nebius", True), ("docker", False)],
+)
+async def test_normal_scheduler_requires_explicit_nebius_backend(
     postgres_url: str,
+    batch_backend: str,
+    expects_lease: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -793,6 +799,21 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
             trial = await session.get(Trial, trial_id)
             assert trial is not None
             session.add(TeamQuota(team_id=trial.team_id))
+            batch_id = uuid4()
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=trial.team_id,
+                    name=f"service scheduler {batch_backend}",
+                    task_filter={},
+                    trial_config={},
+                    backend=batch_backend,
+                    state="submitted",
+                    created_by_token_prefix="test",
+                    expected_trial_count=1,
+                )
+            )
+            trial.batch_id = batch_id
             task = await session.get(Task, trial.task_id)
             assert task is not None
             plan = _runtime_contract(now=now)
@@ -827,7 +848,7 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
                 "cpu_arch": "x86_64",
                 "gpu_vendor": "none",
                 "network_policies": ["gateway-only"],
-                "backend": "docker",
+                "backend": "nebius",
                 "worker_pool": "nebius-cpu",
             }
             await session.execute(
@@ -846,6 +867,9 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
                 now=now,
             )
             await session.commit()
+            if not expects_lease:
+                assert lease is None
+                return
             assert lease is not None
             assert lease.trial_id == trial_id
             assert lease.target_id == target.target_id

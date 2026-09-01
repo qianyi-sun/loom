@@ -28,12 +28,14 @@ SELECT t.id,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config
   FROM trials t
+  JOIN batches b ON b.id = t.batch_id
   JOIN tasks task_definition ON task_definition.id = t.task_id
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
    AND t.attempt_count < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
+   AND b.backend = 'nebius'
    AND task_definition.config ? 'service_execution'
    AND t.requires_caps->>'worker_pool' = :pool_id
    AND (
