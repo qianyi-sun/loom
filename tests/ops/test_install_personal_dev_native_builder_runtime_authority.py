@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib
 import json
 import os
@@ -456,6 +457,403 @@ def test_bootstrap_installs_the_authoritative_inventory_and_is_idempotent(
     ).exists()
 
 
+def test_operator_bootstrap_installs_only_sealed_material_client_inventory(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches installing any GB10 runtime authority or sudo rule on OLDLAB."""
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+
+    first = module.bootstrap_operator_material(source_sha, source_tree)
+    after_first = _tree_snapshot(host_root)
+    second = module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert first == {
+        "asset_sha256": first["asset_sha256"],
+        "changed": True,
+        "policy_sha256": first["policy_sha256"],
+        "source_base_sha": module.APPROVED_BASE_SHA,
+        "source_sha": source_sha,
+        "source_tree_sha": source_tree,
+        "status": "ok",
+        "target": "operator-material",
+    }
+    assert set(first["asset_sha256"]) == {
+        "authority_client",
+        "crypto_helper",
+        "launcher",
+        "material_client",
+        "protocol",
+    }
+    assert second == {**first, "changed": False}
+    assert _tree_snapshot(host_root) == after_first
+
+    installed_ops = _installed(
+        host_root,
+        "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/scripts/ops",
+    )
+    assert {path.name for path in installed_ops.iterdir()} == {
+        "personal_dev_native_builder_runtime_authority_client.py",
+        "personal_dev_native_builder_runtime_authority_protocol.py",
+        "personal_dev_native_builder_runtime_crypto.py",
+    }
+    assert stat.S_IMODE(
+        _installed(
+            host_root,
+            "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+        ).stat().st_mode
+    ) == 0o555
+    assert stat.S_IMODE(
+        _installed(
+            host_root,
+            "/usr/local/libexec/"
+            "loom-personal-dev-native-builder-runtime-authority-material-client",
+        ).stat().st_mode
+    ) == 0o555
+    installed_assets = {
+        "authority_client": installed_ops
+        / "personal_dev_native_builder_runtime_authority_client.py",
+        "crypto_helper": installed_ops
+        / "personal_dev_native_builder_runtime_crypto.py",
+        "launcher": _installed(
+            host_root,
+            "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+        ),
+        "material_client": _installed(
+            host_root,
+            "/usr/local/libexec/"
+            "loom-personal-dev-native-builder-runtime-authority-material-client",
+        ),
+        "protocol": installed_ops
+        / "personal_dev_native_builder_runtime_authority_protocol.py",
+    }
+    asset_digests = first["asset_sha256"]
+    assert isinstance(asset_digests, dict)
+    assert asset_digests == {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in installed_assets.items()
+    }
+
+    policy_path = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-operator-material-authority.json",
+    )
+    policy = json.loads(policy_path.read_text(encoding="ascii"))
+    assert policy == {
+        "asset_sha256": first["asset_sha256"],
+        "authority_source_sha": source_sha,
+        "authority_source_tree": source_tree,
+        "schema": "loom.personal-dev-native-builder-operator-material-authority-policy.v1",
+    }
+    assert stat.S_IMODE(policy_path.stat().st_mode) == 0o444
+    assert first["policy_sha256"] == hashlib.sha256(policy_path.read_bytes()).hexdigest()
+
+    material_root = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-authority-material",
+    )
+    assert stat.S_IMODE(material_root.stat().st_mode) == 0o700
+    assert tuple(material_root.iterdir()) == ()
+
+    for forbidden in (
+        "/etc/sudoers.d/loom-personal-dev-native-builder-runtime-authority",
+        "/usr/lib/tmpfiles.d/"
+        "loom-personal-dev-native-builder-runtime-authority.conf",
+        "/var/lib/loom/personal-dev-native-builder-runtime-authority",
+        "/run/lock/loom-personal-dev-native-builder-runtime-authority.lock",
+        "/run/loom-personal-dev-native-builder-runtime-authority",
+        "/usr/local/lib/loom/personal-dev-native-builder-runtime-authority/"
+        "scripts/ops/personal_dev_native_builder_runtime_authority.py",
+        "/usr/local/lib/loom/personal-dev-native-builder-runtime-authority/"
+        "deploy/personal-dev-native-builder/runtime-profile-v1.json",
+    ):
+        assert not _installed(host_root, forbidden).exists()
+
+
+@pytest.mark.parametrize(
+    ("nodename", "machine"),
+    (("gx10-01c7", "aarch64"), ("TRT-EAI-OLDLAB-1", "aarch64")),
+    ids=("runtime-host", "wrong-architecture"),
+)
+def test_operator_bootstrap_rejects_non_oldlab_target_before_mutation(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    nodename: str,
+    machine: str,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename=nodename, machine=machine),
+    )
+    before = _tree_snapshot(host_root)
+
+    with pytest.raises(module.BootstrapError, match="target_host_required"):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert _tree_snapshot(host_root) == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "authority-client",
+        "crypto-helper",
+        "launcher",
+        "material-client",
+        "protocol",
+        "policy",
+        "material-root",
+        "installed-validation",
+    ),
+)
+def test_operator_bootstrap_rolls_back_every_publication_boundary(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    target_paths = {
+        "authority-client": _installed(
+            host_root,
+            "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+            "scripts/ops/personal_dev_native_builder_runtime_authority_client.py",
+        ),
+        "crypto-helper": _installed(
+            host_root,
+            "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+            "scripts/ops/personal_dev_native_builder_runtime_crypto.py",
+        ),
+        "launcher": _installed(
+            host_root,
+            "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
+        ),
+        "material-client": _installed(
+            host_root,
+            "/usr/local/libexec/"
+            "loom-personal-dev-native-builder-runtime-authority-material-client",
+        ),
+        "protocol": _installed(
+            host_root,
+            "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+            "scripts/ops/personal_dev_native_builder_runtime_authority_protocol.py",
+        ),
+        "policy": _installed(
+            host_root,
+            "/etc/loom/personal-dev-native-builder-operator-material-authority.json",
+        ),
+    }
+    original_install = module._install_file
+    original_ensure = module._ensure_directory
+
+    def fail_after_file(
+        path: Path,
+        payload: bytes,
+        mode: int,
+        created: list[object],
+    ) -> bool:
+        changed = original_install(path, payload, mode, created)
+        if target_paths.get(boundary) == path:
+            raise module.BootstrapError("publication_failed")
+        return changed
+
+    def fail_after_directory(
+        path: Path,
+        mode: int,
+        created: list[object],
+    ) -> bool:
+        changed = original_ensure(path, mode, created)
+        if boundary == "material-root" and path == _installed(
+            host_root,
+            "/etc/loom/personal-dev-native-builder-authority-material",
+        ):
+            raise module.BootstrapError("publication_failed")
+        return changed
+
+    monkeypatch.setattr(module, "_install_file", fail_after_file)
+    monkeypatch.setattr(module, "_ensure_directory", fail_after_directory)
+    if boundary == "installed-validation":
+        monkeypatch.setattr(
+            module,
+            "_validate_installed_policy",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                module.BootstrapError("installed_validation_failed")
+            ),
+        )
+
+    before = _tree_snapshot(host_root)
+    with pytest.raises(module.BootstrapError):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert _tree_snapshot(host_root) == before
+
+
+def test_operator_bootstrap_never_opens_provisioned_material(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    module.bootstrap_operator_material(source_sha, source_tree)
+    material_root = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-authority-material",
+    )
+    key = material_root / "agent-ed25519"
+    ca = material_root / "service-ca.pem"
+    key.write_bytes(b"k" * 32)
+    ca.write_bytes(b"test certificate fixture")
+    key.chmod(0o400)
+    ca.chmod(0o444)
+    original_open = module.os.open
+
+    def reject_material_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(os.fsdecode(path)).name in {"agent-ed25519", "service-ca.pem"}:
+            raise AssertionError("bootstrap opened protected material")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(module.os, "open", reject_material_open)
+
+    receipt = module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert receipt["changed"] is False
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("authority-client", "launcher", "material-root", "policy"),
+)
+def test_operator_bootstrap_preserves_preexisting_installed_drift(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    module.bootstrap_operator_material(source_sha, source_tree)
+    targets = {
+        "authority-client": (
+            "/usr/local/lib/loom-personal-dev-native-builder-runtime-authority/"
+            "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+        ),
+        "launcher": (
+            "/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority"
+        ),
+        "material-root": (
+            "/etc/loom/personal-dev-native-builder-authority-material"
+        ),
+        "policy": (
+            "/etc/loom/"
+            "personal-dev-native-builder-operator-material-authority.json"
+        ),
+    }
+    target = _installed(host_root, targets[drift])
+    if drift == "material-root":
+        target.chmod(0o755)
+    else:
+        target.chmod(0o644)
+        target.write_bytes(b"preexisting root drift\n")
+        target.chmod(0o555 if drift == "launcher" else 0o444)
+
+    with pytest.raises(module.BootstrapError, match="installed_drift"):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    if drift == "material-root":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    else:
+        assert target.read_bytes() == b"preexisting root drift\n"
+
+
+def test_operator_rollback_preserves_replacement_material_directory(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    material_root = _installed(
+        host_root,
+        "/etc/loom/personal-dev-native-builder-authority-material",
+    )
+    displaced = host_root / "displaced-operator-material-root"
+
+    def replace_then_fail(*_args: object, **_kwargs: object) -> None:
+        os.rename(material_root, displaced)
+        material_root.mkdir(mode=0o700)
+        raise module.BootstrapError("installed_validation_failed")
+
+    monkeypatch.setattr(module, "_validate_installed_policy", replace_then_fail)
+
+    with pytest.raises(module.BootstrapError, match="installed_validation_failed"):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert material_root.is_dir()
+    assert material_root.stat().st_ino != displaced.stat().st_ino
+
+
+def test_operator_bootstrap_rejects_unsafe_source_before_installing(
+    authority_install: tuple[ModuleType, Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename="TRT-EAI-OLDLAB-1", machine="x86_64"),
+    )
+    source = module.SOURCE_ROOT / (
+        "scripts/ops/"
+        "personal_dev_native_builder_runtime_authority_material_client.py"
+    )
+    source.chmod(0o664)
+    before = _tree_snapshot(host_root)
+
+    with pytest.raises(module.BootstrapError, match="sealed_source_invalid"):
+        module.bootstrap_operator_material(source_sha, source_tree)
+
+    assert _tree_snapshot(host_root) == before
+
+
+def test_operator_bootstrap_rejects_unsafe_root_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module.os, "getresuid", lambda: (0, 0, 0))
+    monkeypatch.setattr(module.os, "getresgid", lambda: (0, 0, 0))
+    monkeypatch.setenv("SUDO_UID", "1000")
+
+    with pytest.raises(module.BootstrapError, match="direct_root_required"):
+        module.bootstrap_operator_material("1" * 40, "2" * 40)
+
+
 @pytest.mark.parametrize("unsafe_name", ("SUDO_UID", "PYTHONPATH", "LD_PRELOAD"))
 def test_bootstrap_rejects_sudo_and_ambient_unsafe_environment(
     monkeypatch: pytest.MonkeyPatch,
@@ -554,11 +952,31 @@ def test_bootstrap_never_overwrites_installed_drift(
     ).exists()
 
 
+@pytest.mark.parametrize(
+    ("bootstrap_name", "nodename", "machine"),
+    (
+        ("bootstrap", "gx10-01c7", "aarch64"),
+        (
+            "bootstrap_operator_material",
+            "TRT-EAI-OLDLAB-1",
+            "x86_64",
+        ),
+    ),
+    ids=("runtime", "operator-material"),
+)
 def test_source_capture_rejects_identity_change_between_lstat_and_open(
     authority_install: tuple[ModuleType, Path, str, str],
     monkeypatch: pytest.MonkeyPatch,
+    bootstrap_name: str,
+    nodename: str,
+    machine: str,
 ) -> None:
     module, host_root, source_sha, source_tree = authority_install
+    monkeypatch.setattr(
+        module.os,
+        "uname",
+        lambda: SimpleNamespace(nodename=nodename, machine=machine),
+    )
     source = module.SOURCE_ROOT / (
         "scripts/ops/personal_dev_native_builder_runtime_authority_launcher.py"
     )
@@ -593,7 +1011,7 @@ def test_source_capture_rejects_identity_change_between_lstat_and_open(
 
     before = _tree_snapshot(host_root)
     with pytest.raises(module.BootstrapError, match="source_asset_invalid"):
-        module.bootstrap(source_sha, source_tree)
+        getattr(module, bootstrap_name)(source_sha, source_tree)
 
     assert attacked is True
     assert _tree_snapshot(host_root) == before
@@ -894,3 +1312,36 @@ def test_cli_has_only_the_direct_bootstrap_shape() -> None:
 
     with pytest.raises(SystemExit, match="2"):
         module.main(["status"])
+
+
+def test_cli_dispatches_only_the_explicit_operator_material_target(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    calls: list[tuple[str, str]] = []
+
+    def operator(source_sha: str, source_tree_sha: str) -> dict[str, object]:
+        calls.append((source_sha, source_tree_sha))
+        return {"status": "ok", "target": "operator-material"}
+
+    monkeypatch.setattr(module, "bootstrap_operator_material", operator, raising=False)
+
+    assert (
+        module.main(
+            [
+                "--source-sha",
+                "1" * 40,
+                "--source-tree-sha",
+                "2" * 40,
+                "--target",
+                "operator-material",
+            ]
+        )
+        == 0
+    )
+    assert calls == [("1" * 40, "2" * 40)]
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ok",
+        "target": "operator-material",
+    }
