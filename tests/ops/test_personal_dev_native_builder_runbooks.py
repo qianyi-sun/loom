@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import scripts.ops.personal_dev_native_builder_runtime_authority as authority_module
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
@@ -79,7 +80,7 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
         'printf "%s\\n" "$@" > "$AUTHORITY_SSH_ARGS"\n'
         'cat > "$AUTHORITY_SSH_STDIN"\n'
         'request_id="$(sed -n \'/--request-id/{n;p;q;}\' "$AUTHORITY_CLIENT_ARGS")"\n'
-        "printf '%s' '{\"state_sha256\":\"\",\"state\":null,\"schema\":\"loom-personal-dev-native-builder-runtime-authority-receipt.v1\",\"runtime_profile_sha256\":\"'\"$AUTHORITY_PROFILE\"'\",\"request_id\":\"'\"$request_id\"'\",\"phase\":\"inert\",\"operation\":\"status\",\"nft_table\":\"absent\",\"managed_networks\":null,\"managed_containers\":0,\"host_name\":\"gx10-01c7\",\"executable_new_capacity\":0,\"dockerd_service\":\"inactive\",\"authority_source_tree\":\"'\"$AUTHORITY_TREE\"'\",\"authority_source_sha\":\"'\"$AUTHORITY_SHA\"'\",\"architecture\":\"aarch64\",\"agent_service\":\"inactive\"}'\n",
+        "printf '%s' '{\"state_sha256\":\"\",\"state\":null,\"schema\":\"'\"$AUTHORITY_RECEIPT_SCHEMA\"'\",\"runtime_profile_sha256\":\"'\"$AUTHORITY_PROFILE\"'\",\"request_id\":\"'\"$request_id\"'\",\"phase\":\"inert\",\"operation\":\"status\",\"nft_table\":\"absent\",\"managed_networks\":null,\"managed_containers\":0,\"host_name\":\"gx10-01c7\",\"executable_new_capacity\":0,\"dockerd_service\":\"inactive\",\"authority_source_tree\":\"'\"$AUTHORITY_TREE\"'\",\"authority_source_sha\":\"'\"$AUTHORITY_SHA\"'\",\"architecture\":\"aarch64\",\"agent_service\":\"inactive\"}'\n",
         encoding="utf-8",
     )
     fake_ssh.chmod(0o700)
@@ -100,9 +101,10 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
             f'AUTHORITY_SHA="{source_sha}"\n'
             f'AUTHORITY_TREE="{source_tree}"\n'
             f'AUTHORITY_PROFILE="{profile_sha}"\n'
+            f'AUTHORITY_RECEIPT_SCHEMA="{authority_module._RECEIPT_SCHEMA}"\n'
             "export AUTHORITY_SUDO_LOG AUTHORITY_FAKE_SSH AUTHORITY_CLIENT_ARGS "
             "AUTHORITY_SSH_ARGS AUTHORITY_SSH_STDIN AUTHORITY_SHA AUTHORITY_TREE "
-            "AUTHORITY_PROFILE\n"
+            "AUTHORITY_PROFILE AUTHORITY_RECEIPT_SCHEMA\n"
             'native_authority_client=("$1")\n'
             f'authority_source_sha="{source_sha}"\n'
             f'authority_source_tree="{source_tree}"\n'
@@ -200,7 +202,7 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
         "phase": "inert",
         "request_id": request_id,
         "runtime_profile_sha256": profile_sha,
-        "schema": "loom-personal-dev-native-builder-runtime-authority-receipt.v1",
+        "schema": authority_module._RECEIPT_SCHEMA,
         "state": None,
         "state_sha256": "",
     }
@@ -354,7 +356,7 @@ def test_native_authority_transport_rejects_nonpublic_receipts(
         "phase": "inert",
         "request_id": request_id,
         "runtime_profile_sha256": profile_sha,
-        "schema": "loom-personal-dev-native-builder-runtime-authority-receipt.v1",
+        "schema": authority_module._RECEIPT_SCHEMA,
         "state": None,
         "state_sha256": "",
     }

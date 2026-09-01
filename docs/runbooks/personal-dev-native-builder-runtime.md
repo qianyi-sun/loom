@@ -223,7 +223,7 @@ validate_native_authority_receipt() {
         "managed_containers","managed_networks","nft_table","operation","phase",
         "request_id","runtime_profile_sha256","schema","state","state_sha256"
       ]) and
-      .schema == "loom-personal-dev-native-builder-runtime-authority-receipt.v1" and
+      .schema == "loom.personal-dev-native-builder-runtime-authority-receipt.v1" and
       .operation == $operation and .request_id == $request_id and
       .authority_source_sha == $source and .authority_source_tree == $tree and
       .runtime_profile_sha256 == $profile and .host_name == "gx10-01c7" and
