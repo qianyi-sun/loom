@@ -323,6 +323,30 @@ def test_sudoers_and_tmpfiles_assets_have_the_only_authorized_rules() -> None:
     assert tmpfiles == TMPFILES
 
 
+def test_parallel_legacy_native_runtime_authority_surface_is_absent() -> None:
+    assert sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "scripts/ops").glob(
+            "personal_dev_native*_runtime_authority.py"
+        )
+    ) == ["scripts/ops/personal_dev_native_builder_runtime_authority.py"]
+    assert sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "deploy/personal-dev-native-builder").glob(
+            "*native*runtime-authority.sudoers"
+        )
+    ) == [
+        "deploy/personal-dev-native-builder/"
+        "loom-personal-dev-native-builder-runtime-authority.sudoers"
+    ]
+    assert sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "scripts/ops").glob(
+            "personal_dev_native_builder_conformance.*"
+        )
+    ) == ["scripts/ops/personal_dev_native_builder_conformance.py"]
+
+
 @pytest.mark.parametrize(
     "path",
     (
