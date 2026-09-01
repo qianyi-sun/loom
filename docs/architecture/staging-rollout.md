@@ -112,6 +112,17 @@ suspended and retains ready evidence while the stop fence terminates unsafe
 owners for reconciliation. Binding, owner-inventory, or restoration drift
 fails closed rather than resuming a different CronJob or candidate.
 
+A resume may outlive the runner version that admitted its original attempt. In
+that case, the current installed broker and worker independently re-authorize
+the exact historical candidate as an ancestor of the installed runtime with an
+equivalent protected configuration. The current runtime launches and controls
+the guard, while guard readiness, release, and the `ExecStopPost` fence remain
+bound to the historical candidate SHA and tree from the immutable envelope.
+Released evidence is retired only after the complete historical launch
+authority has been validated and the evidence matches that exact request and
+candidate; invalid authority or any identity drift leaves the evidence intact
+and fails closed.
+
 The guard CLI retains a 120-second ceiling for each fixed Kubernetes command
 and caps every fixed systemd owner inventory or kill at 30 seconds. If a stop
 arrives just after a false stop check, reaction can include one 30-second owner

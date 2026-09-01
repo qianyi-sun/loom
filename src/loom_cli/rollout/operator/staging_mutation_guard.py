@@ -43,6 +43,7 @@ from .readonly_database_client import (
     READONLY_DATABASE_TUNNEL_TEARDOWN_BOUND_SECONDS,
     open_readonly_database_guard_query,
 )
+from .resume_runtime_upgrade import build_installed_resume_runtime_upgrade_authority
 
 _NAMESPACE = "loom-staging"
 _CRONJOB_NAME = "loom-staging-data-lifecycle"
@@ -300,11 +301,25 @@ class _MutationGuardUnitStatus(Protocol):
 
 
 class _MutationGuardSystemd(Protocol):
-    def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence: ...
+    def start_mutation_guard(
+        self,
+        request_id: str,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+        runner_config_sha256: str,
+        cluster_config_path: Path,
+    ) -> MutationGuardEvidence: ...
 
     def show_mutation_guard(self, request_id: str) -> _MutationGuardUnitStatus | None: ...
 
-    def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence | None: ...
+    def stop_mutation_guard(
+        self,
+        request_id: str,
+        *,
+        candidate_sha: str,
+        candidate_tree: str,
+    ) -> MutationGuardEvidence | None: ...
 
 
 def _validate_config(config: OperatorConfig) -> None:
@@ -895,7 +910,7 @@ def _resolve_candidate(config: OperatorConfig) -> tuple[str, str]:
 
 @dataclass(slots=True)
 class MutationGuardManager:
-    """Bind broker and worker guard operations to one installed candidate."""
+    """Bind broker and worker guard operations to one verified rollout candidate."""
 
     config: OperatorConfig
     service_uid: int
@@ -909,11 +924,16 @@ class MutationGuardManager:
         *,
         request_id: str,
         state: GuardState,
+        candidate_sha: str | None = None,
+        candidate_tree: str | None = None,
     ) -> MutationGuardEvidence:
         _validate_config(self.config)
         if self.service_uid < 1:
             raise MutationGuardError("mutation guard manager authority is invalid")
-        candidate_sha, candidate_tree = self.resolve_candidate(self.config)
+        if candidate_sha is None or candidate_tree is None:
+            if candidate_sha is not None or candidate_tree is not None:
+                raise MutationGuardError("mutation guard candidate binding is incomplete")
+            candidate_sha, candidate_tree = self.resolve_candidate(self.config)
         observed_wall_time = self.wall_time()
         if (
             evidence.request_id != request_id
@@ -931,13 +951,37 @@ class MutationGuardManager:
             raise MutationGuardError("mutation guard evidence binding drifted")
         return evidence
 
-    def acquire(self, request_id: str) -> MutationGuardEvidence:
-        evidence = self.systemd.start_mutation_guard(request_id)
+    def acquire(
+        self,
+        request_id: str,
+        *,
+        candidate_config: OperatorConfig | None = None,
+    ) -> MutationGuardEvidence:
+        selected_config = self.config if candidate_config is None else candidate_config
+        _validate_config(selected_config)
+        candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
+        evidence = self.systemd.start_mutation_guard(
+            request_id,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            runner_config_sha256=selected_config.config_sha256,
+            cluster_config_path=selected_config.cluster_config_path,
+        )
         try:
-            return self._validate(evidence, request_id=request_id, state="ready")
+            return self._validate(
+                evidence,
+                request_id=request_id,
+                state="ready",
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+            )
         except Exception as validation_error:
             try:
-                released = self.systemd.stop_mutation_guard(request_id)
+                released = self.systemd.stop_mutation_guard(
+                    request_id,
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                )
             except Exception as release_error:
                 raise MutationGuardError(
                     "drifted mutation guard could not be released safely"
@@ -965,11 +1009,28 @@ class MutationGuardManager:
             raise MutationGuardError("mutation guard process identity drifted")
         return self._validate(evidence, request_id=request_id, state="ready")
 
-    def release(self, request_id: str) -> MutationGuardEvidence:
-        evidence = self.systemd.stop_mutation_guard(request_id)
+    def release(
+        self,
+        request_id: str,
+        *,
+        candidate_config: OperatorConfig | None = None,
+    ) -> MutationGuardEvidence:
+        selected_config = self.config if candidate_config is None else candidate_config
+        candidate_sha, candidate_tree = self.resolve_candidate(selected_config)
+        evidence = self.systemd.stop_mutation_guard(
+            request_id,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
         if evidence is None:
             raise MutationGuardError("mutation guard release evidence is absent")
-        return self._validate(evidence, request_id=request_id, state="released")
+        return self._validate(
+            evidence,
+            request_id=request_id,
+            state="released",
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+        )
 
 
 def _validate_reconcile_evidence(
@@ -1477,9 +1538,15 @@ def _parser() -> argparse.ArgumentParser:
     hold = subparsers.add_parser("hold", allow_abbrev=False)
     hold.add_argument("--request-id", required=True)
     hold.add_argument("--generation", required=True)
+    hold.add_argument("--candidate-sha")
+    hold.add_argument("--candidate-tree")
+    hold.add_argument("--runner-config-sha256")
+    hold.add_argument("--cluster-config-path")
     fence = subparsers.add_parser("fence", allow_abbrev=False)
     fence.add_argument("--request-id", required=True)
     fence.add_argument("--generation", required=True)
+    fence.add_argument("--candidate-sha")
+    fence.add_argument("--candidate-tree")
     subparsers.add_parser("reconcile", allow_abbrev=False)
     return parser
 
@@ -1525,17 +1592,59 @@ def main(argv: Sequence[str] | None = None) -> int:
             run=run_systemd,
         )
         if args.command == "hold":
+            candidate_arguments = (
+                args.candidate_sha,
+                args.candidate_tree,
+                args.runner_config_sha256,
+                args.cluster_config_path,
+            )
+            if any(value is not None for value in candidate_arguments):
+                if any(value is None for value in candidate_arguments):
+                    raise MutationGuardError("mutation guard candidate authority is incomplete")
+                current_sha, current_tree = _resolve_candidate(config)
+                if (
+                    args.candidate_sha == current_sha
+                    and args.candidate_tree == current_tree
+                    and args.runner_config_sha256 == config.config_sha256
+                    and args.cluster_config_path == str(config.cluster_config_path)
+                ):
+                    candidate_sha, candidate_tree = current_sha, current_tree
+                else:
+                    effective_config = build_installed_resume_runtime_upgrade_authority(
+                        config,
+                        service_uid=service_uid,
+                        run=run_systemd,
+                    ).resolve(
+                        config,
+                        candidate_sha=args.candidate_sha,
+                        candidate_tree=args.candidate_tree,
+                        runner_config_sha256=args.runner_config_sha256,
+                        cluster_config_path=args.cluster_config_path,
+                    )
+                    candidate_sha = candidate_sha_from_runner_repo(effective_config.runner_repo)
+                    candidate_tree = args.candidate_tree
+            else:
+                candidate_sha, candidate_tree = _resolve_candidate(config)
             hold_request_guard(
                 config=config,
                 request_id=args.request_id,
                 generation=args.generation,
                 service_uid=service_uid,
                 run=run,
+                resolve_candidate=lambda _config: (candidate_sha, candidate_tree),
                 stop_requested=stopped.is_set,
                 owner_running=systemd.mutation_guard_owner_running,
             )
         elif args.command == "fence":
-            systemd.fence_mutation_guard_owners(args.request_id, args.generation)
+            if args.candidate_sha is None and args.candidate_tree is None:
+                systemd.fence_mutation_guard_owners(args.request_id, args.generation)
+            else:
+                systemd.fence_mutation_guard_owners(
+                    args.request_id,
+                    args.generation,
+                    candidate_sha=args.candidate_sha,
+                    candidate_tree=args.candidate_tree,
+                )
         else:
             result = reconcile_orphaned_guard(
                 config=config,

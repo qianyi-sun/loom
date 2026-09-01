@@ -1246,7 +1246,10 @@ def _resume(
         guard_acquired = False
         guard_transferred = False
         try:
-            guard_evidence = mutation_guard.acquire(request_id)
+            guard_evidence = mutation_guard.acquire(
+                request_id,
+                candidate_config=effective_config,
+            )
             guard_acquired = True
             observed_epoch = read_mutation_epoch()
             if (
@@ -1278,7 +1281,7 @@ def _resume(
             guard_transferred = True
         finally:
             if guard_acquired and not guard_transferred:
-                mutation_guard.release(request_id)
+                mutation_guard.release(request_id, candidate_config=effective_config)
         _write_json(
             dependencies.stdout,
             {

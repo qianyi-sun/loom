@@ -324,11 +324,19 @@ class FakeMutationGuard:
         self.order = order
         self.mutation_epoch = mutation_epoch
         self.acquired: list[str] = []
+        self.acquired_configs: list[OperatorConfig | None] = []
         self.released: list[str] = []
+        self.released_configs: list[OperatorConfig | None] = []
 
-    def acquire(self, request_id: str):  # type: ignore[no-untyped-def]
+    def acquire(
+        self,
+        request_id: str,
+        *,
+        candidate_config: OperatorConfig | None = None,
+    ):  # type: ignore[no-untyped-def]
         self.order.append("guard-acquire")
         self.acquired.append(request_id)
+        self.acquired_configs.append(candidate_config)
         return SimpleNamespace(
             request_id=request_id,
             candidate_sha=SHA,
@@ -340,9 +348,15 @@ class FakeMutationGuard:
     def assert_ready(self, request_id: str):  # type: ignore[no-untyped-def]
         raise AssertionError(f"broker must not assert worker readiness for {request_id}")
 
-    def release(self, request_id: str):  # type: ignore[no-untyped-def]
+    def release(
+        self,
+        request_id: str,
+        *,
+        candidate_config: OperatorConfig | None = None,
+    ):  # type: ignore[no-untyped-def]
         self.order.append("guard-release")
         self.released.append(request_id)
+        self.released_configs.append(candidate_config)
         return SimpleNamespace(request_id=request_id, state="released")
 
 
@@ -932,9 +946,7 @@ def test_default_dependencies_wire_backup_maintenance_for_merged_dev(
         broker_module,
         "build_installed_resume_runtime_upgrade_authority",
         lambda _config, *, service_uid, run: (
-            resume_runtime_upgrade
-            if service_uid == os.geteuid() and callable(run)
-            else None
+            resume_runtime_upgrade if service_uid == os.geteuid() and callable(run) else None
         ),
     )
 
@@ -2280,6 +2292,7 @@ def test_resume_accepts_exact_forward_runner_upgrade_authority(
         }
     ]
     assert guard.acquired == [REQUEST_ID]
+    assert guard.acquired_configs == [original_config]
     assert deps.store.read_attempt_envelope(REQUEST_ID, 2).resume is True
 
 
