@@ -68,6 +68,25 @@ if ((10#$provider_key_mode % 100 != 0)); then
   exit 1
 fi
 
+normalized_provider_key=$(mktemp)
+token_file=
+cleanup() {
+  rm -f "$normalized_provider_key"
+  [[ -z "$token_file" ]] || rm -f "$token_file"
+}
+trap cleanup EXIT
+chmod 600 "$normalized_provider_key"
+python3 "$repo_root/scripts/ops/normalize_secret_file.py" \
+  "$model_provider_api_key_file" "$normalized_provider_key"
+provider_key_sha256=$(python3 - "$normalized_provider_key" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)
+
 kubectl get namespace loom >/dev/null
 kubectl get secret -n loom loom-admin-secret >/dev/null
 kubectl get secret -n loom loom-image-admission >/dev/null
@@ -75,11 +94,14 @@ kubectl get secret -n loom-nebius-development loom-execution-actuator-db >/dev/n
 
 kubectl create secret generic loom-nebius-model-provider \
   -n loom \
-  --from-file=api-key="$model_provider_api_key_file" \
+  --from-file=api-key="$normalized_provider_key" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 kubectl patch deployment -n loom loom-llm-gateway --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-gateway-development-patch.yaml" >/dev/null
+kubectl patch deployment -n loom loom-llm-gateway --type=merge \
+  --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/model-provider-secret-sha256\":\"$provider_key_sha256\"}}}}}" \
+  >/dev/null
 kubectl rollout status -n loom deployment/loom-llm-gateway --timeout=180s
 
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
@@ -101,7 +123,6 @@ if ! kubectl get secret -n loom-nebius-development \
   loom-execution-capacity-collector-control-plane >/dev/null 2>&1; then
   token_file=$(mktemp)
   chmod 600 "$token_file"
-  trap 'rm -f "$token_file"' EXIT
   kubectl exec -n loom deploy/loom-control-plane -- python -c '
 import json
 import tomllib

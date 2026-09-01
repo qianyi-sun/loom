@@ -2377,8 +2377,13 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
         await engine.dispose()
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    [NormalizedJobState.SUCCEEDED, NormalizedJobState.FAILED],
+)
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,
+    terminal_state: NormalizedJobState,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -2542,7 +2547,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             resource_generation=lease.resource_generation,
             target_id=target.target_id,
             execution_unit_key=str(lease.execution_unit_key),
-            normalized_state=NormalizedJobState.SUCCEEDED,
+            normalized_state=terminal_state,
             job_uid="job-uid-1",
             pod_uid="pod-uid-1",
             pod_ip=pod_ip,

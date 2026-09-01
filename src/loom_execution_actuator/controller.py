@@ -56,6 +56,16 @@ _FAILURE_REASONS = frozenset(
 )
 _DELETE_COMMANDS = frozenset({"cancel", "timeout", "retry", "delete"})
 _CLEANUP_DESIRED_STATES = frozenset({"cancel", "timeout", "retry", "delete_pending"})
+_COMMITTED_RESULT_TERMINAL_STATES = frozenset(
+    {
+        NormalizedJobState.SUCCEEDED,
+        NormalizedJobState.FAILED,
+        NormalizedJobState.OOM_KILLED,
+        NormalizedJobState.EVICTED,
+        NormalizedJobState.NODE_LOST,
+        NormalizedJobState.DEADLINE_EXCEEDED,
+    }
+)
 
 
 class _ExecutionOutputPendingError(ActuatorContractError):
@@ -166,7 +176,7 @@ class ExecutionActuator:
                 payload=observation.event_payload(),
                 observed_at=now,
             )
-            if observation.normalized_state == NormalizedJobState.SUCCEEDED:
+            if observation.normalized_state in _COMMITTED_RESULT_TERMINAL_STATES:
                 await finalize_committed_service_execution(
                     session,
                     lease_id=lease.id,

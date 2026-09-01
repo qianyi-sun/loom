@@ -112,6 +112,7 @@ trap 'rm -rf "$local_stage"' EXIT
 
 tar -C "$repo_root" -czf "$local_stage/runtime.tar.gz" \
   scripts/ops/apply_nebius_development_runtime.sh \
+  scripts/ops/normalize_secret_file.py \
   deploy/k8s/nebius-gateway-development-patch.yaml \
   deploy/k8s/nebius-control-plane-development-patch.yaml \
   deploy/k8s/nebius-service-development-patch.yaml \
