@@ -65,13 +65,22 @@ Both Slurm controllers use a dedicated kubeconfig at
 rollout converges that credential locally on OLDLAB and GB10 before publishing
 or starting either controller's supervisor units. OLDLAB first invokes the
 reviewed publisher from the immutable candidate with its protected rollout
-kubeconfig. That convergence installs the shared scoped service-account
-authority and dedicated database Secret. GB10 then checks its retained legacy
-narrow credential against that authority and atomically copies the checked
-bytes to the fixed output path as a distinct single-link file. The legacy path
-remains narrow while the old units still reference it; no broad rollout
-credential is installed on GB10 or crosses SSH. Both controllers prove
-owner-only file metadata, database/ConfigMap access, and `pods/exec` denial.
+kubeconfig. The manifest manager owns the shared scoped service-account
+authority, token Secret, and dedicated database Secret shell. A separate
+journaled protected component owns only the derived `data["cp-db-url"]` field
+under `loom-staging-rollout-supervisor-database`, fenced by the observed target
+UID and resource version. It never exposes the value in evidence, never forces
+an ordinary write, adopts only the recognized legacy
+`kubectl-client-side-apply` owner, and rejects unknown or mixed ownership.
+Credential publishers validate that prerequisite and write only the local
+owner-only kubeconfig; they never mutate Kubernetes Secret data.
+
+GB10 then checks its retained legacy narrow credential against that authority
+and atomically copies the checked bytes to the fixed output path as a distinct
+single-link file. The legacy path remains narrow while the old units still
+reference it; no broad rollout credential is installed on GB10 or crosses SSH.
+Both controllers prove owner-only file metadata, database/ConfigMap access,
+and `pods/exec` denial.
 The scoped identity is limited to the dedicated staging database Secret, the
 objects required for the database port-forward, and `get` on the exact
 `loom-dev/loom-global-execution-witness-v1` ConfigMap.
@@ -148,8 +157,10 @@ The code never broadens ownership based solely on repository or tag spelling.
    storage admission, and cooldown behavior.
 2. Apply the capacity-control-plane manifests and prove that both ConfigMap
    keys refresh and validate for longer than two witness TTLs.
-3. Start the protected staging rollout. Its journal first removes only the
-   exact predecessor exec authority and proves complete absence. It then
+3. Start the protected staging rollout. After protected manifests converge,
+   its journal converges the one derived database field independently of the
+   manifest-owned Secret shell. Before credential handling it removes only the
+   exact predecessor exec authority and proves complete absence, then
    preclassifies both controller credentials as one group before either may
    publish.
 4. The controller-local credential components publish and verify both scoped

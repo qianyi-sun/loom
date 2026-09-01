@@ -51,6 +51,9 @@ from .protected_external_supervisor_credential_component import (
 from .protected_external_supervisor_credential_transport import (
     ProtectedExternalSupervisorCredentialTransport,
 )
+from .protected_external_supervisor_database_secret_component import (
+    KubernetesExternalSupervisorDatabaseSecretComponent,
+)
 from .protected_external_supervisor_transition_cleanup_component import (
     KubernetesExternalSupervisorTransitionCleanupComponent,
 )
@@ -90,6 +93,15 @@ class ProtectedApplyCommandRunner(Protocol):
         argv: Sequence[str],
         *,
         env: Mapping[str, str],
+        timeout_seconds: float,
+    ) -> bytes: ...
+
+    def capture_stdout_with_input(
+        self,
+        argv: Sequence[str],
+        *,
+        env: Mapping[str, str],
+        input_payload: bytes,
         timeout_seconds: float,
     ) -> bytes: ...
 
@@ -361,6 +373,11 @@ class MigrationEpochProtectedApplyExecutor:
             service_uid=self.service_uid,
             epoch_guard=epoch.classify,
         ).component(plan)
+        external_supervisor_database = KubernetesExternalSupervisorDatabaseSecretComponent(
+            runner=self.runner,
+            environment=environment,
+            epoch_guard=epoch.classify,
+        ).component(plan)
         production_defaults = KubernetesProtectedProductionDefaultsComponent(
             runner=self.runner,
             environment=environment,
@@ -401,6 +418,7 @@ class MigrationEpochProtectedApplyExecutor:
                 migration,
                 epoch,
                 manifests,
+                external_supervisor_database,
                 environment_state,
                 gb10,
                 production_defaults,
@@ -413,6 +431,7 @@ class MigrationEpochProtectedApplyExecutor:
                 epoch,
                 migration,
                 manifests,
+                external_supervisor_database,
                 environment_state,
                 gb10,
                 production_defaults,
@@ -542,6 +561,13 @@ class KubernetesProtectedConvergenceExecutor:
                 service_uid=self.service_uid,
                 epoch_guard=epoch.classify,
             ).classify(plan),
+            "external-supervisor-database-secret": (
+                KubernetesExternalSupervisorDatabaseSecretComponent(
+                    runner=self.runner,
+                    environment=environment,
+                    epoch_guard=epoch.classify,
+                ).classify(plan)
+            ),
             "environment-state": self._environment_state_observation(
                 environment_state_component,
                 plan,
@@ -579,6 +605,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["mutation-epoch-claim"] = "protected-epoch-not-exact"
         if observations["staging-manifests"].observed_epoch != expected_epoch:
             blockers["staging-manifests"] = "protected-epoch-not-exact"
+        if observations["external-supervisor-database-secret"].observed_epoch != expected_epoch:
+            blockers["external-supervisor-database-secret"] = "protected-epoch-not-exact"
         if observations["environment-state"].observed_epoch != expected_epoch:
             blockers["environment-state"] = "protected-epoch-not-exact"
         if observations["gb10-candidate"].observed_epoch != expected_epoch:

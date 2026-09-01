@@ -30,7 +30,8 @@ metadata:
   name: loom-external-slurm-autoscaler
   namespace: loom-staging
 rules:
-  # The publisher copies only cp-db-url into this dedicated Secret. The
+  # Protected rollout convergence owns only cp-db-url in this dedicated
+  # Secret. The credential publisher never writes Secret data, and the
   # external controller cannot read the multi-purpose loom-secrets object.
   - apiGroups: [""]
     resources: ["secrets"]

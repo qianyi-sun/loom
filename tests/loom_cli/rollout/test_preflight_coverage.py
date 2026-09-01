@@ -148,12 +148,22 @@ def test_systemd_activation_is_classified_as_isolated_rehearsal() -> None:
     assert predicates["protected.external-supervisor-activation"].earliest_check_id == (
         "final.protected-apply"
     )
+    assert predicates[
+        "protected.external-supervisor-database-secret"
+    ].earliest_check_id == "final.protected-apply"
+    assert not predicates[
+        "protected.external-supervisor-database-secret"
+    ].preflight_capable
     assert not predicates["protected.external-supervisor-activation"].preflight_capable
     assert predicates["convergence.external-supervisor-live"].earliest_check_id == (
         "final.convergence"
     )
     assert (
         predicates["convergence.external-supervisor-active-pointer"].earliest_check_id
+        == "final.convergence"
+    )
+    assert (
+        predicates["convergence.external-supervisor-database-secret"].earliest_check_id
         == "final.convergence"
     )
     assert launch_cancel.tier == 0

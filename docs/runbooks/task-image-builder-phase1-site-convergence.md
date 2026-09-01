@@ -151,7 +151,7 @@ not refresh, or a reader rejects it. The publisher is the only workload token
 holder: the manager container retains `automountServiceAccountToken: false`;
 the publisher may only `get` and `patch` this ConfigMap.
 
-### 2. Protected pre-credential transition cleanup and credential publication
+### 2. Protected Secret ownership, transition cleanup, and credential publication
 
 The protected apply in step 3 owns removal of the obsolete manager-exec
 authority before it classifies or publishes either controller credential. Its
@@ -169,18 +169,29 @@ cleanup is journaled before the credential group and both supervisor-unit
 components. Do not remove these objects manually or restore them during
 rollback.
 
-The protected apply in step 3 owns this convergence. It first publishes and
-checks the narrow credential locally on `TRT-EAI-OLDLAB-1`; this also converges
-the shared scoped service-account authority and dedicated database Secret. It
-then invokes the fixed forced broker operation on `gx10-01c7`, which checks the
-retained legacy narrow source and atomically copies it to the distinct
-supervisor output path. The legacy source remains narrow while the old units
-still reference it, and no broad rollout kubeconfig is installed on GB10 or
-sent through SSH. Both credential components finish before either controller
-may write or start a new supervisor unit. Do not invoke the publisher manually,
-copy `$ROLLOUT_KUBECONFIG`, or repair the output with `chown` or `chmod`: an
-absent fixed-path credential is repairable only by that protected path, while
-any present unsafe credential is drift and leaves scale-up closed.
+Immediately after the protected manifests, journaled derived-database Secret
+convergence compares only `loom-secrets.data["cp-db-url"]` with the dedicated
+target field. It applies that field through a dedicated server-side field
+manager, fenced by the observed target UID and resource version, and records
+only content digests. Ordinary writes and dedicated-manager refreshes never
+force conflicts. The one recognized legacy `kubectl-client-side-apply` owner
+may be transferred explicitly; any unknown or mixed owner is blocking drift.
+The manifest manager retains the Secret shell and RBAC; credential publishers
+do not write Kubernetes Secret data. This separation prevents a later
+server-side manifest apply from migrating and pruning data previously written
+by client-side `kubectl apply`.
+
+The protected apply then publishes and checks the narrow credential locally on
+`TRT-EAI-OLDLAB-1`. It invokes the fixed forced broker operation on
+`gx10-01c7`, which checks the retained legacy narrow source and atomically
+copies it to the distinct supervisor output path. The legacy source remains
+narrow while the old units still reference it, and no broad rollout kubeconfig
+is installed on GB10 or sent through SSH. Both credential components finish
+before either controller may write or start a new supervisor unit. Do not invoke
+the publisher manually, copy `$ROLLOUT_KUBECONFIG`, or repair the output with
+`chown` or `chmod`: an absent fixed-path credential is repairable only by that
+protected path, while any present unsafe credential is drift and leaves
+scale-up closed.
 
 After the protected attempt in step 3 reports complete, run the non-mutating
 readback below on each controller as its local `loom-rollout` identity. The
