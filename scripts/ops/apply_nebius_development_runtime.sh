@@ -30,7 +30,9 @@ done
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
 
-credential_mode=$(stat -f '%Lp' "$nebius_credentials" 2>/dev/null || stat -c '%a' "$nebius_credentials")
+if ! credential_mode=$(stat -c '%a' "$nebius_credentials" 2>/dev/null); then
+  credential_mode=$(stat -f '%Lp' "$nebius_credentials")
+fi
 if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1

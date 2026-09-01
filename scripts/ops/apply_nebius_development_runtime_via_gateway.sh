@@ -60,7 +60,9 @@ done
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
 
-credential_mode=$(stat -f '%Lp' "$nebius_credentials" 2>/dev/null || stat -c '%a' "$nebius_credentials")
+if ! credential_mode=$(stat -c '%a' "$nebius_credentials" 2>/dev/null); then
+  credential_mode=$(stat -f '%Lp' "$nebius_credentials")
+fi
 if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
