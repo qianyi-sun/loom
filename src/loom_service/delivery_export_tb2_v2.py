@@ -136,6 +136,11 @@ def _agent_name_for_trial(trial: Trial) -> str:
     return str(raw) if raw else "unknown"
 
 
+def _trial_skipped_verifier(trial: Trial) -> bool:
+    config = trial.config if isinstance(trial.config, dict) else {}
+    return config.get("skip_verifier") is True
+
+
 def _has_legacy_runtime_markers(events: list[TrajectoryEvent]) -> bool:
     for event in events:
         if event.kind == EventKind.AGENT_THOUGHT:
@@ -847,6 +852,9 @@ def resolve_verifier_artifacts(
 
     Fail-closed when indexed verifier artifacts are missing, unreadable,
     hash-mismatched, share-blocked, or contain secret-like content.
+
+    Terminus-2 trials with ``trial.config.skip_verifier`` may export without
+    indexed verifier audit artifacts; agent-only trajectories still pack.
     """
     indexed = _index_artifacts(trial)
     candidates = [
@@ -855,7 +863,7 @@ def resolve_verifier_artifacts(
         if isinstance(item.get("key"), str) and _VERIFIER_KEY_MARKER in str(item["key"])
     ]
     if not candidates:
-        if _agent_name_for_trial(trial) != "terminus-2":
+        if _agent_name_for_trial(trial) != "terminus-2" or _trial_skipped_verifier(trial):
             return []
         raise Tb2V2ExportError(
             "missing_verifier_artifact",
@@ -951,7 +959,11 @@ def resolve_verifier_artifacts(
                 "metadata": sorted(f"{step}/{rel}" for step, rel in meta_keys),
             },
         )
-    if _agent_name_for_trial(trial) == "terminus-2" and not log_keys:
+    if (
+        _agent_name_for_trial(trial) == "terminus-2"
+        and not log_keys
+        and not _trial_skipped_verifier(trial)
+    ):
         raise Tb2V2ExportError(
             "missing_verifier_artifact",
             {
@@ -959,6 +971,8 @@ def resolve_verifier_artifacts(
                 "trial_id": str(trial.id),
             },
         )
+    if _trial_skipped_verifier(trial) and not log_keys:
+        return []
 
     resolved: list[VerifierDeliveryArtifact] = []
     bodies_for_scan: dict[str, bytes] = {}

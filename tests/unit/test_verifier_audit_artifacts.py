@@ -417,6 +417,24 @@ def test_resolve_verifier_artifacts_fails_when_absent() -> None:
     assert exc.value.code == "missing_verifier_artifact"
 
 
+def test_resolve_verifier_artifacts_allows_skip_verifier_without_audit_artifacts() -> None:
+    trial = Trial(
+        id=uuid4(),
+        team_id=uuid4(),
+        task_id="task-1",
+        batch_id=uuid4(),
+        state="succeeded",
+        config={"agent_name": "terminus-2", "skip_verifier": True},
+        trajectory_index={"artifacts": []},
+    )
+    resolved = resolve_verifier_artifacts(
+        trial,
+        client=_FakeS3({}),
+        artifacts_bucket="artifacts",
+    )
+    assert resolved == []
+
+
 def test_resolve_verifier_artifacts_rejects_orphan_log() -> None:
     trial, client, _key = _trial_with_verifier_artifacts(
         log_body=b"ok\n",
