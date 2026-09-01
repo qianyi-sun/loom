@@ -2,12 +2,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH --model-provider-api-key-file PATH" >&2
   exit 2
 }
 
 kubeconfig=
 nebius_credentials=
+model_provider_api_key_file=
 while (($#)); do
   case "$1" in
     --kubeconfig)
@@ -20,12 +21,18 @@ while (($#)); do
       nebius_credentials=$2
       shift 2
       ;;
+    --model-provider-api-key-file)
+      (($# >= 2)) || usage
+      model_provider_api_key_file=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
 
 [[ -n "$kubeconfig" && -f "$kubeconfig" ]] || usage
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
+[[ -n "$model_provider_api_key_file" && -s "$model_provider_api_key_file" ]] || usage
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
@@ -37,11 +44,27 @@ if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
 fi
+if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
+  provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+fi
+if ((10#$provider_key_mode % 100 != 0)); then
+  echo "Model provider API key file must not be group/world accessible" >&2
+  exit 1
+fi
 
 kubectl get namespace loom >/dev/null
 kubectl get secret -n loom loom-admin-secret >/dev/null
 kubectl get secret -n loom loom-image-admission >/dev/null
 kubectl get secret -n loom-nebius-development loom-execution-actuator-db >/dev/null
+
+kubectl create secret generic loom-nebius-model-provider \
+  -n loom \
+  --from-file=api-key="$model_provider_api_key_file" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+kubectl patch deployment -n loom loom-llm-gateway --type=strategic \
+  --patch-file "$repo_root/deploy/k8s/nebius-gateway-development-patch.yaml" >/dev/null
+kubectl rollout status -n loom deployment/loom-llm-gateway --timeout=180s
 
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null

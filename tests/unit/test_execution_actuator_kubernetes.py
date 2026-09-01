@@ -296,6 +296,22 @@ def test_development_service_patch_persists_backend_environment_identity() -> No
     assert env["LOOM_ENV"]["value"] == "development"
 
 
+def test_development_gateway_patch_persists_model_provider_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "gateway"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
+    assert env["LOOM_GW_LOCAL_YIBU_BASE_URL"]["value"] == "https://yibuapi.com/v1"
+    assert env["LOOM_GW_LOCAL_YIBU_API_KEY"]["valueFrom"] == {
+        "secretKeyRef": {"name": "loom-nebius-model-provider", "key": "api-key"}
+    }
+
+
 def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> None:
     actuator_documents = list(
         yaml.safe_load_all(
