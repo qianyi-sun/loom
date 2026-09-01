@@ -41,6 +41,7 @@ class DeepPreflightAuthority:
     read_mutation_epoch: Callable[[], int]
     now: Callable[[], datetime]
     max_concurrency: int = 8
+    post_apply_attested_dependencies: frozenset[str] = frozenset()
 
     def assess(self, candidate: CandidateBinding, mutation_epoch: int) -> PreflightAssessment:
         return self.admission_orchestrator().assess(candidate, mutation_epoch)
@@ -126,6 +127,7 @@ class DeepPreflightAuthority:
             current_mutation_epoch=mutation_epoch,
             now=self.now(),
             max_concurrency=self.max_concurrency,
+            attested_dependencies=self.post_apply_attested_dependencies,
         )
 
     def _orchestrator(self, purpose: RuntimePurpose) -> CandidatePreflightOrchestrator:

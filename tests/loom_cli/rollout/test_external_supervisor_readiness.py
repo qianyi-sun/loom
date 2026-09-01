@@ -33,6 +33,7 @@ _PYTHON_PATH = staging_python_path(_SHA)
 _SCRIPT_PATH = staging_script_path(_SHA)
 _TASK_IMAGE_BUILDER_SCRIPT = "scripts/ops/task_image_builder_autoscaler_external_once.py"
 _TASK_IMAGE_BUILDER_SCRIPT_PATH = f"{_WORKING_DIRECTORY}/{_TASK_IMAGE_BUILDER_SCRIPT}"
+_EXTERNAL_SUPERVISOR_KUBECONFIG = "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +93,7 @@ def _args(
         "--namespace",
         "loom-staging",
         "--kubeconfig",
-        STAGING_KUBECONFIG,
+        _EXTERNAL_SUPERVISOR_KUBECONFIG,
         "--db-local-host",
         "127.0.0.1",
         "--db-local-port",
@@ -109,17 +110,16 @@ def _args(
         "10",
         "--freshness-sec",
         "120",
-        "--global-execution-manager-export",
-        "deployment/loom-capacity-manager",
-        "--global-execution-manager-namespace",
+        "--global-execution-witness-config-map",
+        "loom-global-execution-witness-v1",
+        "--global-execution-witness-namespace",
         "loom-dev",
-        "--global-execution-manager-kubeconfig",
-        STAGING_KUBECONFIG,
+        "--global-execution-witness-kubeconfig",
+        _EXTERNAL_SUPERVISOR_KUBECONFIG,
         "--expected-manager-public-key-sha256",
         "a" * 64,
     ]
-    if pool_name == "gb10":
-        args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
+    args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
     return args
 
 
@@ -152,7 +152,7 @@ def _task_image_builder_args(
         "--namespace",
         "loom-staging",
         "--kubeconfig",
-        STAGING_KUBECONFIG,
+        _EXTERNAL_SUPERVISOR_KUBECONFIG,
         "--db-local-host",
         "127.0.0.1",
         "--db-local-port",
@@ -169,17 +169,39 @@ def _task_image_builder_args(
         "10",
         "--freshness-sec",
         "120",
-        "--global-execution-manager-export",
-        "deployment/loom-capacity-manager",
-        "--global-execution-manager-namespace",
+        "--global-execution-witness-config-map",
+        "loom-global-execution-witness-v1",
+        "--global-execution-witness-namespace",
         "loom-dev",
-        "--global-execution-manager-kubeconfig",
-        STAGING_KUBECONFIG,
+        "--global-execution-witness-kubeconfig",
+        _EXTERNAL_SUPERVISOR_KUBECONFIG,
         "--expected-manager-public-key-sha256",
         "a" * 64,
     ]
-    if pool_name == "task-image-builder-gb10":
-        args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
+    args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
+    return args
+
+
+def _legacy_manager_args(*, port: int = 15451, pool_name: str = "gb10") -> list[str]:
+    args = _args(port=port, pool_name=pool_name)
+    replacements = {
+        "--global-execution-witness-config-map": (
+            "--global-execution-manager-export",
+            "deployment/loom-capacity-manager",
+        ),
+        "--global-execution-witness-namespace": (
+            "--global-execution-manager-namespace",
+            "loom-dev",
+        ),
+        "--global-execution-witness-kubeconfig": (
+            "--global-execution-manager-kubeconfig",
+            STAGING_KUBECONFIG,
+        ),
+    }
+    for current, (legacy, value) in replacements.items():
+        index = args.index(current)
+        args[index : index + 2] = [legacy, value]
+    args[args.index("--kubeconfig") + 1] = STAGING_KUBECONFIG
     return args
 
 
@@ -620,6 +642,7 @@ def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
     expected[expected.index("--namespace") + 1] = "loom-rehearsal-abc123"
     expected[expected.index("--kubeconfig") + 1] = REHEARSAL_KUBECONFIG
     expected[expected.index("--db-local-port") + 1] = "25448"
+    expected[expected.index("--db-secret-name") + 1] = "loom-secrets"
     assert list(command[2:-1]) == expected
     for flag in (
         "--pool-name",
@@ -730,15 +753,9 @@ def test_rehearsal_validation_routes_remote_policy_without_local_slurm_probe(
         "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
     )
     assert gb10_builder[-1] == "--validate-only"
-    assert gb10_builder[gb10_builder.index("--pool-name") + 1] == (
-        "task-image-builder-gb10"
-    )
-    assert gb10_builder[gb10_builder.index("--expected-slurm-cluster-name") + 1] == (
-        "trt-gb10"
-    )
-    assert gb10_builder[
-        gb10_builder.index("--expected-slurm-controller-host") + 1
-    ] == "gx10-01c7"
+    assert gb10_builder[gb10_builder.index("--pool-name") + 1] == ("task-image-builder-gb10")
+    assert gb10_builder[gb10_builder.index("--expected-slurm-cluster-name") + 1] == ("trt-gb10")
+    assert gb10_builder[gb10_builder.index("--expected-slurm-controller-host") + 1] == "gx10-01c7"
     assert _TASK_IMAGE_BUILDER_SCRIPT_PATH not in gb10_builder
 
     assert oldlab[:2] == (_PYTHON_PATH, _SCRIPT_PATH)
@@ -776,6 +793,56 @@ def test_artifact_selects_one_controller_without_losing_candidate_binding(
 
     with pytest.raises(ValueError, match="execution host"):
         artifact.for_execution_host("foreign-controller")
+
+
+def test_builder_accepts_exact_legacy_manager_authority_for_resume(tmp_path: Path) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[_supervisor(args=_legacy_manager_args())],
+        )
+    )
+
+    assert artifact.supervisors[0].args == tuple(_legacy_manager_args())
+
+
+def test_builder_rejects_mixed_or_partial_legacy_manager_authority(tmp_path: Path) -> None:
+    mixed = [
+        *_legacy_manager_args(),
+        "--global-execution-witness-config-map",
+        "loom-global-execution-witness-v1",
+    ]
+    with pytest.raises(ValueError, match="authority is mixed"):
+        _build(_candidate(tmp_path / "mixed", supervisors=[_supervisor(args=mixed)]))
+
+    partial = _legacy_manager_args()
+    flag_index = partial.index("--global-execution-manager-namespace")
+    del partial[flag_index : flag_index + 2]
+    with pytest.raises(ValueError, match="arguments are missing"):
+        _build(_candidate(tmp_path / "partial", supervisors=[_supervisor(args=partial)]))
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--global-execution-manager-export", "deployment/foreign", "global execution"),
+        ("--global-execution-manager-namespace", "foreign-manager", "global execution"),
+        ("--global-execution-manager-kubeconfig", "/tmp/kubeconfig", "global execution"),
+        ("--kubeconfig", _EXTERNAL_SUPERVISOR_KUBECONFIG, "staging kubeconfig"),
+        ("--db-secret-name", "loom-secrets", "optional authority"),
+    ],
+)
+def test_builder_rejects_noncanonical_legacy_manager_authority(
+    tmp_path: Path,
+    flag: str,
+    value: str,
+    message: str,
+) -> None:
+    args = _legacy_manager_args()
+    args[args.index(flag) + 1] = value
+
+    with pytest.raises(ValueError, match=message):
+        _build(_candidate(tmp_path, supervisors=[_supervisor(args=args)]))
 
 
 def test_artifact_rejects_live_port_without_rehearsal_offset_capacity(
@@ -924,7 +991,11 @@ def test_builder_rejects_source_drift_during_build(
     [
         ('"127.0.0.1"', '"10.0.0.8"', "loopback"),
         ('"loom-staging"', '"loom-prod"', "namespace"),
-        (_toml_string(STAGING_KUBECONFIG), '"/tmp/kubeconfig"', "kubeconfig"),
+        (
+            _toml_string(_EXTERNAL_SUPERVISOR_KUBECONFIG),
+            '"/tmp/kubeconfig"',
+            "kubeconfig",
+        ),
         (_toml_string(_WORKING_DIRECTORY), '"relative/repo"', "absolute path"),
         (
             _toml_string(_PYTHON_PATH),
@@ -933,10 +1004,17 @@ def test_builder_rejects_source_drift_during_build(
         ),
         ('"10.0"', '"61"', "out of bounds"),
         ('"5432"', '"5433"', "remote port drifted"),
-        ('"deployment/loom-capacity-manager"', '"deployment/foreign"', "global execution"),
+        (
+            '"loom-global-execution-witness-v1"',
+            '"foreign-witness"',
+            "global execution",
+        ),
         ('"loom-dev"', '"foreign-manager"', "global execution"),
-        ('"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
-         '"invalid-pin"', "global execution"),
+        (
+            '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+            '"invalid-pin"',
+            "global execution",
+        ),
     ],
 )
 def test_builder_rejects_unsafe_or_noncanonical_identity(
@@ -971,9 +1049,9 @@ def test_builder_rejects_missing_duplicate_or_validate_only_arguments(tmp_path: 
 @pytest.mark.parametrize(
     "flag",
     [
-        "--global-execution-manager-export",
-        "--global-execution-manager-namespace",
-        "--global-execution-manager-kubeconfig",
+        "--global-execution-witness-config-map",
+        "--global-execution-witness-namespace",
+        "--global-execution-witness-kubeconfig",
         "--expected-manager-public-key-sha256",
     ],
 )

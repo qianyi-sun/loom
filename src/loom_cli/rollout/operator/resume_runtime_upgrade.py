@@ -11,20 +11,89 @@ from pathlib import Path
 
 from loom_cli.rollout.credential_authority import read_trusted_file
 
-from .candidate import GitRunner, verify_resume_runtime_candidate
+from .candidate import (
+    AdmittedCandidateGitRunner,
+    CandidateIdentityEvidence,
+    GitRunner,
+    verify_resume_runtime_candidate,
+)
 from .config import OperatorConfig, candidate_sha_from_runner_repo, environment_authority
+from .model import CandidateBinding
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_CONFIG_BYTES = 1024 * 1024
 
-RuntimeVerifier = Callable[[OperatorConfig, str, str | None], None]
+RuntimeVerifier = Callable[
+    [OperatorConfig, str, str | None],
+    CandidateIdentityEvidence | None,
+]
 AncestryVerifier = Callable[[Path, str, str], bool]
 ClusterConfigReader = Callable[[Path], bytes]
 
 
 class ResumeRuntimeUpgradeError(ValueError):
     """Raised when a failed request cannot reuse its historical runtime binding."""
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedResumeRuntimeUpgrade:
+    """Capability issued only after one exact forward runtime upgrade is proven."""
+
+    config: OperatorConfig
+    candidate_sha: str
+    candidate_tree: str
+    verify_runtime: RuntimeVerifier
+
+    def __post_init__(self) -> None:
+        if (
+            self.config.source_mode != "merged-dev"
+            or _SHA_RE.fullmatch(self.candidate_sha) is None
+            or _SHA_RE.fullmatch(self.candidate_tree) is None
+            or not callable(self.verify_runtime)
+        ):
+            raise ResumeRuntimeUpgradeError("admitted resume runtime identity is invalid")
+
+    def verify_candidate(self, candidate: CandidateBinding) -> CandidateIdentityEvidence:
+        """Re-read the exact historical candidate without re-reading today's config."""
+        if (
+            candidate.resolved_sha != self.candidate_sha
+            or candidate.resolved_tree != self.candidate_tree
+            or candidate.source_mode != "merged-dev"
+            or candidate.approved_base_sha is not None
+        ):
+            raise ResumeRuntimeUpgradeError("admitted resume candidate binding drifted")
+        try:
+            evidence = self.verify_runtime(
+                self.config,
+                self.candidate_sha,
+                self.candidate_tree,
+            )
+        except Exception as exc:
+            raise ResumeRuntimeUpgradeError("admitted resume candidate is invalid") from exc
+        if (
+            not isinstance(evidence, CandidateIdentityEvidence)
+            or evidence.resolved_sha != self.candidate_sha
+            or evidence.resolved_tree != self.candidate_tree
+            or evidence.source_mode != "merged-dev"
+            or evidence.approved_base_sha is not None
+            or evidence.linear_history_count != 0
+        ):
+            raise ResumeRuntimeUpgradeError("admitted resume candidate evidence drifted")
+        return evidence
+
+    def candidate_git_runner(self, run: GitRunner) -> AdmittedCandidateGitRunner:
+        """Bind the ordinary check's Git surface to this admitted historical runtime."""
+
+        def verify(
+            config: OperatorConfig,
+            candidate: CandidateBinding,
+        ) -> CandidateIdentityEvidence:
+            if config != self.config:
+                raise ResumeRuntimeUpgradeError("admitted resume runtime config drifted")
+            return self.verify_candidate(candidate)
+
+        return AdmittedCandidateGitRunner(run=run, verify_candidate=verify)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +134,7 @@ class ResumeRuntimeUpgradeAuthority:
             or candidate_tree is None
             or _SHA_RE.fullmatch(candidate_tree) is None
             or _SHA256_RE.fullmatch(runner_config_sha256) is None
-            or hashlib.sha256(self.current_config_payload).hexdigest()
-            != config.config_sha256
+            or hashlib.sha256(self.current_config_payload).hexdigest() != config.config_sha256
         ):
             raise ResumeRuntimeUpgradeError("resume runtime upgrade binding is invalid")
         authority = environment_authority(config.short_name)
@@ -111,6 +179,32 @@ class ResumeRuntimeUpgradeAuthority:
             raise ResumeRuntimeUpgradeError("resume runtime upgrade is not a forward upgrade")
         return effective
 
+    def admit(
+        self,
+        config: OperatorConfig,
+        *,
+        candidate_sha: str,
+        candidate_tree: str | None,
+        runner_config_sha256: str,
+        cluster_config_path: str,
+    ) -> AdmittedResumeRuntimeUpgrade:
+        """Issue a verifier capability after resolving the exact historical runtime."""
+        effective = self.resolve(
+            config,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            runner_config_sha256=runner_config_sha256,
+            cluster_config_path=cluster_config_path,
+        )
+        if candidate_tree is None:
+            raise ResumeRuntimeUpgradeError("resume runtime upgrade candidate tree is unavailable")
+        return AdmittedResumeRuntimeUpgrade(
+            config=effective,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            verify_runtime=self.verify_runtime,
+        )
+
 
 def _git_ancestry_argv(repo: Path, historical_sha: str, current_sha: str) -> list[str]:
     return [
@@ -154,8 +248,12 @@ def build_installed_resume_runtime_upgrade_authority(
         require_nonempty=True,
     ).payload
 
-    def verify_runtime(active: OperatorConfig, sha: str, tree: str | None) -> None:
-        verify_resume_runtime_candidate(active, sha, tree, run=run)
+    def verify_runtime(
+        active: OperatorConfig,
+        sha: str,
+        tree: str | None,
+    ) -> CandidateIdentityEvidence:
+        return verify_resume_runtime_candidate(active, sha, tree, run=run)
 
     def prove_ancestor(repo: Path, historical_sha: str, current_sha: str) -> bool:
         try:
@@ -187,6 +285,7 @@ def build_installed_resume_runtime_upgrade_authority(
 
 
 __all__ = [
+    "AdmittedResumeRuntimeUpgrade",
     "ResumeRuntimeUpgradeAuthority",
     "ResumeRuntimeUpgradeError",
     "build_installed_resume_runtime_upgrade_authority",

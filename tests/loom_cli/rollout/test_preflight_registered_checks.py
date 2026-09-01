@@ -50,7 +50,10 @@ from loom_cli.rollout.operator.backup_rotation import (
     record_manifest_verified,
     record_restore_verified,
 )
-from loom_cli.rollout.operator.candidate import CandidateIdentityEvidence
+from loom_cli.rollout.operator.candidate import (
+    AdmittedCandidateGitRunner,
+    CandidateIdentityEvidence,
+)
 from loom_cli.rollout.operator.config import OperatorConfig
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_contract import (
@@ -221,6 +224,61 @@ def test_registered_candidate_identity_uses_shared_verifier(
     assert result.evidence["resolved-tree"] == "2" * 40
     assert result.evidence["linear-history-count"] == 46
     assert calls == [candidate]
+
+
+def test_registered_candidate_identity_uses_admitted_resume_git_runner(tmp_path: Path) -> None:
+    candidate = _candidate_binding()
+    calls: list[CandidateBinding] = []
+
+    def resume_identity(_config: object, found: CandidateBinding) -> CandidateIdentityEvidence:
+        calls.append(found)
+        return CandidateIdentityEvidence(
+            resolved_sha=candidate.resolved_sha,
+            resolved_tree="2" * 40,
+            source_mode="sealed-cumulative",
+            approved_base_sha="3" * 40,
+            linear_history_count=46,
+            evidence_digest="4" * 64,
+        )
+
+    check = build_candidate_identity_check(
+        config=_candidate_config(tmp_path),
+        candidate=candidate,
+        run=AdmittedCandidateGitRunner(
+            run=lambda _argv: subprocess.CompletedProcess([], 0, "", ""),
+            verify_candidate=resume_identity,
+        ),
+    )
+
+    result = PreflightDag((check,)).run(_candidate_context())[0]
+
+    assert result.passed
+    assert result.evidence["identity-digest"] == "4" * 64
+    assert calls == [candidate]
+
+
+def test_registered_candidate_identity_rejects_drifted_resume_git_runner(tmp_path: Path) -> None:
+    candidate = _candidate_binding()
+    check = build_candidate_identity_check(
+        config=_candidate_config(tmp_path),
+        candidate=candidate,
+        run=AdmittedCandidateGitRunner(
+            run=lambda _argv: subprocess.CompletedProcess([], 0, "", ""),
+            verify_candidate=lambda _config, _found: CandidateIdentityEvidence(
+                resolved_sha="f" * 40,
+                resolved_tree="2" * 40,
+                source_mode="sealed-cumulative",
+                approved_base_sha="3" * 40,
+                linear_history_count=46,
+                evidence_digest="4" * 64,
+            ),
+        ),
+    )
+
+    result = PreflightDag((check,)).run(_candidate_context())[0]
+
+    assert not result.passed
+    assert result.evidence["identity-digest"] == "0" * 64
 
 
 def test_registered_candidate_identity_rejects_binding_drift_before_git(

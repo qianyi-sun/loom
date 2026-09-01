@@ -62,7 +62,10 @@ from .model import (
 from .policy import sanitized_child_environment
 from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
-from .resume_runtime_upgrade import build_installed_resume_runtime_upgrade_authority
+from .resume_runtime_upgrade import (
+    AdmittedResumeRuntimeUpgrade,
+    build_installed_resume_runtime_upgrade_authority,
+)
 from .staging_mutation_guard import MutationGuardManager
 from .store import RequestStore
 from .systemd import MUTATION_GUARD_CLIENT_OPERATION_TIMEOUT_SECONDS, SystemdUserManager
@@ -1108,6 +1111,8 @@ def _default_dependencies(
     service_uid: int,
     installed_config: OperatorConfig | None = None,
     runner_install_digest: str | None = None,
+    mutation_guard: MutationGuardManager | None = None,
+    resume_runtime_upgrade: AdmittedResumeRuntimeUpgrade | None = None,
 ) -> WorkerDependencies:
     from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
 
@@ -1126,11 +1131,12 @@ def _default_dependencies(
         run=lambda argv: _run(argv, environment=child_environment),
     )
     lifecycle = LifecycleCoordinator(control_config, store=store, systemd=systemd)
-    mutation_guard = MutationGuardManager(
-        config=control_config,
-        service_uid=service_uid,
-        systemd=systemd,
-    )
+    if mutation_guard is None:
+        mutation_guard = MutationGuardManager(
+            config=control_config,
+            service_uid=service_uid,
+            systemd=systemd,
+        )
 
     def clock() -> datetime:
         return datetime.now(UTC)
@@ -1147,6 +1153,7 @@ def _default_dependencies(
         now=clock,
         rollout_runner_install_digest=runner_install_digest,
         installed_config=control_config,
+        resume_runtime_upgrade=resume_runtime_upgrade,
     )
     deep_preflight = composition.authority()
     detached_preflight = build_installed_detached_preflight_runner(
@@ -1286,13 +1293,8 @@ def _default_attempt_dependencies(
         service_uid=service_uid,
         run=run,
     )
-    mutation_guard = MutationGuardManager(
-        config=installed_config,
-        service_uid=service_uid,
-        systemd=systemd,
-    )
+    mutation_guard: MutationGuardManager | None = None
     try:
-        guard_evidence = mutation_guard.assert_ready(request_id)
         resume_runtime_upgrade = (
             build_installed_resume_runtime_upgrade_authority(
                 installed_config,
@@ -1308,6 +1310,16 @@ def _default_attempt_dependencies(
             effective_uid=service_uid,
             resume_runtime_upgrade=resume_runtime_upgrade,
         )
+        if envelope.resolved_tree is None:
+            raise ValueError("worker resume candidate tree is unavailable")
+        candidate_identity = (envelope.resolved_sha, envelope.resolved_tree)
+        mutation_guard = MutationGuardManager(
+            config=installed_config,
+            service_uid=service_uid,
+            systemd=systemd,
+            resolve_candidate=lambda _config: candidate_identity,
+        )
+        guard_evidence = mutation_guard.assert_ready(request_id)
         if (
             guard_evidence.request_id != request_id
             or guard_evidence.candidate_sha != envelope.resolved_sha
@@ -1315,6 +1327,19 @@ def _default_attempt_dependencies(
             or guard_evidence.state != "ready"
         ):
             raise ValueError("staging mutation guard binding drifted")
+        admitted_runtime_upgrade = None
+        if effective_config != installed_config:
+            if resume_runtime_upgrade is None:
+                raise ValueError("worker resume runtime upgrade authority is unavailable")
+            admitted_runtime_upgrade = resume_runtime_upgrade.admit(
+                installed_config,
+                candidate_sha=envelope.resolved_sha,
+                candidate_tree=envelope.resolved_tree,
+                runner_config_sha256=envelope.runner_config_sha256,
+                cluster_config_path=envelope.cluster_config_path,
+            )
+            if admitted_runtime_upgrade.config != effective_config:
+                raise ValueError("worker resume runtime upgrade authority drifted")
         attestation = PreflightAttestationStore(installed_config.state_root).read(
             envelope.preflight_attestation_sha256
         )
@@ -1335,11 +1360,14 @@ def _default_attempt_dependencies(
             service_uid=service_uid,
             installed_config=installed_config,
             runner_install_digest=bindings.runner_install_hash,
+            mutation_guard=mutation_guard,
+            resume_runtime_upgrade=admitted_runtime_upgrade,
         )
     except BaseException:
-        released = mutation_guard.release(request_id)
-        if released.request_id != request_id or released.state != "released":
-            raise ValueError("staging mutation guard release drifted") from None
+        if mutation_guard is not None:
+            released = mutation_guard.release(request_id)
+            if released.request_id != request_id or released.state != "released":
+                raise ValueError("staging mutation guard release drifted") from None
         raise
 
 

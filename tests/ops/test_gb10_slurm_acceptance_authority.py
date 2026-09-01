@@ -1477,6 +1477,10 @@ def observe(argv, *, timeout=30, check=True, deadline=None):
         "schema_version": 1,
     }
     discovery_path.write_text("unique-name-query-before-wait\n")
+    deadline = time.monotonic() + 5
+    while authority._DEFERRED_SIGNAL != signal.SIGTERM and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert authority._DEFERRED_SIGNAL == signal.SIGTERM
     return subprocess.CompletedProcess(argv, 0, "123|loom-test-job\n", "")
 
 
@@ -1525,7 +1529,7 @@ raise SystemExit(3)
         )
         assert process.poll() is None
         process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=15)
     finally:
         if process.poll() is None:
             process.kill()

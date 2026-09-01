@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -42,13 +43,26 @@ def _parse_tool_arguments(raw: object) -> dict[str, Any]:
     return {}
 
 
+def _parse_analysis_plan(text: str | None) -> tuple[str | None, str | None]:
+    if not text:
+        return None, None
+    match = re.search(
+        r"(?is)\banalysis\s*:\s*(.*?)(?=\bplan\s*:|$)",
+        text,
+    )
+    analysis = match.group(1).strip() if match else None
+    match = re.search(
+        r"(?is)\bplan\s*:\s*(.*)$",
+        text,
+    )
+    plan = match.group(1).strip() if match else None
+    return analysis or None, plan or None
+
+
 def _reasoning_from_action(event: dict[str, Any]) -> str | None:
     reasoning = _optional_str(event.get("reasoning_content"))
     if reasoning:
         return reasoning
-    thought = _text_from_thought(event.get("thought"))
-    if thought:
-        return thought
     tool_name = _optional_str(event.get("tool_name"))
     if tool_name == "think":
         tool_call = event.get("tool_call")
@@ -91,6 +105,11 @@ class OpenHandsSdkTrajectoryMapper:
                 projected["tool_name"] = raw_event.get("tool_name")
                 projected["reasoning_content"] = _reasoning_from_action(raw_event)
                 projected["thought"] = _text_from_thought(raw_event.get("thought"))
+                analysis, plan = _parse_analysis_plan(projected["thought"])
+                if analysis is not None:
+                    projected["analysis"] = analysis
+                if plan is not None:
+                    projected["plan"] = plan
                 projected["summary"] = raw_event.get("summary")
                 tool_call = raw_event.get("tool_call")
                 if isinstance(tool_call, dict):

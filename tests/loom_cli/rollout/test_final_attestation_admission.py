@@ -60,7 +60,16 @@ def _check(
         AdmissionPhase.PRE_APPLY,
         AdmissionPhase.POST_APPLY,
     ),
+    probe_calls: list[str] | None = None,
 ) -> RegisteredCheck:
+    def probe(_context: CheckContext) -> CheckProbe:
+        if probe_calls is not None:
+            probe_calls.append(check_id)
+        return CheckProbe(
+            passed=passed,
+            evidence=evidence,  # type: ignore[arg-type]
+        )
+
     return RegisteredCheck(
         spec=CheckSpec(
             check_id=check_id,
@@ -78,12 +87,7 @@ def _check(
             admission_phases=admission_phases,
         ),
         implementation_version="v1",
-        operations={
-            CheckOperation.PROBE: lambda _context: CheckProbe(
-                passed=passed,
-                evidence=evidence,  # type: ignore[arg-type]
-            )
-        },
+        operations={CheckOperation.PROBE: probe},
     )
 
 
@@ -152,6 +156,8 @@ def _checks(
     gb10_inventory_digest: str = "4" * 64,
     baseline_ready: bool = True,
     baseline_epoch: int = 7,
+    runner_install_ready: bool = True,
+    tier0_probe_calls: list[str] | None = None,
 ) -> tuple[RegisteredCheck, ...]:
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "e" * 64,
@@ -166,11 +172,14 @@ def _checks(
             "candidate.identity",
             {"resolved-sha": "a" * 40, "resolved-tree": "b" * 40},
             (EvidenceField("resolved-sha", "string"), EvidenceField("resolved-tree", "string")),
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "runner.install",
             {"attestation-digest": "2" * 64},
             (EvidenceField("attestation-digest", "sha256"),),
+            passed=runner_install_ready,
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "credentials.metadata",
@@ -189,16 +198,19 @@ def _checks(
                 ),
             ),
             policy=SecretRedactionPolicy.METADATA_FINGERPRINTS_ONLY,
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "gb10.shared-mount",
             {"mount-digest": "3" * 64},
             (EvidenceField("mount-digest", "sha256"),),
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "gb10.candidate-source",
             {"source-digest": "b" * 64},
             (EvidenceField("source-digest", "sha256"),),
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "gb10.host-readiness",
@@ -207,6 +219,7 @@ def _checks(
                 EvidenceField("inventory-digest", "sha256", EvidenceClass.OBSERVATION),
                 EvidenceField("boot-ids", "string-map"),
             ),
+            probe_calls=tier0_probe_calls,
         ),
         _check(
             "external-supervisor.predecessor",
@@ -289,6 +302,7 @@ def _checks(
             ),
             passed=predecessor_transition_clear and predecessor_runtime_ready,
             admission_phases=(AdmissionPhase.PRE_APPLY,),
+            probe_calls=tier0_probe_calls,
         ),
     )
     tier2 = (
@@ -879,6 +893,30 @@ def test_post_apply_drift_rejects_wrong_epoch_or_expired_attestation() -> None:
         )
 
 
+def test_post_apply_drift_rejects_runner_install_exemption_for_normal_admission() -> None:
+    plan = _plan(_checks())
+    admission = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    post_apply_plan = _at_epoch(
+        _plan(_checks(runner_install_ready=False)),
+        8,
+    )
+
+    with pytest.raises(ValueError, match="requires resumed admission"):
+        validate_post_apply_attestation_drift(
+            admission=admission,
+            plan=post_apply_plan,
+            current_mutation_epoch=8,
+            now=NOW,
+            attested_dependencies=frozenset({"runner.install"}),
+        )
+
+
 def test_post_apply_drift_classifies_changed_host_identity_as_transient() -> None:
     plan = _plan(_checks())
     admission = validate_final_attestation(
@@ -957,6 +995,49 @@ def test_post_apply_resume_reuses_original_baseline_after_current_health_recheck
     assert resumed.tier2_executions == prior.tier2_executions
     assert resumed.preflight_plan is post_apply_plan
     assert resumed.post_apply_resume is True
+
+
+def test_post_apply_resume_reuses_historical_runner_install_after_proven_upgrade() -> None:
+    plan = _plan(_checks())
+    prior = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    probe_calls: list[str] = []
+    post_apply_plan = _at_epoch(
+        _plan(
+            _checks(
+                baseline_epoch=8,
+                runner_install_ready=False,
+                tier0_probe_calls=probe_calls,
+            )
+        ),
+        8,
+    )
+
+    resumed = validate_post_apply_resume_attestation(
+        prior_admission=prior,
+        candidate=_candidate(),
+        plan=post_apply_plan,
+        current_mutation_epoch=8,
+        now=NOW + timedelta(hours=2),
+        attested_dependencies=frozenset({"runner.install"}),
+    )
+
+    assert resumed.post_apply_resume is True
+    assert resumed.tier0_executions == prior.tier0_executions
+    assert "runner.install" not in probe_calls
+    assert set(probe_calls) == {
+        "candidate.identity",
+        "credentials.metadata",
+        "external-supervisor.predecessor",
+        "gb10.candidate-source",
+        "gb10.host-readiness",
+        "gb10.shared-mount",
+    }
 
 
 def test_post_apply_resume_rejects_unhealthy_current_baseline() -> None:

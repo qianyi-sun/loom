@@ -287,6 +287,8 @@ export interface paths {
                 name: string;
                 description: string;
                 available: boolean;
+                cold_start_available: boolean;
+                cold_start_pools: string[];
               }[];
             };
           };

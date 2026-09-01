@@ -36,13 +36,14 @@ _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX = MappingProxyType(
 PROTECTED_EXTERNAL_SUPERVISOR_UNIT_PREFIXES = tuple(
     _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX
 )
-SUPERVISOR_SCRIPT_PATHS = frozenset(
-    _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX.values()
-)
+SUPERVISOR_SCRIPT_PATHS = frozenset(_PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX.values())
 STAGING_RUNNER_ROOT = "/opt/loom-staging-runner"
 STAGING_CANDIDATE_RUNTIME_ROOT = f"{STAGING_RUNNER_ROOT}/candidates"
 STAGING_NAMESPACE = "loom-staging"
 STAGING_KUBECONFIG = "/var/lib/loom-staging-rollout/kubeconfig"
+STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG = (
+    "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
+)
 STAGING_ROLLOUT_EXECUTION_HOST = "TRT-EAI-OLDLAB-1"
 STAGING_GB10_CONTROLLER_EXECUTION_HOST = "gx10-01c7"
 REHEARSAL_KUBECONFIG = "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig"
@@ -72,6 +73,12 @@ _STAGING_SLURM_AUTHORITIES = {
 }
 _STAGING_DATABASE_SECRETS = {
     "gb10": "loom-external-slurm-autoscaler-db",
+    "oldlab": "loom-external-slurm-autoscaler-db",
+    "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
+    "task-image-builder-oldlab": "loom-external-slurm-autoscaler-db",
+}
+_LEGACY_STAGING_DATABASE_SECRETS = {
+    "gb10": "loom-external-slurm-autoscaler-db",
     "oldlab": "loom-secrets",
     "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
     "task-image-builder-oldlab": "loom-secrets",
@@ -82,8 +89,10 @@ _STAGING_SUPERVISOR_SCRIPTS = {
     "task-image-builder-gb10": TASK_IMAGE_BUILDER_SCRIPT_PATH,
     "task-image-builder-oldlab": TASK_IMAGE_BUILDER_SCRIPT_PATH,
 }
-_STAGING_MANAGER_EXPORT = "deployment/loom-capacity-manager"
-_STAGING_MANAGER_NAMESPACE = "loom-dev"
+_STAGING_WITNESS_CONFIG_MAP = "loom-global-execution-witness-v1"
+_STAGING_WITNESS_NAMESPACE = "loom-dev"
+_STAGING_LEGACY_MANAGER_EXPORT = "deployment/loom-capacity-manager"
+_STAGING_LEGACY_MANAGER_NAMESPACE = "loom-dev"
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -124,10 +133,24 @@ _COMMON_REQUIRED_ARGUMENTS = frozenset(
         "--db-port-forward-stop-timeout-sec",
         "--db-connect-timeout-sec",
         "--freshness-sec",
+        "--global-execution-witness-config-map",
+        "--global-execution-witness-namespace",
+        "--global-execution-witness-kubeconfig",
+        "--expected-manager-public-key-sha256",
+    }
+)
+_WITNESS_ARGUMENTS = frozenset(
+    {
+        "--global-execution-witness-config-map",
+        "--global-execution-witness-namespace",
+        "--global-execution-witness-kubeconfig",
+    }
+)
+_LEGACY_MANAGER_ARGUMENTS = frozenset(
+    {
         "--global-execution-manager-export",
         "--global-execution-manager-namespace",
         "--global-execution-manager-kubeconfig",
-        "--expected-manager-public-key-sha256",
     }
 )
 _TASK_IMAGE_BUILDER_ARGUMENTS = frozenset(
@@ -293,7 +316,7 @@ def _argument_map(args: tuple[str, ...], *, pool_name: str) -> dict[str, str]:
     required = _REQUIRED_ARGUMENTS_BY_POOL.get(pool_name)
     if required is None:
         raise ValueError("external supervisor pool is unauthorized")
-    allowed = required | _OPTIONAL_ARGUMENTS
+    allowed = required | _LEGACY_MANAGER_ARGUMENTS | _OPTIONAL_ARGUMENTS
     if not args or len(args) > 64:
         raise ValueError("external supervisor args are invalid")
     if "--validate-only" in args or any(token.startswith("--validate-only=") for token in args):
@@ -314,7 +337,14 @@ def _argument_map(args: tuple[str, ...], *, pool_name: str) -> dict[str, str]:
         if flag not in allowed or flag in parsed or not value:
             raise ValueError(f"external supervisor argument {flag!r} is unauthorized")
         parsed[flag] = value
-    missing = required - set(parsed)
+    present = set(parsed)
+    witness = present & _WITNESS_ARGUMENTS
+    legacy = present & _LEGACY_MANAGER_ARGUMENTS
+    if witness and legacy:
+        raise ValueError("external supervisor global execution authority is mixed")
+    authority_required = _LEGACY_MANAGER_ARGUMENTS if legacy else _WITNESS_ARGUMENTS
+    selected_required = (required - _WITNESS_ARGUMENTS) | authority_required
+    missing = selected_required - present
     if missing:
         raise ValueError(
             "external supervisor bounded tunnel arguments are missing: "
@@ -344,9 +374,8 @@ def _unit_name(value: str, field: str, suffix: str) -> str:
 
 def _protected_unit_name(value: str, field: str, suffix: str) -> str:
     cleaned = _clean_text(value, field, maximum=128)
-    if (
-        PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(cleaned) is None
-        or not cleaned.endswith(suffix)
+    if PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(cleaned) is None or not cleaned.endswith(
+        suffix
     ):
         raise ValueError(f"external supervisor {field} is not a protected unit name")
     return cleaned
@@ -438,10 +467,13 @@ class ExternalSupervisorIdentity:
         if _safe_absolute_path(self.python_path, "python_path") != staging_python_path(runtime_sha):
             raise ValueError("external supervisor Python path is not canonical")
         expected_script_path = _STAGING_SUPERVISOR_SCRIPTS[self.pool_name]
-        if _safe_absolute_path(
-            self.script_path,
-            "script_path",
-        ) != f"{staging_working_directory(runtime_sha)}/{expected_script_path}":
+        if (
+            _safe_absolute_path(
+                self.script_path,
+                "script_path",
+            )
+            != f"{staging_working_directory(runtime_sha)}/{expected_script_path}"
+        ):
             raise ValueError("external supervisor script path is not canonical")
         if not self.args or any(not isinstance(item, str) for item in self.args):
             raise ValueError("external supervisor args are invalid")
@@ -460,8 +492,7 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor pool argument drifted")
         if self.pool_name.startswith("task-image-builder-"):
             if (
-                arguments["--profile"]
-                != f"{staging_working_directory(runtime_sha)}/{PROFILE_PATH}"
+                arguments["--profile"] != f"{staging_working_directory(runtime_sha)}/{PROFILE_PATH}"
                 or arguments["--git-sha"] != runtime_sha
                 or _IMAGE_TAG_RE.fullmatch(arguments["--image-tag"]) is None
                 or arguments["--env-config-version"] != arguments["--image-tag"]
@@ -474,19 +505,28 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor Slurm authority drifted")
         if arguments["--namespace"] != STAGING_NAMESPACE:
             raise ValueError("external supervisor staging namespace is not canonical")
-        if arguments["--kubeconfig"] != STAGING_KUBECONFIG:
+        legacy_manager_authority = _LEGACY_MANAGER_ARGUMENTS <= arguments.keys()
+        expected_kubeconfig = (
+            STAGING_KUBECONFIG
+            if legacy_manager_authority
+            else STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG
+        )
+        if arguments["--kubeconfig"] != expected_kubeconfig:
             raise ValueError("external supervisor staging kubeconfig is not canonical")
+        global_execution_ready = (
+            arguments["--global-execution-manager-export"] == _STAGING_LEGACY_MANAGER_EXPORT
+            and arguments["--global-execution-manager-namespace"]
+            == _STAGING_LEGACY_MANAGER_NAMESPACE
+            and arguments["--global-execution-manager-kubeconfig"] == STAGING_KUBECONFIG
+            if legacy_manager_authority
+            else arguments["--global-execution-witness-config-map"] == _STAGING_WITNESS_CONFIG_MAP
+            and arguments["--global-execution-witness-namespace"] == _STAGING_WITNESS_NAMESPACE
+            and arguments["--global-execution-witness-kubeconfig"]
+            == STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG
+        )
         if (
-            arguments["--global-execution-manager-export"]
-            != _STAGING_MANAGER_EXPORT
-            or arguments["--global-execution-manager-namespace"]
-            != _STAGING_MANAGER_NAMESPACE
-            or arguments["--global-execution-manager-kubeconfig"]
-            != STAGING_KUBECONFIG
-            or _SHA256_RE.fullmatch(
-                arguments["--expected-manager-public-key-sha256"]
-            )
-            is None
+            not global_execution_ready
+            or _SHA256_RE.fullmatch(arguments["--expected-manager-public-key-sha256"]) is None
             or arguments["--expected-manager-public-key-sha256"] == "0" * 64
         ):
             raise ValueError("external supervisor global execution authority is not canonical")
@@ -495,13 +535,13 @@ class ExternalSupervisorIdentity:
             "--db-secret-key": "cp-db-url",
             "--scontrol": "/usr/bin/scontrol",
         }
-        if (
-            any(
-                flag in arguments and arguments[flag] != expected
-                for flag, expected in optional_authority.items()
-            )
-            or arguments.get("--db-secret-name", "loom-secrets")
-            != (_STAGING_DATABASE_SECRETS[self.pool_name])
+        if any(
+            flag in arguments and arguments[flag] != expected
+            for flag, expected in optional_authority.items()
+        ) or arguments.get("--db-secret-name", "loom-secrets") != (
+            _LEGACY_STAGING_DATABASE_SECRETS[self.pool_name]
+            if legacy_manager_authority
+            else _STAGING_DATABASE_SECRETS[self.pool_name]
         ):
             raise ValueError("external supervisor optional authority is not canonical")
         try:
@@ -776,8 +816,7 @@ class ExternalSupervisorArtifact:
         ports = [supervisor.db_local_port for supervisor in self.supervisors]
         rehearsal_ports = [_rehearsal_db_local_port(port) for port in ports]
         expected_scripts = {
-            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
-            for supervisor in self.supervisors
+            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name] for supervisor in self.supervisors
         }
         if (
             self.schema_version != 3
@@ -856,8 +895,7 @@ class ExternalSupervisorArtifact:
         if not supervisors:
             raise ValueError("external supervisor execution host is not present")
         selected_script_paths = {
-            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
-            for supervisor in supervisors
+            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name] for supervisor in supervisors
         }
         selected_script_sha256 = {
             path: digest
@@ -1212,8 +1250,7 @@ def build_external_supervisor_artifact(
         str(policy["pool_name"])
         for policy in profile.task_image_builder_policies
         if manager_witness_export_bootstrap
-        and "manager_witness_export_bootstrap_pending"
-        in policy.get("activation_blockers", ())
+        and "manager_witness_export_bootstrap_pending" in policy.get("activation_blockers", ())
     }
     desired_execution_host = (
         execution_host.split(".", 1)[0].casefold() if execution_host is not None else None
@@ -1247,10 +1284,7 @@ def build_external_supervisor_artifact(
     script_paths = {
         relative_path: _candidate_source(root, relative_path)
         for relative_path in sorted(
-            {
-                _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
-                for supervisor in supervisors
-            }
+            {_STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name] for supervisor in supervisors}
         )
     }
     scripts_first = {
@@ -1375,6 +1409,7 @@ __all__ = [
     "REHEARSAL_POLICY_VALIDATION_MODULE",
     "SCRIPT_PATH",
     "STAGING_CANDIDATE_RUNTIME_ROOT",
+    "STAGING_EXTERNAL_SUPERVISOR_KUBECONFIG",
     "STAGING_GB10_CONTROLLER_EXECUTION_HOST",
     "STAGING_KUBECONFIG",
     "STAGING_NAMESPACE",

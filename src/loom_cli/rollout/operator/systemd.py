@@ -86,6 +86,7 @@ _ACTIVE_STATES = frozenset(
 _STATUS_TOKEN_RE = re.compile(r"^[a-z0-9-]+$")
 _RESULT_TOKEN_RE = re.compile(r"^[a-z0-9-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRANSIENT_UNIT_RE = re.compile(
     r"(?:loom-staging-backup-[a-z0-9][a-z0-9-]{7,79}"
     r"|loom-staging-mutation-guard-[a-z0-9][a-z0-9-]{7,79}"
@@ -115,6 +116,24 @@ _SHOW_PROPERTIES = (
 
 def _new_mutation_guard_generation() -> str:
     return secrets.token_hex(16)
+
+
+def _guard_candidate_identity(
+    candidate_sha: str | None,
+    candidate_tree: str | None,
+    *,
+    error_type: type[UnitLaunchError] | type[SystemdOperationError],
+) -> tuple[str, str] | None:
+    if candidate_sha is None and candidate_tree is None:
+        return None
+    if (
+        not isinstance(candidate_sha, str)
+        or _SHA_RE.fullmatch(candidate_sha) is None
+        or not isinstance(candidate_tree, str)
+        or _SHA_RE.fullmatch(candidate_tree) is None
+    ):
+        raise error_type("mutation guard candidate identity is invalid")
+    return candidate_sha, candidate_tree
 
 
 def _same_mutation_guard_acquisition(
@@ -742,12 +761,45 @@ class SystemdUserManager:
         self,
         request_id: str,
         generation: str,
+        *,
+        candidate_sha: str | None = None,
+        candidate_tree: str | None = None,
+        runner_config_sha256: str | None = None,
+        cluster_config_path: Path | None = None,
     ) -> list[str]:
         unit_name = mutation_guard_unit_name(request_id)
         try:
             validate_mutation_guard_generation(generation)
         except MutationGuardError as exc:
             raise UnitLaunchError("mutation guard generation is invalid") from exc
+        candidate_identity = _guard_candidate_identity(
+            candidate_sha,
+            candidate_tree,
+            error_type=UnitLaunchError,
+        )
+        authority_arguments: tuple[str, ...] = ()
+        if candidate_identity is None:
+            if runner_config_sha256 is not None or cluster_config_path is not None:
+                raise UnitLaunchError("mutation guard candidate authority is incomplete")
+        else:
+            if (
+                not isinstance(runner_config_sha256, str)
+                or _SHA256_RE.fullmatch(runner_config_sha256) is None
+                or not isinstance(cluster_config_path, Path)
+                or not cluster_config_path.is_absolute()
+                or ".." in cluster_config_path.parts
+            ):
+                raise UnitLaunchError("mutation guard candidate authority is invalid")
+            authority_arguments = (
+                "--candidate-sha",
+                candidate_identity[0],
+                "--candidate-tree",
+                candidate_identity[1],
+                "--runner-config-sha256",
+                runner_config_sha256,
+                "--cluster-config-path",
+                str(cluster_config_path),
+            )
         environment = sanitized_child_environment(
             self.config,
             service_uid=self.service_uid,
@@ -768,7 +820,18 @@ class SystemdUserManager:
                 request_id,
                 "--generation",
                 generation,
+                *authority_arguments,
             ),
+        )
+        fence_candidate_arguments = (
+            ()
+            if candidate_identity is None
+            else (
+                "--candidate-sha",
+                candidate_identity[0],
+                "--candidate-tree",
+                candidate_identity[1],
+            )
         )
         fence_command = (
             "/usr/bin/env",
@@ -782,6 +845,7 @@ class SystemdUserManager:
             request_id,
             "--generation",
             generation,
+            *fence_candidate_arguments,
         )
         argv[10:10] = [
             "--property",
@@ -891,6 +955,9 @@ class SystemdUserManager:
         self,
         request_id: str,
         generation: str | None = None,
+        *,
+        candidate_sha: str | None = None,
+        candidate_tree: str | None = None,
     ) -> None:
         """Hard-fence exact owners unless normal guard release was verified."""
 
@@ -899,6 +966,11 @@ class SystemdUserManager:
                 validate_mutation_guard_generation(generation)
             except MutationGuardError as exc:
                 raise SystemdOperationError("mutation guard fence generation is invalid") from exc
+        candidate_identity = _guard_candidate_identity(
+            candidate_sha,
+            candidate_tree,
+            error_type=SystemdOperationError,
+        )
         evidence_path = guard_evidence_path(self.config, request_id)
         try:
             evidence = read_mutation_guard_evidence(
@@ -911,7 +983,13 @@ class SystemdUserManager:
             evidence is not None
             and generation is not None
             and evidence.request_id == request_id
-            and evidence.candidate_sha == self.config.runner_repo.parent.name
+            and evidence.candidate_sha
+            == (
+                self.config.runner_repo.parent.name
+                if candidate_identity is None
+                else candidate_identity[0]
+            )
+            and (candidate_identity is None or evidence.candidate_tree == candidate_identity[1])
             and evidence.generation == generation
             and evidence.state == "released"
         ):
@@ -944,6 +1022,8 @@ class SystemdUserManager:
         *,
         request_id: str,
         next_generation: str,
+        candidate_sha: str,
+        candidate_tree: str | None,
     ) -> None:
         try:
             evidence = read_mutation_guard_evidence(
@@ -954,7 +1034,8 @@ class SystemdUserManager:
             raise UnitLaunchError("mutation guard evidence identity is already occupied") from exc
         if (
             evidence.request_id != request_id
-            or evidence.candidate_sha != self.config.runner_repo.parent.name
+            or evidence.candidate_sha != candidate_sha
+            or (candidate_tree is not None and evidence.candidate_tree != candidate_tree)
             or evidence.generation == next_generation
             or evidence.state != "released"
         ):
@@ -987,11 +1068,38 @@ class SystemdUserManager:
         finally:
             os.close(directory_fd)
 
-    def start_mutation_guard(self, request_id: str) -> MutationGuardEvidence:
+    def start_mutation_guard(
+        self,
+        request_id: str,
+        *,
+        candidate_sha: str | None = None,
+        candidate_tree: str | None = None,
+        runner_config_sha256: str | None = None,
+        cluster_config_path: Path | None = None,
+    ) -> MutationGuardEvidence:
         mutation_guard_unit_name(request_id)
+        candidate_identity = _guard_candidate_identity(
+            candidate_sha,
+            candidate_tree,
+            error_type=UnitLaunchError,
+        )
+        expected_candidate_sha = (
+            self.config.runner_repo.parent.name
+            if candidate_identity is None
+            else candidate_identity[0]
+        )
+        expected_candidate_tree = None if candidate_identity is None else candidate_identity[1]
         if self.show_mutation_guard(request_id) is not None:
             raise UnitLaunchError("mutation guard unit identity is already occupied")
         generation = self._new_guard_generation()
+        launch_argv = self.start_mutation_guard_argv(
+            request_id,
+            generation,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            runner_config_sha256=runner_config_sha256,
+            cluster_config_path=cluster_config_path,
+        )
         evidence_path = guard_evidence_path(self.config, request_id)
         try:
             os.lstat(evidence_path)
@@ -1004,9 +1112,11 @@ class SystemdUserManager:
                 evidence_path,
                 request_id=request_id,
                 next_generation=generation,
+                candidate_sha=expected_candidate_sha,
+                candidate_tree=expected_candidate_tree,
             )
         try:
-            result = self._run(self.start_mutation_guard_argv(request_id, generation))
+            result = self._run(launch_argv)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnitLaunchError("transient mutation guard could not be started") from exc
         if result.returncode != 0:
@@ -1035,7 +1145,11 @@ class SystemdUserManager:
                 break
             if (
                 evidence.request_id != request_id
-                or evidence.candidate_sha != self.config.runner_repo.parent.name
+                or evidence.candidate_sha != expected_candidate_sha
+                or (
+                    expected_candidate_tree is not None
+                    and evidence.candidate_tree != expected_candidate_tree
+                )
                 or evidence.generation != generation
                 or evidence.guard_pid != status.main_pid
                 or evidence.state != "ready"
@@ -1046,7 +1160,11 @@ class SystemdUserManager:
         if failure is None:
             failure = UnitLaunchError("mutation guard readiness timed out")
         try:
-            self.stop_mutation_guard(request_id)
+            self.stop_mutation_guard(
+                request_id,
+                candidate_sha=candidate_sha,
+                candidate_tree=candidate_tree,
+            )
         except SystemdOperationError:
             pass
         raise failure
@@ -1091,12 +1209,28 @@ class SystemdUserManager:
         _mutation_guard_request_id(unit_name, error_type=SystemdQueryError)
         return self._show_validated(unit_name)
 
-    def stop_mutation_guard(self, request_id: str) -> MutationGuardEvidence | None:
+    def stop_mutation_guard(
+        self,
+        request_id: str,
+        *,
+        candidate_sha: str | None = None,
+        candidate_tree: str | None = None,
+    ) -> MutationGuardEvidence | None:
         try:
             unit_name = mutation_guard_unit_name(request_id)
             _mutation_guard_request_id(unit_name, error_type=SystemdOperationError)
         except UnitLaunchError as exc:
             raise SystemdOperationError("mutation guard request identity is invalid") from exc
+        candidate_identity = _guard_candidate_identity(
+            candidate_sha,
+            candidate_tree,
+            error_type=SystemdOperationError,
+        )
+        expected_candidate_sha = (
+            self.config.runner_repo.parent.name
+            if candidate_identity is None
+            else candidate_identity[0]
+        )
         evidence_path = guard_evidence_path(self.config, request_id)
         status = self._show_validated(unit_name)
         if status is None:
@@ -1117,7 +1251,11 @@ class SystemdUserManager:
                 raise SystemdOperationError("mutation guard release evidence is invalid") from exc
             if (
                 evidence.request_id != request_id
-                or evidence.candidate_sha != self.config.runner_repo.parent.name
+                or evidence.candidate_sha != expected_candidate_sha
+                or (
+                    candidate_identity is not None
+                    and evidence.candidate_tree != candidate_identity[1]
+                )
                 or evidence.state != "released"
             ):
                 raise SystemdOperationError("absent mutation guard was not released")
@@ -1133,7 +1271,11 @@ class SystemdUserManager:
         else:
             if (
                 observed_ready.request_id == request_id
-                and observed_ready.candidate_sha == self.config.runner_repo.parent.name
+                and observed_ready.candidate_sha == expected_candidate_sha
+                and (
+                    candidate_identity is None
+                    or observed_ready.candidate_tree == candidate_identity[1]
+                )
                 and observed_ready.guard_pid == status.main_pid
                 and observed_ready.state == "ready"
             ):
@@ -1164,7 +1306,8 @@ class SystemdUserManager:
         if (
             ready_evidence is None
             or evidence.request_id != request_id
-            or evidence.candidate_sha != self.config.runner_repo.parent.name
+            or evidence.candidate_sha != expected_candidate_sha
+            or (candidate_identity is not None and evidence.candidate_tree != candidate_identity[1])
             or evidence.state != "released"
             or not _same_mutation_guard_acquisition(ready_evidence, evidence)
         ):

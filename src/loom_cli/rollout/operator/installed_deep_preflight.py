@@ -39,6 +39,7 @@ from .config import OperatorConfig
 from .deep_preflight_authority import DeepPreflightAuthority, RuntimePurpose
 from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
+from .resume_runtime_upgrade import AdmittedResumeRuntimeUpgrade
 
 BackupAuthorityFactory = Callable[[int], BackupAdmissionAuthority]
 ManifestFactory = Callable[[CandidateBinding], RenderManifest]
@@ -84,6 +85,7 @@ class InstalledDeepPreflightComposition:
     read_mutation_epoch: Callable[[], int]
     read_database_schema_revision: Callable[[], str]
     now: Callable[[], datetime]
+    resume_runtime_upgrade: AdmittedResumeRuntimeUpgrade | None = None
     importer: ModuleImporter = importlib.import_module
     max_concurrency: int = 8
     gb10_candidate_source_run: SystemdCommandRunner | None = None
@@ -142,7 +144,11 @@ class InstalledDeepPreflightComposition:
             service_uid=self.service_uid,
             service_gid=self.service_gid,
             runner_install_digest=self.inputs.runner_install_digest,
-            git_run=self.git_run,
+            git_run=(
+                self.git_run
+                if self.resume_runtime_upgrade is None
+                else self.resume_runtime_upgrade.candidate_git_runner(self.git_run)
+            ),
             credential_sources=self.inputs.credential_sources,
             executable_lookup=self.executable_lookup,
             docker_runtime_run=self.docker_runtime_run,
@@ -181,9 +187,7 @@ class InstalledDeepPreflightComposition:
             now=self.now,
             importer=self.importer,
             loaded_artifacts=loaded,
-            permit_reserved_rotation_candidate=(
-                purpose is RuntimePurpose.DETACHED_REHEARSAL
-            ),
+            permit_reserved_rotation_candidate=(purpose is RuntimePurpose.DETACHED_REHEARSAL),
             gb10_candidate_source_run=self.gb10_candidate_source_run,
             container_registry=self.container_registry,
             container_registry_push=self.container_registry_push,
@@ -197,6 +201,11 @@ class InstalledDeepPreflightComposition:
             read_mutation_epoch=self.read_mutation_epoch,
             now=self.now,
             max_concurrency=self.max_concurrency,
+            post_apply_attested_dependencies=(
+                frozenset()
+                if self.resume_runtime_upgrade is None
+                else frozenset({"runner.install"})
+            ),
         )
 
 

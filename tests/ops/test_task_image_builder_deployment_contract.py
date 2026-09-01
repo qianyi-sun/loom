@@ -37,6 +37,7 @@ def test_staging_activates_both_provisioned_native_builders() -> None:
         assert row["exclusive"] is True
         assert row["requested_concurrency"] == 1
         assert row["max_jobs"] > 0
+        assert row["failure_backoff_seconds"] == 300
         assert "builder_token_not_provisioned" not in row["activation_blockers"]
         assert "registry_push_credentials_not_provisioned" not in row["activation_blockers"]
         assert "registry_retention_not_provisioned" not in row["activation_blockers"]
@@ -103,13 +104,15 @@ def test_staging_builder_supervisors_match_native_activation() -> None:
         assert args.global_execution_witness_json is None
         assert args.manager_public_key is None
         assert args.expected_manager_public_key_sha256_file is None
-        assert args.global_execution_manager_export == (
-            "deployment/loom-capacity-manager"
+        assert args.global_execution_witness_config_map == ("loom-global-execution-witness-v1")
+        assert args.global_execution_witness_namespace == "loom-dev"
+        assert args.global_execution_witness_kubeconfig == (
+            "/var/lib/loom-staging-rollout/external-supervisor.kubeconfig"
         )
-        assert args.global_execution_manager_namespace == "loom-dev"
-        assert args.global_execution_manager_kubeconfig == (
-            "/var/lib/loom-staging-rollout/kubeconfig"
-        )
+        assert args.global_execution_manager_export is None
+        assert args.global_execution_manager_namespace is None
+        assert args.global_execution_manager_kubeconfig is None
+        assert args.kubeconfig == ("/var/lib/loom-staging-rollout/external-supervisor.kubeconfig")
         assert args.expected_manager_public_key_sha256 == (
             "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd"
         )
@@ -209,3 +212,107 @@ def test_release_manifest_preserves_dual_arch_builder_activation() -> None:
     assert by_arch["arm64"]["enabled"] is True
     assert by_arch["arm64"]["activation_blockers"] == []
     assert all(row["exclusive"] is True for row in builders)
+
+
+def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None:
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
+    phase2_boundary = " ".join(runbook.split("## Closed Phase 2 boundary", maxsplit=1)[1].split())
+
+    assert "do not activate a rootless provider, policy, or supervisor" in phase2_boundary
+    assert "does not block the active native Phase 1 builder" in phase2_boundary
+    assert "rerun task `4139e767`" in phase2_boundary
+    assert "must still wait for every active Phase 1 convergence gate above" in phase2_boundary
+
+
+def test_phase1_runbook_assigns_transition_cleanup_to_protected_precredential_apply() -> None:
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+
+    assert "protected pre-credential transition cleanup" in normalized
+    assert "complete four-object predecessor set" in normalized
+    assert "GC-reduced admission-policy and admission-binding pair" in normalized
+    assert "complete absence" in normalized
+    assert (
+        "RoleBinding, Role, ValidatingAdmissionPolicyBinding, then ValidatingAdmissionPolicy"
+        in normalized
+    )
+    assert "TRANSITION_PRESENT_COUNT" not in runbook
+    assert 'delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"' not in normalized
+
+
+def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() -> None:
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
+    rollback = runbook.split("## Rollback order", maxsplit=1)[1].split(
+        "## Disabled Phase 2 prerequisites", maxsplit=1
+    )[0]
+    rollback_normalized = " ".join(rollback.replace("\\\n", "").split())
+    gb10_readback = rollback.split("On `gx10-01c7`, run the following locally:", maxsplit=1)[
+        1
+    ].split("On `TRT-EAI-OLDLAB-1`, run the following locally:", maxsplit=1)[0]
+    oldlab_readback = rollback.split(
+        "On `TRT-EAI-OLDLAB-1`, run the following locally:", maxsplit=1
+    )[1]
+
+    assert "PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" not in rollback
+    assert "sudo install" not in rollback
+    assert "protected credential-before-unit convergence" in rollback
+    assert '--check "$SUPERVISOR_KUBECONFIG"' in rollback
+    assert "get secret loom-external-slurm-autoscaler-db -o name" in rollback
+    assert "auth can-i --all-namespaces create pods/exec" not in rollback
+    assert "On `gx10-01c7`, run the following locally:" in rollback
+    assert "On `TRT-EAI-OLDLAB-1`, run the following locally:" in rollback
+    assert rollback.count("get namespaces -o name") == 2
+    assert rollback.count("auth can-i create pods/exec") == 2
+    for controller_readback in (gb10_readback, oldlab_readback):
+        assert "ROLLBACK_RELEASE_SHA=REVIEWED_MERGED_DEV_SHA" in controller_readback
+        assert '[[ "$ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in controller_readback
+        assert (
+            'ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/'
+            '$ROLLBACK_RELEASE_SHA/repo"' in controller_readback
+        )
+    assert (
+        rollback.count(
+            'ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"'
+        )
+        == 2
+    )
+    assert 'test "$ROLLBACK_CANDIDATE_ROOT" = ' not in rollback_normalized
+    assert (
+        rollback_normalized.count(
+            'test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = "$ROLLBACK_RELEASE_SHA"'
+        )
+        == 2
+    )
+    assert rollback.count('test -z "$(git -C "$ROLLBACK_CANDIDATE_ROOT" status --porcelain=v1') == 2
+    assert (
+        rollback.count(
+            '"$ROLLBACK_CANDIDATE_ROOT/deploy/slurm/'
+            'publish-external-slurm-autoscaler-kubeconfig.sh"'
+        )
+        == 2
+    )
+    assert (
+        '"$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"'
+        not in rollback
+    )
+
+
+def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:
+    runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+
+    assert "as_supervisor journalctl" not in normalized
+    assert "sudo journalctl --lines=0 --show-cursor --no-pager" in normalized
+    assert '_UID="$SUPERVISOR_UID"' in runbook
+    assert '_SYSTEMD_USER_UNIT="$UNIT"' in runbook
+    assert 'JOURNAL_PIPE_STATUS=("${PIPESTATUS[@]}")' in normalized
+    assert 'sudo chown "$SUPERVISOR_USER:$SUPERVISOR_GROUP" "$JOURNAL_PATH"' in normalized
+    assert 'sudo chmod 0600 "$JOURNAL_PATH"' in normalized

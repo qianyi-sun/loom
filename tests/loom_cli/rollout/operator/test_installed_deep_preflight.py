@@ -276,6 +276,7 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         installed_deep_preflight_factory, "build_external_supervisor_artifact", build
     )
 
+    admitted_upgrade = SimpleNamespace(config=config)
     installed_deep_preflight_factory.build_installed_deep_preflight_composition(
         config,
         service_uid=995,
@@ -283,10 +284,12 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
         store=SimpleNamespace(),  # type: ignore[arg-type]
         now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
         installed_config=installed_config,
+        resume_runtime_upgrade=admitted_upgrade,  # type: ignore[arg-type]
     )
     rehearsal_factory = captured["composition"]["rehearsal_factory"]  # type: ignore[index]
     assert callable(rehearsal_factory)
     assert captured["sanitized_config"] == installed_config
+    assert captured["composition"]["resume_runtime_upgrade"] is admitted_upgrade  # type: ignore[index]
     assert rehearsal_factory(candidate, 8, RuntimePurpose.DETACHED_REHEARSAL, loaded) == (  # type: ignore[operator]
         "actions",
         "identity",

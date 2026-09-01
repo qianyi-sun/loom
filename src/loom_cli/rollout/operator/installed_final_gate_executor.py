@@ -35,12 +35,19 @@ from .protected_apply_executor import (
 from .protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
 )
+from .protected_external_supervisor_credential_transport import (
+    FixedLocalExternalSupervisorCredentialTransport,
+    ProtectedExternalSupervisorCredentialTransport,
+)
 from .protected_external_supervisor_transport import (
     ProtectedExternalSupervisorTransport,
     build_fixed_external_supervisor_transport,
 )
 from .protected_gb10_external_supervisor_transport import (
     GB10_CONTROLLER_EXECUTION_HOST,
+    GB10_CONTROLLER_SERVICE_GID,
+    GB10_CONTROLLER_SERVICE_UID,
+    GB10ExternalSupervisorCredentialTransport,
     build_fixed_gb10_external_supervisor_transport,
 )
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
@@ -155,6 +162,7 @@ class InstalledFinalGateExecutor:
             or self.service_uid <= 0
             or self.service_gid <= 0
             or os.geteuid() != self.service_uid
+            or os.getegid() != self.service_gid
             or not callable(self.verify_install)
         ):
             raise ValueError("installed final gate authority is invalid")
@@ -190,6 +198,26 @@ class InstalledFinalGateExecutor:
                     build_fixed_external_supervisor_transport(service_uid=self.service_uid)
                 ),
             }
+            external_supervisor_credentials: dict[
+                str, ProtectedExternalSupervisorCredentialTransport
+            ] = {
+                GB10_CONTROLLER_EXECUTION_HOST: GB10ExternalSupervisorCredentialTransport(
+                    gb10_controller
+                ),
+                STAGING_ROLLOUT_EXECUTION_HOST: FixedLocalExternalSupervisorCredentialTransport(
+                    candidate_root=effective_config.runner_repo,
+                    execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                    service_uid=self.service_uid,
+                    service_gid=self.service_gid,
+                ),
+            }
+            external_supervisor_credential_identities = {
+                GB10_CONTROLLER_EXECUTION_HOST: (
+                    GB10_CONTROLLER_SERVICE_UID,
+                    GB10_CONTROLLER_SERVICE_GID,
+                ),
+                STAGING_ROLLOUT_EXECUTION_HOST: (self.service_uid, self.service_gid),
+            }
             environment_state = HttpxProtectedEnvironmentStateTransport(
                 candidate_root=effective_config.runner_repo,
                 admin_token_path=Path(effective_config.admin_token_source.removeprefix("file:")),
@@ -209,6 +237,8 @@ class InstalledFinalGateExecutor:
                 environment_state_transport=environment_state,
                 candidate_root=effective_config.runner_repo,
                 external_supervisor_transports=external_supervisors,
+                external_supervisor_credential_transports=external_supervisor_credentials,
+                external_supervisor_credential_identities=external_supervisor_credential_identities,
                 container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.convergence":
@@ -219,6 +249,8 @@ class InstalledFinalGateExecutor:
                 environment_state_transport=environment_state,
                 candidate_root=effective_config.runner_repo,
                 external_supervisor_transports=external_supervisors,
+                external_supervisor_credential_transports=external_supervisor_credentials,
+                external_supervisor_credential_identities=external_supervisor_credential_identities,
                 container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.capacity":
