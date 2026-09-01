@@ -30,6 +30,7 @@ from loom.request_params import coerce_request_params
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
+from loom_control_plane.service_execution import request_trial_execution_cancellation
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
@@ -526,6 +527,11 @@ async def cancel_trial(
             .mappings()
             .one_or_none()
         )
+        if row is not None:
+            await request_trial_execution_cancellation(
+                session,
+                trial_id=trial_id,
+            )
         await session.commit()
 
     if row is None:
