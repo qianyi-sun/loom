@@ -152,9 +152,6 @@ def _materialize_kubernetes_job_defaults(job: dict[str, object]) -> None:
         "controller-uid": job_uid,
         "job-name": job_name,
     }
-    labels = metadata["labels"]
-    assert isinstance(labels, dict)
-    labels.update(controller_labels)
     metadata.update(
         {
             "creationTimestamp": "2026-07-20T00:00:00Z",
@@ -323,7 +320,7 @@ def test_refresh_rejects_drifted_existing_job_before_apply(tmp_path: Path) -> No
     assert commands.applies == 0
 
 
-def test_refresh_accepts_only_the_expected_kubernetes_defaulted_job(
+def test_refresh_accepts_kubernetes_job_metadata_without_controller_labels(
     tmp_path: Path,
 ) -> None:
     service, commands = _service(tmp_path, existing=True)

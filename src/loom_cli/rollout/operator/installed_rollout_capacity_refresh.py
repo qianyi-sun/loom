@@ -265,10 +265,7 @@ def _require_metadata(
         **expected,
         "creationTimestamp": creation_timestamp,
         "generation": 1,
-        "labels": {
-            **expected_labels,
-            **_controller_labels(job_name=name, job_uid=uid),
-        },
+        "labels": expected_labels,
         "resourceVersion": resource_version,
         "uid": uid,
     }
