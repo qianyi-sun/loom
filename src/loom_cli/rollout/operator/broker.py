@@ -21,6 +21,7 @@ from uuid import uuid4
 from loom_cli.cluster_config import lifecycle_inventory_buckets, load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
+from loom_cli.rollout.gb10_slurm_acceptance import GB10_SLURM_WORKER_HOSTS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 from loom_cli.rollout.preflight_artifact_reference import PreflightArtifactReference
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
@@ -83,6 +84,9 @@ from .protected_apply_journal import (
     read_component_failure_diagnostic,
 )
 from .protected_apply_recovery import find_advanced_epoch_attempt
+from .protected_gb10_external_supervisor_transport import (
+    CAPACITY_ACCEPTANCE_FAILURE_CODES,
+)
 from .readonly_capacity_client import verify_installed_immutable_objects
 from .readonly_database_client import (
     InstalledReadonlyDatabaseEvidenceSource,
@@ -110,11 +114,19 @@ _SEALED_CUMULATIVE_COORDINATORS = frozenset({"qianyi", "hongjian", "devansh"})
 _PROTECTED_APPLY_COMPONENTS = frozenset(
     {
         "database-migration",
+        "environment-state",
+        "external-supervisor-credential-gb10",
+        "external-supervisor-credential-oldlab",
+        "external-supervisor-database-secret",
+        "external-supervisor-reconciliation",
+        "external-supervisor-transition-cleanup",
         "mutation-epoch-claim",
         "staging-manifests",
         "gb10-candidate",
         "production-defaults",
         "external-supervisors",
+        "external-supervisors-gb10",
+        "external-supervisors-oldlab",
     }
 )
 
@@ -1348,7 +1360,18 @@ def _protected_apply_progress(
     dependencies: BrokerDependencies,
     request_id: str,
     attempt_number: int,
-) -> tuple[str, str, tuple[str, ...], str | None, str | None] | None:
+) -> (
+    tuple[
+        str,
+        str,
+        tuple[str, ...],
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ]
+    | None
+):
     """Return only secret-free component metadata from the protected journal."""
     root = (
         dependencies.config.state_root
@@ -1418,6 +1441,8 @@ def _protected_apply_progress(
                 failed_hosts = failure.failed_hosts
             failure_code: str | None = None
             diagnostic: str | None = None
+            primary_failure_code: str | None = None
+            compensation_failure_code: str | None = None
             diagnostic_path = component_root / "failure-diagnostic.json"
             try:
                 has_diagnostic = _private_progress_file(
@@ -1442,24 +1467,28 @@ def _protected_apply_progress(
                 if failure_diagnostic is not None:
                     failure_code = failure_diagnostic.failure_code
                     diagnostic = failure_diagnostic.diagnostic
+                    primary_failure_code = failure_diagnostic.primary_failure_code
+                    compensation_failure_code = failure_diagnostic.compensation_failure_code
             return (
                 component_id,
                 "protected_component_incomplete",
                 failed_hosts,
                 failure_code,
                 diagnostic,
+                primary_failure_code,
+                compensation_failure_code,
             )
         last_complete = component_id
     if last_complete is None:
         return None
-    return last_complete, "protected_component_complete", (), None, None
+    return last_complete, "protected_component_complete", (), None, None, None, None
 
 
 def _final_gate_progress(
     dependencies: BrokerDependencies,
     request_id: str,
     attempt_number: int,
-) -> tuple[str, str, str | None] | None:
+) -> tuple[str, str, str | None, str | None, str | None] | None:
     """Return only normalized final-gate identity and outcome metadata."""
     journal = FinalGateExecutionStore(
         dependencies.config.state_root,
@@ -1475,7 +1504,25 @@ def _final_gate_progress(
     completed = [executions[check_id] for check_id in FINAL_CHECK_IDS if check_id in executions]
     selected = next((execution for execution in completed if not execution.passed), completed[-1])
     failure_code = None if selected.passed else selected.failure_code
-    return selected.check_id, selected.outcome.value, failure_code
+    capacity_failure_code: str | None = None
+    capacity_node: str | None = None
+    if selected.check_id == "final.capacity" and not selected.passed:
+        blockers = selected.evidence.get("blockers")
+        if isinstance(blockers, dict) and set(blockers) <= {"capacity", "capacity-node"}:
+            candidate_code = blockers.get("capacity")
+            candidate_node = blockers.get("capacity-node")
+            if candidate_code in CAPACITY_ACCEPTANCE_FAILURE_CODES and (
+                candidate_node is None or candidate_node in GB10_SLURM_WORKER_HOSTS
+            ):
+                capacity_failure_code = cast(str, candidate_code)
+                capacity_node = cast(str | None, candidate_node)
+    return (
+        selected.check_id,
+        selected.outcome.value,
+        failure_code,
+        capacity_failure_code,
+        capacity_node,
+    )
 
 
 def _request_status(
@@ -1523,9 +1570,15 @@ def _request_status(
         except RequestStoreError:
             protected_progress = None
         if protected_progress is not None:
-            component_id, progress_reason, failed_hosts, failure_code, diagnostic = (
-                protected_progress
-            )
+            (
+                component_id,
+                progress_reason,
+                failed_hosts,
+                failure_code,
+                diagnostic,
+                primary_failure_code,
+                compensation_failure_code,
+            ) = protected_progress
             payload["protected_component"] = component_id
             payload["protected_component_status"] = progress_reason
             if failed_hosts:
@@ -1538,6 +1591,10 @@ def _request_status(
                     known_secrets=dependencies.known_secrets(),
                     limit=512,
                 )
+            if primary_failure_code is not None:
+                payload["protected_primary_failure_code"] = primary_failure_code
+            if compensation_failure_code is not None:
+                payload["protected_compensation_failure_code"] = compensation_failure_code
         try:
             final_gate_progress = _final_gate_progress(
                 dependencies,
@@ -1547,11 +1604,17 @@ def _request_status(
         except (FinalGateStoreError, OSError, RequestStoreError):
             final_gate_progress = None
         if final_gate_progress is not None:
-            check_id, outcome, failure_code = final_gate_progress
+            check_id, outcome, failure_code, capacity_failure_code, capacity_node = (
+                final_gate_progress
+            )
             payload["final_gate_check"] = check_id
             payload["final_gate_outcome"] = outcome
             if failure_code is not None:
                 payload["final_gate_failure_code"] = failure_code
+            if capacity_failure_code is not None:
+                payload["final_gate_capacity_failure_code"] = capacity_failure_code
+            if capacity_node is not None:
+                payload["final_gate_capacity_node"] = capacity_node
     return payload
 
 

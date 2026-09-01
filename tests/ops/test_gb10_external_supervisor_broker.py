@@ -20,6 +20,7 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transiti
 )
 
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    CAPACITY_ACCEPTANCE_FAILURE_CODES,
     _encode_helper_request,
 )
 
@@ -386,6 +387,101 @@ def test_broker_capacity_rejects_unsafe_authority_failures(
 
     with pytest.raises(broker.BrokerError, match="output is invalid"):
         broker.accept_capacity(request)
+
+
+_CANONICAL_AUTHORITY_FAILURE = (
+    '{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+    '"schema_version":1,"status":"failed"}\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "stderr"),
+    [
+        (_CANONICAL_AUTHORITY_FAILURE.removesuffix("\n"), 1, ""),
+        ('{"failure_code":\n', 1, ""),
+        (
+            '{"failure_code":"busy-accounting-unverified",'
+            '"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+            '"schema_version":1,"status":"failed"}\n',
+            1,
+            "",
+        ),
+        (
+            json.dumps(
+                {
+                    "failure_code": "busy-accounting-unverified",
+                    "node": "trt-gb10-1",
+                    "schema_version": 1,
+                    "status": "failed",
+                }
+            )
+            + "\n",
+            1,
+            "",
+        ),
+        (_CANONICAL_AUTHORITY_FAILURE * 2, 1, ""),
+        ("x" * (1024 * 1024 + 1), 1, ""),
+        (_CANONICAL_AUTHORITY_FAILURE, 1, "unexpected stderr"),
+        (_CANONICAL_AUTHORITY_FAILURE, 0, ""),
+    ],
+    ids=(
+        "missing-newline",
+        "truncated-json",
+        "duplicate-keys",
+        "noncanonical-encoding",
+        "trailing-frame",
+        "oversized-stdout",
+        "stderr-contamination",
+        "typed-frame-wrong-exit",
+    ),
+)
+def test_broker_capacity_rejects_malformed_authority_failure_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    returncode: int,
+    stderr: str,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            returncode,
+            stdout,
+            stderr,
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError) as raised:
+        broker.accept_capacity(request)
+
+    assert not isinstance(raised.value, broker.BrokerCapacityFailureError)
+
+
+def test_capacity_failure_code_allowlists_match_every_protocol_boundary() -> None:
+    authority_spec = importlib.util.spec_from_file_location(
+        "gb10_acceptance_allowlist_test",
+        AUTHORITY_PATH,
+    )
+    assert authority_spec is not None and authority_spec.loader is not None
+    authority = importlib.util.module_from_spec(authority_spec)
+    authority_spec.loader.exec_module(authority)
+
+    assert broker._CAPACITY_FAILURE_CODES == CAPACITY_ACCEPTANCE_FAILURE_CODES
+    assert authority.CAPACITY_FAILURE_CODES == CAPACITY_ACCEPTANCE_FAILURE_CODES
 
 
 def test_broker_sanitized_environment_composes_fixed_authority_executables(

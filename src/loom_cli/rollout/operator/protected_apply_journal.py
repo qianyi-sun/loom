@@ -26,6 +26,12 @@ from uuid import uuid4
 from .failure_diagnostics import unclassified_failure_diagnostic
 from .final_gate_plan import FinalGatePlan
 from .model import validate_safe_identifier
+from .protected_external_supervisor_transport import (
+    COMPENSATION_RECONCILIATION_FAILURE_CODES,
+    EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES,
+    ExternalSupervisorApplyError,
+    ExternalSupervisorCompensationError,
+)
 
 _COMPONENT_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 _GB10_HOST_RE = re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$")
@@ -37,11 +43,23 @@ _MAX_FAILURE_DIAGNOSTIC_CHARS = 512
 _FAILURE_DIAGNOSTIC_CODES = frozenset(
     {
         "apply-failed",
+        "compensation-reconciliation-failed",
         "did-not-converge",
         "post-classify-failed",
         "pre-classify-failed",
         "terminal-classify-failed",
     }
+)
+_EXTERNAL_SUPERVISOR_COMPONENT_IDS = frozenset(
+    {
+        "external-supervisors",
+        "external-supervisors-gb10",
+        "external-supervisors-oldlab",
+    }
+)
+_TYPED_APPLY_DIAGNOSTIC = "classified external-supervisor apply failure"
+_TYPED_COMPENSATION_DIAGNOSTIC = (
+    "classified external-supervisor compensation reconciliation failure"
 )
 
 
@@ -78,6 +96,7 @@ class ProtectedApplyComponent:
     classify: Callable[[FinalGatePlan], ComponentObservation]
     apply: Callable[[FinalGatePlan], None]
     preapply_group: str | None = None
+    reconcile_before_apply: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -88,6 +107,8 @@ class ProtectedApplyComponent:
                 self.preapply_group is not None
                 and _COMPONENT_RE.fullmatch(self.preapply_group) is None
             )
+            or self.reconcile_before_apply
+            != (self.component_id == "external-supervisor-reconciliation")
         ):
             raise ValueError("protected apply component authority is invalid")
 
@@ -222,10 +243,12 @@ class ComponentFailureDiagnostic:
     ordinal: int
     failure_code: str
     diagnostic: str
+    primary_failure_code: str | None = None
+    compensation_failure_code: str | None = None
 
     def __post_init__(self) -> None:
         if (
-            self.schema_version != 1
+            self.schema_version not in {1, 2}
             or _COMPONENT_RE.fullmatch(self.component_id) is None
             or type(self.ordinal) is not int
             or not 0 <= self.ordinal < 32
@@ -235,23 +258,73 @@ class ComponentFailureDiagnostic:
             or any(ord(char) < 32 or ord(char) == 127 for char in self.diagnostic)
         ):
             raise ValueError("protected component failure diagnostic is invalid")
+        if self.schema_version == 1:
+            if self.primary_failure_code is not None or self.compensation_failure_code is not None:
+                raise ValueError("protected component failure diagnostic is invalid")
+        elif self.failure_code == "apply-failed":
+            if (
+                self.component_id not in _EXTERNAL_SUPERVISOR_COMPONENT_IDS
+                or self.primary_failure_code not in EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES
+                or self.diagnostic != _TYPED_APPLY_DIAGNOSTIC
+            ) or (
+                self.compensation_failure_code is not None
+                and self.compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+            ):
+                raise ValueError("protected component failure diagnostic is invalid")
+        elif (
+            self.failure_code != "compensation-reconciliation-failed"
+            or self.component_id != "external-supervisor-reconciliation"
+            or self.diagnostic != _TYPED_COMPENSATION_DIAGNOSTIC
+            or self.primary_failure_code is not None
+            or self.compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+        ):
+            raise ValueError("protected component failure diagnostic is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "component_id": self.component_id,
+            "ordinal": self.ordinal,
+            "failure_code": self.failure_code,
+            "diagnostic": self.diagnostic,
+        }
+        if self.schema_version == 2:
+            payload["primary_failure_code"] = self.primary_failure_code
+            payload["compensation_failure_code"] = self.compensation_failure_code
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> ComponentFailureDiagnostic:
-        if set(value) != {
+        base_fields = {
             "schema_version",
             "component_id",
             "ordinal",
             "failure_code",
             "diagnostic",
-        }:
+        }
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int:
+            raise ValueError("protected component failure diagnostic schema is invalid")
+        if set(value) != (
+            base_fields
+            if schema_version == 1
+            else base_fields | {"primary_failure_code", "compensation_failure_code"}
+        ):
             raise ValueError("protected component failure diagnostic fields are invalid")
+        primary_failure_code = value.get("primary_failure_code")
+        compensation_failure_code = value.get("compensation_failure_code")
+        if (primary_failure_code is not None and not isinstance(primary_failure_code, str)) or (
+            compensation_failure_code is not None and not isinstance(compensation_failure_code, str)
+        ):
+            raise ValueError("protected component typed failure diagnostic is invalid")
         return cls(
-            schema_version=_integer(value, "schema_version"),
+            schema_version=schema_version,
             component_id=_string(value, "component_id"),
             ordinal=_integer(value, "ordinal"),
             failure_code=_string(value, "failure_code"),
             diagnostic=_string(value, "diagnostic"),
+            primary_failure_code=primary_failure_code,
+            compensation_failure_code=compensation_failure_code,
         )
 
 
@@ -390,6 +463,12 @@ class ProtectedApplyJournal:
                     )
                     preclassified_groups.add(component.preapply_group)
                 results[component.component_id] = self._execute_one(plan, component, ordinal)
+            for ordinal, component in enumerate(components):
+                if component.reconcile_before_apply:
+                    self._publish_or_match(
+                        self.root / f"{ordinal:02d}-{component.component_id}" / "terminal.json",
+                        results[component.component_id].to_dict(),
+                    )
             return MappingProxyType(results)
         finally:
             try:
@@ -466,7 +545,7 @@ class ProtectedApplyJournal:
             return False
 
         matches: list[tuple[int, Path]] = []
-        for ordinal in (0, 1):
+        for ordinal in (0, 1, 2):
             component_root = self.root / f"{ordinal:02d}-mutation-epoch-claim"
             try:
                 _require_directory(component_root, uid=self.service_uid)
@@ -535,6 +614,13 @@ class ProtectedApplyJournal:
         else:
             if terminal.intent_digest != intent.intent_digest:
                 raise ProtectedApplyJournalError("protected component terminal identity drifted")
+            if component.reconcile_before_apply:
+                self._apply_with_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    plan,
+                )
             observed = self._classify_with_diagnostic(
                 component_root,
                 component,
@@ -564,36 +650,13 @@ class ProtectedApplyJournal:
                 f"protected component {component.component_id} live state drifted"
             )
         applied = False
-        if before.state is ComponentState.READY:
-            try:
-                component.apply(plan)
-            except BaseException as exc:
-                from .protected_gb10_transport import GB10FleetApplyError
-
-                if component.component_id == "gb10-candidate" and isinstance(
-                    exc, GB10FleetApplyError
-                ):
-                    failure = ComponentFailure(
-                        schema_version=1,
-                        component_id=component.component_id,
-                        failure_code="gb10-convergence-failed",
-                        failed_hosts=exc.failed_hosts,
-                    )
-                    self._publish_or_match(component_root / "failure.json", failure.to_dict())
-                else:
-                    # Every other component previously published no failure
-                    # record at all, leaving its cause a masked dead-end
-                    # (#1081). Record a coded, secret-safe reason (#1085 p1).
-                    self._publish_failure_diagnostic(
-                        component_root,
-                        component,
-                        ordinal,
-                        failure_code="apply-failed",
-                        diagnostic=unclassified_failure_diagnostic(
-                            exc, activity=component.component_id
-                        ),
-                    )
-                raise
+        if before.state is ComponentState.READY or component.reconcile_before_apply:
+            self._apply_with_diagnostic(
+                component_root,
+                component,
+                ordinal,
+                plan,
+            )
             applied = True
         after = self._classify_with_diagnostic(
             component_root,
@@ -614,8 +677,64 @@ class ProtectedApplyJournal:
                 f"protected component {component.component_id} did not converge exactly"
             )
         terminal = ComponentTerminal.build(intent, after, applied=applied)
-        self._publish_or_match(terminal_path, terminal.to_dict())
+        if not component.reconcile_before_apply:
+            self._publish_or_match(terminal_path, terminal.to_dict())
         return terminal
+
+    def _apply_with_diagnostic(
+        self,
+        component_root: Path,
+        component: ProtectedApplyComponent,
+        ordinal: int,
+        plan: FinalGatePlan,
+    ) -> None:
+        try:
+            component.apply(plan)
+        except BaseException as exc:
+            from .protected_gb10_transport import GB10FleetApplyError
+
+            if component.component_id == "gb10-candidate" and isinstance(exc, GB10FleetApplyError):
+                failure = ComponentFailure(
+                    schema_version=1,
+                    component_id=component.component_id,
+                    failure_code="gb10-convergence-failed",
+                    failed_hosts=exc.failed_hosts,
+                )
+                self._publish_or_match(component_root / "failure.json", failure.to_dict())
+            elif isinstance(exc, ExternalSupervisorApplyError):
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="apply-failed",
+                    diagnostic=_TYPED_APPLY_DIAGNOSTIC,
+                    primary_failure_code=exc.failure_code,
+                    compensation_failure_code=exc.compensation_failure_code,
+                )
+            elif isinstance(exc, ExternalSupervisorCompensationError):
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="compensation-reconciliation-failed",
+                    diagnostic=_TYPED_COMPENSATION_DIAGNOSTIC,
+                    compensation_failure_code=exc.failure_code,
+                )
+            else:
+                # Every other component previously published no failure record
+                # at all, leaving its cause a masked dead-end (#1081). Record a
+                # coded, secret-safe reason (#1085 p1).
+                self._publish_failure_diagnostic(
+                    component_root,
+                    component,
+                    ordinal,
+                    failure_code="apply-failed",
+                    diagnostic=unclassified_failure_diagnostic(
+                        exc,
+                        activity=component.component_id,
+                    ),
+                )
+            raise
 
     def _classify_with_diagnostic(
         self,
@@ -649,6 +768,8 @@ class ProtectedApplyJournal:
         *,
         failure_code: str,
         diagnostic: str,
+        primary_failure_code: str | None = None,
+        compensation_failure_code: str | None = None,
     ) -> None:
         """Record *why* a component failed — durably, coded, and secret-safe.
 
@@ -662,13 +783,19 @@ class ProtectedApplyJournal:
         writing it — including a write-once mismatch on a differing retry — is
         swallowed so the original exception still propagates unchanged.
         """
-        record = {
-            "schema_version": 1,
-            "component_id": component.component_id,
-            "ordinal": ordinal,
-            "failure_code": failure_code,
-            "diagnostic": diagnostic,
-        }
+        record = ComponentFailureDiagnostic(
+            schema_version=(
+                2
+                if primary_failure_code is not None or compensation_failure_code is not None
+                else 1
+            ),
+            component_id=component.component_id,
+            ordinal=ordinal,
+            failure_code=failure_code,
+            diagnostic=diagnostic,
+            primary_failure_code=primary_failure_code,
+            compensation_failure_code=compensation_failure_code,
+        ).to_dict()
         try:
             self._publish_or_match(component_root / "failure-diagnostic.json", record)
         except Exception:

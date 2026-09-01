@@ -457,7 +457,7 @@ def test_remote_apply_preserves_only_typed_failure_and_compensation_status(
     response = (
         json.dumps(
             {
-                "compensation_failure_code": None,
+                "compensation_failure_code": "transition-validation-failed",
                 "failure_code": "service-activation-failed",
                 "operation": "apply",
                 "schema_version": 1,
@@ -484,7 +484,7 @@ def test_remote_apply_preserves_only_typed_failure_and_compensation_status(
         )
 
     assert raised.value.failure_code == "service-activation-failed"
-    assert raised.value.compensation_failure_code is None
+    assert raised.value.compensation_failure_code == "transition-validation-failed"
 
 
 def test_candidate_helper_returns_only_a_typed_reconcile_failure(
@@ -620,6 +620,73 @@ def test_remote_capacity_rejects_an_unapproved_failure_code(tmp_path: Path) -> N
             profile_sha256="c" * 64,
             nodes=NORMAL_GB10_WORKER_HOSTS,
         )
+
+
+_CANONICAL_CAPACITY_FAILURE = (
+    '{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+    '"operation":"accept_capacity","schema_version":1,"status":"failed"}\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("response", "returncode", "stderr"),
+    [
+        (_CANONICAL_CAPACITY_FAILURE.removesuffix("\n"), 1, ""),
+        ('{"failure_code":\n', 1, ""),
+        (
+            '{"failure_code":"busy-accounting-unverified",'
+            '"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+            '"operation":"accept_capacity","schema_version":1,"status":"failed"}\n',
+            1,
+            "",
+        ),
+        (
+            json.dumps(
+                {
+                    "failure_code": "busy-accounting-unverified",
+                    "node": "trt-gb10-1",
+                    "operation": "accept_capacity",
+                    "schema_version": 1,
+                    "status": "failed",
+                }
+            )
+            + "\n",
+            1,
+            "",
+        ),
+        (_CANONICAL_CAPACITY_FAILURE * 2, 1, ""),
+        ("x" * (4 * 1024 * 1024 + 1), 1, ""),
+        (_CANONICAL_CAPACITY_FAILURE, 1, "unexpected stderr"),
+        (_CANONICAL_CAPACITY_FAILURE, 0, ""),
+    ],
+    ids=(
+        "missing-newline",
+        "truncated-json",
+        "duplicate-keys",
+        "noncanonical-encoding",
+        "trailing-frame",
+        "oversized-stdout",
+        "stderr-contamination",
+        "typed-frame-wrong-exit",
+    ),
+)
+def test_remote_capacity_rejects_malformed_typed_failure_frames(
+    tmp_path: Path,
+    response: str,
+    returncode: int,
+    stderr: str,
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    run = _Run(response, returncode=returncode, stderr=stderr)
+    transport = _transport(artifact, run, tmp_path / "controller-ed25519")
+
+    with pytest.raises((RuntimeError, ValueError)) as raised:
+        transport.accept_capacity(
+            profile_sha256="c" * 64,
+            nodes=NORMAL_GB10_WORKER_HOSTS,
+        )
+
+    assert not isinstance(raised.value, remote.ExternalSupervisorCapacityError)
 
 
 @pytest.mark.parametrize(

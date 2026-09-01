@@ -15,6 +15,7 @@ from loom_cli.rollout.preflight_contract import CheckOperation
 
 from .final_gate_plan import FinalGatePlan
 from .protected_gb10_external_supervisor_transport import (
+    ExternalSupervisorCapacityError,
     FixedGB10ExternalSupervisorTransport,
 )
 
@@ -52,6 +53,26 @@ class FinalCapacityExecutor:
                 profile_sha256=plan.supervisor_profile_sha256,
                 nodes=GB10_SLURM_WORKER_HOSTS,
             )
+        except ExternalSupervisorCapacityError as exc:
+            evidence_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "accepted": False,
+                        "candidate_sha": plan.candidate_sha,
+                        "candidate_tree": plan.candidate_tree,
+                        "failure_code": exc.failure_code,
+                        "node": exc.node,
+                        "nodes": GB10_SLURM_WORKER_HOSTS,
+                        "profile_sha256": plan.supervisor_profile_sha256,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            blockers = {
+                "capacity": exc.failure_code,
+                "capacity-node": exc.node,
+            }
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             evidence_digest = hashlib.sha256(
                 json.dumps(

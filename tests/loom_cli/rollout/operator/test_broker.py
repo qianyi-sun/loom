@@ -2489,15 +2489,60 @@ def test_status_reports_certified_protected_component_failure_diagnostic(
     assert payload["protected_failure_diagnostic"] == diagnostic
 
 
+def test_status_reports_certified_typed_protected_failure_codes(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    root = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1" / "protected-apply"
+    _private_directory(root)
+    _private_file(root / "execution.lock", "")
+    reconciliation = root / "00-external-supervisor-reconciliation"
+    _private_directory(reconciliation)
+    _private_file(reconciliation / "intent.json")
+    _private_file(
+        reconciliation / "failure-diagnostic.json",
+        json.dumps(
+            {
+                "schema_version": 2,
+                "component_id": "external-supervisor-reconciliation",
+                "ordinal": 0,
+                "failure_code": "compensation-reconciliation-failed",
+                "diagnostic": (
+                    "classified external-supervisor compensation reconciliation failure"
+                ),
+                "primary_failure_code": None,
+                "compensation_failure_code": "transition-validation-failed",
+            }
+        ),
+    )
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["protected_component"] == "external-supervisor-reconciliation"
+    assert payload["protected_failure_code"] == "compensation-reconciliation-failed"
+    assert payload["protected_compensation_failure_code"] == "transition-validation-failed"
+    assert "protected_primary_failure_code" not in payload
+
+
 @pytest.mark.parametrize(
     "diagnostic_record",
     [
+        {
+            "component_id": "staging-manifests",
+            "ordinal": 2,
+            "failure_code": "apply-failed",
+            "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+        },
         {
             "schema_version": 2,
             "component_id": "staging-manifests",
             "ordinal": 2,
             "failure_code": "apply-failed",
             "diagnostic": "unclassified staging-manifests failure: RuntimeError",
+            "primary_failure_code": "service-activation-failed",
+            "compensation_failure_code": None,
         },
         {
             "schema_version": 1,
@@ -2656,6 +2701,62 @@ def test_status_reports_only_normalized_final_gate_failure_metadata(tmp_path: Pa
     assert payload["final_gate_check"] == "final.convergence"
     assert payload["final_gate_outcome"] == "fail"
     assert payload["final_gate_failure_code"] == "final.convergence.failed"
+    assert "private remediation" not in deps.stdout.getvalue()
+
+
+def test_status_reports_normalized_final_capacity_diagnostic(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    assert broker_main(["start"], dependencies=deps.dependencies) == 0
+    attempt = deps.config.state_root / "requests" / REQUEST_ID / "attempts" / "1"
+    _private_directory(attempt)
+    evidence = MappingProxyType(
+        {
+            "ready": False,
+            "candidate-sha": SHA,
+            "attestation-digest": "4" * 64,
+            "observed-epoch": 8,
+            "evidence-digest": "3" * 64,
+            "protected-mutation": True,
+            "blockers": {
+                "capacity": "busy-accounting-unverified",
+                "capacity-node": "trt-gb10-1",
+            },
+        }
+    )
+    execution = CheckExecution(
+        check_id="final.capacity",
+        failure_code="final.capacity.failed",
+        tier=4,
+        stage=StageCapability.FINAL_ONLY,
+        operation=CheckOperation.APPLY,
+        outcome=CheckOutcome.FAIL,
+        input_fingerprint="1" * 64,
+        implementation_digest="2" * 64,
+        evidence=evidence,
+        evidence_hash=hashlib.sha256(
+            json.dumps(dict(evidence), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        started_at=NOW,
+        finished_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+        remediation="private remediation must not be exposed",
+    )
+    FinalGateExecutionStore(
+        deps.config.state_root,
+        request_id=REQUEST_ID,
+        attempt_number=1,
+    ).publish(execution)
+
+    deps.stdout.seek(0)
+    deps.stdout.truncate()
+    assert broker_main(["status", REQUEST_ID], dependencies=deps.dependencies) == 0
+
+    payload = _last_json(deps.stdout)
+    assert payload["final_gate_check"] == "final.capacity"
+    assert payload["final_gate_outcome"] == "fail"
+    assert payload["final_gate_failure_code"] == "final.capacity.failed"
+    assert payload["final_gate_capacity_failure_code"] == "busy-accounting-unverified"
+    assert payload["final_gate_capacity_node"] == "trt-gb10-1"
     assert "private remediation" not in deps.stdout.getvalue()
 
 
