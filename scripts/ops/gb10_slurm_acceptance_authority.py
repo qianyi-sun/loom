@@ -2115,8 +2115,7 @@ def _allocation_never_started(
                 and (expected_job_id is None or job_id == expected_job_id)
                 and recorded_name == job_name
                 and state.partition(" ")[0] in {"CANCELLED", "PENDING"}
-                and started_at in {"None", "Unknown"}
-                and recorded_node in {"None assigned", node}
+                and (started_at, recorded_node) in {("None", "None assigned"), ("Unknown", node)}
             )
         if accounting_deadline - time.monotonic() <= 0.05:
             return False

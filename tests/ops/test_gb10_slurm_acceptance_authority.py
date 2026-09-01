@@ -1045,6 +1045,8 @@ def test_busy_deferral_requires_a_real_busy_node_and_scheduler_error() -> None:
     (
         ("123|loom-job|CANCELLED by 995|Unknown|trt-gb10-1\n", True),
         ("38794|loom-job|CANCELLED by 995|None|None assigned\n", True),
+        ("123|loom-job|CANCELLED by 995|None|trt-gb10-1\n", False),
+        ("123|loom-job|CANCELLED by 995|Unknown|None assigned\n", False),
         ("123|loom-job|RUNNING|2026-08-27T12:00:00|trt-gb10-1\n", False),
         ("123|other-job|CANCELLED|Unknown|trt-gb10-1\n", False),
         ("", False),
