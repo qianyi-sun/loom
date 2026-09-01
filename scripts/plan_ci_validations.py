@@ -106,6 +106,7 @@ PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT = {
 }
 
 PROTECTED_NATIVE_AUTHORITY_EXACT = {
+    "deploy/worker-pools/gb10/README.md",
     "scripts/ops/converge_personal_dev_native_builder_release.py",
     "scripts/ops/install_personal_dev_native_builder_runtime.py",
     "scripts/ops/install_personal_dev_native_builder_runtime_authority.py",

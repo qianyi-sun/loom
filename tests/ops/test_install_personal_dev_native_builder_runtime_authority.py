@@ -339,6 +339,7 @@ def test_sudoers_and_tmpfiles_assets_have_the_only_authorized_rules() -> None:
         "tests/ops/test_install_personal_dev_native_builder_runtime_authority.py",
         "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
         "deploy/personal-dev-native-builder/runtime-profile-v1.json",
+        "deploy/worker-pools/gb10/README.md",
     ),
 )
 def test_native_authority_paths_select_every_heavy_gate_as_protected(path: str) -> None:
