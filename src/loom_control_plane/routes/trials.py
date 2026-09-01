@@ -27,6 +27,7 @@ from loom.db.task_set_visibility import visible_tasks
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.request_params import coerce_request_params
+from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
@@ -34,6 +35,43 @@ from loom_control_plane.service_execution import request_trial_execution_cancell
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
+
+
+def _resolve_required_worker_pool_for_backend(
+    *,
+    batch_backend: str,
+    requested_pool: str | None,
+    task_service_pool: str | None,
+) -> str | None:
+    """Map an explicit user backend to exactly one execution mechanism."""
+
+    if batch_backend != NEBIUS_BACKEND:
+        if requested_pool == NEBIUS_LOGICAL_POOL_ID:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "required_worker_pool 'nebius-cpu' requires "
+                    "backend 'nebius'"
+                ),
+            )
+        return requested_pool
+    if task_service_pool != NEBIUS_LOGICAL_POOL_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "backend 'nebius' requires a task revision bound to the "
+                "nebius-cpu service-execution pool"
+            ),
+        )
+    if requested_pool is not None and requested_pool != task_service_pool:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "required_worker_pool conflicts with the task's immutable "
+                "service-execution binding"
+            ),
+        )
+    return task_service_pool
 
 
 async def _ensure_trial_task_image_links(
@@ -262,19 +300,15 @@ async def submit_trial(
         requires_caps_json["terminus2_model_switch"] = True
     required_worker_pool = _required_worker_pool(payload)
     task_service_execution = task_config.service_execution
-    if task_service_execution is not None:
-        if (
-            required_worker_pool is not None
-            and required_worker_pool != task_service_execution.logical_pool_id
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "required_worker_pool conflicts with the task's immutable "
-                    "service-execution binding"
-                ),
-            )
-        required_worker_pool = task_service_execution.logical_pool_id
+    required_worker_pool = _resolve_required_worker_pool_for_backend(
+        batch_backend=batch_backend,
+        requested_pool=required_worker_pool,
+        task_service_pool=(
+            task_service_execution.logical_pool_id
+            if task_service_execution is not None
+            else None
+        ),
+    )
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool
 

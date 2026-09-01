@@ -487,9 +487,15 @@ async def test_cancel_trial_forwards(
     assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
 
 
-async def test_cancel_batch_forwards_service_execution_trials(
+@pytest.mark.parametrize(
+    ("backend", "expected_forward_count"),
+    [("nebius", 1), ("docker", 0)],
+)
+async def test_cancel_batch_respects_explicit_backend_fence(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,
+    backend: str,
+    expected_forward_count: int,
 ) -> None:
     app, raw, team_id, captured = fwd_setup
     batch_id = uuid4()
@@ -513,6 +519,7 @@ async def test_cancel_batch_forwards_service_execution_trials(
                 name="service execution cancellation",
                 task_filter={},
                 trial_config={},
+                backend=backend,
                 state="running",
                 created_by_token_prefix="test",
                 expected_trial_count=1,
@@ -543,9 +550,10 @@ async def test_cancel_batch_forwards_service_execution_trials(
     assert response.status_code == 200, response.text
     assert response.json()["state"] == "cancelled"
     cancel_reqs = [req for req in captured["reqs"] if req["url"].endswith("/cancel")]
-    assert len(cancel_reqs) == 1
-    assert cancel_reqs[0]["url"].endswith(f"/trials/{trial_id}/cancel")
-    assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
+    assert len(cancel_reqs) == expected_forward_count
+    if backend == "nebius":
+        assert cancel_reqs[0]["url"].endswith(f"/trials/{trial_id}/cancel")
+        assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
 
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)

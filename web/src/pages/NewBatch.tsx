@@ -1446,7 +1446,9 @@ export default function NewBatch(): JSX.Element {
       : `${totalTrials} trials planned.`;
   const releaseBackendText = backend
     ? selectedBackend?.available === false
-      ? `Backend ${backend} has no live worker.`
+      ? selectedBackend.cold_start_available
+        ? `Backend ${backend} can scale from zero via ${selectedBackend.cold_start_pools.join(", ")}.`
+        : `Backend ${backend} has no live worker or scale-from-zero authority.`
       : selectedBackend?.available === true
         ? `Backend ${backend} has a live worker.`
         : `Backend ${backend} availability is not loaded yet.`
@@ -1523,7 +1525,12 @@ export default function NewBatch(): JSX.Element {
                 >
                   {(backends.data?.items ?? []).map((b) => (
                     <option key={b.name} value={b.name}>
-                      {b.name}{b.available ? "" : " (no live worker)"}
+                      {b.name}
+                      {b.available
+                        ? ""
+                        : b.cold_start_available
+                          ? " (scales from zero)"
+                          : " (unavailable)"}
                     </option>
                   ))}
                 </select>
@@ -1531,20 +1538,26 @@ export default function NewBatch(): JSX.Element {
                   <Help>
                     {backends.data?.items.find((b) => b.name === backend)
                       ?.description ?? null}
-                    {backends.data?.items.find((b) => b.name === backend)
-                      ?.available === false ? (
+                    {selectedBackend?.available === false &&
+                    selectedBackend.cold_start_available ? (
+                      <span className="mt-0.5 block text-sky-700">
+                        No live worker is required at submission. This backend
+                        has fresh scale-from-zero authority through {" "}
+                        {selectedBackend.cold_start_pools.join(", ")}.
+                      </span>
+                    ) : selectedBackend?.available === false ? (
                       <span className="mt-0.5 block text-amber-700">
-                        No live worker advertises this backend right now —
-                        batches will queue until one comes online.
+                        No live worker or scale-from-zero authority is available
+                        for this backend right now.
                       </span>
                     ) : null}
                   </Help>
                 ) : (
                   <Help>
                     The sandbox provider that runs each trial. Loom ships
-                    drivers for docker, modal, and fake; entries
-                    marked &quot;no live worker&quot; have a driver but no
-                    worker advertising them right now.
+                    explicit execution backends. Docker uses GB10/OLDLAB;
+                    Nebius uses the Nebius Kubernetes pool. Loom never falls
+                    back from one selected backend to another.
                   </Help>
                 )}
               </label>

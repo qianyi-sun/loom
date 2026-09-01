@@ -32,6 +32,8 @@ from loom.db.schema import (
     ProviderConnection,
     ProviderModelCache,
     RateCard,
+    ServiceExecutionClass,
+    ServiceExecutionTarget,
     Task,
     TaskSet,
     Team,
@@ -43,11 +45,13 @@ from loom.db.schema import (
     Worker,
     WorkerPoolAutoscalerPolicy,
 )
+from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
 from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
 )
+from loom.pipeline.keys import canonical_digest
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service import agent_catalog
 from loom_service.app import create_app
@@ -2188,12 +2192,12 @@ async def test_post_rejects_when_no_worker_advertises_backend(
     assert "no active workers" in detail
 
 
-async def test_post_accepts_service_execution_task_without_legacy_worker(
+async def test_post_docker_does_not_implicitly_select_nebius(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    """A converted task is claimed by the service scheduler, not a worker."""
-    app, raw, team_id = camp_setup
+    """A Nebius-capable task still needs Docker capacity when Docker is selected."""
+    app, raw, _team_id = camp_setup
     task_id = "local/service-execution"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -2229,45 +2233,189 @@ async def test_post_accepts_service_execution_task_without_legacy_worker(
             },
         )
 
-    assert response.status_code == 201, response.text
-    assert response.json()["expected_trial_count"] == 1
+    sync_engine.dispose()
+    assert response.status_code == 400, response.text
+    assert "no active worker advertises backend 'docker'" in response.json()["detail"]
 
-    batch_id = UUID(response.json()["batch_id"])
+
+async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """The explicit Nebius backend is admitted by a fresh Nebius target."""
+    app, raw, team_id = camp_setup
+    task_id = "local/explicit-nebius"
+    target_id = "nebius-explicit-backend-test"
+    now = datetime.now(UTC)
+    execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
     with sl() as s:
-        s.execute(
-            Batch.__table__.update()
-            .where(Batch.id == batch_id)
-            .values(
-                state="finished",
-                result_status="all_failed",
-                finished_at=datetime.now(UTC),
+        s.execute(delete(Worker))
+        s.add(
+            ServiceExecutionClass(
+                id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                schema_version=NEBIUS_CPU_EXECUTION_CLASS_V1.schema_version,
+                spec_json=execution_class_spec,
+                spec_sha256=canonical_digest(execution_class_spec),
+                enabled=True,
+            )
+        )
+        s.add(
+            ServiceExecutionTarget(
+                id=target_id,
+                logical_pool_id="nebius-cpu",
+                execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                schema_version="loom.execution-target.v1",
+                spec_json={"health_stale_after_seconds": 60},
+                spec_sha256="sha256:" + "d" * 64,
+                environment="development",
+                provider="nebius",
+                region="eu-north1",
+                failure_domain="eu-north1-a",
+                data_residency="eu",
+                desired_state="active",
+                observed_state="ready",
+                health_status="healthy",
+                health_observed_at=now,
             )
         )
         s.execute(
-            insert(Trial).values(
-                id=uuid4(),
-                task_id=task_id,
-                team_id=team_id,
-                state="failed",
-                failure_reason="gateway_error",
-                failure_message="gateway 503",
-                config={},
-                requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
-                submitted_at=datetime.now(UTC),
-                batch_id=batch_id,
-                sample_idx=0,
-                combination_idx=0,
+            insert(Task).values(
+                id=task_id,
+                checksum="7" * 64,
+                config=_service_execution_task_config(task_id),
+                source="local",
+                license="MIT",
             )
         )
         s.commit()
-    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
-        rerun = await ac.post(
-            f"/api/v1/batches/{batch_id}/rerun-failed",
-            headers={"Authorization": f"Bearer {raw}"},
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            catalog = await ac.get(
+                "/api/v1/backends",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+            response = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "name": "explicit-nebius",
+                    "task_filter": {
+                        "subset_kind": "explicit",
+                        "task_ids": [task_id],
+                    },
+                    "trial_config": {},
+                    "backend": "nebius",
+                },
+            )
+
+        assert catalog.status_code == 200, catalog.text
+        nebius = next(
+            item for item in catalog.json()["items"] if item["name"] == "nebius"
         )
-    sync_engine.dispose()
-    assert rerun.status_code == 201, rerun.text
-    assert rerun.json()["rerun_target_count"] == 1
+        assert nebius == {
+            "name": "nebius",
+            "description": "Nebius Kubernetes execution pool; scales from zero.",
+            "available": False,
+            "cold_start_available": True,
+            "cold_start_pools": ["nebius-cpu"],
+        }
+        assert response.status_code == 201, response.text
+        assert response.json()["expected_trial_count"] == 1
+
+        batch_id = UUID(response.json()["batch_id"])
+        with sl() as s:
+            s.execute(
+                Batch.__table__.update()
+                .where(Batch.id == batch_id)
+                .values(
+                    state="finished",
+                    result_status="all_failed",
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    task_id=task_id,
+                    team_id=team_id,
+                    state="failed",
+                    failure_reason="gateway_error",
+                    failure_message="gateway 503",
+                    config={},
+                    requires_caps={
+                        "backend": "nebius",
+                        "cpu_arch": "x86_64",
+                        "worker_pool": "nebius-cpu",
+                    },
+                    submitted_at=datetime.now(UTC),
+                    batch_id=batch_id,
+                    sample_idx=0,
+                    combination_idx=0,
+                )
+            )
+            s.commit()
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            rerun = await ac.post(
+                f"/api/v1/batches/{batch_id}/rerun-failed",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        assert rerun.status_code == 201, rerun.text
+        assert rerun.json()["rerun_target_count"] == 1
+        with sl() as s:
+            rerun_backend = s.execute(
+                select(Batch.backend).where(
+                    Batch.id == UUID(rerun.json()["batch_id"]),
+                )
+            ).scalar_one()
+        assert rerun_backend == "nebius"
+    finally:
+        with sl() as s:
+            s.execute(
+                delete(ServiceExecutionTarget).where(
+                    ServiceExecutionTarget.id == target_id,
+                )
+            )
+            s.execute(
+                delete(ServiceExecutionClass).where(
+                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                )
+            )
+            s.commit()
+        sync_engine.dispose()
+
+
+async def test_post_nebius_rejects_task_without_nebius_binding(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    """Selecting Nebius never falls back to a legacy Docker task route."""
+    app, raw, _team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "incompatible-nebius",
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": ["local/mit-0"],
+                },
+                "trial_config": {},
+                "backend": "nebius",
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == {
+        "reason": "nebius_task_incompatible",
+        "backend": "nebius",
+        "logical_pool_id": "nebius-cpu",
+        "task_ids": ["local/mit-0"],
+    }
 
 
 async def test_post_rejects_mixed_service_and_legacy_without_capacity(
@@ -2378,7 +2526,7 @@ async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
         )
         assert docker == {
             "name": "docker",
-            "description": "Local docker on the worker host.",
+            "description": "Docker execution on the GB10 or OLDLAB worker pools.",
             "available": False,
             "cold_start_available": True,
             "cold_start_pools": ["oldlab"],
