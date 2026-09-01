@@ -31,6 +31,7 @@ jobs:
     permissions: {}
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      DISPATCH_SHA: ${{ github.sha }}
       IMAGE_SELECTOR: ${{ inputs.image_tag }}
     steps:
       - name: Validate inputs
@@ -39,6 +40,11 @@ jobs:
           set -euo pipefail
           if [[ ! "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             printf 'error: candidate_sha must be exactly 40 lowercase hexadecimal characters\n' >&2
+            exit 1
+          fi
+
+          if [[ "${DISPATCH_SHA}" != "${CANDIDATE_SHA}" ]]; then
+            printf 'error: workflow dispatch SHA must match candidate_sha\n' >&2
             exit 1
           fi
 

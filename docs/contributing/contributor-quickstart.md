@@ -392,9 +392,10 @@ approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
 For `main`, enable native squash auto-merge only for a same-repository `dev`
-promotion after release evidence is attached. GitHub has no active `main`
-ruleset, so maintainers must not use a direct push or manual merge to bypass
-the checked-in release flow.
+production candidate. The active `main protected promotion` ruleset requires
+only `main-promotion-gate`, which binds the open PR, current `dev` head,
+successful release gate, and evidence artifact to one SHA. Direct pushes,
+deletion, force-pushes, and bypasses remain prohibited.
 
 Current `dev protected admission` ruleset:
 
@@ -409,10 +410,13 @@ Current `dev protected admission` ruleset:
 
 Current `main` promotion boundary:
 
-- only a same-repository `dev` -> `main` promotion with the four current-head
-  checks and release evidence is eligible for native squash auto-merge;
-- GitHub has no active `main` branch ruleset, so maintainers must not bypass the
-  release flow with a direct push or manual merge.
+- only a same-repository `dev` -> `main` promotion with
+  `main-promotion-gate` is eligible for native squash auto-merge;
+- the composite gate requires the PR head and current `dev` head to equal the
+  exact SHA that passed `release-promotion-gate` with an unexpired evidence
+  artifact;
+- production deployment still re-verifies candidate tree and artifact identity
+  before releasing production credentials.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

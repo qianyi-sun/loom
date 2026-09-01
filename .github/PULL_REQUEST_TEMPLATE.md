@@ -70,15 +70,17 @@
 
 Complete this section only for PRs targeting `main`.
 
-The production release remains evidence-gated and may only promote `dev` to
-`main`. The PR author and reviewer identities do not affect merge eligibility.
+`main` accepts only a same-repository current `dev` candidate that passed the
+real staging release gate. The PR author and reviewer identities do not affect
+merge eligibility.
 
 - Candidate SHA:
 - Immutable prod tag (`vX.Y.Z`; never move after publication):
 - Staging URL:
 - Image digests:
-- Release gate workflow run:
+- Release gate workflow run and run ID:
 - Gate evidence artifact:
+- Main promotion gate workflow run:
 - Frontend route evidence:
 - Worker isolation evidence:
 - Raw-delivery/export requirement status:
@@ -90,7 +92,7 @@ The production release remains evidence-gated and may only promote `dev` to
 - Production Environment approver (deployment-secret release):
 - I confirm this PR targets `main` only for release promotion from validated `dev`.
 - I confirm GitHub native squash auto-merge is enabled and the protected
-  current-head CI gates are the only merge authority.
+  `main-promotion-gate` is the only merge authority.
 - I confirm `release_owner_approval` evidence and Production Environment
   approval are distinct controls and are not interchangeable with CI.
 - I confirm the prod tag is new, immutable, and will not be force-moved.

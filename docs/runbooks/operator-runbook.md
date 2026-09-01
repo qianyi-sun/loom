@@ -420,11 +420,17 @@ an arbitrary branch or tag.
    `scripts/ops/release_gate.py`, including image digests, frontend route
    evidence, `prod_staging_isolation`, `raw_delivery_export_status`, rollback
    and recovery data, and `release_owner_approval`.
-4. Dispatch `.github/workflows/release-promotion-gate.yml` from `dev` with
-   `candidate_sha`, `image_tag`, and the base64-encoded evidence manifest.
-5. Open the `dev` to `main` promotion pull request and enable GitHub's native
-   squash auto-merge; the protected current-head CI gates are the only merge
-   authority.
+4. Dispatch `.github/workflows/release-promotion-gate.yml` from `dev` while its
+   current SHA exactly matches `candidate_sha`, with `image_tag` and the
+   base64-encoded evidence manifest.
+5. Open the same-repository `dev` to `main` promotion pull request. Let
+   `.github/workflows/main-promotion-gate.yml` run from `dev` with the exact
+   `candidate_sha`, PR number, and successful `release_gate_run_id`, then enable
+   GitHub's native squash auto-merge. The composite gate verifies the PR and
+   current `dev` head still match the release-gated SHA and evidence artifact.
+   `main-promotion-gate` is the only merge authority for `main`.
+   If `dev` advances, select and validate the new head rather than reusing stale
+   evidence.
 6. Dispatch `.github/workflows/deploy-environment.yml` from `main` with
    `environment=production`, the same `candidate_sha` and `image_tag`, and the
    successful `release_gate_run_id`.
