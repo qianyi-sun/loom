@@ -290,24 +290,65 @@ def test_transition_cleanup_rejects_every_other_partial_set(tmp_path, objects) -
     assert _component(_Runner(objects)).classify(_plan(tmp_path)).state is ComponentState.DRIFTED
 
 
-def test_transition_cleanup_rejects_wrong_identity_or_unrelated_exec_role(tmp_path) -> None:
+def test_transition_cleanup_rejects_wrong_named_identity(tmp_path) -> None:
     wrong_identity = _complete_objects()
     wrong_identity["rolebinding"]["subjects"] = [  # type: ignore[index]
         {"kind": "ServiceAccount", "name": "other", "namespace": "loom-staging"}
     ]
-    unrelated = _complete_objects()
-    unrelated["unrelated-role-other"] = {
-        "apiVersion": "rbac.authorization.k8s.io/v1",
-        "kind": "Role",
-        "metadata": {"name": "other-exec", "namespace": NAMESPACE},
-        "rules": [{"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]}],
-    }
 
     assert (
         _component(_Runner(wrong_identity)).classify(_plan(tmp_path)).state
         is ComponentState.DRIFTED
     )
-    assert _component(_Runner(unrelated)).classify(_plan(tmp_path)).state is ComponentState.DRIFTED
+
+
+def test_transition_cleanup_preserves_unrelated_exec_role_while_revoking_exact_authority(
+    tmp_path,
+) -> None:
+    unrelated_role = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "Role",
+        "metadata": {
+            "name": "loom-personal-dev-shared-operations",
+            "namespace": NAMESPACE,
+        },
+        "rules": [
+            {
+                "apiGroups": [""],
+                "resourceNames": ["loom-dev-minio-0"],
+                "resources": ["pods"],
+                "verbs": ["get"],
+            },
+            {
+                "apiGroups": [""],
+                "resourceNames": ["loom-dev-minio-0"],
+                "resources": ["pods/exec"],
+                "verbs": ["create"],
+            },
+        ],
+    }
+    objects = _complete_objects()
+    objects["unrelated-role-personal-dev-shared-operations"] = unrelated_role
+    runner = _Runner(objects)
+    component = _component(runner)
+    plan = _plan(tmp_path)
+
+    assert component.classify(plan).state is ComponentState.READY
+
+    component.apply(plan)
+
+    assert runner.objects == {
+        "unrelated-role-personal-dev-shared-operations": unrelated_role,
+    }
+    deletes = [call for call in runner.calls if "delete" in call]
+    assert [call[call.index("delete") + 1] for call in deletes] == [
+        "rolebinding",
+        "role",
+        "validatingadmissionpolicybinding",
+        "validatingadmissionpolicy",
+    ]
+    assert all(call[call.index("delete") + 2] == NAME for call in deletes)
+    assert component.classify(plan).state is ComponentState.EXACT
 
 
 @pytest.mark.parametrize(

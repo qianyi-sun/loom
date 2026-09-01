@@ -155,13 +155,7 @@ class KubernetesExternalSupervisorTransitionCleanupComponent:
 
     def _observe(self) -> _TransitionObservation:
         documents = {resource: self._list(resource) for resource in _RESOURCE_ORDER}
-        roles = documents["role"]
         named: dict[str, Mapping[str, object]] = {}
-        for role in roles:
-            metadata = _mapping(role.get("metadata"))
-            name = _string(metadata.get("name"))
-            if _role_grants_pods_exec(role) and name != _NAME:
-                raise ValueError("unrelated pods/exec Role is present")
         for resource, items in documents.items():
             matches = [item for item in items if _object_name(item) == _NAME]
             if len(matches) > 1:
@@ -448,24 +442,6 @@ def _expected_policy_binding() -> dict[str, object]:
     }
 
 
-def _role_grants_pods_exec(value: Mapping[str, object]) -> bool:
-    rules = value.get("rules")
-    if not isinstance(rules, list):
-        raise ValueError("transition cleanup Role rules are invalid")
-    for item in rules:
-        rule = _mapping(item)
-        groups = _string_list(rule.get("apiGroups"))
-        resources = _string_list(rule.get("resources"))
-        verbs = _string_list(rule.get("verbs"))
-        if (
-            any(group in {"", "*"} for group in groups)
-            and any(resource in {"pods/exec", "*/exec", "*"} for resource in resources)
-            and any(verb in {"create", "*"} for verb in verbs)
-        ):
-            return True
-    return False
-
-
 def _object_name(value: Mapping[str, object]) -> str:
     return _string(_mapping(value.get("metadata")).get("name"))
 
@@ -480,12 +456,6 @@ def _string(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("transition cleanup object is invalid")
     return value
-
-
-def _string_list(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError("transition cleanup object is invalid")
-    return tuple(value)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
