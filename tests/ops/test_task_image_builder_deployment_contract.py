@@ -226,21 +226,22 @@ def test_phase2_boundary_does_not_block_native_phase1_acceptance_rerun() -> None
     assert "must still wait for every active Phase 1 convergence gate above" in phase2_boundary
 
 
-def test_phase1_runbook_removes_complete_or_absent_transition_exec_set() -> None:
+def test_phase1_runbook_assigns_transition_cleanup_to_protected_precredential_apply() -> None:
     runbook = Path("docs/runbooks/task-image-builder-phase1-site-convergence.md").read_text(
         encoding="utf-8"
     )
     normalized = " ".join(runbook.split())
 
-    assert 'TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"' in runbook
+    assert "protected pre-credential transition cleanup" in normalized
+    assert "complete four-object predecessor set" in normalized
+    assert "GC-reduced admission-policy and admission-binding pair" in normalized
+    assert "complete absence" in normalized
     assert (
-        'test "$TRANSITION_PRESENT_COUNT" -eq 0 || test "$TRANSITION_PRESENT_COUNT" -eq 4'
-    ) in normalized
-    assert 'delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
-    assert 'delete role "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
-    assert 'delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
-    assert 'delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"' in normalized
-    assert 'error("unexpected pods/exec Role remains")' in normalized
+        "RoleBinding, Role, ValidatingAdmissionPolicyBinding, then ValidatingAdmissionPolicy"
+        in normalized
+    )
+    assert "TRANSITION_PRESENT_COUNT" not in runbook
+    assert 'delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"' not in normalized
 
 
 def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() -> None:
@@ -250,6 +251,7 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
     rollback = runbook.split("## Rollback order", maxsplit=1)[1].split(
         "## Disabled Phase 2 prerequisites", maxsplit=1
     )[0]
+    rollback_normalized = " ".join(rollback.replace("\\\n", "").split())
 
     assert "PREVIOUS_REVIEWED_SUPERVISOR_KUBECONFIG" not in rollback
     assert "sudo install" not in rollback
@@ -261,6 +263,37 @@ def test_phase1_rollback_keeps_credential_convergence_protected_and_read_only() 
     assert "On `TRT-EAI-OLDLAB-1`, run the following locally:" in rollback
     assert rollback.count("get namespaces -o name") == 2
     assert rollback.count("auth can-i create pods/exec") == 2
+    assert (
+        rollback.count(
+            'ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"'
+        )
+        == 2
+    )
+    assert (
+        rollback_normalized.count(
+            'test "$ROLLBACK_CANDIDATE_ROOT" = '
+            '"/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"'
+        )
+        == 2
+    )
+    assert (
+        rollback_normalized.count(
+            'test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = "$ROLLBACK_RELEASE_SHA"'
+        )
+        == 2
+    )
+    assert rollback.count('test -z "$(git -C "$ROLLBACK_CANDIDATE_ROOT" status --porcelain=v1') == 2
+    assert (
+        rollback.count(
+            '"$ROLLBACK_CANDIDATE_ROOT/deploy/slurm/'
+            'publish-external-slurm-autoscaler-kubeconfig.sh"'
+        )
+        == 2
+    )
+    assert (
+        '"$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh"'
+        not in rollback
+    )
 
 
 def test_phase1_runbook_reads_user_unit_journal_with_operator_authority() -> None:

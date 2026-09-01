@@ -86,8 +86,13 @@ during compensation or rollback.
 
 The protected rollout kubeconfig remains at
 `/var/lib/loom-staging-rollout/kubeconfig` and is never referenced by a
-supervisor unit. The temporary exact-pod `pods/exec` Role and RoleBinding are
-deleted during convergence after both supervisors prove successful reads.
+supervisor unit. Before either credential is classified or published, a
+protected journal component classifies the exact four-object predecessor
+authority, its known GC-reduced admission-only pair, or complete absence. It
+rejects every other partial or mismatched state and any unrelated `pods/exec`
+Role, revokes the exact RoleBinding before Role and admission binding before
+policy, then proves complete absence. It has no path that creates or restores
+exec authority.
 
 ## Storage admission and owned cleanup
 
@@ -137,17 +142,19 @@ The code never broadens ownership based solely on repository or tag spelling.
    storage admission, and cooldown behavior.
 2. Apply the capacity-control-plane manifests and prove that both ConfigMap
    keys refresh and validate for longer than two witness TTLs.
-3. Start the protected staging rollout. Its controller-local credential
-   components publish and verify both scoped kubeconfigs before the existing
-   supervisor components may write or start any unit.
-4. Verify the applied environment state so all four supervisors use the
+3. Start the protected staging rollout. Its journal first removes only the
+   exact predecessor exec authority and proves complete absence. It then
+   preclassifies both controller credentials as one group before either may
+   publish.
+4. The controller-local credential components publish and verify both scoped
+   kubeconfigs before the existing supervisor components may write or start any
+   unit.
+5. Verify the applied environment state so all four supervisors use the
    ConfigMap source and dedicated kubeconfig.
-5. Verify OLDLAB and GB10 trial and builder supervisors reconcile successfully
+6. Verify OLDLAB and GB10 trial and builder supervisors reconcile successfully
    with an empty queue.
-6. Perform owned GB10 legacy cleanup until storage admission passes, without
+7. Perform owned GB10 legacy cleanup until storage admission passes, without
    submitting a canary task.
-7. Delete the temporary pod-name-bound witness RBAC and prove that
-   `pods/exec` is denied to the external supervisor identity.
 
 Any failed step leaves scale-up closed. The registry and existing ready
 digests continue serving trials independently of builder availability.

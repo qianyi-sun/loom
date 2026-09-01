@@ -62,6 +62,7 @@ class ProtectedExternalSupervisorCredentialComponent:
             ),
             classify=self.classify,
             apply=self.apply,
+            preapply_group="external-supervisor-credentials",
         )
 
     def classify(self, plan: FinalGatePlan) -> ComponentObservation:

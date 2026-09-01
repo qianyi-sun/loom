@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -142,3 +143,53 @@ def test_default_command_runner_discards_unbounded_child_output(
     assert captured["stderr"] is subprocess.DEVNULL
     assert result.stdout == b""
     assert result.stderr == b""
+
+
+def test_observe_ignores_an_aged_atime_update(tmp_path: Path) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+    output.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
+    output.chmod(0o600)
+    now_ns = time.time_ns()
+    os.utime(output, ns=(now_ns - 3 * 24 * 60 * 60 * 1_000_000_000, now_ns))
+    run = _Run(output)
+
+    evidence = _transport(tmp_path, run).observe()
+
+    assert evidence is not None
+    assert evidence.size == len("apiVersion: v1\nkind: Config\n")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["replace", "write", "chmod", "truncate", "grow"],
+)
+def test_observe_rejects_stable_identity_or_content_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    output = tmp_path / "external-supervisor.kubeconfig"
+    original = "apiVersion: v1\nkind: Config\n"
+    output.write_text(original, encoding="utf-8")
+    output.chmod(0o600)
+
+    class _MutatingRun(_Run):
+        def __call__(self, argv, environment, timeout_seconds):
+            result = super().__call__(argv, environment, timeout_seconds)
+            if mutation == "replace":
+                replacement = self.output_path.with_suffix(".replacement")
+                replacement.write_text(original, encoding="utf-8")
+                replacement.chmod(0o600)
+                replacement.replace(self.output_path)
+            elif mutation == "write":
+                self.output_path.write_text(original.replace("v1", "v2"), encoding="utf-8")
+            elif mutation == "chmod":
+                self.output_path.chmod(0o640)
+            elif mutation == "truncate":
+                self.output_path.write_text("apiVersion: v1\n", encoding="utf-8")
+            elif mutation == "grow":
+                with self.output_path.open("a", encoding="utf-8") as stream:
+                    stream.write("users: []\n")
+            return result
+
+    with pytest.raises((RuntimeError, ValueError), match=r"changed|unsafe"):
+        _transport(tmp_path, _MutatingRun(output)).observe()

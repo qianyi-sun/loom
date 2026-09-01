@@ -94,13 +94,15 @@ if [ ! -f "$AUTHORITY_MANIFEST" ] || [ -L "$AUTHORITY_MANIFEST" ]; then
   echo "error: external autoscaler authority manifest is unavailable" >&2
   exit 1
 fi
-if [ -L "$output_path" ]; then
-  echo "error: output kubeconfig must not be a symlink" >&2
+if [ -e "$output_path" ] || [ -L "$output_path" ]; then
+  echo "error: output kubeconfig already exists" >&2
   exit 1
 fi
 
 umask 077
-temporary_dir="$(mktemp -d)"
+output_directory="$(dirname -- "$output_path")"
+output_name="$(basename -- "$output_path")"
+temporary_dir="$(mktemp -d -- "$output_directory/.${output_name}.publish.XXXXXXXX")"
 trap 'rm -rf -- "$temporary_dir"' EXIT
 
 "$KUBECTL" --kubeconfig "$KUBECONFIG" apply -f "$AUTHORITY_MANIFEST" >/dev/null
@@ -167,7 +169,11 @@ printf '%s\n' \
 chmod 0600 "$temporary_dir/kubeconfig"
 
 validate_runtime_kubeconfig "$temporary_dir/kubeconfig"
-install -m 0600 "$temporary_dir/kubeconfig" "$output_path"
+if ! ln -- "$temporary_dir/kubeconfig" "$output_path"; then
+  echo "error: output kubeconfig appeared during publication" >&2
+  exit 1
+fi
+rm -f -- "$temporary_dir/kubeconfig"
 validate_runtime_kubeconfig "$output_path"
 printf 'published namespace-scoped external Slurm autoscaler kubeconfig: %s\n' \
   "$output_path"

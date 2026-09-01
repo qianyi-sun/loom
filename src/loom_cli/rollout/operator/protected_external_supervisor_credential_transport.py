@@ -109,6 +109,20 @@ class ExternalSupervisorCredentialEvidence:
         return cls(**fields)  # type: ignore[arg-type]
 
 
+@dataclass(frozen=True, slots=True)
+class _CredentialMetadata:
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    gid: int
+    link_count: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+
+
 def _subprocess_run(
     argv: Sequence[str],
     environment: Mapping[str, str],
@@ -197,7 +211,7 @@ class FixedLocalExternalSupervisorCredentialTransport:
             raise RuntimeError("external supervisor credential publication failed safely")
         return published
 
-    def _metadata(self) -> tuple[int, int, int, int, str]:
+    def _metadata(self) -> _CredentialMetadata:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.output_kubeconfig, flags)
         try:
@@ -220,9 +234,22 @@ class FixedLocalExternalSupervisorCredentialTransport:
                     raise ValueError("external supervisor credential metadata is unsafe")
                 digest.update(payload)
                 remaining -= len(payload)
-            if os.fstat(descriptor) != metadata:
+            stable = _CredentialMetadata(
+                device=metadata.st_dev,
+                inode=metadata.st_ino,
+                mode=metadata.st_mode,
+                uid=metadata.st_uid,
+                gid=metadata.st_gid,
+                link_count=metadata.st_nlink,
+                size=metadata.st_size,
+                mtime_ns=metadata.st_mtime_ns,
+                ctime_ns=metadata.st_ctime_ns,
+                sha256=digest.hexdigest(),
+            )
+            after = os.fstat(descriptor)
+            if _stable_stat(after, sha256=stable.sha256) != stable:
                 raise RuntimeError("external supervisor credential changed during read")
-            return metadata.st_uid, metadata.st_gid, mode, metadata.st_size, digest.hexdigest()
+            return stable
         except OSError as exc:
             raise ValueError("external supervisor credential metadata is unsafe") from exc
         finally:
@@ -230,16 +257,15 @@ class FixedLocalExternalSupervisorCredentialTransport:
 
     def _evidence(
         self,
-        metadata: tuple[int, int, int, int, str],
+        metadata: _CredentialMetadata,
     ) -> ExternalSupervisorCredentialEvidence:
-        uid, gid, mode, size, digest = metadata
         return ExternalSupervisorCredentialEvidence(
             execution_host=self.execution_host,
-            kubeconfig_sha256=digest,
-            uid=uid,
-            gid=gid,
-            mode=mode,
-            size=size,
+            kubeconfig_sha256=metadata.sha256,
+            uid=metadata.uid,
+            gid=metadata.gid,
+            mode=stat.S_IMODE(metadata.mode),
+            size=metadata.size,
             database_secret_readable=True,
             witness_config_map_readable=True,
             pods_exec_denied=True,
@@ -272,6 +298,23 @@ class FixedLocalExternalSupervisorCredentialTransport:
             or len(result.stderr) > _MAX_COMMAND_OUTPUT
         ):
             raise RuntimeError(failure)
+
+
+def _stable_stat(metadata: os.stat_result, *, sha256: str) -> _CredentialMetadata:
+    """Return identity/security/change fields while intentionally excluding atime."""
+
+    return _CredentialMetadata(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        mode=metadata.st_mode,
+        uid=metadata.st_uid,
+        gid=metadata.st_gid,
+        link_count=metadata.st_nlink,
+        size=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        ctime_ns=metadata.st_ctime_ns,
+        sha256=sha256,
+    )
 
 
 __all__ = [

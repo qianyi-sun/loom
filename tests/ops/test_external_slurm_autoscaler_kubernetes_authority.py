@@ -235,3 +235,93 @@ def test_publisher_parses_as_bash() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("race_kind", ["regular", "symlink"])
+def test_publisher_race_never_clobbers_a_concurrently_appearing_destination(
+    tmp_path: Path,
+    race_kind: str,
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    source = tmp_path / "rollout.kubeconfig"
+    source.write_text("protected source\n", encoding="utf-8")
+    source.chmod(0o600)
+    output = tmp_path / "external-supervisor.kubeconfig"
+    symlink_target = tmp_path / "concurrent-target"
+    symlink_target.write_text("concurrent-symlink-target\n", encoding="utf-8")
+    marker = tmp_path / "race-created"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *" apply -f "*)
+    if [ "${*: -1}" = "-" ]; then cat >/dev/null; fi
+    ;;
+  *" get secret loom-secrets -o jsonpath={.data.cp-db-url} "*)
+    printf 'ZGF0YWJhc2UtdXJsCg=='
+    ;;
+  *" create secret generic loom-external-slurm-autoscaler-db "*)
+    printf '%s\n' 'apiVersion: v1' 'kind: Secret'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.token} "*)
+    printf 'dG9rZW4='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.ca\\.crt} "*)
+    printf 'Y2E='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o name "*|*" get configmap loom-global-execution-witness-v1 -o name "*)
+    if [[ " $* " == *" --kubeconfig "*"/kubeconfig "* ]] && [ ! -e "${RACE_MARKER:?}" ]; then
+      : >"$RACE_MARKER"
+      if [ "${RACE_KIND:?}" = symlink ]; then
+        ln -s -- "${SYMLINK_TARGET:?}" "${OUTPUT_PATH:?}"
+      else
+        printf 'concurrent-regular-file\n' >"${OUTPUT_PATH:?}"
+        chmod 0644 "${OUTPUT_PATH:?}"
+      fi
+    fi
+    printf 'resource/allowed\n'
+    ;;
+  *" get namespaces -o name "*)
+    printf '%s\n' namespace/loom-staging namespace/loom-dev
+    ;;
+  *" auth can-i create pods/exec "*)
+    printf 'no\n'
+    ;;
+  *)
+    exit 93
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(PUBLISHER), str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "KUBECONFIG": str(source),
+            "KUBECTL": str(kubectl),
+            "OUTPUT_PATH": str(output),
+            "RACE_KIND": race_kind,
+            "RACE_MARKER": str(marker),
+            "SYMLINK_TARGET": str(symlink_target),
+        },
+    )
+
+    assert marker.exists()
+    assert result.returncode != 0
+    if race_kind == "symlink":
+        assert output.is_symlink()
+        assert output.readlink() == symlink_target
+        assert symlink_target.read_text(encoding="utf-8") == "concurrent-symlink-target\n"
+    else:
+        assert not output.is_symlink()
+        assert output.read_text(encoding="utf-8") == "concurrent-regular-file\n"
+        assert output.stat().st_mode & 0o777 == 0o644

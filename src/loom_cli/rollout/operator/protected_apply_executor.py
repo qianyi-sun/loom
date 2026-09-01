@@ -51,6 +51,9 @@ from .protected_external_supervisor_credential_component import (
 from .protected_external_supervisor_credential_transport import (
     ProtectedExternalSupervisorCredentialTransport,
 )
+from .protected_external_supervisor_transition_cleanup_component import (
+    KubernetesExternalSupervisorTransitionCleanupComponent,
+)
 from .protected_external_supervisor_transport import (
     ProtectedExternalSupervisorTransport,
 )
@@ -382,6 +385,13 @@ class MigrationEpochProtectedApplyExecutor:
                 execution_host=self.external_supervisor_execution_host,
             )
         )
+        external_supervisor_transition_cleanup = (
+            KubernetesExternalSupervisorTransitionCleanupComponent(
+                runner=self.runner,
+                environment=environment,
+                epoch_guard=epoch.classify,
+            ).component(plan)
+        )
         components = (
             (
                 migration,
@@ -390,6 +400,7 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
+                external_supervisor_transition_cleanup,
                 *external_supervisor_credentials,
                 *external_supervisors,
             )
@@ -401,6 +412,7 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
+                external_supervisor_transition_cleanup,
                 *external_supervisor_credentials,
                 *external_supervisors,
             )
@@ -507,6 +519,11 @@ class KubernetesProtectedConvergenceExecutor:
             identities=self.external_supervisor_credential_identities,
             execution_host=self.external_supervisor_execution_host,
         )
+        transition_cleanup = KubernetesExternalSupervisorTransitionCleanupComponent(
+            runner=self.runner,
+            environment=environment,
+            epoch_guard=epoch.classify,
+        )
         observations = {
             "database-migration": KubernetesProtectedMigrationComponent(
                 runner=self.runner,
@@ -536,6 +553,7 @@ class KubernetesProtectedConvergenceExecutor:
                 epoch_guard=epoch.classify,
                 request=self.production_defaults_request,
             ).classify(plan),
+            "external-supervisor-transition-cleanup": transition_cleanup.classify(plan),
         }
         external_component_ids: list[str] = []
         credential_component_ids: list[str] = []
@@ -563,6 +581,8 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
             blockers["production-defaults"] = "protected-epoch-not-exact"
+        if observations["external-supervisor-transition-cleanup"].observed_epoch != expected_epoch:
+            blockers["external-supervisor-transition-cleanup"] = "protected-epoch-not-exact"
         for component_id in (*credential_component_ids, *external_component_ids):
             if observations[component_id].observed_epoch != expected_epoch:
                 blockers[component_id] = "protected-epoch-not-exact"

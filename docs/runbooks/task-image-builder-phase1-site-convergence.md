@@ -151,7 +151,23 @@ not refresh, or a reader rejects it. The publisher is the only workload token
 holder: the manager container retains `automountServiceAccountToken: false`;
 the publisher may only `get` and `patch` this ConfigMap.
 
-### 2. Brokered publication and readback of the dedicated supervisor credential
+### 2. Protected pre-credential transition cleanup and credential publication
+
+The protected apply in step 3 owns removal of the obsolete manager-exec
+authority before it classifies or publishes either controller credential. Its
+journaled transition component accepts only the complete four-object
+predecessor set, the GC-reduced admission-policy and admission-binding pair, or
+complete absence. It rejects every other partial set, any identity or content
+mismatch, and any unrelated `pods/exec` Role in `loom-dev`.
+
+For a complete predecessor it revokes RoleBinding, Role,
+ValidatingAdmissionPolicyBinding, then ValidatingAdmissionPolicy; for the
+GC-reduced pair it performs only the last two revocations. It then proves all
+four fixed identities are absent. The component has no creation, restore, or
+recreation path for exec authority. This protected pre-credential transition
+cleanup is journaled before the credential group and both supervisor-unit
+components. Do not remove these objects manually or restore them during
+rollback.
 
 The protected apply in step 3 owns this convergence. It first publishes and
 checks the narrow credential locally on `gx10-01c7` through the fixed forced
@@ -403,95 +419,16 @@ the check. If an allocation fails, queued demand remains durable but that exact
 `(environment, pool)` waits five minutes after its latest failed allocation
 before a retry. Do not manually shorten or bypass this cooldown.
 
-### 5. Remove transitional exec authority only after proof
+### 5. Verify protected transition cleanup remained converged
 
-After both controllers have successfully read and validated the stable
-ConfigMap, remove #1679's temporary exact-pod manager-export authority using
-the rollout credential. The valid starting states are the complete four-object
-transition set or complete absence; a partial set is a hard failure. Discovery
-also rejects any `pods/exec` Role other than the exact reviewed transition
-identity. Revoke the namespaced RoleBinding and Role before removing the
-now-inert admission binding and policy.
-
-```bash
-TRANSITION_WITNESS_EXEC_NAME="loom-external-slurm-autoscaler-manager-export"
-TRANSITION_EXEC_ROLES="$({
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get role -o json \
-    | jq -cer --arg name "$TRANSITION_WITNESS_EXEC_NAME" '
-      [.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))
-        | .metadata.name]
-      | if (. == [] or . == [$name]) then .
-        else error("unexpected pods/exec Role is present")
-        end'
-} )"
-TRANSITION_PRESENT_COUNT=0
-if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get role "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
-  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
-fi
-if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
-  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
-fi
-if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-  get validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
-  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
-fi
-if kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-  get validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME" -o json; then
-  TRANSITION_PRESENT_COUNT=$((TRANSITION_PRESENT_COUNT + 1))
-fi
-test "$TRANSITION_PRESENT_COUNT" -eq 0 || test "$TRANSITION_PRESENT_COUNT" -eq 4
-
-if [ "$TRANSITION_PRESENT_COUNT" -eq 4 ]; then
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-    get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o json \
-    | jq -e --arg name "$TRANSITION_WITNESS_EXEC_NAME" '
-      .roleRef == {
-        apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: $name
-      }
-      and .subjects == [{
-        kind: "ServiceAccount",
-        name: "loom-external-slurm-autoscaler",
-        namespace: "loom-staging"
-      }]'
-  TRANSITION_DELETE_IDENTITY="role/$TRANSITION_WITNESS_EXEC_NAME/rolebinding/$TRANSITION_WITNESS_EXEC_NAME/validatingadmissionpolicybinding/$TRANSITION_WITNESS_EXEC_NAME/validatingadmissionpolicy/$TRANSITION_WITNESS_EXEC_NAME"
-  printf 'Delete exact transition authority? Type %s: ' "$TRANSITION_DELETE_IDENTITY"
-  read -r TRANSITION_DELETE_CONFIRMATION
-  test "$TRANSITION_DELETE_CONFIRMATION" = "$TRANSITION_DELETE_IDENTITY"
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-    delete rolebinding "$TRANSITION_WITNESS_EXEC_NAME"
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-    delete role "$TRANSITION_WITNESS_EXEC_NAME"
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-    delete validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME"
-  kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-    delete validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME"
-fi
-
-! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get role "$TRANSITION_WITNESS_EXEC_NAME" -o name
-! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
-  get rolebinding "$TRANSITION_WITNESS_EXEC_NAME" -o name
-! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-  get validatingadmissionpolicybinding "$TRANSITION_WITNESS_EXEC_NAME" -o name
-! kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" \
-  get validatingadmissionpolicy "$TRANSITION_WITNESS_EXEC_NAME" -o name
-kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev get role -o json \
-  | jq -e '[.items[] | select(any(.rules[]?; (.resources // []) | index("pods/exec")))]
-    | if length == 0 then true else error("unexpected pods/exec Role remains") end'
-as_supervisor kubectl --kubeconfig "$SUPERVISOR_KUBECONFIG" --namespace loom-dev \
-  auth can-i create pods/exec
-```
-
-Acceptance is `no`, with all four supervisors still reconciling from
-`loom-global-execution-witness-v1`. Do not restore exec as a response to a
-read failure: an unavailable witness must leave scale-up closed and drain
-legacy-supervisor-owned capacity.
-
-Re-run the two controller-local reconciliation blocks from step 3 after the
-deletion. Retain the four new JSON files and require the same empty-queue/no-
-submission assertions before proceeding.
+The completed protected journal must contain the exact
+`external-supervisor-transition-cleanup` terminal before either credential or
+supervisor-unit terminal. Re-run the two controller-local credential and
+reconciliation readbacks from steps 2 and 3. Acceptance remains `no` for
+`pods/exec`, with all four supervisors reconciling from
+`loom-global-execution-witness-v1` and the rollout status reporting no cleanup
+blocker. Do not restore exec as a response to a read failure: an unavailable
+witness leaves scale-up closed and drains legacy-supervisor-owned capacity.
 
 ## Rollback order
 
@@ -597,8 +534,18 @@ kubectl --kubeconfig "$ROLLOUT_KUBECONFIG" --namespace loom-dev \
 On `gx10-01c7`, run the following locally:
 
 ```bash
+ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
+test "$ROLLBACK_CANDIDATE_ROOT" = \
+  "/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
+test ! -L "$ROLLBACK_CANDIDATE_ROOT"
+test -d "$ROLLBACK_CANDIDATE_ROOT"
+test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = \
+  "$ROLLBACK_RELEASE_SHA"
+test -z "$(git -C "$ROLLBACK_CANDIDATE_ROOT" status --porcelain=v1 --untracked-files=all)"
+test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD^{tree})" = \
+  "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse "$ROLLBACK_RELEASE_SHA^{tree}")"
 as_supervisor \
-  "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
+  "$ROLLBACK_CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
   --check "$SUPERVISOR_KUBECONFIG"
 test ! -L "$SUPERVISOR_KUBECONFIG"
 test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
@@ -622,8 +569,18 @@ done <<<"$NAMESPACE_RESOURCES"
 On `TRT-EAI-OLDLAB-1`, run the following locally:
 
 ```bash
+ROLLBACK_CANDIDATE_ROOT="/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
+test "$ROLLBACK_CANDIDATE_ROOT" = \
+  "/opt/loom-staging-runner/candidates/$ROLLBACK_RELEASE_SHA/repo"
+test ! -L "$ROLLBACK_CANDIDATE_ROOT"
+test -d "$ROLLBACK_CANDIDATE_ROOT"
+test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD)" = \
+  "$ROLLBACK_RELEASE_SHA"
+test -z "$(git -C "$ROLLBACK_CANDIDATE_ROOT" status --porcelain=v1 --untracked-files=all)"
+test "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse HEAD^{tree})" = \
+  "$(git -C "$ROLLBACK_CANDIDATE_ROOT" rev-parse "$ROLLBACK_RELEASE_SHA^{tree}")"
 as_supervisor \
-  "$CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
+  "$ROLLBACK_CANDIDATE_ROOT/deploy/slurm/publish-external-slurm-autoscaler-kubeconfig.sh" \
   --check "$SUPERVISOR_KUBECONFIG"
 test ! -L "$SUPERVISOR_KUBECONFIG"
 test "$(stat -c '%F:%U:%G:%a' "$SUPERVISOR_KUBECONFIG")" = \
