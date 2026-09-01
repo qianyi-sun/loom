@@ -380,34 +380,6 @@ def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> N
     assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "deploy/personal-dev-native-builder/loom-personal-dev-native-runtime-authority.sudoers",
-        "deploy/personal-dev-native-builder/runtime-profile-v1.json",
-        "docs/runbooks/personal-dev-native-builder-acceptance.md",
-        "docs/runbooks/personal-dev-native-builder-runtime.md",
-        "scripts/ops/converge_personal_dev_native_builder_release.py",
-        "scripts/ops/install_personal_dev_native_builder_runtime.py",
-        "scripts/ops/personal_dev_native_builder_conformance.sh",
-        "scripts/ops/personal_dev_native_runtime_authority.py",
-        "scripts/ops/staging_rollout_sealed_source.py",
-        "tests/ops/test_personal_dev_native_builder_runbooks.py",
-        "tests/ops/test_personal_dev_native_runtime_authority.py",
-    ],
-)
-def test_personal_dev_native_authority_paths_select_every_heavy_gate(
-    path: str,
-) -> None:
-    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
-
-    assert plan.unowned_runtime is False
-    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert all(
-        "protected-personal-dev-native-authority" in plan.reasons[check] for check in HEAVY_CHECKS
-    )
-
-
 def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> None:
     plan = plan_validations(
         changed_paths=["src/loom_cli/rollout/operator_notes.py"],

@@ -91,20 +91,6 @@ PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "tests/ops/test_staging_rollout_",
 )
 
-PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT = {
-    "deploy/personal-dev-native-builder/loom-personal-dev-native-runtime-authority.sudoers",
-    "deploy/personal-dev-native-builder/runtime-profile-v1.json",
-    "docs/runbooks/personal-dev-native-builder-acceptance.md",
-    "docs/runbooks/personal-dev-native-builder-runtime.md",
-    "scripts/ops/converge_personal_dev_native_builder_release.py",
-    "scripts/ops/install_personal_dev_native_builder_runtime.py",
-    "scripts/ops/personal_dev_native_builder_conformance.sh",
-    "scripts/ops/personal_dev_native_runtime_authority.py",
-    "scripts/ops/staging_rollout_sealed_source.py",
-    "tests/ops/test_personal_dev_native_builder_runbooks.py",
-    "tests/ops/test_personal_dev_native_runtime_authority.py",
-}
-
 PROTECTED_NATIVE_AUTHORITY_EXACT = {
     "deploy/worker-pools/gb10/README.md",
     "docs/architecture/2026-08-31-personal-dev-native-runtime-authority-design.md",
@@ -131,6 +117,10 @@ PROTECTED_NATIVE_AUTHORITY_EXACT = {
     "tests/ops/test_personal_dev_native_builder_runtime_authority.py",
     "tests/ops/test_personal_dev_native_builder_runtime_authority_protocol.py",
     "tests/ops/test_personal_dev_native_builder_runtime_profile.py",
+    # Retired path tombstones keep removal diffs inside the protected lane.
+    "scripts/ops/personal_dev_native_builder_conformance.sh",
+    "scripts/ops/personal_dev_native_runtime_authority.py",
+    "tests/ops/test_personal_dev_native_runtime_authority.py",
 }
 
 PROTECTED_NATIVE_AUTHORITY_PREFIXES = ("deploy/personal-dev-native-builder/",)
@@ -215,10 +205,6 @@ def _is_protected_staging_rollout_path(path: str) -> bool:
     )
 
 
-def _is_protected_personal_dev_native_authority_path(path: str) -> bool:
-    return path in PROTECTED_PERSONAL_DEV_NATIVE_AUTHORITY_EXACT
-
-
 def _is_protected_native_authority_path(path: str) -> bool:
     return _matches(
         path,
@@ -280,10 +266,6 @@ def plan_validations(
     if any(_is_protected_staging_rollout_path(path) for path in paths):
         for name in HEAVY_CHECKS:
             select(name, "protected-staging-rollout")
-
-    if any(_is_protected_personal_dev_native_authority_path(path) for path in paths):
-        for name in HEAVY_CHECKS:
-            select(name, "protected-personal-dev-native-authority")
 
     if any(_is_protected_native_authority_path(path) for path in paths):
         for name in HEAVY_CHECKS:
@@ -402,13 +384,12 @@ def plan_validations(
         if _is_documentation_path(path):
             continue
         matched_owner = (
-            path in PLANNER_PATHS
-            or path in OWNERSHIP_AUTHORITY_PATHS
-            or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
-            or _is_protected_staging_rollout_path(path)
-            or _is_protected_personal_dev_native_authority_path(path)
-            or _is_protected_native_authority_path(path)
-        )
+                path in PLANNER_PATHS
+                or path in OWNERSHIP_AUTHORITY_PATHS
+                or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+                or _is_protected_staging_rollout_path(path)
+                or _is_protected_native_authority_path(path)
+            )
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
