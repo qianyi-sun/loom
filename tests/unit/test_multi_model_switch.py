@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -287,6 +289,57 @@ def test_redact_agent_llm_kwargs() -> None:
     redact_agent_llm_kwargs(agent)
     assert "api_key" not in agent._llm_kwargs
     assert agent._llm_kwargs["timeout"] == 1
+
+
+def test_scrub_harbor_trajectory_drops_step_api_key(tmp_path: Path) -> None:
+    from loom.agent.terminus2.runtime import (
+        _assert_harbor_artifacts_have_no_step_secrets,
+        _scrub_harbor_trajectory_llm_kwargs,
+    )
+
+    traj = tmp_path / "trajectory.json"
+    traj.write_text(
+        json.dumps(
+            {
+                "agent": {
+                    "name": "terminus-2",
+                    "extra": {
+                        "parser": "xml",
+                        "llm_kwargs": {
+                            "api_key": "loom_step_should_not_publish",
+                            "timeout": 1,
+                        },
+                    },
+                },
+                "steps": [{"step_id": 1, "message": 'code mentions "api_key" ok'}],
+            },
+        ),
+        encoding="utf-8",
+    )
+    _scrub_harbor_trajectory_llm_kwargs(traj)
+    payload = json.loads(traj.read_text(encoding="utf-8"))
+    assert payload["agent"]["extra"]["llm_kwargs"] == {"timeout": 1}
+    # Bare "api_key" in step text must not fail publish after scrub.
+    _assert_harbor_artifacts_have_no_step_secrets(tmp_path)
+
+
+def test_assert_harbor_artifacts_still_blocks_raw_step_jwt(tmp_path: Path) -> None:
+    from loom.agent.terminus2.runtime import (
+        _assert_harbor_artifacts_have_no_step_secrets,
+    )
+
+    traj = tmp_path / "trajectory.json"
+    traj.write_text(
+        json.dumps(
+            {
+                "agent": {"name": "terminus-2", "extra": {}},
+                "steps": [{"step_id": 1, "message": "leak loom_step_abcdef.payload"}],
+            },
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AgentError, match="step credential material"):
+        _assert_harbor_artifacts_have_no_step_secrets(tmp_path)
 
 
 def test_assert_terminus2_switch_contract_missing_attrs() -> None:
