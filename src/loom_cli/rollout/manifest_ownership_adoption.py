@@ -21,7 +21,10 @@ from typing import cast
 
 import yaml  # type: ignore[import-untyped]
 
-from loom_cli.rollout.manifest_readiness import ManifestArtifact
+from loom_cli.rollout.manifest_readiness import (
+    ManifestArtifact,
+    is_admitted_manifest_identity,
+)
 from loom_cli.rollout.operator.manifest_apply_contract import (
     MANIFEST_FIELD_MANAGER,
     MANIFEST_REQUEST_TIMEOUT,
@@ -353,7 +356,13 @@ def managed_fields_cleanup_argv(
     if (
         _API_VERSION_RE.fullmatch(api_version) is None
         or _KIND_RE.fullmatch(kind) is None
-        or namespace not in {"", "loom-staging"}
+        or not is_admitted_manifest_identity(
+            api_version,
+            kind,
+            namespace,
+            name,
+            namespace="loom-staging",
+        )
         or _DNS_RE.fullmatch(name) is None
     ):
         raise ValueError("managed-field cleanup identity is invalid")
@@ -728,8 +737,20 @@ def _resources_by_identity(
         declared_namespace = metadata.get("namespace")
         if declared_namespace is None:
             resource_namespace: str | None = ""
-        elif declared_namespace == namespace:
-            resource_namespace = namespace
+        elif (
+            isinstance(api_version, str)
+            and isinstance(kind, str)
+            and isinstance(declared_namespace, str)
+            and isinstance(name, str)
+            and is_admitted_manifest_identity(
+                api_version,
+                kind,
+                declared_namespace,
+                name,
+                namespace=namespace,
+            )
+        ):
+            resource_namespace = declared_namespace
         else:
             resource_namespace = None
         if (

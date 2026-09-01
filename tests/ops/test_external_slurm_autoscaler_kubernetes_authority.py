@@ -29,6 +29,7 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
     assert [document["kind"] for document in documents] == [
         "ServiceAccount",
         "Secret",
+        "Secret",
         "Role",
         "RoleBinding",
         "Role",
@@ -36,7 +37,8 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
         "ClusterRole",
         "ClusterRoleBinding",
     ]
-    assert [document["metadata"]["namespace"] for document in documents[:6]] == [  # type: ignore[index]
+    assert [document["metadata"]["namespace"] for document in documents[:7]] == [  # type: ignore[index]
+        "loom-staging",
         "loom-staging",
         "loom-staging",
         "loom-staging",
@@ -44,7 +46,21 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
         "loom-dev",
         "loom-dev",
     ]
-    token = documents[1]
+    service_account = documents[0]
+    assert service_account["automountServiceAccountToken"] is False
+    database = documents[1]
+    assert database == {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "loom-external-slurm-autoscaler-db",
+            "namespace": "loom-staging",
+        },
+        "type": "Opaque",
+    }
+    assert "data" not in database
+    assert "stringData" not in database
+    token = documents[2]
     assert token["type"] == "kubernetes.io/service-account-token"
     assert token["metadata"]["annotations"] == {  # type: ignore[index]
         "kubernetes.io/service-account.name": "loom-external-slurm-autoscaler",
@@ -52,7 +68,7 @@ def test_authority_is_namespace_scoped_and_uses_a_dedicated_token() -> None:
 
 
 def test_authority_can_read_only_the_dedicated_db_secret() -> None:
-    role = _documents()[2]
+    role = _documents()[3]
     rules = role["rules"]  # type: ignore[index]
     secret_rules = [rule for rule in rules if "secrets" in rule["resources"]]
     assert secret_rules == [
@@ -67,7 +83,7 @@ def test_authority_can_read_only_the_dedicated_db_secret() -> None:
 
 
 def test_authority_has_only_the_reads_and_port_forward_needed_for_postgres() -> None:
-    rules = _documents()[2]["rules"]  # type: ignore[index]
+    rules = _documents()[3]["rules"]  # type: ignore[index]
     assert {
         "apiGroups": [""],
         "resources": ["services", "endpoints", "pods"],
@@ -84,7 +100,7 @@ def test_authority_has_only_the_reads_and_port_forward_needed_for_postgres() -> 
 
 def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
     documents = _documents()
-    witness_role = documents[4]
+    witness_role = documents[5]
     assert witness_role["metadata"]["name"] == (  # type: ignore[index]
         "loom-external-slurm-autoscaler-witness"
     )
@@ -96,7 +112,7 @@ def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
             "verbs": ["get"],
         }
     ]
-    binding = documents[5]
+    binding = documents[6]
     assert binding["subjects"] == [
         {
             "kind": "ServiceAccount",
@@ -113,14 +129,14 @@ def test_authority_reads_only_the_stable_witness_and_never_execs() -> None:
 
 def test_authority_can_list_only_namespace_metadata_for_complete_exec_audit() -> None:
     documents = _documents()
-    audit_role = documents[6]
+    audit_role = documents[7]
     assert audit_role == {
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRole",
         "metadata": {"name": "loom-external-slurm-autoscaler-namespace-audit"},
         "rules": [{"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list"]}],
     }
-    assert documents[7] == {
+    assert documents[8] == {
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRoleBinding",
         "metadata": {"name": "loom-external-slurm-autoscaler-namespace-audit"},

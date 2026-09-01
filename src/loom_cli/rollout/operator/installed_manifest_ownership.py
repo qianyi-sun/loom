@@ -18,6 +18,7 @@ from loom_cli.rollout.manifest_ownership_adoption import (
 )
 from loom_cli.rollout.manifest_ownership_journal import ManifestOwnershipJournal
 from loom_cli.rollout.manifest_ownership_operator import ManifestOwnershipOperator
+from loom_cli.rollout.manifest_readiness import is_admitted_manifest_identity
 from loom_cli.rollout.operator.manifest_apply_contract import server_side_apply_argv
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 
@@ -150,7 +151,13 @@ class InstalledManifestOwnershipService:
                 namespace=self.config.namespace,
             ):
                 _api_version, kind, namespace, name = identity.split("|", 3)
-                if namespace not in {"", self.config.namespace}:
+                if not is_admitted_manifest_identity(
+                    _api_version,
+                    kind,
+                    namespace,
+                    name,
+                    namespace=self.config.namespace,
+                ):
                     raise ValueError("ownership maintenance target namespace drifted")
                 argv = ["kubectl", "--kubeconfig", str(self.config.kubeconfig_path)]
                 if namespace:

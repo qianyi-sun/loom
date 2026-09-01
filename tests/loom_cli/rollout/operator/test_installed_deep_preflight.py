@@ -98,6 +98,15 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
+    authority_source = (
+        Path(__file__).resolve().parents[4]
+        / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+    ).read_text(encoding="utf-8")
+    authority_path = (
+        config.runner_repo / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+    )
+    authority_path.parent.mkdir(parents=True)
+    authority_path.write_text(authority_source, encoding="utf-8")
     installed_config = replace(
         config,
         runner_repo=tmp_path / "installed" / "repo",
@@ -213,6 +222,22 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
     monkeypatch.setattr(
         installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
     )
+    primary_render = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: primary-render
+  namespace: loom-staging
+"""
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "render_manifests",
+        lambda _cluster: primary_render,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "replace",
+        lambda found_cluster, **_changes: found_cluster,
+    )
 
     def capacity_source(**kwargs: object) -> SimpleNamespace:
         captured["capacity_source"] = kwargs
@@ -326,6 +351,14 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
             "loom-worker",
         }
     )
+    manifest_factory = captured["composition"]["render_manifest_factory"]  # type: ignore[index]
+    assert callable(manifest_factory)
+    rendered = manifest_factory(candidate)()  # type: ignore[operator]
+    assert rendered == primary_render + "---\n" + authority_source
+
+    authority_path.write_text(authority_source.rsplit("---", 1)[0], encoding="utf-8")
+    with pytest.raises(ValueError, match="authority resource set is invalid"):
+        manifest_factory(candidate)()  # type: ignore[operator]
 
 
 class _Artifacts:

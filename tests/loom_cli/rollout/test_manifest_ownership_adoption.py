@@ -15,6 +15,7 @@ from loom_cli.rollout.manifest_ownership_adoption import (
     build_manifest_ownership_adoption_plan,
     managed_fields_cleanup_argv,
     ownership_adoption_argv,
+    ownership_manifest_identities,
     verify_managed_fields_cleanup,
     verify_ownership_adoption_dry_run,
 )
@@ -894,6 +895,55 @@ def test_managed_fields_cleanup_command_is_exact_and_dry_run_first_capable() -> 
             kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
             dry_run=True,
         )
+
+
+def test_ownership_identities_admit_only_exact_secondary_namespace_witnesses() -> None:
+    rendered = """apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loom-external-slurm-autoscaler-witness
+subjects: []
+"""
+
+    assert ownership_manifest_identities(rendered, namespace="loom-staging") == (
+        "rbac.authorization.k8s.io/v1|RoleBinding|loom-dev|"
+        "loom-external-slurm-autoscaler-witness",
+        "rbac.authorization.k8s.io/v1|Role|loom-dev|"
+        "loom-external-slurm-autoscaler-witness",
+    )
+    cleanup = managed_fields_cleanup_argv(
+        identity=(
+            "rbac.authorization.k8s.io/v1|Role|loom-dev|"
+            "loom-external-slurm-autoscaler-witness"
+        ),
+        kubeconfig=Path("/var/lib/loom-staging-rollout/kubeconfig"),
+        dry_run=True,
+    )
+    assert cleanup[4:6] == ("--namespace", "loom-dev")
+
+    for drifted in (
+        rendered.replace("kind: Role\n", "kind: ConfigMap\n", 1),
+        rendered.replace(
+            "name: loom-external-slurm-autoscaler-witness",
+            "name: ambient-witness",
+            1,
+        ),
+        rendered.replace("namespace: loom-dev", "namespace: loom-audit", 1),
+    ):
+        with pytest.raises(ManifestOwnershipAdoptionError, match="identity is invalid"):
+            ownership_manifest_identities(drifted, namespace="loom-staging")
 
 
 def test_managed_fields_cleanup_rejects_duplicate_resources_and_malformed_patch() -> None:

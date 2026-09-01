@@ -141,6 +141,53 @@ def test_manifest_render_ignores_only_empty_yaml_documents() -> None:
         )
 
 
+def test_manifest_render_admits_only_exact_secondary_namespace_witnesses() -> None:
+    witnesses = """---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loom-external-slurm-autoscaler-witness
+  namespace: loom-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loom-external-slurm-autoscaler-witness
+subjects: []
+"""
+
+    artifact = inspect_rendered_manifests(
+        _rendered() + witnesses,
+        image_tag="staging-1111111",
+        namespace="loom-staging",
+        image_digests=_digests(),
+    )
+
+    assert artifact.resource_count == 3
+    for drifted in (
+        witnesses.replace("kind: Role\n", "kind: ConfigMap\n", 1),
+        witnesses.replace(
+            "name: loom-external-slurm-autoscaler-witness",
+            "name: ambient-witness",
+            1,
+        ),
+        witnesses.replace("namespace: loom-dev", "namespace: loom-audit", 1),
+    ):
+        with pytest.raises(ValueError, match="namespace drifted"):
+            inspect_rendered_manifests(
+                _rendered() + drifted,
+                image_tag="staging-1111111",
+                namespace="loom-staging",
+                image_digests=_digests(),
+            )
+
+
 def test_manifest_render_rejects_missing_or_stale_local_image() -> None:
     missing = _rendered().replace(
         "        - name: loom-worker\n          image: loom-worker:staging-1111111\n",
