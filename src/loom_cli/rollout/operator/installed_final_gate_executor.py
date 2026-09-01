@@ -180,6 +180,20 @@ class InstalledFinalGateExecutor:
                 candidate_tree=plan.candidate_tree,
                 run=self._supervisor_ssh_run,
             )
+            credential_candidate_root = effective_config.runner_repo
+            gb10_credential_controller = gb10_controller
+            if plan.runner_config_hash != self.config.config_sha256:
+                if self.resume_runtime_upgrade is None:  # pragma: no cover - validated above
+                    raise ValueError("installed final gate plan drifted from runner config")
+                credential_runtime = self.resume_runtime_upgrade.current_runtime_identity(
+                    self.config
+                )
+                credential_candidate_root = self.config.runner_repo
+                gb10_credential_controller = build_fixed_gb10_external_supervisor_transport(
+                    candidate_sha=credential_runtime.resolved_sha,
+                    candidate_tree=credential_runtime.resolved_tree,
+                    run=self._supervisor_ssh_run,
+                )
             container_registry = str(
                 load_cluster_config(effective_config.cluster_config_path).container_registry
             )
@@ -202,10 +216,10 @@ class InstalledFinalGateExecutor:
                 str, ProtectedExternalSupervisorCredentialTransport
             ] = {
                 GB10_CONTROLLER_EXECUTION_HOST: GB10ExternalSupervisorCredentialTransport(
-                    gb10_controller
+                    gb10_credential_controller
                 ),
                 STAGING_ROLLOUT_EXECUTION_HOST: FixedLocalExternalSupervisorCredentialTransport(
-                    candidate_root=effective_config.runner_repo,
+                    candidate_root=credential_candidate_root,
                     execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
                     service_uid=self.service_uid,
                     service_gid=self.service_gid,

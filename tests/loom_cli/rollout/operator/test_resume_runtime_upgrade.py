@@ -79,6 +79,87 @@ def test_runtime_upgrade_authority_reconstructs_exact_historical_config(
     assert resolved.config_sha256 == hashlib.sha256(historical_payload).hexdigest()
 
 
+def test_runtime_upgrade_authority_returns_verified_current_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("loom_cli.rollout.operator.resume_runtime_upgrade")
+    config, current_payload, _historical_payload = _runtime_config(tmp_path)
+    expected = CandidateIdentityEvidence(
+        resolved_sha=CURRENT_SHA,
+        resolved_tree="d" * 40,
+        source_mode="merged-dev",
+        approved_base_sha=None,
+        linear_history_count=0,
+        evidence_digest="e" * 64,
+    )
+    verified: list[tuple[OperatorConfig, str, str | None]] = []
+
+    def verify_runtime(
+        active: OperatorConfig,
+        candidate_sha: str,
+        candidate_tree: str | None,
+    ) -> CandidateIdentityEvidence:
+        verified.append((active, candidate_sha, candidate_tree))
+        return expected
+
+    authority = module.ResumeRuntimeUpgradeAuthority(
+        current_config_payload=current_payload,
+        verify_runtime=verify_runtime,
+        prove_ancestor=lambda *_args: True,
+        read_cluster_config=lambda _path: b"cluster\n",
+    )
+
+    assert authority.current_runtime_identity(config) == expected
+    assert verified == [(config, CURRENT_SHA, None)]
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        None,
+        CandidateIdentityEvidence(
+            resolved_sha="f" * 40,
+            resolved_tree="d" * 40,
+            source_mode="merged-dev",
+            approved_base_sha=None,
+            linear_history_count=0,
+            evidence_digest="e" * 64,
+        ),
+        CandidateIdentityEvidence(
+            resolved_sha=CURRENT_SHA,
+            resolved_tree="invalid",
+            source_mode="merged-dev",
+            approved_base_sha=None,
+            linear_history_count=0,
+            evidence_digest="e" * 64,
+        ),
+        CandidateIdentityEvidence(
+            resolved_sha=CURRENT_SHA,
+            resolved_tree="d" * 40,
+            source_mode="sealed-cumulative",
+            approved_base_sha="a" * 40,
+            linear_history_count=1,
+            evidence_digest="e" * 64,
+        ),
+    ],
+)
+def test_runtime_upgrade_authority_rejects_unbound_current_runtime_identity(
+    tmp_path: Path,
+    evidence: CandidateIdentityEvidence | None,
+) -> None:
+    module = importlib.import_module("loom_cli.rollout.operator.resume_runtime_upgrade")
+    config, current_payload, _historical_payload = _runtime_config(tmp_path)
+    authority = module.ResumeRuntimeUpgradeAuthority(
+        current_config_payload=current_payload,
+        verify_runtime=lambda *_args: evidence,
+        prove_ancestor=lambda *_args: True,
+        read_cluster_config=lambda _path: b"cluster\n",
+    )
+
+    with pytest.raises(module.ResumeRuntimeUpgradeError, match="current runtime"):
+        authority.current_runtime_identity(config)
+
+
 def test_runtime_upgrade_authority_admits_exact_historical_candidate_rechecks(
     tmp_path: Path,
 ) -> None:

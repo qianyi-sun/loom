@@ -115,6 +115,39 @@ class ResumeRuntimeUpgradeAuthority:
         ):
             raise ValueError("resume runtime upgrade authority is invalid")
 
+    def current_runtime_identity(
+        self,
+        config: OperatorConfig,
+    ) -> CandidateIdentityEvidence:
+        """Return the exact installed forward runtime used for new capabilities."""
+        if (
+            config.source_mode != "merged-dev"
+            or config.source_commit_sha is not None
+            or config.source_tree_sha is not None
+            or config.source_base_sha is not None
+            or hashlib.sha256(self.current_config_payload).hexdigest() != config.config_sha256
+        ):
+            raise ResumeRuntimeUpgradeError("current runtime identity binding is invalid")
+        current_sha = candidate_sha_from_runner_repo(
+            config.runner_repo,
+            authority=environment_authority(config.short_name),
+        )
+        try:
+            evidence = self.verify_runtime(config, current_sha, None)
+        except Exception as exc:
+            raise ResumeRuntimeUpgradeError("current runtime identity is invalid") from exc
+        if (
+            not isinstance(evidence, CandidateIdentityEvidence)
+            or evidence.resolved_sha != current_sha
+            or _SHA_RE.fullmatch(evidence.resolved_tree) is None
+            or evidence.source_mode != "merged-dev"
+            or evidence.approved_base_sha is not None
+            or evidence.linear_history_count != 0
+            or _SHA256_RE.fullmatch(evidence.evidence_digest) is None
+        ):
+            raise ResumeRuntimeUpgradeError("current runtime identity drifted")
+        return evidence
+
     def resolve(
         self,
         config: OperatorConfig,
