@@ -25,6 +25,8 @@ from uuid import uuid4
 from loom.staging_mutation_coordination import (
     STAGING_MUTATION_TRY_LOCK_SQL,
     STAGING_MUTATION_UNLOCK_SQL,
+    rollout_guard_application_name,
+    rollout_guard_bind_sql,
 )
 from loom_cli.cluster_backup_guard import DEFAULT_BACKUP_MAX_ELAPSED_SECONDS
 from loom_cli.rollout.credential_authority import (
@@ -733,12 +735,21 @@ def _parse_scalar(
 ) -> int: ...
 
 
+@overload
 def _parse_scalar(
     rows: tuple[Mapping[str, object], ...],
     *,
     key: str,
-    expected_type: type[bool] | type[int],
-) -> bool | int:
+    expected_type: type[str],
+) -> str: ...
+
+
+def _parse_scalar(
+    rows: tuple[Mapping[str, object], ...],
+    *,
+    key: str,
+    expected_type: type[bool] | type[int] | type[str],
+) -> bool | int | str:
     if len(rows) != 1 or set(rows[0]) != {key}:
         raise MutationGuardError("mutation guard database evidence is invalid")
     value = rows[0][key]
@@ -1324,6 +1335,19 @@ def hold_request_guard(
         )
         with query_context(service_uid=service_uid) as query:
             try:
+                application_name = rollout_guard_application_name(
+                    request_id=request_id,
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                    generation=generation,
+                )
+                bound_application_name = _parse_scalar(
+                    query(rollout_guard_bind_sql(application_name)),
+                    key="application_name",
+                    expected_type=str,
+                )
+                if bound_application_name != application_name:
+                    raise MutationGuardError("mutation guard database identity drifted")
                 for attempt in range(max_lock_attempts):
                     _require_before_readiness_deadline(
                         monotonic,

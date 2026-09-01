@@ -393,6 +393,43 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
     }
 
 
+def test_installed_smoke_dispatch_binds_protected_capacity_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    plan = _bound_plan(tmp_path)
+    refresh = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        installed_module,
+        "build_installed_rollout_capacity_refresh",
+        lambda config, *, service_uid: (
+            captured.update({"config": config, "service_uid": service_uid}) or refresh
+        ),
+        raising=False,
+    )
+
+    class _SmokeExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def __call__(self, actual_check: str, actual_operation: object, actual_plan: object):
+            assert (actual_check, actual_operation, actual_plan) == (
+                "final.smoke",
+                CheckOperation.APPLY,
+                plan,
+            )
+            return "dispatched"
+
+    monkeypatch.setattr(installed_module, "FinalSmokeExecutor", _SmokeExecutor)
+
+    assert executor("final.smoke", CheckOperation.APPLY, plan) == "dispatched"  # type: ignore[comparison-overlap]
+    assert captured["config"] == executor.config
+    assert captured["service_uid"] == os.geteuid()
+    assert captured["refresh_capacity"] is refresh
+
+
 @pytest.mark.parametrize(
     ("check_id", "executor_name", "operation"),
     [

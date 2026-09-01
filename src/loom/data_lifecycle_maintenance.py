@@ -41,12 +41,30 @@ from loom.data_lifecycle_runtime import (
     build_lifecycle_object_store_client,
     load_lifecycle_runtime,
 )
-from loom.staging_mutation_coordination import hold_staging_mutation_guard
+from loom.staging_mutation_coordination import (
+    RolloutCapacityAuthority,
+    hold_rollout_capacity_authority,
+    hold_staging_mutation_guard,
+)
+
+_ROLLOUT_AUTHORITY_FIELDS = (
+    "rollout_request_id",
+    "rollout_plan_digest",
+    "rollout_candidate_sha",
+    "rollout_candidate_tree",
+    "rollout_guard_generation",
+    "rollout_guard_backend_pid",
+    "rollout_mutation_epoch",
+)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--action", choices=("auto", "capacity", "resume"), default="auto")
+    parser.add_argument(
+        "--action",
+        choices=("auto", "capacity", "resume", "rollout-capacity"),
+        default="auto",
+    )
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--bucket", action="append", required=True)
     parser.add_argument(
@@ -65,32 +83,74 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--requested-by", default="staging-lifecycle-cronjob")
     parser.add_argument("--resume-run-id", type=UUID)
     parser.add_argument("--request-id")
+    parser.add_argument("--rollout-request-id")
+    parser.add_argument("--rollout-plan-digest")
+    parser.add_argument("--rollout-candidate-sha")
+    parser.add_argument("--rollout-candidate-tree")
+    parser.add_argument("--rollout-guard-generation")
+    parser.add_argument("--rollout-guard-backend-pid", type=int)
+    parser.add_argument("--rollout-mutation-epoch", type=int)
     return parser
+
+
+def _validate_capacity_arguments(args: argparse.Namespace) -> None:
+    if args.capacity_source == "minio-admin" and (
+        args.expected_drive_count is None or args.expected_drive_count < 1
+    ):
+        raise RuntimeError(
+            "--capacity-source minio-admin requires a positive --expected-drive-count"
+        )
+    if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
+        raise RuntimeError("--capacity-source filesystem cannot use --expected-drive-count")
+    if args.capacity_source == "filesystem" and not args.filesystem_path:
+        raise RuntimeError(
+            "--capacity-source filesystem requires at least one --filesystem-path"
+        )
+
+
+def _rollout_authority(args: argparse.Namespace) -> RolloutCapacityAuthority | None:
+    rollout_values = {name: getattr(args, name) for name in _ROLLOUT_AUTHORITY_FIELDS}
+    has_rollout_authority = any(value is not None for value in rollout_values.values())
+    if args.action == "resume":
+        if args.resume_run_id is None or args.request_id is None:
+            raise RuntimeError("resume requires --resume-run-id and --request-id")
+        if has_rollout_authority:
+            raise RuntimeError("resume does not accept rollout authority")
+        return None
+    if args.resume_run_id is not None or args.request_id is not None:
+        raise RuntimeError("non-resume actions do not accept resume authority")
+    _validate_capacity_arguments(args)
+    if args.action != "rollout-capacity":
+        if has_rollout_authority:
+            raise RuntimeError(f"{args.action} does not accept rollout authority")
+        return None
+    if args.namespace != "loom-staging":
+        raise RuntimeError("rollout capacity requires the loom-staging namespace")
+    if any(value is None for value in rollout_values.values()):
+        raise RuntimeError("rollout capacity requires exact rollout authority")
+    try:
+        return RolloutCapacityAuthority(
+            request_id=args.rollout_request_id,
+            candidate_sha=args.rollout_candidate_sha,
+            candidate_tree=args.rollout_candidate_tree,
+            generation=args.rollout_guard_generation,
+            guard_backend_pid=args.rollout_guard_backend_pid,
+            mutation_epoch=args.rollout_mutation_epoch,
+            plan_digest=args.rollout_plan_digest,
+        )
+    except ValueError as exc:
+        raise RuntimeError("rollout capacity authority is invalid") from exc
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.action == "resume":
-        if args.resume_run_id is None or args.request_id is None:
-            raise RuntimeError("resume requires --resume-run-id and --request-id")
-    else:
-        if args.resume_run_id is not None or args.request_id is not None:
-            raise RuntimeError("auto and capacity do not accept resume authority")
-        if args.capacity_source == "minio-admin" and (
-            args.expected_drive_count is None or args.expected_drive_count < 1
-        ):
-            raise RuntimeError(
-                "--capacity-source minio-admin requires a positive --expected-drive-count"
-            )
-        if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
-            raise RuntimeError("--capacity-source filesystem cannot use --expected-drive-count")
-        if args.capacity_source == "filesystem" and not args.filesystem_path:
-            raise RuntimeError(
-                "--capacity-source filesystem requires at least one --filesystem-path"
-            )
+    authority = _rollout_authority(args)
     runtime = load_lifecycle_runtime()
     engine = build_lifecycle_engine(runtime.database)
     try:
+        if authority is not None:
+            with hold_rollout_capacity_authority(engine, authority):
+                return _run_maintenance(args, runtime=runtime, engine=engine)
         with hold_staging_mutation_guard(engine) as acquired:
             if not acquired:
                 print(

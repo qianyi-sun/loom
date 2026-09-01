@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from loom_cli.rollout.admin_smoke_contract import AdminSmokeAuthority
 from loom_cli.rollout.credential_authority import (
     read_trusted_file,
@@ -57,6 +59,7 @@ def _executor(tmp_path: Path, *, request):
                 agent="oracle",
             ),
             request=_Transport(request),
+            refresh_capacity=lambda _plan: "c" * 64,
             monotonic=lambda: 1.0,
             sleep=lambda _seconds: None,
         ),
@@ -196,3 +199,84 @@ def test_final_smoke_rejects_token_drift_before_http(tmp_path: Path) -> None:
     assert result.blockers == {"smoke": "smoke-token-binding-drift"}
     assert not result.protected_mutation
     assert calls == []
+
+
+def test_final_smoke_refreshes_capacity_immediately_before_new_submission(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    def request(method, path, _token, _payload, _headers):
+        events.append(path)
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            value = {"items": []}
+        elif path == "/api/v1/admin/batches/on-behalf":
+            value = {"id": "batch-1"}
+        elif path == "/api/v1/batches/batch-1":
+            value = _terminal("batch-1", "rollout-1111111111111111-1")
+        else:  # pragma: no cover - exact route assertion
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    plan, executor = _executor(tmp_path, request=request)
+    try:
+        executor = replace(
+            executor,
+            refresh_capacity=lambda _plan: (
+                events.append("capacity-refresh") or "c" * 64
+            ),
+        )
+    except TypeError:
+        pytest.fail("final smoke has no protected capacity refresh boundary")
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    submit_index = events.index("/api/v1/admin/batches/on-behalf")
+    assert events[submit_index - 1 : submit_index + 1] == [
+        "capacity-refresh",
+        "/api/v1/admin/batches/on-behalf",
+    ]
+
+
+def test_final_smoke_fails_closed_when_capacity_refresh_fails(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def request(_method, path, _token, _payload, _headers):
+        calls.append(path)
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            value = {"items": []}
+        else:  # pragma: no cover - refresh must stop before submit
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    def fail_refresh(_plan):
+        raise RuntimeError("private capacity diagnostic")
+
+    plan, executor = _executor(tmp_path, request=request)
+    try:
+        executor = replace(executor, refresh_capacity=fail_refresh)
+    except TypeError:
+        pytest.fail("final smoke has no protected capacity refresh boundary")
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.blockers == {"smoke": "smoke-capacity-refresh-failed"}
+    assert result.protected_mutation
+    assert "/api/v1/admin/batches/on-behalf" not in calls
