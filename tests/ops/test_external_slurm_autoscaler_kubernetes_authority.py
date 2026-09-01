@@ -293,9 +293,11 @@ esac
     assert "dedicated database credential is unavailable" in result.stderr
 
 
-def test_publisher_requires_protected_prerequisite_instead_of_bootstrapping_authority(
+def _run_publisher_with_missing_prerequisite(
     tmp_path: Path,
-) -> None:
+    *,
+    missing: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash not available")
@@ -304,42 +306,32 @@ def test_publisher_requires_protected_prerequisite_instead_of_bootstrapping_auth
     source.chmod(0o600)
     output = tmp_path / "external-supervisor.kubeconfig"
     call_log = tmp_path / "kubectl.calls"
+    mutation_log = tmp_path / "mutations"
     kubectl = tmp_path / "kubectl"
     kubectl.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
 case " $* " in
-  *" apply -f "*)
-    if [ "${*: -1}" = "-" ]; then cat >/dev/null; fi
+  *" get secret loom-external-slurm-autoscaler-db -o name "*)
+    if [ "${MISSING_PREREQUISITE:?}" = db ]; then exit 42; fi
+    printf 'secret/loom-external-slurm-autoscaler-db\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o name "*)
+    if [ "${MISSING_PREREQUISITE:?}" = token ]; then exit 43; fi
+    printf 'secret/loom-external-slurm-autoscaler-token\n'
     ;;
   *" get secret loom-secrets -o jsonpath={.data.cp-db-url} "*)
+    printf 'source-read\n' >>"${MUTATION_LOG:?}"
     printf 'ZGF0YWJhc2UtdXJsCg=='
     ;;
   *" create secret generic loom-external-slurm-autoscaler-db "*)
+    printf 'secret-create\n' >>"${MUTATION_LOG:?}"
     printf '%s\n' 'apiVersion: v1' 'kind: Secret'
     ;;
-  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.token} "*)
-    printf 'dG9rZW4='
-    ;;
-  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.ca\\.crt} "*)
-    printf 'Y2E='
-    ;;
-  *" get secret loom-external-slurm-autoscaler-db -o name "*)
-    if [[ " $* " == *" --kubeconfig ${SOURCE_KUBECONFIG:?} "* ]]; then exit 42; fi
-    printf 'secret/loom-external-slurm-autoscaler-db\n'
-    ;;
-  *" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} "*)
-    printf 'ZGF0YWJhc2UtdXJsCg=='
-    ;;
-  *" get configmap loom-global-execution-witness-v1 -o name "*)
-    printf 'configmap/loom-global-execution-witness-v1\n'
-    ;;
-  *" get namespaces -o name "*)
-    printf '%s\n' namespace/loom-staging namespace/loom-dev
-    ;;
-  *" auth can-i create pods/exec "*)
-    printf 'no\n'
+  *" apply -f "*)
+    printf 'secret-apply\n' >>"${MUTATION_LOG:?}"
+    cat >/dev/null
     ;;
   *)
     exit 93
@@ -360,15 +352,56 @@ esac
             "KUBECONFIG": str(source),
             "KUBECTL": str(kubectl),
             "KUBECTL_LOG": str(call_log),
-            "SOURCE_KUBECONFIG": str(source),
+            "MISSING_PREREQUISITE": missing,
+            "MUTATION_LOG": str(mutation_log),
         },
     )
 
-    assert result.returncode != 0
-    assert not output.exists()
-    assert "external-slurm-autoscaler-authority.yaml" not in call_log.read_text(
-        encoding="utf-8"
+    return (
+        result,
+        call_log.read_text(encoding="utf-8").splitlines(),
+        mutation_log.read_text(encoding="utf-8").splitlines()
+        if mutation_log.exists()
+        else [],
     )
+
+
+def test_publisher_requires_missing_db_prerequisite_before_mutation(
+    tmp_path: Path,
+) -> None:
+    result, calls, mutations = _run_publisher_with_missing_prerequisite(tmp_path, missing="db")
+
+    assert result.returncode != 0
+    assert not (tmp_path / "external-supervisor.kubeconfig").exists()
+    assert mutations == []
+    assert not any(
+        "loom-secrets" in call
+        or "create secret generic" in call
+        or " apply -f " in call
+        for call in calls
+    )
+    assert len(calls) == 1
+    assert "get secret loom-external-slurm-autoscaler-db -o name" in calls[0]
+    assert "external-slurm-autoscaler-authority.yaml" not in "\n".join(calls)
+
+
+def test_publisher_requires_missing_token_prerequisite_before_mutation(
+    tmp_path: Path,
+) -> None:
+    result, calls, mutations = _run_publisher_with_missing_prerequisite(tmp_path, missing="token")
+
+    assert result.returncode != 0
+    assert not (tmp_path / "external-supervisor.kubeconfig").exists()
+    assert mutations == []
+    assert not any(
+        "loom-secrets" in call
+        or "create secret generic" in call
+        or " apply -f " in call
+        for call in calls
+    )
+    assert len(calls) == 2
+    assert "get secret loom-external-slurm-autoscaler-db -o name" in calls[0]
+    assert "get secret loom-external-slurm-autoscaler-token -o name" in calls[1]
 
 
 def test_publisher_parses_as_bash() -> None:
