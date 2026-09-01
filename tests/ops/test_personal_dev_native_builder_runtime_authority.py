@@ -942,6 +942,85 @@ def test_bounded_runner_never_signals_a_reused_group_after_leader_reap(
     assert reused_signals == []
 
 
+@pytest.mark.parametrize("signal_window", ("group-check", "leader-wait"))
+def test_bounded_runner_defers_signal_until_retained_leader_is_reaped_once(
+    monkeypatch: pytest.MonkeyPatch,
+    signal_window: str,
+) -> None:
+    """Catches a post-WNOWAIT signal bypassing descendant cleanup or leader reap."""
+    events: list[str] = []
+    installed: dict[int, object] = {}
+
+    class Process:
+        pid = 444444
+        stdout = object()
+        stderr = object()
+        args = ("fake",)
+        returncode: int | None = None
+        reaps = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader.wait")
+            if signal_window == "leader-wait":
+                handler = installed[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                events.append("signal.deferred")
+            self.reaps += 1
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    def previous(signum: int, _frame: object) -> None:
+        assert signum == signal.SIGTERM
+        assert process.reaps == 1
+        events.append("signal.replayed")
+
+    def install(signum: int, handler: object) -> object:
+        old = installed.get(signum, previous)
+        installed[signum] = handler
+        return old
+
+    def group_has_other_members(process_group: int) -> bool:
+        assert process_group == process.pid
+        events.append("group.check")
+        if signal_window == "group-check":
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            events.append("signal.deferred")
+            return True
+        return False
+
+    def terminate(observed: object) -> None:
+        assert observed is process
+        events.append("group.cleanup")
+        process.wait()
+
+    monkeypatch.setattr(authority_module.signal, "signal", install)
+    monkeypatch.setattr(
+        authority_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    runner = authority_module.BoundedSubprocessRunner(
+        timeout_seconds=1,
+        maximum_output=1024,
+    )
+    monkeypatch.setattr(runner, "_drain", lambda _process: (b"", b""))
+    monkeypatch.setattr(runner, "_group_has_other_members", group_has_other_members)
+    monkeypatch.setattr(runner, "_terminate", terminate)
+
+    with pytest.raises(AuthorityError):
+        runner.run(("fake",))
+
+    assert process.reaps == 1
+    assert events.count("group.cleanup") == (1 if signal_window == "group-check" else 0)
+    assert events[-1] == "signal.replayed"
+
+
 def test_cleanup_defers_then_replays_the_first_termination_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2598,6 +2677,59 @@ def test_activate_failure_after_each_mutation_restores_staged_inert_state(
     ]
     assert not host.dockerd_active and not host.agent_active and not host.nft_present
     assert states.snapshot == original
+
+
+@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGHUP))
+@pytest.mark.parametrize("publication_boundary", ("before", "after"))
+@pytest.mark.parametrize("transition", ("stage-agent", "activate"))
+def test_transaction_signal_around_publication_restores_exact_prior_state(
+    signum: signal.Signals,
+    publication_boundary: str,
+    transition: str,
+) -> None:
+    """Catches host/file compensation leaving a newly published phase committed."""
+    initial = _prepared_state() if transition == "stage-agent" else _staged_state()
+    runtime, events, host, states, installer, secrets = _transition_runtime(initial)
+    original = states.snapshot
+    assert original is not None
+
+    class InterruptingStates(RecordingStates):
+        publish_calls = 0
+
+        def publish(self, value: dict[str, object]) -> StateSnapshot:
+            self.publish_calls += 1
+            interrupt = signal.getsignal(signum)
+            assert callable(interrupt)
+            if self.publish_calls == 1 and publication_boundary == "before":
+                interrupt(signum, None)
+            snapshot = super().publish(value)
+            if self.publish_calls == 1 and publication_boundary == "after":
+                interrupt(signum, None)
+            return snapshot
+
+    interrupting_states = InterruptingStates(events)
+    interrupting_states.snapshot = original
+    runtime.states = interrupting_states
+    replayed: list[int] = []
+    previous = signal.signal(signum, lambda observed, _frame: replayed.append(observed))
+    request = (
+        _stage_request(original.sha256)
+        if transition == "stage-agent"
+        else _state_request("activate", original.sha256)
+    )
+
+    try:
+        with pytest.raises(AuthorityError):
+            runtime.dispatch(request)
+    finally:
+        signal.signal(signum, previous)
+
+    assert replayed == [signum]
+    assert interrupting_states.snapshot == original
+    assert not host.dockerd_active and not host.agent_active and not host.nft_present
+    if transition == "stage-agent":
+        assert not installer.staged_present
+        assert not secrets.present
 
 
 @pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))

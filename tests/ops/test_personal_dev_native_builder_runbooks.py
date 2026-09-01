@@ -211,10 +211,9 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     )
 
 
-def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
-    tmp_path: Path,
+def _assert_stage_agent_uses_sealed_snapshot(
+    tmp_path: Path, *, replace_commit: bool
 ) -> None:
-    """Catches checkout replacement controlling the root stage-agent encoder."""
     document = _read(RUNTIME)
     stage_agent = _shell_function(document, "native_authority_stage_agent")
     try:
@@ -256,6 +255,12 @@ def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
         capture_output=True,
         text=True,
     ).stdout.strip()
+    source_tree = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     replacement = tmp_path / "replacement-client"
     marker = tmp_path / "checkout-client-ran-as-root"
     replacement.write_text(
@@ -263,6 +268,30 @@ def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
         encoding="utf-8",
     )
     replacement.chmod(0o755)
+    if replace_commit:
+        client.write_bytes(replacement.read_bytes())
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "--all"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-q", "-m", "attacker"],
+            check=True,
+            capture_output=True,
+            env=git_environment,
+        )
+        attacker_sha = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(repository), "replace", source_sha, attacker_sha],
+            check=True,
+            capture_output=True,
+        )
     key = tmp_path / "agent-key"
     ca = tmp_path / "service-ca"
     key.write_bytes(b"x")
@@ -294,6 +323,10 @@ def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
             f'CHECKOUT_ROOT_MARKER="{marker}"\n'
             "export CHECKOUT_ROOT_MARKER\n"
             'repository_root="$1"\n'
+            'native_authority_git=(/usr/bin/env -i HOME=/nonexistent '
+            'PATH=/usr/bin:/bin LC_ALL=C GIT_CONFIG_NOSYSTEM=1 '
+            'GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-replace-objects '
+            '-C "$repository_root")\n'
             'merged_source_sha="$2"\n'
             'native_authority_client_snapshot_root="$3"\n'
             'native_authority_client=("$5")\n'
@@ -305,11 +338,11 @@ def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
             + 'agent_private_key="$6"\n'
             'service_ca="$7"\n'
             f'authority_source_sha="{"a" * 40}"\n'
-            f'authority_source_tree="{"b" * 40}"\n'
+            f'authority_source_tree="{source_tree}"\n'
             f'runtime_profile_sha256="{"c" * 64}"\n'
             + install_snapshot
             + ("\ninstall_native_authority_client_snapshot\n" if install_snapshot else "\n")
-            + 'mv -- "$4" "$5"\n'
+            + ('\n:\n' if replace_commit else 'mv -- "$4" "$5"\n')
             + stage_agent
             + '\nnative_authority_stage_agent "123e4567-e89b-42d3-a456-426614174000" '
             + '--expected-state-sha256 "'
@@ -328,6 +361,20 @@ def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
 
     assert behavior.returncode == 0, behavior.stderr
     assert not marker.exists()
+
+
+def test_stage_agent_uses_sealed_snapshot_after_checkout_client_replacement(
+    tmp_path: Path,
+) -> None:
+    """Catches checkout replacement controlling the root stage-agent encoder."""
+    _assert_stage_agent_uses_sealed_snapshot(tmp_path, replace_commit=False)
+
+
+def test_stage_agent_snapshot_ignores_git_replace_for_authorized_commit(
+    tmp_path: Path,
+) -> None:
+    """Catches a replace ref substituting the tree behind an authorized commit."""
+    _assert_stage_agent_uses_sealed_snapshot(tmp_path, replace_commit=True)
 
 
 def test_archive_upload_uses_root_private_copy_before_source_substitution(
@@ -428,6 +475,86 @@ def test_archive_upload_failure_removes_the_root_private_copy(
     )
 
     assert behavior.returncode != 0
+    assert not (local_root / request_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        ("signal-HUP", 128 + 1),
+        ("signal-INT", 128 + 2),
+        ("signal-TERM", 128 + 15),
+        ("cat-failure", 1),
+        ("copy-failure", 23),
+        ("sftp-failure", 19),
+        ("success", 0),
+    ],
+)
+def test_archive_stage_always_removes_exact_root_private_copy(
+    tmp_path: Path,
+    failure: str,
+    expected_status: int,
+) -> None:
+    """Catches signals and early pipeline failures bypassing exact local cleanup."""
+    stage_archive = _shell_function(_read(RUNTIME), "native_authority_stage_archive")
+    source = tmp_path / "archive.tar.bz2"
+    source.write_bytes(b"reviewed archive")
+    source.chmod(0o600)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/install && test "$2" = -d; then\n'
+        '  "$@"\n'
+        '  status=$?\n'
+        '  if test "$ARCHIVE_FAILURE" = cat-failure; then rm -f -- "$ARCHIVE_SOURCE"; fi\n'
+        '  exit "$status"\n'
+        "fi\n"
+        'if test "$1" = /usr/bin/install && test "$ARCHIVE_FAILURE" = copy-failure; then\n'
+        '  destination=\n'
+        '  for argument in "$@"; do destination="$argument"; done\n'
+        '  head -c 1 > "$destination"\n'
+        "  exit 23\n"
+        "fi\n"
+        'if test "$1" = /usr/bin/sftp; then\n'
+        '  cat >/dev/null\n'
+        '  case "$ARCHIVE_FAILURE" in\n'
+        '    signal-*) kill -s "${ARCHIVE_FAILURE#signal-}" "$PPID"; sleep 0.1; exit 99 ;;\n'
+        '    sftp-failure) exit 19 ;;\n'
+        '    *) exit 0 ;;\n'
+        "  esac\n"
+        "fi\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    local_root = tmp_path / "root-archive"
+
+    behavior = subprocess.run(
+        ["bash", "-seuo", "pipefail", "--", request_id, str(source)],
+        input=(
+            f'PATH="{fake_bin}:$PATH"\n'
+            f'ARCHIVE_FAILURE="{failure}"\n'
+            f'ARCHIVE_SOURCE="{source}"\n'
+            f'native_authority_local_archive_root="{local_root}"\n'
+            f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
+            "export ARCHIVE_FAILURE ARCHIVE_SOURCE\n"
+            + stage_archive
+            + '\nnative_authority_stage_archive "$1" "$2"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    observed_statuses = {expected_status}
+    if failure.startswith("signal-"):
+        observed_statuses.add(-(expected_status - 128))
+    assert behavior.returncode in observed_statuses, behavior.stderr
     assert not (local_root / request_id).exists()
 
 
@@ -737,7 +864,9 @@ def test_native_builder_runtime_binds_exact_release_and_owner_only_evidence() ->
         "dc21bdc7a4f52d049f4da74a337fc7437b2ac1465c7479816a852120a8cff5292"
         "d72ae78bc4c581f857836bc9a56a1ba18ad687e6bef13d03fdd670d6f2071f7"
     ) in runbook
-    assert 'test "$(git rev-parse HEAD)" = "$merged_source_sha"' in runbook
+    assert "/usr/bin/git --no-replace-objects -C \"$repository_root\"" in runbook
+    assert "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null" in runbook
+    assert 'rev-parse --verify HEAD^{commit})" = \\' in runbook
     assert 'test -z "$(git status --porcelain=v1 --untracked-files=all)"' in runbook
     assert 'sha256sum "$trusted_release"' in runbook
     assert 'sha256sum "$previous_trusted_release"' in runbook

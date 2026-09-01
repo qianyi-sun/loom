@@ -13,8 +13,9 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 
@@ -144,6 +145,10 @@ class SubprocessRunner:
             raise ConformanceError("conformance failed")
         process: subprocess.Popen[bytes] | None = None
         previous_handlers: dict[int, object] = {}
+        pending_signal: int | None = None
+        caught: BaseException | None = None
+        cleanup_failure: BaseException | None = None
+        group_leaked = False
         try:
             process = subprocess.Popen(
                 list(argv),
@@ -157,19 +162,64 @@ class SubprocessRunner:
                 previous_handlers = _forward_signals(process)
             stdout, stderr = _drain_bounded(process)
         except BaseException as exc:
-            if process is not None:
+            caught = exc
+            if isinstance(exc, _CommandSignal):
+                pending_signal = exc.signum
+
+        if process is not None and previous_handlers:
+
+            def defer(signum: int, _frame: object) -> None:
+                nonlocal pending_signal
+                if pending_signal is None:
+                    pending_signal = signum
+
+            for deferred_signum in previous_handlers:
+                signal.signal(deferred_signum, defer)
+
+        if process is not None and caught is None:
+            try:
+                group_leaked = _process_group_has_other_members(process.pid)
+                if not group_leaked:
+                    process.wait()
+            except BaseException as exc:
+                caught = exc
+                if isinstance(exc, _CommandSignal):
+                    pending_signal = exc.signum
+        if process is not None and (caught is not None or group_leaked):
+            try:
                 _terminate_and_reap(process)
-            if isinstance(exc, (subprocess.TimeoutExpired, _CommandOutputError, _CommandSignal)):
-                raise ConformanceError("conformance failed") from exc
-            raise
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, cast(signal.Handlers, handler))
-        if _process_group_has_other_members(process.pid):
-            _terminate_and_reap(process)
+            except BaseException as exc:
+                cleanup_failure = exc
+
+        for restored_signum, handler in previous_handlers.items():
+            signal.signal(restored_signum, cast(signal.Handlers, handler))
+
+        if pending_signal is not None:
+            handler = previous_handlers[pending_signal]
+            if handler == signal.SIG_DFL:
+                signal.raise_signal(pending_signal)
+            elif handler != signal.SIG_IGN and callable(handler):
+                cast(Callable[[int, object], object], handler)(pending_signal, None)
+
+        if cleanup_failure is not None:
+            raise ConformanceError("conformance failed") from cleanup_failure
+        if group_leaked:
             raise ConformanceError("conformance failed")
-        process.wait()
-        if len(stdout) > _MAX_COMMAND_OUTPUT or len(stderr) > _MAX_COMMAND_OUTPUT:
+        if caught is not None:
+            if isinstance(
+                caught,
+                (subprocess.TimeoutExpired, _CommandOutputError, _CommandSignal),
+            ):
+                raise ConformanceError("conformance failed") from caught
+            raise caught
+        if pending_signal is not None:
+            raise ConformanceError("conformance failed")
+        if process is None:
+            raise ConformanceError("conformance failed")
+        if (
+            len(stdout) > _MAX_COMMAND_OUTPUT
+            or len(stderr) > _MAX_COMMAND_OUTPUT
+        ):
             raise ConformanceError("conformance failed")
         result = CommandResult(
             process.returncode,
@@ -186,7 +236,8 @@ class _CommandOutputError(RuntimeError):
 
 
 class _CommandSignal(BaseException):
-    pass
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
 
 
 def _forward_signals(process: subprocess.Popen[bytes]) -> dict[int, object]:
@@ -197,9 +248,9 @@ def _forward_signals(process: subprocess.Popen[bytes]) -> dict[int, object]:
             os.killpg(process.pid, signum)
         except ProcessLookupError:
             pass
-        raise _CommandSignal()
+        raise _CommandSignal(signum)
 
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous[signum] = signal.signal(signum, forward)
     return previous
 
@@ -536,6 +587,24 @@ def _inspect_matches_create(
         return False
 
 
+class _InspectDisposition(Enum):
+    ABSENT = "absent"
+    INDETERMINATE = "indeterminate"
+
+
+def _is_exact_not_found(
+    result: CommandResult,
+    kind: str,
+    name: str,
+) -> bool:
+    expected = (
+        f"Error response from daemon: network {name} not found\n"
+        if kind == "network"
+        else f"Error response from daemon: No such container: {name}\n"
+    )
+    return result.returncode == 1 and result.stdout == "" and result.stderr == expected
+
+
 def _inspect_owned_create(
     runner: Runner,
     endpoint: str,
@@ -544,7 +613,8 @@ def _inspect_owned_create(
     argv: tuple[str, ...],
     invocation: str,
     specification: str,
-) -> tuple[str, bool] | None:
+) -> tuple[str, bool] | _InspectDisposition:
+    exact_absences = 0
     for _attempt in range(2):
         try:
             result = _run(
@@ -555,6 +625,8 @@ def _inspect_owned_create(
         except ConformanceError:
             continue
         if result.returncode != 0:
+            if _is_exact_not_found(result, kind, name):
+                exact_absences += 1
             continue
         try:
             value = json.loads(result.stdout)
@@ -566,7 +638,7 @@ def _inspect_owned_create(
                 else _mapping(identity.get("Config")).get("Labels")
             )
         except (ConformanceError, json.JSONDecodeError, TypeError, ValueError):
-            return None
+            continue
         if (
             not isinstance(identifier, str)
             or _HEX_64.fullmatch(identifier) is None
@@ -574,9 +646,11 @@ def _inspect_owned_create(
             or labels.get(_INVOCATION_LABEL_KEY) != invocation
             or labels.get(_SPEC_LABEL_KEY) != specification
         ):
-            return None
+            continue
         return identifier, _inspect_matches_create(identity, argv, kind)
-    return None
+    if exact_absences == 2:
+        return _InspectDisposition.ABSENT
+    return _InspectDisposition.INDETERMINATE
 
 
 def _create_owned(
@@ -609,7 +683,7 @@ def _create_owned(
         invocation,
         specification,
     )
-    if reconciled is None:
+    if isinstance(reconciled, _InspectDisposition):
         if primary_failure is not None:
             raise primary_failure
         raise ConformanceError("conformance failed")
@@ -637,7 +711,7 @@ def _expect_platform(runner: Runner, endpoint: str, image: str) -> None:
 
 def _assert_absent(runner: Runner, endpoint: str, kind: str, name: str) -> None:
     result = _run(runner, _docker(endpoint, kind, "inspect", name), allow_failure=True)
-    if result.returncode == 0:
+    if not _is_exact_not_found(result, kind, name):
         raise ConformanceError("conformance failed")
 
 
@@ -809,11 +883,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
                 ),
                 allow_failure=True,
             )
-            if (
-                logs.returncode == 0
-                and "loom-buildkitd-native-child-preflight nnp=1" in logs.stdout
-                and workers.returncode == 0
-            ):
+            if logs.returncode == 0 and "loom-buildkitd-native-child-preflight nnp=1" in logs.stdout and workers.returncode == 0:
                 break
             if attempt == 59:
                 raise ConformanceError("conformance failed")
@@ -1014,9 +1084,7 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
         )
         _expect(
             runner,
-            _docker(
-                _NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Runtime}}", buildkit_id
-            ),
+            _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Runtime}}", buildkit_id),
             "runsc-personal-dev-native",
         )
         _expect(
@@ -1025,53 +1093,11 @@ def run_conformance(inputs: ConformanceInputs, runner: Runner) -> dict[str, obje
             "runsc-personal-dev-native",
         )
         for identifier, expected in ((buildkit_id, "3000000000"), (client_id, "1000000000")):
-            _expect(
-                runner,
-                _docker(
-                    _NATIVE_ENDPOINT,
-                    "inspect",
-                    "--format",
-                    "{{.HostConfig.CgroupParent}}",
-                    identifier,
-                ),
-                "loom-personal-dev-builder.slice",
-            )
-            _expect(
-                runner,
-                _docker(
-                    _NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.NanoCpus}}", identifier
-                ),
-                expected,
-            )
-            _expect(
-                runner,
-                _docker(
-                    _NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Memory}}", identifier
-                ),
-                "17179869184",
-            )
-            _expect(
-                runner,
-                _docker(
-                    _NATIVE_ENDPOINT,
-                    "inspect",
-                    "--format",
-                    "{{json .HostConfig.Devices}}",
-                    identifier,
-                ),
-                "[]",
-            )
-            _expect(
-                runner,
-                _docker(
-                    _NATIVE_ENDPOINT,
-                    "inspect",
-                    "--format",
-                    "{{json .HostConfig.Binds}}",
-                    identifier,
-                ),
-                "null",
-            )
+            _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.CgroupParent}}", identifier), "loom-personal-dev-builder.slice")
+            _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.NanoCpus}}", identifier), expected)
+            _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{.HostConfig.Memory}}", identifier), "17179869184")
+            _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{json .HostConfig.Devices}}", identifier), "[]")
+            _expect(runner, _docker(_NATIVE_ENDPOINT, "inspect", "--format", "{{json .HostConfig.Binds}}", identifier), "null")
     except BaseException as primary_failure:
         try:
             _cleanup(runner, created, verified_absent)

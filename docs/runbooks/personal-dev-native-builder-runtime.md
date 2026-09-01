@@ -92,7 +92,14 @@ PY
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 evidence_dir="$evidence_root/${timestamp}-${merged_source_sha}"
 authority_source_sha="$merged_source_sha"
-authority_source_tree="$(git rev-parse HEAD^{tree})"
+native_authority_git=(
+  /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  /usr/bin/git --no-replace-objects -C "$repository_root"
+)
+authority_source_tree="$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
 native_authority_client=(
   "$loom_python"
   "$repository_root/scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
@@ -133,15 +140,33 @@ native_authority_stage_agent() {
     "$@"
 }
 install_native_authority_client_snapshot() {
-  local relative destination expected observed mode
+  local relative destination expected observed mode observed_commit observed_tree
+  observed_commit="$(
+    "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{commit}"
+  )"
+  test "$observed_commit" = "$merged_source_sha"
+  test "$("${native_authority_git[@]}" cat-file -t "$observed_commit")" = commit
+  observed_tree="$(
+    "${native_authority_git[@]}" rev-parse --verify "$observed_commit^{tree}"
+  )"
+  test "$observed_tree" = "$authority_source_tree"
+  test "$("${native_authority_git[@]}" cat-file -t "$observed_tree")" = tree
   sudo -n -- /usr/bin/install -d -m 0700 \
     "$native_authority_client_snapshot_root"
   while read -r relative destination mode; do
-    expected="$(/usr/bin/git -C "$repository_root" rev-parse \
-      "$merged_source_sha:$relative")"
-    /usr/bin/git -C "$repository_root" show "$merged_source_sha:$relative" \
+    expected="$(
+      "${native_authority_git[@]}" rev-parse --verify \
+        "$authority_source_tree:$relative"
+    )"
+    test "$("${native_authority_git[@]}" cat-file -t "$expected")" = blob
+    "${native_authority_git[@]}" cat-file blob "$expected" \
       | sudo -n -- /usr/bin/install -m "$mode" /dev/stdin "$destination"
-    observed="$(sudo -n -- /usr/bin/git hash-object "$destination")"
+    observed="$(
+      sudo -n -- /usr/bin/env -i HOME=/nonexistent PATH=/usr/bin:/bin LC_ALL=C \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_DIR=/nonexistent /usr/bin/git --no-replace-objects \
+        hash-object --no-filters "$destination"
+    )"
     test "$observed" = "$expected"
   done <<EOF
 scripts/ops/personal_dev_native_builder_runtime_authority_client.py ${native_authority_privileged_client[0]} 0500
@@ -329,61 +354,90 @@ native_authority_request() {
   chmod 0600 "$output"
 }
 native_authority_stage_archive() {
-  local request_id="$1"
-  local source="$2"
-  local upload_status
-  local local_dir="$native_authority_local_archive_root/$request_id"
-  local local_archive="$local_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
-  local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
-  local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
-  [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-  test -f "$source" && test ! -L "$source"
-  test "$(stat -c %u "$source")" = "$(id -u)"
-  test "$(stat -c %a "$source")" = 600
-  sudo -n -- /usr/bin/install -d -m 0700 "$local_dir"
-  test ! -e "$local_archive"
-  /bin/cat -- "$source" \
-    | sudo -n -- /usr/bin/install -m 0600 /dev/stdin "$local_archive"
-  if test "$(sudo -n -- /usr/bin/sha512sum "$local_archive" | awk '{print $1}')" \
-    != "$archive_sha512"; then
-    sudo -n -- /usr/bin/rm -f -- "$local_archive"
-    sudo -n -- /usr/bin/rmdir -- "$local_dir"
-    return 1
-  fi
-  if {
-    printf 'mkdir %s\n' "$remote_dir"
-    printf 'chmod 700 %s\n' "$remote_dir"
-    printf 'put %s %s\n' "$local_archive" "$remote_archive"
-    printf 'chmod 600 %s\n' "$remote_archive"
-  } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
-    -o HostName=192.168.20.12 \
-    -o Port=22 \
-    -o User=qianyi \
-    -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
-    -o IdentitiesOnly=yes \
-    -o PubkeyAuthentication=yes \
-    -o PreferredAuthentications=publickey \
-    -o GSSAPIAuthentication=no \
-    -o HostbasedAuthentication=no \
-    -o PasswordAuthentication=no \
-    -o KbdInteractiveAuthentication=no \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
-    -o GlobalKnownHostsFile=/dev/null \
-    -o UpdateHostKeys=no \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=3 \
-    -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-    trt-gb10-2; then
-    upload_status=0
-  else
-    upload_status=$?
-  fi
-  sudo -n -- /usr/bin/rm -f -- "$local_archive"
-  sudo -n -- /usr/bin/rmdir -- "$local_dir"
-  return "$upload_status"
+  (
+    local request_id="$1"
+    local source="$2"
+    local local_dir="$native_authority_local_archive_root/$request_id"
+    local local_archive="$local_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
+    local remote_dir="/var/tmp/loom-personal-dev-native-builder/$request_id"
+    local remote_archive="$remote_dir/gvisor-release-20260810.0-aarch64.tar.bz2"
+    local operation_status
+    [[ "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+    test -f "$source" && test ! -L "$source"
+    test "$(stat -c %u "$source")" = "$(id -u)"
+    test "$(stat -c %a "$source")" = 600
+    cleanup_native_authority_local_archive() {
+      local primary_status=$?
+      local file_status=0
+      local directory_status=0
+      trap - EXIT
+      trap '' HUP INT TERM
+      if sudo -n -- /usr/bin/rm -f -- "$local_archive"; then
+        :
+      else
+        file_status=$?
+      fi
+      if sudo -n -- /usr/bin/rmdir -- "$local_dir"; then
+        :
+      else
+        directory_status=$?
+      fi
+      if test "$primary_status" -ne 0; then
+        exit "$primary_status"
+      fi
+      if test "$file_status" -ne 0; then
+        exit "$file_status"
+      fi
+      exit "$directory_status"
+    }
+    trap cleanup_native_authority_local_archive EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    sudo -n -- /usr/bin/install -d -m 0700 "$local_dir"
+    test ! -e "$local_archive"
+    if /bin/cat -- "$source" \
+      | sudo -n -- /usr/bin/install -m 0600 /dev/stdin "$local_archive"; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
+    test "$(sudo -n -- /usr/bin/sha512sum "$local_archive" | awk '{print $1}')" \
+      = "$archive_sha512"
+    if {
+      printf 'mkdir %s\n' "$remote_dir"
+      printf 'chmod 700 %s\n' "$remote_dir"
+      printf 'put %s %s\n' "$local_archive" "$remote_archive"
+      printf 'chmod 600 %s\n' "$remote_archive"
+    } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
+      -o HostName=192.168.20.12 \
+      -o Port=22 \
+      -o User=qianyi \
+      -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
+      -o IdentitiesOnly=yes \
+      -o PubkeyAuthentication=yes \
+      -o PreferredAuthentications=publickey \
+      -o GSSAPIAuthentication=no \
+      -o HostbasedAuthentication=no \
+      -o PasswordAuthentication=no \
+      -o KbdInteractiveAuthentication=no \
+      -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts \
+      -o GlobalKnownHostsFile=/dev/null \
+      -o UpdateHostKeys=no \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=3 \
+      -o ConnectTimeout=10 \
+      -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
+      trt-gb10-2; then
+      :
+    else
+      operation_status=$?
+      exit "$operation_status"
+    fi
+  )
 }
 native_authority_remove_staged_archive() {
   local request_id="$1"
@@ -452,14 +506,17 @@ test "$merged_source_sha" != '<merged-40-lowercase-hex>'
 test "$trusted_release_sha256" != '<trusted-release-64-lowercase-hex>'
 test "$runtime_window_id" != '<authorized-native-runtime-window-id>'
 test "$(git rev-parse --show-toplevel)" = "$repository_root"
-test "$(git rev-parse HEAD)" = "$merged_source_sha"
+test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
+  "$merged_source_sha"
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
 test -x "${native_authority_client[1]}"
 verify_loom_cli_source
 test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = \
   "$runtime_profile_sha256"
-test "$authority_source_tree" = "$(git rev-parse HEAD^{tree})"
+test "$authority_source_tree" = "$(
+  "${native_authority_git[@]}" rev-parse --verify "$merged_source_sha^{tree}"
+)"
 validate_native_authority_transport_config
 install_native_authority_client_snapshot
 

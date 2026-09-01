@@ -197,6 +197,15 @@ def _without_reconciliation_labels(call: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _not_found(kind: str, name: str) -> CommandResult:
+    message = (
+        f"Error response from daemon: network {name} not found\n"
+        if kind == "network"
+        else f"Error response from daemon: No such container: {name}\n"
+    )
+    return CommandResult(1, "", message)
+
+
 @dataclass
 class RecordingDockerRunner:
     """A Docker boundary fake that returns only reviewed, public probe facts."""
@@ -276,6 +285,9 @@ class RecordingDockerRunner:
         is_emptiness_check = call[-2:] in (("ps", "-aq"), ("ls", "-q"))
         if self._failed_call == call:
             return CommandResult(1, stderr="primary failed")
+        if is_reconciliation and call[-1] not in self.present:
+            kind = "network" if call[3] == "network" else "container"
+            return _not_found(kind, call[-1])
         if (
             not is_cleanup
             and not is_preexisting_check
@@ -288,7 +300,8 @@ class RecordingDockerRunner:
                 return CommandResult(1, stderr="primary failed")
         if is_preexisting_check:
             present = self.present.get(call[-1])
-            return CommandResult(1) if present is None else CommandResult(0, present[1])
+            kind = "network" if call[3] == "network" else "container"
+            return _not_found(kind, call[-1]) if present is None else CommandResult(0, present[1])
         if call[3:5] == ("ps", "-aq"):
             return CommandResult(0, self.managed_containers_after)
         if call[3:6] == ("network", "ls", "-q"):
@@ -669,12 +682,13 @@ def test_subprocess_runner_times_out_and_reaps_its_process_group(
     assert time.monotonic() - started < 2
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
 def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, signum: signal.Signals
 ) -> None:
-    """Catches SIGINT/SIGTERM bypassing root cleanup while the command group keeps running."""
+    """Catches transaction signals being consumed instead of forwarded, reaped, and replayed."""
     ready = tmp_path / "handler-ready"
+    forwarded = tmp_path / "child-received-signal"
     original_forward = conformance._forward_signals
 
     def forward_after_handler(process: object) -> dict[int, object]:
@@ -683,19 +697,29 @@ def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(
         return handlers
 
     monkeypatch.setattr(conformance, "_forward_signals", forward_after_handler)
+    monkeypatch.setattr(conformance, "_COMMAND_TIMEOUT_SECONDS", 0.2)
     program = (
-        "import os,signal,time\n"
+        "import os,signal,sys,time\n"
         f"ready={str(ready)!r}\n"
         "while not os.path.exists(ready): time.sleep(.01)\n"
+        f"marker=os.open({str(forwarded)!r},os.O_WRONLY|os.O_CREAT,0o600)\n"
+        f"signal.signal({signum.value},lambda *_: (os.write(marker,b'forwarded'),sys.exit(0)))\n"
         f"os.kill(os.getppid(),{signum.value})\n"
         "time.sleep(10)"
     )
     started = time.monotonic()
+    replayed: list[int] = []
+    previous = signal.signal(signum, lambda observed, _frame: replayed.append(observed))
 
-    with pytest.raises(ConformanceError, match="conformance failed"):
-        SubprocessRunner().run((sys.executable, "-c", program))
+    try:
+        with pytest.raises(ConformanceError, match="conformance failed"):
+            SubprocessRunner().run((sys.executable, "-c", program))
+    finally:
+        signal.signal(signum, previous)
 
     assert time.monotonic() - started < 2
+    assert forwarded.read_bytes().startswith(b"forwarded")
+    assert replayed == [signum]
 
 
 def test_refuses_existing_exact_name_before_first_create() -> None:
@@ -909,6 +933,88 @@ def test_ambiguous_create_reconciles_every_kind_and_endpoint_before_retry(
         "loom-native-conformance-foreign-client",
     ],
 )
+@pytest.mark.parametrize(
+    "inspect_behavior",
+    ("daemon-error", "malformed", "raised", "unavailable", "exact-not-found"),
+)
+def test_ambiguous_create_requires_proven_ownership_or_exact_not_found(
+    name: str,
+    inspect_behavior: str,
+) -> None:
+    """Catches uncertain inspect results being treated as ownership or absence."""
+
+    class IndeterminateInspectRunner(RecordingDockerRunner):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.target_identifier = ""
+            self.target_present = False
+            self.inject_ambiguity = True
+
+        def run(
+            self,
+            argv: Sequence[str],
+            *,
+            check: bool = True,
+            env: dict[str, str] | None = None,
+        ) -> CommandResult:
+            call = tuple(argv)
+            call_name = call[call.index("--name") + 1] if "--name" in call else call[-1]
+            is_target_create = "create" in call and call_name == name
+            if self.target_present and "inspect" in call and call[-1] == name:
+                self.calls.append(call)
+                self.environments.append({} if env is None else dict(env))
+                if inspect_behavior == "raised":
+                    raise TimeoutError("inspect transport unavailable")
+                if inspect_behavior == "malformed" and "--format" in call:
+                    return CommandResult(0, "{\n", "")
+                if inspect_behavior == "daemon-error":
+                    return CommandResult(
+                        1,
+                        "",
+                        "Error response from daemon: daemon is unavailable\n",
+                    )
+                if inspect_behavior == "unavailable":
+                    return CommandResult(
+                        125,
+                        "",
+                        "Cannot connect to the Docker daemon\n",
+                    )
+                return CommandResult(1, "", "truncated inspect response\n")
+            if is_target_create and self.inject_ambiguity:
+                result = super().run(argv, check=check, env=env)
+                self.target_identifier = result.stdout.strip()
+                self.target_present = inspect_behavior != "exact-not-found"
+                self.inject_ambiguity = False
+                if not self.target_present:
+                    self.present.pop(name)
+                return CommandResult(0, "truncated-object-id\n", "")
+            return super().run(argv, check=check, env=env)
+
+    runner = IndeterminateInspectRunner()
+
+    if inspect_behavior == "exact-not-found":
+        with pytest.raises(ConformanceError, match=r"^conformance failed$"):
+            run_conformance(_inputs(), runner)
+    else:
+        with pytest.raises(ConformanceError, match="cleanup failed"):
+            run_conformance(_inputs(), runner)
+
+    removed_ids = {call[-1] for call in runner.calls if "rm" in call}
+    assert runner.target_identifier not in removed_ids
+    assert runner.target_present is (inspect_behavior != "exact-not-found")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "loom-native-conformance",
+        "loom-native-conformance-denied",
+        "loom-native-conformance-buildkit",
+        "loom-native-conformance-client",
+        "loom-native-conformance-denial-target",
+        "loom-native-conformance-foreign-client",
+    ],
+)
 def test_create_reconciliation_requires_complete_spec_identity(name: str) -> None:
     """Catches trusting ownership labels without checking the committed object spec."""
     runner = RecordingDockerRunner(drifted_inspect_name=name)
@@ -1018,6 +1124,77 @@ def test_conformance_cleanup_never_signals_a_reused_group_after_leader_reap(
     conformance._terminate_and_reap(process)  # type: ignore[arg-type]
 
     assert reused_signals == []
+
+
+@pytest.mark.parametrize("signal_window", ("group-check", "leader-wait"))
+def test_conformance_runner_defers_signal_until_retained_leader_is_reaped_once(
+    monkeypatch: pytest.MonkeyPatch,
+    signal_window: str,
+) -> None:
+    """Catches a post-WNOWAIT signal bypassing descendant cleanup or leader reap."""
+    events: list[str] = []
+    installed: dict[int, object] = {}
+
+    class Process:
+        pid = 454545
+        stdout = object()
+        stderr = object()
+        args = ("fake",)
+        returncode: int | None = None
+        reaps = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader.wait")
+            if signal_window == "leader-wait":
+                handler = installed[signal.SIGTERM]
+                assert callable(handler)
+                handler(signal.SIGTERM, None)
+                events.append("signal.deferred")
+            self.reaps += 1
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    def previous(signum: int, _frame: object) -> None:
+        assert signum == signal.SIGTERM
+        assert process.reaps == 1
+        events.append("signal.replayed")
+
+    def install(signum: int, handler: object) -> object:
+        old = installed.get(signum, previous)
+        installed[signum] = handler
+        return old
+
+    def group_has_other_members(process_group: int) -> bool:
+        assert process_group == process.pid
+        events.append("group.check")
+        if signal_window == "group-check":
+            handler = installed[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            events.append("signal.deferred")
+            return True
+        return False
+
+    def terminate(observed: object) -> None:
+        assert observed is process
+        events.append("group.cleanup")
+        process.wait()
+
+    monkeypatch.setattr(conformance.signal, "signal", install)
+    monkeypatch.setattr(conformance.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(conformance, "_drain_bounded", lambda _process: (b"", b""))
+    monkeypatch.setattr(conformance, "_process_group_has_other_members", group_has_other_members)
+    monkeypatch.setattr(conformance, "_terminate_and_reap", terminate)
+
+    with pytest.raises(ConformanceError, match="conformance failed"):
+        SubprocessRunner().run(("fake",))
+
+    assert process.reaps == 1
+    assert events.count("group.cleanup") == (1 if signal_window == "group-check" else 0)
+    assert events[-1] == "signal.replayed"
 
 
 def _pidfd_open(pid: int) -> int:
