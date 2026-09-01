@@ -830,6 +830,36 @@ def test_database_pod_manifest_uses_bounded_termination_grace() -> None:
     assert manifest["spec"]["terminationGracePeriodSeconds"] == 10
 
 
+def test_database_pod_manifest_waits_for_final_postgres_process() -> None:
+    plan = _plan()
+
+    manifest = _database_pod_manifest(plan)
+
+    postgres = manifest["spec"]["containers"][0]
+    assert postgres["readinessProbe"]["exec"]["command"] == [
+        "sh",
+        "-ceu",
+        'test "$(cat /proc/1/comm)" = postgres\n'
+        'exec pg_isready --dbname "$POSTGRES_DB" --username "$POSTGRES_USER"',
+    ]
+
+
+def test_database_pod_manifest_keeps_database_name_out_of_readiness_shell() -> None:
+    database = "loom_rehearsal_$(invalid-command)"
+    plan = replace(_plan(), resources=replace(_plan().resources, database=database))
+
+    manifest = _database_pod_manifest(plan)
+
+    postgres = manifest["spec"]["containers"][0]
+    assert postgres["readinessProbe"]["exec"]["command"] == [
+        "sh",
+        "-ceu",
+        'test "$(cat /proc/1/comm)" = postgres\n'
+        'exec pg_isready --dbname "$POSTGRES_DB" --username "$POSTGRES_USER"',
+    ]
+    assert {item["name"]: item["value"] for item in postgres["env"]}["POSTGRES_DB"] == database
+
+
 def test_registry_rehearsal_uses_preflight_published_digest_without_republish() -> None:
     manifest_digests = {
         name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"

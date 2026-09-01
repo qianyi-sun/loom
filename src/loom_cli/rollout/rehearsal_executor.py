@@ -2657,11 +2657,11 @@ def _database_pod_manifest(plan: RehearsalPlan) -> dict[str, object]:
                     "readinessProbe": {
                         "exec": {
                             "command": [
-                                "pg_isready",
-                                "--dbname",
-                                plan.resources.database,
-                                "--username",
-                                "loom_rehearsal",
+                                "sh",
+                                "-ceu",
+                                'test "$(cat /proc/1/comm)" = postgres\n'
+                                'exec pg_isready --dbname "$POSTGRES_DB" '
+                                '--username "$POSTGRES_USER"',
                             ]
                         },
                         "failureThreshold": 30,
