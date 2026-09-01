@@ -174,16 +174,23 @@ class ValidationPlan:
 
 def _pull_request_gate_mode(
     *,
+    action: str,
+    action_label: str,
     draft: bool,
+    base_changed: bool,
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Every non-draft PR event emits the four protected contexts. Drafts are
-    filtered. Validation labels remain additive selectors, but no label,
-    author, reviewer, or coordinator grants merge authority.
+    Head, base, readiness, and supported validation-selector changes emit the
+    four protected contexts. Drafts and unrelated metadata events are filtered
+    before checkout. Unknown actions remain fail-closed and run the full gate.
     """
 
-    if draft:
+    if draft or action == "converted_to_draft":
+        return False, False, "filtered"
+    if action == "edited" and not base_changed:
+        return False, False, "filtered"
+    if action in {"labeled", "unlabeled"} and action_label not in LABEL_TO_CHECK:
         return False, False, "filtered"
     return True, True, "full"
 
@@ -250,7 +257,10 @@ def plan_validations(
     gate_mode = "full"
     if event_name == "pull_request":
         event_relevant, full_gate, gate_mode = _pull_request_gate_mode(
+            action=pull_request_action,
+            action_label=pull_request_action_label,
             draft=pull_request_draft,
+            base_changed=pull_request_base_changed,
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
