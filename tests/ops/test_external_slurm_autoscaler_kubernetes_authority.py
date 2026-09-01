@@ -165,19 +165,6 @@ def test_publisher_cannot_recreate_transitional_manager_exec_authority() -> None
     assert "loom-external-slurm-autoscaler-manager-export" not in source
 
 
-def test_publisher_avoids_secret_values_in_process_arguments() -> None:
-    source = PUBLISHER.read_text(encoding="utf-8")
-    assert "loom-secrets" in source
-    assert "cp-db-url" in source
-    assert "loom-external-slurm-autoscaler-db" in source
-    assert "mktemp -d" in source
-    assert "trap " in source
-    assert "--from-file=cp-db-url=" in source
-    assert "--from-literal" not in source
-    assert "chmod 0600" in source
-    assert "https://192.168.50.103:6443" in source
-
-
 def test_publisher_has_a_non_mutating_runtime_credential_check() -> None:
     source = PUBLISHER.read_text(encoding="utf-8")
 
@@ -402,6 +389,79 @@ def test_publisher_requires_missing_token_prerequisite_before_mutation(
     assert len(calls) == 2
     assert "get secret loom-external-slurm-autoscaler-db -o name" in calls[0]
     assert "get secret loom-external-slurm-autoscaler-token -o name" in calls[1]
+
+
+def test_publisher_only_reads_existing_prerequisites_before_local_publication(
+    tmp_path: Path,
+) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    source = tmp_path / "rollout.kubeconfig"
+    source.write_text("protected source\n", encoding="utf-8")
+    source.chmod(0o600)
+    output = tmp_path / "external-supervisor.kubeconfig"
+    call_log = tmp_path / "kubectl.calls"
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${KUBECTL_LOG:?}"
+case " $* " in
+  *" get secret loom-external-slurm-autoscaler-db -o name "*)
+    printf 'secret/loom-external-slurm-autoscaler-db\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o name "*)
+    printf 'secret/loom-external-slurm-autoscaler-token\n'
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.token} "*)
+    printf 'dG9rZW4='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-token -o jsonpath={.data.ca\\.crt} "*)
+    printf 'Y2E='
+    ;;
+  *" get secret loom-external-slurm-autoscaler-db -o jsonpath={.data.cp-db-url} "*)
+    printf 'ZGF0YWJhc2UtdXJsCg=='
+    ;;
+  *" get configmap loom-global-execution-witness-v1 -o name "*)
+    printf 'configmap/loom-global-execution-witness-v1\n'
+    ;;
+  *" get namespaces -o name "*)
+    printf '%s\n' namespace/loom-staging namespace/loom-dev
+    ;;
+  *" auth can-i create pods/exec "*)
+    printf 'no\n'
+    ;;
+  *)
+    exit 97
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    kubectl.chmod(0o700)
+
+    result = subprocess.run(
+        [bash, str(PUBLISHER), str(output)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "KUBECONFIG": str(source),
+            "KUBECTL": str(kubectl),
+            "KUBECTL_LOG": str(call_log),
+        },
+    )
+
+    calls = call_log.read_text(encoding="utf-8").splitlines()
+    assert result.returncode == 0, result.stderr
+    assert output.is_file() and not output.is_symlink()
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert not any(
+        "loom-secrets" in call or "create secret generic" in call or " apply " in call
+        for call in calls
+    )
 
 
 def test_publisher_parses_as_bash() -> None:

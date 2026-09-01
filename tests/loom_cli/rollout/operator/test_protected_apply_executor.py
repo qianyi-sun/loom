@@ -58,6 +58,7 @@ class Runner:
         self.environment = {"KUBECONFIG": "/exact"}
         self.manifest_status = 1
         self.transition_objects: dict[str, dict[str, object]] = {}
+        self.supervisor_database_value = "cG9zdGdyZXNxbDovL2Rlcml2ZWQtc291cmNlCg=="
 
     def capture_stdout(self, argv, *, env, timeout_seconds):
         assert env == self.environment
@@ -69,6 +70,34 @@ class Runner:
             "validatingadmissionpolicybindings": "validatingadmissionpolicybinding",
         }
         requested_resource = argv[argv.index("get") + 1] if "get" in argv else None
+        if requested_resource == "secret/loom-secrets":
+            assert "--output=jsonpath={.data.cp-db-url}" in argv
+            return self.supervisor_database_value.encode()
+        if requested_resource == "secret/loom-external-slurm-autoscaler-db":
+            assert "--show-managed-fields" in argv
+            return json.dumps(
+                {
+                    "apiVersion": "v1",
+                    "data": {"cp-db-url": self.supervisor_database_value},
+                    "kind": "Secret",
+                    "metadata": {
+                        "managedFields": [
+                            {
+                                "apiVersion": "v1",
+                                "fieldsType": "FieldsV1",
+                                "fieldsV1": {"f:data": {"f:cp-db-url": {}}},
+                                "manager": "loom-staging-rollout-supervisor-database",
+                                "operation": "Apply",
+                            }
+                        ],
+                        "name": "loom-external-slurm-autoscaler-db",
+                        "namespace": "loom-staging",
+                        "resourceVersion": "10",
+                        "uid": "bb36273b-9a83-4ad4-bfaf-992e24e43b99",
+                    },
+                    "type": "Opaque",
+                }
+            ).encode()
         if requested_resource in inventory_resources:
             self.calls.append("transition-read")
             resource = inventory_resources[requested_resource]
@@ -442,12 +471,13 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[0].name == "00-database-migration"
     assert roots[1].name == "01-mutation-epoch-claim"
     assert roots[2].name == "02-staging-manifests"
-    assert roots[3].name == "03-environment-state"
-    assert roots[4].name == "04-gb10-candidate"
-    assert roots[5].name == "05-production-defaults"
-    assert roots[6].name == "06-external-supervisor-transition-cleanup"
-    assert roots[7].name == "07-external-supervisor-credential-gb10"
-    assert roots[8].name == "08-external-supervisors-gb10"
+    assert roots[3].name == "03-external-supervisor-database-secret"
+    assert roots[4].name == "04-environment-state"
+    assert roots[5].name == "05-gb10-candidate"
+    assert roots[6].name == "06-production-defaults"
+    assert roots[7].name == "07-external-supervisor-transition-cleanup"
+    assert roots[8].name == "08-external-supervisor-credential-gb10"
+    assert roots[9].name == "09-external-supervisors-gb10"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -544,6 +574,7 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "database-migration",
         "mutation-epoch-claim",
         "staging-manifests",
+        "external-supervisor-database-secret",
         "environment-state",
         "gb10-candidate",
         "production-defaults",
@@ -686,12 +717,14 @@ def test_protected_apply_journals_both_narrow_credentials_before_supervisor_unit
         if path.is_dir() and "-" in path.name
     )
     assert roots[6:] == [
-        "06-external-supervisor-transition-cleanup",
-        "07-external-supervisor-credential-oldlab",
-        "08-external-supervisor-credential-gb10",
-        "09-external-supervisors-gb10",
-        "10-external-supervisors-oldlab",
+        "06-production-defaults",
+        "07-external-supervisor-transition-cleanup",
+        "08-external-supervisor-credential-oldlab",
+        "09-external-supervisor-credential-gb10",
+        "10-external-supervisors-gb10",
+        "11-external-supervisors-oldlab",
     ]
+    assert "03-external-supervisor-database-secret" in roots
     assert all(
         transport.calls.count("credential-publish") == 1 for transport in credentials.values()
     )

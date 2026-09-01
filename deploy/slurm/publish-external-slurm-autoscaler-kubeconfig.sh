@@ -6,7 +6,6 @@ KUBECTL="${KUBECTL:-/usr/local/bin/kubectl}"
 NAMESPACE="loom-staging"
 WITNESS_NAMESPACE="loom-dev"
 WITNESS_CONFIG_MAP="loom-global-execution-witness-v1"
-SOURCE_SECRET="loom-secrets"
 TARGET_SECRET="loom-external-slurm-autoscaler-db"
 TOKEN_SECRET="loom-external-slurm-autoscaler-token"
 API_SERVER="https://192.168.50.103:6443"
@@ -113,20 +112,6 @@ trap 'rm -rf -- "$temporary_dir"' EXIT
   get secret "$TARGET_SECRET" -o name >/dev/null
 "$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" \
   get secret "$TOKEN_SECRET" -o name >/dev/null
-
-# Keep the broad source credential off command lines and out of output. The
-# generated Kubernetes Secret contains only the one key the runner consumes.
-"$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" get secret \
-  "$SOURCE_SECRET" -o 'jsonpath={.data.cp-db-url}' \
-  | base64 --decode >"$temporary_dir/cp-db-url"
-if [ ! -s "$temporary_dir/cp-db-url" ]; then
-  echo "error: source database credential is empty" >&2
-  exit 1
-fi
-"$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" create secret generic \
-  "$TARGET_SECRET" --from-file=cp-db-url="$temporary_dir/cp-db-url" \
-  --dry-run=client -o yaml \
-  | "$KUBECTL" --kubeconfig "$KUBECONFIG" -n "$NAMESPACE" apply -f - >/dev/null
 
 token_data=""
 ca_data=""

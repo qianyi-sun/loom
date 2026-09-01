@@ -115,11 +115,22 @@ and `get` that exact ConfigMap. It has no `pods/exec` authority. The protected
 rollout credential at `/var/lib/loom-staging-rollout/kubeconfig` is used only
 by the rollout publisher and is never referenced by a supervisor unit.
 
+The manifest manager owns the dedicated database Secret shell and scoped
+service-account objects, while a journaled protected component owns only the
+derived `data["cp-db-url"]` field under its own server-side field manager. The
+write is fenced by the observed target UID and resource version; normal writes
+do not force, recognized legacy client-side ownership is the sole adoption
+case, and unknown ownership is blocking drift. The controller-local credential
+publisher only validates this Secret and atomically publishes its `0600`
+kubeconfig, so later manifest convergence cannot migrate and prune Secret data
+owned by the dedicated component.
+
 The old `deployment/loom-capacity-manager` exec source is transition-only. It
 is absent from every active profile and the temporary exact-pod `pods/exec`
-Role and RoleBinding are removed only after both controllers have demonstrated
-successful ConfigMap reads. A later failure remains closed rather than falling
-back to exec.
+Role and RoleBinding are removed by protected transition cleanup before either
+controller credential is classified or published. The cleanup proves the
+exact predecessor set (or its recognized GC-reduced state) and complete
+absence; a later failure remains closed rather than falling back to exec.
 
 Staging profile and supervisor activation is a protected, broker-owned rollout:
 `loom-staging-rollout --env staging start` creates the required rollout
