@@ -284,6 +284,18 @@ def test_development_patch_persists_service_execution_scheduler_identity() -> No
     }
 
 
+def test_development_service_patch_persists_backend_environment_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "service"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
+
+
 def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> None:
     actuator_documents = list(
         yaml.safe_load_all(

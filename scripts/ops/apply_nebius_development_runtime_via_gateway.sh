@@ -76,6 +76,7 @@ trap 'rm -rf "$local_stage"' EXIT
 tar -C "$repo_root" -czf "$local_stage/runtime.tar.gz" \
   scripts/ops/apply_nebius_development_runtime.sh \
   deploy/k8s/nebius-control-plane-development-patch.yaml \
+  deploy/k8s/nebius-service-development-patch.yaml \
   deploy/k8s/nebius-execution-actuator.yaml \
   deploy/k8s/nebius-capacity-collector.yaml \
   deploy/k8s/network-policies.yaml

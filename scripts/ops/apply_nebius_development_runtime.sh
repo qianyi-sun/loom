@@ -46,6 +46,9 @@ kubectl get secret -n loom-nebius-development loom-execution-actuator-db >/dev/n
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null
 kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
+kubectl patch deployment -n loom loom-service --type=strategic \
+  --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
+kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
