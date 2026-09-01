@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
 ACCEPTANCE = ROOT / "docs/runbooks/personal-dev-native-builder-acceptance.md"
@@ -31,11 +33,20 @@ def _shell_function(document: str, name: str) -> str:
     return shell[start:end]
 
 
+def _native_authority_request(document: str) -> str:
+    return (
+        _shell_function(document, "validate_native_authority_receipt")
+        + "\n"
+        + _shell_function(document, "native_authority_request")
+    )
+
+
+@pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
 def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
-    tmp_path: Path,
+    tmp_path: Path, runbook: Path
 ) -> None:
     """Catches a root transport that trusts repository SSH config or alters its client frame."""
-    request = _shell_function(_read(RUNTIME), "native_authority_request")
+    request = _native_authority_request(_read(runbook))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     sudo_log = tmp_path / "sudo"
@@ -124,6 +135,12 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
         "-o",
         "PubkeyAuthentication=yes",
         "-o",
+        "PreferredAuthentications=publickey",
+        "-o",
+        "GSSAPIAuthentication=no",
+        "-o",
+        "HostbasedAuthentication=no",
+        "-o",
         "PasswordAuthentication=no",
         "-o",
         "KbdInteractiveAuthentication=no",
@@ -144,7 +161,7 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
         "-o",
         "ConnectTimeout=10",
         "-o",
-        'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1',
+        'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1',
         "trt-gb10-2",
         "sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
     ]
@@ -256,6 +273,135 @@ def test_native_authority_transport_preflight_validates_checked_in_gb10_topology
             check=False,
         )
         assert behavior.returncode == 0, behavior.stderr
+
+
+def test_native_authority_transport_preflight_rejects_jump_user_drift(
+    tmp_path: Path,
+) -> None:
+    """Catches a proxy user binding that is not validated before root SSH runs."""
+    validators = [
+        _shell_function(_read(runbook), "validate_native_authority_transport_config")
+        for runbook in (RUNTIME, ACCEPTANCE)
+    ]
+    checked_in = ROOT / "deploy/worker-pools/gb10/ssh_config"
+    configured = tmp_path / "deploy/worker-pools/gb10/ssh_config"
+    configured.parent.mkdir(parents=True)
+    configured.write_text(
+        checked_in.read_text(encoding="utf-8").replace(
+            "Host trt-gb10-1\n", "Host trt-gb10-1\n  User wrong-user\n", 1
+        ),
+        encoding="utf-8",
+    )
+
+    for validator in validators:
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", str(tmp_path)],
+            input=(
+                'repository_root="$1"\n'
+                + validator
+                + "\nvalidate_native_authority_transport_config\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert behavior.returncode != 0, behavior.stderr
+
+
+@pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
+def test_native_authority_transport_rejects_nonpublic_receipts(
+    tmp_path: Path, runbook: Path
+) -> None:
+    """Catches preserving an extra or unconstrained broker field as evidence."""
+    request = _native_authority_request(_read(runbook))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = -n && shift\n'
+        'test "$1" = -- && shift\n'
+        'if test "$1" = /usr/bin/ssh; then shift; exec "$AUTHORITY_FAKE_SSH" "$@"; fi\n'
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o700)
+    fake_client = fake_bin / "client"
+    fake_client.write_text("#!/bin/sh\nprintf frame\n", encoding="utf-8")
+    fake_client.chmod(0o700)
+    fake_ssh = fake_bin / "ssh"
+    fake_ssh.write_text(
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$AUTHORITY_RECEIPT\"\n",
+        encoding="utf-8",
+    )
+    fake_ssh.chmod(0o700)
+    source_sha = "a" * 40
+    source_tree = "b" * 40
+    profile_sha = "c" * 64
+    request_id = "123e4567-e89b-42d3-a456-426614174000"
+    canonical = {
+        "agent_service": "inactive",
+        "architecture": "aarch64",
+        "authority_source_sha": source_sha,
+        "authority_source_tree": source_tree,
+        "dockerd_service": "inactive",
+        "executable_new_capacity": 0,
+        "host_name": "gx10-01c7",
+        "managed_containers": 0,
+        "managed_networks": None,
+        "nft_table": "absent",
+        "operation": "status",
+        "phase": "inert",
+        "request_id": request_id,
+        "runtime_profile_sha256": profile_sha,
+        "schema": "loom-personal-dev-native-builder-runtime-authority-receipt.v1",
+        "state": None,
+        "state_sha256": "",
+    }
+    extra_field = dict(canonical)
+    extra_field["unexpected_private_material"] = "not-public"
+    unconstrained_state = dict(canonical)
+    unconstrained_state.update(
+        {
+            "phase": "prepared",
+            "state": {"unexpected_private_material": "not-public"},
+            "state_sha256": "d" * 64,
+        }
+    )
+
+    rejected: list[tuple[bool, int, bool, str]] = []
+    for name, invalid_receipt in (
+        ("extra", extra_field),
+        ("state", unconstrained_state),
+    ):
+        output = tmp_path / f"{name}.json"
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", str(fake_client), str(output), request_id],
+            input=(
+                f'PATH="{fake_bin}:$PATH"\n'
+                f'AUTHORITY_FAKE_SSH="{fake_ssh}"\n'
+                f"AUTHORITY_RECEIPT='{json.dumps(invalid_receipt)}'\n"
+                "export AUTHORITY_FAKE_SSH AUTHORITY_RECEIPT\n"
+                'native_authority_client=("$1")\n'
+                f'authority_source_sha="{source_sha}"\n'
+                f'authority_source_tree="{source_tree}"\n'
+                f'runtime_profile_sha256="{profile_sha}"\n'
+                + request
+                + '\nnative_authority_request status "$3" "$2"\n'
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        rejected.append(
+            (
+                behavior.returncode != 0 and not output.exists(),
+                behavior.returncode,
+                output.exists(),
+                behavior.stderr,
+            )
+        )
+    assert all(item[0] for item in rejected), rejected
 
 
 def test_native_builder_runbooks_leave_no_direct_gb10_privilege_or_scp_path() -> None:
@@ -584,6 +730,61 @@ def test_native_builder_acceptance_proves_concurrent_native_platforms_and_routes
     assert '[[ "$owner_1_candidate" =~ ^[0-9a-f]{64}$ ]]' in runbook
     assert '[[ "$route_host" =~ ^[a-z0-9]' in runbook
     assert "Run section 7 of the runtime runbook" in runbook
+
+
+def test_native_builder_acceptance_rejects_unobserved_platform_or_runtime(
+    tmp_path: Path,
+) -> None:
+    """Catches container evidence that claims arm64/gVisor without observing it."""
+    shell = _shell(_read(ACCEPTANCE))
+    start = shell.index('jq -cS --slurpfile grants "$simultaneous_grants" -s ')
+    end = shell.index('chmod 0600 "$initial_native_runtime"', start)
+    container_evidence = shell[start:end]
+    grants = tmp_path / "grants.json"
+    jobs = tmp_path / "jobs.json"
+    runtime = tmp_path / "runtime.jsonl"
+    containers = tmp_path / "containers.json"
+    grants.write_text(
+        json.dumps([{"grant_id": "grant-0"}, {"grant_id": "grant-1"}]),
+        encoding="utf-8",
+    )
+    jobs.write_text(json.dumps([{}, {}]), encoding="utf-8")
+    runtime.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "grant_id": grant_id,
+                    "evidence": {
+                        "buildkit_container_id": f"buildkit-{grant_id}",
+                        "builder_image": "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:"
+                        + "a" * 64,
+                        "client_container_id": f"client-{grant_id}",
+                        "platform": "linux/amd64",
+                        "runtime_name": "runc",
+                    },
+                }
+            )
+            for grant_id in ("grant-0", "grant-1")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--", str(jobs), str(grants), str(runtime), str(containers)],
+        input=(
+            'simultaneous_jobs="$1"\n'
+            'simultaneous_grants="$2"\n'
+            'initial_native_runtime="$3"\n'
+            'simultaneous_containers="$4"\n'
+            + container_evidence
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0, behavior.stderr
 
 
 def test_native_builder_acceptance_activates_after_agent_and_cleans_up_through_owner_api() -> None:

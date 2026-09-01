@@ -133,6 +133,130 @@ native_authority_stage_agent() {
     --schema-version 1 \
     "$@"
 }
+validate_native_authority_receipt() {
+  local operation="$1"
+  local request_id="$2"
+  local receipt state state_sha256
+  receipt="$(cat)"
+  test -n "$receipt" || return 1
+  printf '%s' "$receipt" | jq -e \
+    --arg operation "$operation" --arg request_id "$request_id" \
+    --arg source "$authority_source_sha" --arg tree "$authority_source_tree" \
+    --arg profile "$runtime_profile_sha256" '
+      def exact_fields($expected):
+        if type == "object" then keys == $expected else false end;
+      def hex40: type == "string" and test("^[0-9a-f]{40}$");
+      def hex64: type == "string" and test("^[0-9a-f]{64}$");
+      def uuid:
+        type == "string" and
+        test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+      def nonnegative_integer: type == "number" and . >= 0 and floor == .;
+      def https_origin:
+        type == "string" and startswith("https://") and
+        (index("\r") | not) and (index("\n") | not) and (index("\u0000") | not);
+      def agent_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-native-builder-agent@sha256:[0-9a-f]{64}$");
+      def builder_image:
+        type == "string" and
+        test("^ghcr\\.io/qianyi-sun/loom-personal-dev-builder@sha256:[0-9a-f]{64}$");
+      def conformance:
+        exact_fields([
+          "architecture","buildkit_sandbox_id","client_sandbox_id",
+          "cross_provider_network","foreign_to_provider","host_to_provider",
+          "managed_containers_after","managed_networks_after","platform",
+          "private_control_plane","public_https","runtime","schema","status"
+        ]) and
+        .architecture == "arm64" and
+        (.buildkit_sandbox_id | hex64) and
+        (.client_sandbox_id | hex64) and
+        .cross_provider_network == "denied" and
+        .foreign_to_provider == "denied" and
+        .host_to_provider == "denied" and
+        .managed_containers_after == 0 and .managed_networks_after == 0 and
+        .platform == "linux/arm64" and .private_control_plane == "denied" and
+        .public_https == "allowed" and .runtime == "runsc-personal-dev-native" and
+        .schema == "loom-personal-dev-native-builder-conformance-v1" and
+        .status == "passed";
+      def public_state:
+        (
+          if .phase == "prepared" then
+            exact_fields([
+              "authority_source_sha","authority_source_tree","conformance",
+              "current_agent","current_builder","current_revision","phase",
+              "previous_agent","previous_builder","previous_revision",
+              "public_store_origin","runtime_profile_sha256","schema"
+            ])
+          elif .phase == "staged" or .phase == "active" then
+            exact_fields([
+              "agent_instance_id","agent_key_id","authority_source_sha",
+              "authority_source_tree","conformance","current_agent",
+              "current_builder","current_revision","phase","previous_agent",
+              "previous_builder","previous_revision","public_key_sha256",
+              "public_store_origin","runtime_profile_sha256","schema",
+              "service_origin"
+            ])
+          else false
+          end
+        ) and
+        .schema == "loom.personal-dev-native-builder-runtime-authority-state.v1" and
+        .authority_source_sha == $source and .authority_source_tree == $tree and
+        .runtime_profile_sha256 == $profile and
+        (.current_agent | agent_image) and (.current_builder | builder_image) and
+        (.current_revision | hex40) and (.public_store_origin | https_origin) and
+        (
+          (.previous_agent == "" and .previous_builder == "" and .previous_revision == "") or
+          ((.previous_agent | agent_image) and (.previous_builder | builder_image) and
+           (.previous_revision | hex40) and .previous_revision != .current_revision)
+        ) and
+        (
+          if .phase == "prepared" then true else
+            (.agent_instance_id | uuid) and
+            (.agent_key_id | type == "string" and test("^[a-z][a-z0-9._-]{0,63}$")) and
+            (.public_key_sha256 | hex64) and (.service_origin | https_origin)
+          end
+        ) and
+        (.conformance | conformance);
+      exact_fields([
+        "agent_service","architecture","authority_source_sha","authority_source_tree",
+        "dockerd_service","executable_new_capacity","host_name",
+        "managed_containers","managed_networks","nft_table","operation","phase",
+        "request_id","runtime_profile_sha256","schema","state","state_sha256"
+      ]) and
+      .schema == "loom-personal-dev-native-builder-runtime-authority-receipt.v1" and
+      .operation == $operation and .request_id == $request_id and
+      .authority_source_sha == $source and .authority_source_tree == $tree and
+      .runtime_profile_sha256 == $profile and .host_name == "gx10-01c7" and
+      .architecture == "aarch64" and .executable_new_capacity == 0 and
+      (.agent_service == "active" or .agent_service == "inactive") and
+      (.dockerd_service == "active" or .dockerd_service == "inactive") and
+      (.nft_table == "present" or .nft_table == "absent") and
+      (.managed_containers | nonnegative_integer) and
+      (.managed_networks == null or (.managed_networks | nonnegative_integer)) and
+      (
+        if $operation == "status" then true
+        elif $operation == "prepare" then .phase == "prepared"
+        elif $operation == "stage-agent" then .phase == "staged"
+        elif $operation == "activate" then .phase == "active"
+        elif $operation == "remove" then .phase == "inert"
+        else false
+        end
+      ) and
+      (
+        if .phase == "inert" then .state == null and .state_sha256 == ""
+        else
+          (.state | public_state) and (.state_sha256 | hex64) and
+          .state.phase == .phase
+        end
+      )
+    ' >/dev/null || return 1
+  if test "$(printf '%s' "$receipt" | jq -er .phase)" != inert; then
+    state_sha256="$(printf '%s' "$receipt" | jq -er .state_sha256)" || return 1
+    state="$(printf '%s' "$receipt" | jq -a -cS -j .state)" || return 1
+    test "$(printf '%s\n' "$state" | sha256sum | awk '{print $1}')" = "$state_sha256" || return 1
+  fi
+  printf '%s' "$receipt" | jq -a -cS -j -e . || return 1
+}
 native_authority_request() {
   local operation="$1"
   local request_id="$2"
@@ -143,7 +267,8 @@ native_authority_request() {
     status|prepare|stage-agent|activate|remove) ;;
     *) exit 1 ;;
   esac
-  {
+  if ! {
+    {
     if test "$operation" = stage-agent; then
       native_authority_stage_agent "$request_id" "$@"
     else
@@ -162,6 +287,9 @@ native_authority_request() {
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
     -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
     -o PasswordAuthentication=no \
     -o KbdInteractiveAuthentication=no \
     -o BatchMode=yes \
@@ -172,28 +300,18 @@ native_authority_request() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
+    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
     trt-gb10-2 \
     'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
     | jq -cS -j -s '
       if length == 1 and (.[0] | type) == "object" then .[0]
       else error("authority receipt cardinality") end
-    ' > "$output"
+    ' | validate_native_authority_receipt "$operation" "$request_id"
+  } > "$output"; then
+    rm -f -- "$output"
+    return 1
+  fi
   chmod 0600 "$output"
-  jq -e --arg operation "$operation" --arg request_id "$request_id" \
-    --arg source "$authority_source_sha" --arg tree "$authority_source_tree" \
-    --arg profile "$runtime_profile_sha256" '
-      .schema == "loom-personal-dev-native-builder-runtime-authority-receipt.v1" and
-      .operation == $operation and .request_id == $request_id and
-      .authority_source_sha == $source and .authority_source_tree == $tree and
-      .runtime_profile_sha256 == $profile and .host_name == "gx10-01c7" and
-      .architecture == "aarch64" and .executable_new_capacity == 0 and
-      (.agent_service == "active" or .agent_service == "inactive") and
-      (.dockerd_service == "active" or .dockerd_service == "inactive") and
-      (.nft_table == "present" or .nft_table == "absent") and
-      (.phase == "inert" or .phase == "prepared" or .phase == "staged" or .phase == "active") and
-      (.state_sha256 == "" or (.state_sha256 | test("^[0-9a-f]{64}$")))
-    ' "$output" >/dev/null
 }
 native_authority_stage_archive() {
   local request_id="$1"
@@ -216,6 +334,9 @@ native_authority_stage_archive() {
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
     -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
     -o PasswordAuthentication=no \
     -o KbdInteractiveAuthentication=no \
     -o BatchMode=yes \
@@ -226,7 +347,7 @@ native_authority_stage_archive() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
+    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
     trt-gb10-2
 }
 native_authority_remove_staged_archive() {
@@ -244,6 +365,9 @@ native_authority_remove_staged_archive() {
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
     -o PubkeyAuthentication=yes \
+    -o PreferredAuthentications=publickey \
+    -o GSSAPIAuthentication=no \
+    -o HostbasedAuthentication=no \
     -o PasswordAuthentication=no \
     -o KbdInteractiveAuthentication=no \
     -o BatchMode=yes \
@@ -254,7 +378,7 @@ native_authority_remove_staged_archive() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
+    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
     trt-gb10-2
 }
 new_native_authority_request_id() {
@@ -286,6 +410,7 @@ validate_native_authority_transport_config() {
   test "$(awk '$1 == "updatehostkeys" { print $2; exit }' <<< "$target")" = false
   test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$jump")" = 207.35.188.227
   test "$(awk '$1 == "port" { print $2; exit }' <<< "$jump")" = 2221
+  test "$(awk '$1 == "user" { print $2; exit }' <<< "$jump")" = qianyi
 }
 
 test "$merged_source_sha" != '<merged-40-lowercase-hex>'
