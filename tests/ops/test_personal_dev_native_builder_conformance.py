@@ -7,7 +7,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -691,8 +691,11 @@ def test_subprocess_runner_forwards_signals_and_reaps_its_process_group(
     forwarded = tmp_path / "child-received-signal"
     original_forward = conformance._forward_signals
 
-    def forward_after_handler(process: object) -> dict[int, object]:
-        handlers = original_forward(process)  # type: ignore[arg-type]
+    def forward_after_handler(
+        process: object,
+        record: Callable[[int], None],
+    ) -> dict[int, object]:
+        handlers = original_forward(process, record)  # type: ignore[arg-type]
         ready.write_text("ready", encoding="ascii")
         return handlers
 
@@ -1195,6 +1198,114 @@ def test_conformance_runner_defers_signal_until_retained_leader_is_reaped_once(
     assert process.reaps == 1
     assert events.count("group.cleanup") == (1 if signal_window == "group-check" else 0)
     assert events[-1] == "signal.replayed"
+
+
+@pytest.mark.parametrize("signum", (signal.SIGINT, signal.SIGTERM, signal.SIGHUP))
+@pytest.mark.parametrize("signal_window", ("drain-handoff", "cleanup-adjudication"))
+def test_conformance_runner_keeps_signal_deferral_through_cleanup_error_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    signum: signal.Signals,
+    signal_window: str,
+) -> None:
+    """Catches the WNOWAIT handoff gap and signal replay hiding failed cleanup."""
+    events: list[str] = []
+    installed: dict[int, object] = {}
+    previous_handlers: dict[int, object] = {}
+    restore_counts = {value: 0 for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    drain_complete = False
+    handoff_delivered = False
+    replayed: list[int] = []
+    real_signal = signal.signal
+
+    class Process:
+        pid = 474747
+        stdout = object()
+        stderr = object()
+        args = ("fake",)
+        returncode: int | None = None
+        reaps = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader.wait")
+            self.reaps += 1
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    def previous(observed: int, _frame: object) -> None:
+        assert observed == signum
+        assert process.reaps == 1
+        replayed.append(observed)
+        events.append("signal.replayed")
+
+    for value in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        handler = previous if value == signum else signal.SIG_IGN
+        installed[value] = handler
+        previous_handlers[value] = handler
+
+    def install(observed: int, handler: object) -> object:
+        nonlocal handoff_delivered
+        if observed not in installed:
+            return real_signal(observed, handler)  # type: ignore[arg-type]
+        old = installed[observed]
+        if (
+            signal_window == "drain-handoff"
+            and drain_complete
+            and not handoff_delivered
+        ):
+            handoff_delivered = True
+            active = installed[signum]
+            assert callable(active)
+            active(signum, None)
+            events.append("signal.deferred")
+        installed[observed] = handler
+        if handler is previous_handlers[observed]:
+            restore_counts[observed] += 1
+        return old
+
+    def drain(_process: object) -> tuple[bytes, bytes]:
+        nonlocal drain_complete
+        events.append("drain.complete")
+        drain_complete = True
+        return b"", b""
+
+    def group_has_other_members(process_group: int) -> bool:
+        assert process_group == process.pid
+        events.append("group.check")
+        return signal_window == "cleanup-adjudication"
+
+    def terminate(observed: object) -> None:
+        assert observed is process
+        events.append("group.cleanup")
+        process.wait()
+        active = installed[signum]
+        assert callable(active)
+        active(signum, None)
+        events.append("signal.deferred")
+        raise ConformanceError("cleanup failed")
+
+    monkeypatch.setattr(conformance.signal, "signal", install)
+    monkeypatch.setattr(conformance.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(conformance, "_drain_bounded", drain)
+    monkeypatch.setattr(conformance, "_process_group_has_other_members", group_has_other_members)
+    monkeypatch.setattr(conformance, "_terminate_and_reap", terminate)
+
+    with pytest.raises(ConformanceError, match="conformance failed") as raised:
+        SubprocessRunner().run(("fake",))
+
+    assert process.reaps == 1
+    assert restore_counts == {
+        signal.SIGINT: 1,
+        signal.SIGTERM: 1,
+        signal.SIGHUP: 1,
+    }
+    assert installed == previous_handlers
+    assert replayed == ([signum] if signal_window == "drain-handoff" else [])
+    assert events.index("leader.wait") < events.index("signal.deferred")
+    if signal_window == "cleanup-adjudication":
+        assert isinstance(raised.value.__cause__, ConformanceError)
 
 
 def _pidfd_open(pid: int) -> int:

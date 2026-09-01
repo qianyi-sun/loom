@@ -177,12 +177,6 @@ class _CommandOutputLimitError(RuntimeError):
     pass
 
 
-class _CommandSignal(BaseException):
-    def __init__(self, signum: int) -> None:
-        self.signum = signum
-        super().__init__(signum)
-
-
 class _TransactionInterruption(BaseException):
     def __init__(self, signum: int) -> None:
         self.signum = signum
@@ -355,6 +349,7 @@ class BoundedSubprocessRunner:
         previous_handlers: dict[int, object] = {}
         pending_signal: int | None = None
         caught: BaseException | None = None
+        group_leaked = False
         stdout = b""
         stderr = b""
         try:
@@ -367,42 +362,25 @@ class BoundedSubprocessRunner:
                 start_new_session=True,
             )
 
-            def forward(signum: int, _frame: object) -> None:
-                try:
-                    os.killpg(process.pid, signum)
-                except ProcessLookupError:
-                    pass
-                raise _CommandSignal(signum)
-
-            if threading.current_thread() is threading.main_thread():
-                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-                    previous_handlers[signum] = signal.signal(signum, forward)
-            stdout, stderr = self._drain(process)
-        except BaseException as exc:
-            caught = exc
-            if isinstance(exc, _CommandSignal):
-                pending_signal = exc.signum
-
-        if process is not None and previous_handlers:
-
-            def defer(signum: int, _frame: object) -> None:
+            def forward_and_defer(signum: int, _frame: object) -> None:
                 nonlocal pending_signal
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signum)
+                    except ProcessLookupError:
+                        pass
                 if pending_signal is None:
                     pending_signal = signum
 
-            for deferred_signum in previous_handlers:
-                signal.signal(deferred_signum, defer)
-
-        group_leaked = False
-        if process is not None and caught is None:
-            try:
-                group_leaked = self._group_has_other_members(process.pid)
-                if not group_leaked:
-                    process.wait()
-            except BaseException as exc:
-                caught = exc
-                if isinstance(exc, _CommandSignal):
-                    pending_signal = exc.signum
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                    previous_handlers[signum] = signal.signal(signum, forward_and_defer)
+            stdout, stderr = self._drain(process)
+            group_leaked = self._group_has_other_members(process.pid)
+            if not group_leaked:
+                process.wait()
+        except BaseException as exc:
+            caught = exc
 
         cleanup_failure: BaseException | None = None
         if process is not None and (caught is not None or group_leaked):
@@ -411,35 +389,31 @@ class BoundedSubprocessRunner:
             except BaseException as exc:
                 cleanup_failure = exc
 
-        if previous_handlers:
-            for restored_signum, handler in previous_handlers.items():
-                signal.signal(restored_signum, cast(signal.Handlers, handler))
+        for restored_signum, handler in previous_handlers.items():
+            signal.signal(restored_signum, cast(signal.Handlers, handler))
 
+        if cleanup_failure is not None:
+            if isinstance(cleanup_failure, AuthorityError):
+                raise cleanup_failure
+            raise AuthorityError("command_cleanup_failed") from cleanup_failure
         if pending_signal is not None:
             handler = previous_handlers[pending_signal]
             if handler == signal.SIG_DFL:
                 signal.raise_signal(pending_signal)
             elif handler != signal.SIG_IGN and callable(handler):
                 cast(Callable[[int, object], object], handler)(pending_signal, None)
-
-        if cleanup_failure is not None:
-            if isinstance(cleanup_failure, AuthorityError):
-                raise cleanup_failure
-            raise AuthorityError("command_cleanup_failed") from cleanup_failure
         if group_leaked:
             raise AuthorityError("command_cleanup_failed")
+        if pending_signal is not None:
+            raise AuthorityError("command_interrupted")
         if caught is not None:
             if isinstance(caught, subprocess.TimeoutExpired):
                 raise AuthorityError("command_timeout") from caught
             if isinstance(caught, _CommandOutputLimitError):
                 raise AuthorityError("command_output_invalid") from caught
-            if isinstance(caught, _CommandSignal):
-                raise AuthorityError("command_interrupted") from caught
             if isinstance(caught, AuthorityError):
                 raise caught
             raise AuthorityError("command_failed") from caught
-        if pending_signal is not None:
-            raise AuthorityError("command_interrupted")
         if process is None:
             raise AuthorityError("command_failed")
         result = CommandResult(
@@ -1828,6 +1802,8 @@ def _defer_transaction_signals() -> Iterator[None]:
     finally:
         for restored_signum, handler in previous.items():
             signal.signal(restored_signum, cast(signal.Handlers, handler))
+    if isinstance(caught, AuthorityError) and caught.code == "cleanup_failed":
+        raise caught
     if pending is not None:
         handler = previous[pending]
         if handler == signal.SIG_DFL:
@@ -1912,6 +1888,22 @@ class RuntimeAuthority:
             raise AuthorityError("state_invalid")
         return snapshot
 
+    @staticmethod
+    def _retry_cleanup_step(
+        operation: Callable[[], None],
+    ) -> BaseException | None:
+        first_failure: BaseException | None = None
+        for _attempt in range(2):
+            try:
+                operation()
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+            else:
+                return first_failure
+        assert first_failure is not None
+        raise AuthorityError("cleanup_failed") from first_failure
+
     def _compensate_inert(self) -> None:
         first_failure: BaseException | None = None
         with _defer_cleanup_signals():
@@ -1930,10 +1922,12 @@ class RuntimeAuthority:
             except BaseException as exc:
                 if first_failure is None:
                     first_failure = exc
-        if first_failure is not None:
-            raise AuthorityError("cleanup_failed") from first_failure
+            if first_failure is not None:
+                raise AuthorityError("cleanup_failed") from first_failure
 
     def _restore_state_snapshot(self, previous: StateSnapshot) -> None:
+        if self._read_state() == previous:
+            return
         restored = self.states.publish(previous.value)
         if (
             not isinstance(restored, StateSnapshot)
@@ -2081,26 +2075,59 @@ class RuntimeAuthority:
             raise AuthorityError("state_changed")
         return current
 
-    def _rollback_agent_stage(self, previous_state: StateSnapshot | None) -> None:
+    def _restore_staged_files(
+        self,
+        request: AuthorityRequest,
+        header: Mapping[str, object],
+    ) -> None:
+        with self.secrets.files(
+            request.payload,
+            private_key_length=cast(int, header["private_key_length"]),
+            service_ca_length=cast(int, header["service_ca_length"]),
+            request_id=cast(str, header["request_id"]),
+        ) as paths:
+            self.installer.stage_agent_authorized(
+                agent_image=cast(str, header["agent_image"]),
+                builder_image=cast(str, header["builder_image"]),
+                service_url=cast(str, header["service_origin"]),
+                agent_instance_id=cast(str, header["agent_instance_id"]),
+                key_id=cast(str, header["agent_key_id"]),
+                private_key=paths.private_key,
+                ca_file=paths.ca_file,
+                expected_public_key_sha256=cast(str, header["expected_public_key_sha256"]),
+            )
+            self.installer.verify_staged()
+            self._validated_host_status(self.host.verify_inert(require_empty=True))
+
+    def _rollback_agent_stage(
+        self,
+        previous_state: StateSnapshot | None,
+        *,
+        restore_staged_files: Callable[[], None],
+    ) -> None:
         first_failure: BaseException | None = None
         with _defer_cleanup_signals():
-            try:
-                self.installer.discard_agent_stage()
-            except BaseException as exc:
-                first_failure = exc
+            step_failure = self._retry_cleanup_step(self.installer.discard_agent_stage)
+            if step_failure is not None:
+                first_failure = step_failure
             if previous_state is not None:
                 try:
-                    self._restore_state_snapshot(previous_state)
-                except BaseException as exc:
-                    if first_failure is None:
-                        first_failure = exc
-            try:
-                self._compensate_inert()
-            except BaseException as exc:
-                if first_failure is None:
-                    first_failure = exc
-        if first_failure is not None:
-            raise AuthorityError("cleanup_failed") from first_failure
+                    step_failure = self._retry_cleanup_step(
+                        lambda: self._restore_state_snapshot(previous_state)
+                    )
+                except BaseException as cleanup_failure:
+                    try:
+                        self._retry_cleanup_step(restore_staged_files)
+                    except BaseException as recovery_failure:
+                        raise AuthorityError("cleanup_failed") from recovery_failure
+                    raise AuthorityError("cleanup_failed") from cleanup_failure
+                if first_failure is None and step_failure is not None:
+                    first_failure = step_failure
+            step_failure = self._retry_cleanup_step(self._compensate_inert)
+            if first_failure is None and step_failure is not None:
+                first_failure = step_failure
+            if first_failure is not None:
+                raise AuthorityError("cleanup_failed") from first_failure
 
     def _stage_agent(
         self,
@@ -2160,7 +2187,10 @@ class RuntimeAuthority:
         except BaseException as primary_failure:
             if mutating:
                 try:
-                    self._rollback_agent_stage(prepared if publication_started else None)
+                    self._rollback_agent_stage(
+                        prepared if publication_started else None,
+                        restore_staged_files=lambda: self._restore_staged_files(request, header),
+                    )
                 except BaseException as cleanup_failure:
                     if isinstance(cleanup_failure, AuthorityError):
                         raise
@@ -2177,6 +2207,37 @@ class RuntimeAuthority:
             final_host,
         )
 
+    def _restore_active_phase(self, active: Mapping[str, object]) -> None:
+        host = self._host_status()
+        if host.managed_containers or (host.dockerd_active and host.managed_networks):
+            raise AuthorityError("cleanup_failed")
+        if not host.nft_present:
+            self.host.load_nft()
+        if not host.dockerd_active:
+            self.host.start_dockerd()
+        if not host.agent_active:
+            self.host.start_agent()
+        self.installer.verify_active()
+        restored_host = self._host_status()
+        if (
+            not restored_host.dockerd_active
+            or not restored_host.agent_active
+            or not restored_host.nft_present
+            or restored_host.managed_containers
+            or restored_host.managed_networks
+        ):
+            raise AuthorityError("cleanup_failed")
+        validated = _validate_state(active)
+        expected = StateSnapshot(
+            MappingProxyType(validated),
+            hashlib.sha256(encode_state(validated)).hexdigest(),
+        )
+        if self._read_state() == expected:
+            return
+        restored = self.states.publish(validated)
+        if restored != expected or self._read_state() != expected:
+            raise AuthorityError("cleanup_failed")
+
     def _activate(
         self,
         request: AuthorityRequest,
@@ -2189,6 +2250,9 @@ class RuntimeAuthority:
             phases=frozenset({"staged"}),
         )
         self._validated_host_status(self.host.verify_inert(require_empty=True))
+        active = dict(staged.value)
+        active["phase"] = "active"
+        active = _validate_state(active)
         mutating = False
         publication_started = False
         try:
@@ -2206,9 +2270,6 @@ class RuntimeAuthority:
                 or final_host.managed_networks
             ):
                 raise AuthorityError("host_state_invalid")
-            active = dict(staged.value)
-            active["phase"] = "active"
-            active = _validate_state(active)
             publication_started = True
             snapshot = self.states.publish(active)
             if not isinstance(snapshot, StateSnapshot):
@@ -2219,16 +2280,31 @@ class RuntimeAuthority:
                 with _defer_cleanup_signals():
                     if publication_started:
                         try:
-                            self._restore_state_snapshot(staged)
+                            step_failure = self._retry_cleanup_step(
+                                lambda: self._restore_state_snapshot(staged)
+                            )
                         except BaseException as cleanup_failure:
-                            first_failure = cleanup_failure
+                            try:
+                                self._retry_cleanup_step(
+                                    lambda: self._restore_active_phase(active)
+                                )
+                            except BaseException as recovery_failure:
+                                raise AuthorityError("cleanup_failed") from recovery_failure
+                            raise AuthorityError("cleanup_failed") from cleanup_failure
+                        if step_failure is not None:
+                            first_failure = step_failure
                     try:
-                        self._compensate_inert()
+                        step_failure = self._retry_cleanup_step(self._compensate_inert)
                     except BaseException as cleanup_failure:
-                        if first_failure is None:
-                            first_failure = cleanup_failure
-                if first_failure is not None:
-                    raise AuthorityError("cleanup_failed") from first_failure
+                        try:
+                            self._retry_cleanup_step(lambda: self._restore_active_phase(active))
+                        except BaseException as recovery_failure:
+                            raise AuthorityError("cleanup_failed") from recovery_failure
+                        raise AuthorityError("cleanup_failed") from cleanup_failure
+                    if first_failure is None and step_failure is not None:
+                        first_failure = step_failure
+                    if first_failure is not None:
+                        raise AuthorityError("cleanup_failed") from first_failure
             if isinstance(primary_failure, AuthorityError):
                 raise
             raise AuthorityError("transition_failed") from primary_failure

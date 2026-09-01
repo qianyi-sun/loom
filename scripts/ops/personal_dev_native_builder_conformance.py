@@ -149,6 +149,14 @@ class SubprocessRunner:
         caught: BaseException | None = None
         cleanup_failure: BaseException | None = None
         group_leaked = False
+        stdout = b""
+        stderr = b""
+
+        def record_pending_signal(signum: int) -> None:
+            nonlocal pending_signal
+            if pending_signal is None:
+                pending_signal = signum
+
         try:
             process = subprocess.Popen(
                 list(argv),
@@ -159,32 +167,16 @@ class SubprocessRunner:
                 start_new_session=True,
             )
             if threading.current_thread() is threading.main_thread():
-                previous_handlers = _forward_signals(process)
+                previous_handlers = _forward_signals(
+                    process,
+                    record_pending_signal,
+                )
             stdout, stderr = _drain_bounded(process)
+            group_leaked = _process_group_has_other_members(process.pid)
+            if not group_leaked:
+                process.wait()
         except BaseException as exc:
             caught = exc
-            if isinstance(exc, _CommandSignal):
-                pending_signal = exc.signum
-
-        if process is not None and previous_handlers:
-
-            def defer(signum: int, _frame: object) -> None:
-                nonlocal pending_signal
-                if pending_signal is None:
-                    pending_signal = signum
-
-            for deferred_signum in previous_handlers:
-                signal.signal(deferred_signum, defer)
-
-        if process is not None and caught is None:
-            try:
-                group_leaked = _process_group_has_other_members(process.pid)
-                if not group_leaked:
-                    process.wait()
-            except BaseException as exc:
-                caught = exc
-                if isinstance(exc, _CommandSignal):
-                    pending_signal = exc.signum
         if process is not None and (caught is not None or group_leaked):
             try:
                 _terminate_and_reap(process)
@@ -194,26 +186,25 @@ class SubprocessRunner:
         for restored_signum, handler in previous_handlers.items():
             signal.signal(restored_signum, cast(signal.Handlers, handler))
 
+        if cleanup_failure is not None:
+            raise ConformanceError("conformance failed") from cleanup_failure
         if pending_signal is not None:
             handler = previous_handlers[pending_signal]
             if handler == signal.SIG_DFL:
                 signal.raise_signal(pending_signal)
             elif handler != signal.SIG_IGN and callable(handler):
                 cast(Callable[[int, object], object], handler)(pending_signal, None)
-
-        if cleanup_failure is not None:
-            raise ConformanceError("conformance failed") from cleanup_failure
         if group_leaked:
+            raise ConformanceError("conformance failed")
+        if pending_signal is not None:
             raise ConformanceError("conformance failed")
         if caught is not None:
             if isinstance(
                 caught,
-                (subprocess.TimeoutExpired, _CommandOutputError, _CommandSignal),
+                (subprocess.TimeoutExpired, _CommandOutputError),
             ):
                 raise ConformanceError("conformance failed") from caught
             raise caught
-        if pending_signal is not None:
-            raise ConformanceError("conformance failed")
         if process is None:
             raise ConformanceError("conformance failed")
         if (
@@ -235,20 +226,19 @@ class _CommandOutputError(RuntimeError):
     pass
 
 
-class _CommandSignal(BaseException):
-    def __init__(self, signum: int) -> None:
-        self.signum = signum
-
-
-def _forward_signals(process: subprocess.Popen[bytes]) -> dict[int, object]:
+def _forward_signals(
+    process: subprocess.Popen[bytes],
+    record: Callable[[int], None],
+) -> dict[int, object]:
     previous: dict[int, object] = {}
 
     def forward(signum: int, _frame: object) -> None:
-        try:
-            os.killpg(process.pid, signum)
-        except ProcessLookupError:
-            pass
-        raise _CommandSignal(signum)
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+        record(signum)
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         previous[signum] = signal.signal(signum, forward)
