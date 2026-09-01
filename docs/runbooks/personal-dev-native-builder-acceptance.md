@@ -239,8 +239,8 @@ native_authority_request() {
     --runtime-profile-sha256 "$runtime_profile_sha256" \
     --schema-version 1 \
     "$@" | sudo -n -- /usr/bin/ssh -F /dev/null \
-    -o HostName=192.168.20.12 \
-    -o Port=22 \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
     -o User=qianyi \
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
@@ -258,8 +258,7 @@ native_authority_request() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-    trt-gb10-2 \
+    trt-gb10-1 \
     'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
     | jq -cS -j -s '
       if length == 1 and (.[0] | type) == "object" then .[0]
@@ -278,15 +277,15 @@ print(uuid4())
 PY
 }
 validate_native_authority_transport_config() {
-  local config target jump
+  local config target
   config="$repository_root/deploy/worker-pools/gb10/ssh_config"
   test -f "$config" && test ! -L "$config"
-  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-2)"
-  jump="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
-  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 192.168.20.12
-  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 22
+  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
+  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 207.35.188.227
+  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 2221
   test "$(awk '$1 == "user" { print $2; exit }' <<< "$target")" = qianyi
-  test "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")" = trt-gb10-1
+  test -z "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")"
+  test -z "$(awk '$1 == "proxycommand" { print $2; exit }' <<< "$target")"
   test "$(awk '$1 == "identityfile" { print $2; exit }' <<< "$target")" = \
     /var/lib/loom-staging-rollout/gb10-deploy-ed25519
   test "$(awk '$1 == "userknownhostsfile" { print $2; exit }' <<< "$target")" = \
@@ -297,9 +296,6 @@ validate_native_authority_transport_config() {
   test "$(awk '$1 == "passwordauthentication" { print $2; exit }' <<< "$target")" = no
   test "$(awk '$1 == "stricthostkeychecking" { print $2; exit }' <<< "$target")" = true
   test "$(awk '$1 == "updatehostkeys" { print $2; exit }' <<< "$target")" = false
-  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$jump")" = 207.35.188.227
-  test "$(awk '$1 == "port" { print $2; exit }' <<< "$jump")" = 2221
-  test "$(awk '$1 == "user" { print $2; exit }' <<< "$jump")" = qianyi
 }
 trusted_launcher_profile='<absolute-owner-only-trusted-launcher-profile.json>'
 scanner_finding_policy='<absolute-owner-only-scanner-finding-policy.json>'

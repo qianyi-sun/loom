@@ -165,8 +165,9 @@ ledger-bound hosts before removing local key material.
 The personal native-builder runbooks use the installed
 `/usr/local/libexec/loom-personal-dev-native-builder-runtime-authority` as the
 only remote sudo target. The operator encoder writes a framed request to stdin;
-root-local OpenSSH runs with `-F /dev/null`, fixed GB10 host/jump, identity, and
-known-host settings, then invokes only `sudo -n --` for that launcher. The
+root-local OpenSSH runs with `-F /dev/null` and pins the direct controller
+`trt-gb10-1` at `207.35.188.227:2221`, the deployment identity, and known-host
+settings; it then invokes only `sudo -n --` for that launcher. The
 non-executable broker library is never a remote command.
 
 `status`, `prepare`, `stage-agent`, `activate`, and `remove` receipts are the

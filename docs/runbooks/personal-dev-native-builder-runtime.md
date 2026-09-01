@@ -283,8 +283,8 @@ native_authority_request() {
         "$@"
     fi
   } | sudo -n -- /usr/bin/ssh -F /dev/null \
-    -o HostName=192.168.20.12 \
-    -o Port=22 \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
     -o User=qianyi \
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
@@ -302,8 +302,7 @@ native_authority_request() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-    trt-gb10-2 \
+    trt-gb10-1 \
     'sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority' \
     | jq -cS -j -s '
       if length == 1 and (.[0] | type) == "object" then .[0]
@@ -373,8 +372,8 @@ native_authority_stage_archive() {
       printf 'put %s %s\n' "$local_archive" "$remote_archive"
       printf 'chmod 600 %s\n' "$remote_archive"
     } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
-      -o HostName=192.168.20.12 \
-      -o Port=22 \
+      -o HostName=207.35.188.227 \
+      -o Port=2221 \
       -o User=qianyi \
       -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
       -o IdentitiesOnly=yes \
@@ -392,8 +391,7 @@ native_authority_stage_archive() {
       -o ServerAliveInterval=30 \
       -o ServerAliveCountMax=3 \
       -o ConnectTimeout=10 \
-      -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-      trt-gb10-2; then
+      trt-gb10-1; then
       :
     else
       operation_status=$?
@@ -410,8 +408,8 @@ native_authority_remove_staged_archive() {
     printf 'rm %s\n' "$remote_archive"
     printf 'rmdir %s\n' "$remote_dir"
   } | sudo -n -- /usr/bin/sftp -b - -F /dev/null \
-    -o HostName=192.168.20.12 \
-    -o Port=22 \
+    -o HostName=207.35.188.227 \
+    -o Port=2221 \
     -o User=qianyi \
     -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 \
     -o IdentitiesOnly=yes \
@@ -429,8 +427,7 @@ native_authority_remove_staged_archive() {
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ConnectTimeout=10 \
-    -o 'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1' \
-    trt-gb10-2
+    trt-gb10-1
 }
 native_authority_prepare() {
   (
@@ -469,15 +466,15 @@ print(uuid4())
 PY
 }
 validate_native_authority_transport_config() {
-  local config target jump
+  local config target
   config="$repository_root/deploy/worker-pools/gb10/ssh_config"
   test -f "$config" && test ! -L "$config"
-  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-2)"
-  jump="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
-  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 192.168.20.12
-  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 22
+  target="$(/usr/bin/ssh -G -F "$config" trt-gb10-1)"
+  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$target")" = 207.35.188.227
+  test "$(awk '$1 == "port" { print $2; exit }' <<< "$target")" = 2221
   test "$(awk '$1 == "user" { print $2; exit }' <<< "$target")" = qianyi
-  test "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")" = trt-gb10-1
+  test -z "$(awk '$1 == "proxyjump" { print $2; exit }' <<< "$target")"
+  test -z "$(awk '$1 == "proxycommand" { print $2; exit }' <<< "$target")"
   test "$(awk '$1 == "identityfile" { print $2; exit }' <<< "$target")" = \
     /var/lib/loom-staging-rollout/gb10-deploy-ed25519
   test "$(awk '$1 == "userknownhostsfile" { print $2; exit }' <<< "$target")" = \
@@ -488,9 +485,6 @@ validate_native_authority_transport_config() {
   test "$(awk '$1 == "passwordauthentication" { print $2; exit }' <<< "$target")" = no
   test "$(awk '$1 == "stricthostkeychecking" { print $2; exit }' <<< "$target")" = true
   test "$(awk '$1 == "updatehostkeys" { print $2; exit }' <<< "$target")" = false
-  test "$(awk '$1 == "hostname" { print $2; exit }' <<< "$jump")" = 207.35.188.227
-  test "$(awk '$1 == "port" { print $2; exit }' <<< "$jump")" = 2221
-  test "$(awk '$1 == "user" { print $2; exit }' <<< "$jump")" = qianyi
 }
 
 test "$merged_source_sha" != '<merged-40-lowercase-hex>'

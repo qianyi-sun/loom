@@ -12,6 +12,51 @@ import scripts.ops.personal_dev_native_builder_runtime_authority as authority_mo
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "docs/runbooks/personal-dev-native-builder-runtime.md"
 ACCEPTANCE = ROOT / "docs/runbooks/personal-dev-native-builder-acceptance.md"
+GB10_README = ROOT / "deploy/worker-pools/gb10/README.md"
+
+DIRECT_GB10_TRANSPORT_ARGS = [
+    "-F",
+    "/dev/null",
+    "-o",
+    "HostName=207.35.188.227",
+    "-o",
+    "Port=2221",
+    "-o",
+    "User=qianyi",
+    "-o",
+    "IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "PubkeyAuthentication=yes",
+    "-o",
+    "PreferredAuthentications=publickey",
+    "-o",
+    "GSSAPIAuthentication=no",
+    "-o",
+    "HostbasedAuthentication=no",
+    "-o",
+    "PasswordAuthentication=no",
+    "-o",
+    "KbdInteractiveAuthentication=no",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=yes",
+    "-o",
+    "UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts",
+    "-o",
+    "GlobalKnownHostsFile=/dev/null",
+    "-o",
+    "UpdateHostKeys=no",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    "-o",
+    "ConnectTimeout=10",
+    "trt-gb10-1",
+]
 
 
 def _read(path: Path) -> str:
@@ -130,49 +175,7 @@ def test_native_authority_transport_pins_root_ssh_and_preserves_client_frame(
     assert behavior.stdout == ""
     assert ssh_stdin.read_bytes() == b"LOOMNBR1client-frame"
     assert ssh_args.read_text(encoding="utf-8").splitlines() == [
-        "-F",
-        "/dev/null",
-        "-o",
-        "HostName=192.168.20.12",
-        "-o",
-        "Port=22",
-        "-o",
-        "User=qianyi",
-        "-o",
-        "IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "PubkeyAuthentication=yes",
-        "-o",
-        "PreferredAuthentications=publickey",
-        "-o",
-        "GSSAPIAuthentication=no",
-        "-o",
-        "HostbasedAuthentication=no",
-        "-o",
-        "PasswordAuthentication=no",
-        "-o",
-        "KbdInteractiveAuthentication=no",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        "-o",
-        "UpdateHostKeys=no",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ServerAliveCountMax=3",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        'ProxyCommand=/usr/bin/ssh -F /dev/null -o HostName=207.35.188.227 -o Port=2221 -o User=qianyi -o IdentityFile=/var/lib/loom-staging-rollout/gb10-deploy-ed25519 -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey -o GSSAPIAuthentication=no -o HostbasedAuthentication=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/loom/staging-rollout-gb10-known-hosts -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -W "[%h]:%p" trt-gb10-1',
-        "trt-gb10-2",
+        *DIRECT_GB10_TRANSPORT_ARGS,
         "sudo -n -- /usr/local/libexec/loom-personal-dev-native-builder-runtime-authority",
     ]
     assert client_args.read_text(encoding="utf-8").splitlines() == [
@@ -309,6 +312,7 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
     replacement = tmp_path / "replacement-link"
     replacement.symlink_to(root_only)
     uploaded = tmp_path / "uploaded"
+    sftp_args = tmp_path / "sftp.args"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_sudo = fake_bin / "sudo"
@@ -324,6 +328,7 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
     fake_sftp = fake_bin / "sftp"
     fake_sftp.write_text(
         "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$SFTP_ARGS"\n'
         'batch="$(mktemp)"\n'
         'cat > "$batch"\n'
         'mv -- "$ATTACK_REPLACEMENT" "$ATTACK_SOURCE"\n'
@@ -341,9 +346,11 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
             f'ATTACK_SOURCE="{source}"\n'
             f'ATTACK_REPLACEMENT="{replacement}"\n'
             f'UPLOADED_ARCHIVE="{uploaded}"\n'
+            f'SFTP_ARGS="{sftp_args}"\n'
             f'native_authority_local_archive_root="{tmp_path / "root-archive"}"\n'
             f'archive_sha512="{__import__("hashlib").sha512(b"reviewed archive").hexdigest()}"\n'
-            "export FAKE_SFTP ATTACK_SOURCE ATTACK_REPLACEMENT UPLOADED_ARCHIVE\n"
+            "export FAKE_SFTP ATTACK_SOURCE ATTACK_REPLACEMENT UPLOADED_ARCHIVE "
+            "SFTP_ARGS\n"
             + stage_archive
             + '\nnative_authority_stage_archive "$1" "$2"\n'
         ),
@@ -354,6 +361,11 @@ def test_archive_upload_uses_root_private_copy_before_source_substitution(
 
     assert behavior.returncode == 0, behavior.stderr
     assert uploaded.read_bytes() == b"reviewed archive"
+    assert sftp_args.read_text(encoding="utf-8").splitlines() == [
+        "-b",
+        "-",
+        *DIRECT_GB10_TRANSPORT_ARGS,
+    ]
 
 
 def test_archive_upload_failure_removes_the_root_private_copy(
@@ -544,18 +556,21 @@ def test_remote_archive_remover_targets_only_the_request_archive(
         "#!/bin/sh\n"
         'test "$1" = -n && shift\n'
         'test "$1" = -- && shift\n'
-        'test "$1" = /usr/bin/sftp\n'
+        'test "$1" = /usr/bin/sftp && shift\n'
+        'printf "%s\\n" "$@" > "$REMOTE_SFTP_ARGS"\n'
         'cat > "$REMOTE_BATCH_LOG"\n',
         encoding="utf-8",
     )
     fake_sudo.chmod(0o755)
     request_id = "123e4567-e89b-42d3-a456-426614174000"
+    sftp_args = tmp_path / "sftp.args"
     behavior = subprocess.run(
         ["bash", "-seu", "--", request_id],
         input=(
             f'PATH="{fake_bin}:$PATH"\n'
             f'REMOTE_BATCH_LOG="{batch_log}"\n'
-            "export REMOTE_BATCH_LOG\n"
+            f'REMOTE_SFTP_ARGS="{sftp_args}"\n'
+            "export REMOTE_BATCH_LOG REMOTE_SFTP_ARGS\n"
             + remover
             + '\nnative_authority_remove_staged_archive "$1"\n'
         ),
@@ -570,6 +585,11 @@ def test_remote_archive_remover_targets_only_the_request_archive(
         f"rm {remote_dir}/gvisor-release-20260810.0-aarch64.tar.bz2\n"
         f"rmdir {remote_dir}\n"
     )
+    assert sftp_args.read_text(encoding="utf-8").splitlines() == [
+        "-b",
+        "-",
+        *DIRECT_GB10_TRANSPORT_ARGS,
+    ]
 
 
 def test_native_builder_acceptance_rejects_lifecycle_requests_before_transport(
@@ -638,10 +658,10 @@ def test_native_authority_transport_preflight_validates_checked_in_gb10_topology
         assert behavior.returncode == 0, behavior.stderr
 
 
-def test_native_authority_transport_preflight_rejects_jump_user_drift(
+def test_native_authority_transport_preflight_rejects_controller_user_drift(
     tmp_path: Path,
 ) -> None:
-    """Catches a proxy user binding that is not validated before root SSH runs."""
+    """Catches a controller user binding that is not validated before root SSH runs."""
     validators = [
         _shell_function(_read(runbook), "validate_native_authority_transport_config")
         for runbook in (RUNTIME, ACCEPTANCE)
@@ -669,6 +689,79 @@ def test_native_authority_transport_preflight_rejects_jump_user_drift(
             check=False,
         )
         assert behavior.returncode != 0, behavior.stderr
+
+
+@pytest.mark.parametrize(
+    "proxy_directive",
+    ("ProxyJump trt-gb10-2", "ProxyCommand /usr/bin/false"),
+)
+def test_native_authority_transport_preflight_rejects_controller_proxy(
+    tmp_path: Path,
+    proxy_directive: str,
+) -> None:
+    """Catches turning the sealed controller endpoint into an indirect route."""
+    validators = [
+        _shell_function(_read(runbook), "validate_native_authority_transport_config")
+        for runbook in (RUNTIME, ACCEPTANCE)
+    ]
+    checked_in = ROOT / "deploy/worker-pools/gb10/ssh_config"
+    configured = tmp_path / "deploy/worker-pools/gb10/ssh_config"
+    configured.parent.mkdir(parents=True)
+    configured.write_text(
+        checked_in.read_text(encoding="utf-8").replace(
+            "Host trt-gb10-1\n",
+            f"Host trt-gb10-1\n  {proxy_directive}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    for validator in validators:
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", str(tmp_path)],
+            input=(
+                'repository_root="$1"\n'
+                + validator
+                + "\nvalidate_native_authority_transport_config\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert behavior.returncode != 0, behavior.stderr
+
+
+def test_native_authority_transport_preflight_ignores_non_controller_worker(
+    tmp_path: Path,
+) -> None:
+    """Catches binding the sealed broker preflight to a different GB10 worker."""
+    validators = [
+        _shell_function(_read(runbook), "validate_native_authority_transport_config")
+        for runbook in (RUNTIME, ACCEPTANCE)
+    ]
+    checked_in = ROOT / "deploy/worker-pools/gb10/ssh_config"
+    configured = tmp_path / "deploy/worker-pools/gb10/ssh_config"
+    configured.parent.mkdir(parents=True)
+    configured.write_text(
+        checked_in.read_text(encoding="utf-8").replace(
+            "HostName 192.168.20.12", "HostName 192.0.2.12", 1
+        ),
+        encoding="utf-8",
+    )
+
+    for validator in validators:
+        behavior = subprocess.run(
+            ["bash", "-seu", "--", str(tmp_path)],
+            input=(
+                'repository_root="$1"\n'
+                + validator
+                + "\nvalidate_native_authority_transport_config\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert behavior.returncode == 0, behavior.stderr
 
 
 @pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
@@ -781,6 +874,19 @@ def test_native_builder_runbooks_leave_no_direct_gb10_privilege_or_scp_path() ->
         )
         is None
     )
+
+
+def test_gb10_handoff_documents_direct_native_authority_controller() -> None:
+    """Catches describing the sealed controller transport as a worker jump route."""
+    native_handoff = _read(GB10_README).split(
+        "## Native-runtime authority\n", maxsplit=1
+    )[1]
+    native_handoff = native_handoff.split("\n## ", maxsplit=1)[0]
+    normalized = _normalized(native_handoff)
+
+    assert "`trt-gb10-1` at `207.35.188.227:2221`" in normalized
+    assert "host/jump" not in native_handoff
+    assert "ProxyJump" not in native_handoff
 
 
 def test_native_builder_runbooks_bind_cli_to_exact_checkout(tmp_path: Path) -> None:
