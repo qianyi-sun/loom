@@ -286,6 +286,27 @@ def test_fixed_authority_paths_and_complete_asset_inventory() -> None:
         "sudoers",
         "tmpfiles",
     }
+    operator_specs = launcher_module.OPERATOR_MATERIAL_ASSET_SPECS
+    assert launcher_module.OPERATOR_MATERIAL_POLICY_PATH == Path(
+        "/etc/loom/personal-dev-native-builder-operator-material-authority.json"
+    )
+    assert set(operator_specs) == {
+        "authority_client",
+        "crypto_helper",
+        "launcher",
+        "material_client",
+        "protocol",
+    }
+    assert dict(operator_specs) == {
+        name: ASSET_SPECS[name]
+        for name in (
+            "authority_client",
+            "crypto_helper",
+            "launcher",
+            "material_client",
+            "protocol",
+        )
+    }
 
 
 @pytest.mark.parametrize("poisoned_name", ["broker", "dependency"])
@@ -592,6 +613,77 @@ def test_policy_loader_requires_canonical_root_owned_single_link_assets(
         load_policy(
             policy_path=policy_path,
             asset_specs=specs,
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+
+
+def test_operator_material_policy_loads_only_exact_sealed_subset(tmp_path: Path) -> None:
+    contents = {
+        "authority_client": b"authority client\n",
+        "crypto_helper": b"crypto helper\n",
+        "launcher": b"launcher\n",
+        "material_client": b"material client\n",
+        "protocol": b"protocol\n",
+    }
+    specs: dict[str, AssetSpec] = {}
+    digests: dict[str, str] = {}
+    for name, payload in contents.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        mode = 0o555 if name in {"launcher", "material_client"} else 0o444
+        path.chmod(mode)
+        specs[name] = AssetSpec(path, mode)
+        digests[name] = hashlib.sha256(payload).hexdigest()
+    expected: dict[str, object] = {
+        "asset_sha256": digests,
+        "authority_source_sha": SOURCE_SHA,
+        "authority_source_tree": SOURCE_TREE,
+        "schema": "loom.personal-dev-native-builder-operator-material-authority-policy.v1",
+    }
+    policy_path = tmp_path / "operator-policy.json"
+    policy_path.write_bytes(
+        (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "ascii"
+        )
+    )
+    policy_path.chmod(0o444)
+
+    assert launcher_module.load_operator_material_policy(
+        policy_path=policy_path,
+        asset_specs=MappingProxyType(specs),
+        expected_uid=os.getuid(),
+        expected_gid=os.getgid(),
+    ) == expected
+
+    invalid = {**expected, "runtime_profile_sha256": PROFILE_SHA256}
+    policy_path.chmod(0o644)
+    policy_path.write_bytes(
+        (json.dumps(invalid, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "ascii"
+        )
+    )
+    policy_path.chmod(0o444)
+    with pytest.raises(LauncherError, match="policy_invalid"):
+        launcher_module.load_operator_material_policy(
+            policy_path=policy_path,
+            asset_specs=MappingProxyType(specs),
+            expected_uid=os.getuid(),
+            expected_gid=os.getgid(),
+        )
+
+    policy_path.chmod(0o644)
+    policy_path.write_bytes(
+        (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "ascii"
+        )
+    )
+    policy_path.chmod(0o444)
+    specs["sudoers"] = AssetSpec(tmp_path / "forbidden-sudoers", 0o440)
+    with pytest.raises(LauncherError, match="policy_invalid"):
+        launcher_module.load_operator_material_policy(
+            policy_path=policy_path,
+            asset_specs=MappingProxyType(specs),
             expected_uid=os.getuid(),
             expected_gid=os.getgid(),
         )

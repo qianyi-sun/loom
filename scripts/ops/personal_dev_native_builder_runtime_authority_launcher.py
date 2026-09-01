@@ -30,6 +30,9 @@ LIBRARY_ROOT = Path(
 POLICY_PATH = Path(
     "/etc/loom/personal-dev-native-builder-runtime-authority.json"
 )
+OPERATOR_MATERIAL_POLICY_PATH = Path(
+    "/etc/loom/personal-dev-native-builder-operator-material-authority.json"
+)
 BROKER_PATH = (
     LIBRARY_ROOT
     / "scripts"
@@ -38,6 +41,9 @@ BROKER_PATH = (
 )
 
 _POLICY_SCHEMA = "loom.personal-dev-native-builder-runtime-authority-policy.v1"
+_OPERATOR_MATERIAL_POLICY_SCHEMA = (
+    "loom.personal-dev-native-builder-operator-material-authority-policy.v1"
+)
 _MAX_POLICY_BYTES = 64 * 1024
 _MAX_ASSET_BYTES = 8 * 1024 * 1024
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
@@ -139,6 +145,18 @@ ASSET_SPECS: Mapping[str, AssetSpec] = MappingProxyType(
             0o444,
         ),
     }
+)
+_OPERATOR_MATERIAL_ASSET_NAMES = frozenset(
+    {
+        "authority_client",
+        "crypto_helper",
+        "launcher",
+        "material_client",
+        "protocol",
+    }
+)
+OPERATOR_MATERIAL_ASSET_SPECS: Mapping[str, AssetSpec] = MappingProxyType(
+    {name: ASSET_SPECS[name] for name in sorted(_OPERATOR_MATERIAL_ASSET_NAMES)}
 )
 
 
@@ -301,14 +319,15 @@ def _canonical_policy(value: Mapping[str, object]) -> bytes:
         raise LauncherError("policy_invalid") from exc
 
 
-def load_policy(
+def _load_asset_policy(
     *,
-    policy_path: Path = POLICY_PATH,
-    asset_specs: Mapping[str, AssetSpec] = ASSET_SPECS,
-    expected_uid: int = 0,
-    expected_gid: int = 0,
+    policy_path: Path,
+    asset_specs: Mapping[str, AssetSpec],
+    expected_uid: int,
+    expected_gid: int,
+    schema: str,
+    runtime_profile: bool,
 ) -> Mapping[str, object]:
-    """Validate the canonical policy and complete fixed asset inventory."""
     payload = _read_safe_file(
         policy_path,
         maximum=_MAX_POLICY_BYTES,
@@ -325,20 +344,22 @@ def load_policy(
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise LauncherError("policy_invalid") from exc
-    if not isinstance(loaded, dict) or set(loaded) != {
+    fields = {
         "asset_sha256",
         "authority_source_sha",
         "authority_source_tree",
-        "runtime_profile_sha256",
         "schema",
-    }:
+    }
+    if runtime_profile:
+        fields.add("runtime_profile_sha256")
+    if not isinstance(loaded, dict) or set(loaded) != fields:
         raise LauncherError("policy_invalid")
     assets = loaded.get("asset_sha256")
     source_sha = loaded.get("authority_source_sha")
     source_tree = loaded.get("authority_source_tree")
     profile_sha = loaded.get("runtime_profile_sha256")
     if (
-        loaded.get("schema") != _POLICY_SCHEMA
+        loaded.get("schema") != schema
         or not isinstance(assets, dict)
         or set(assets) != set(asset_specs)
         or not isinstance(source_sha, str)
@@ -346,8 +367,13 @@ def load_policy(
         or not isinstance(source_tree, str)
         or _HEX_40.fullmatch(source_tree) is None
         or source_sha == source_tree
-        or not isinstance(profile_sha, str)
-        or _HEX_64.fullmatch(profile_sha) is None
+        or (
+            runtime_profile
+            and (
+                not isinstance(profile_sha, str)
+                or _HEX_64.fullmatch(profile_sha) is None
+            )
+        )
         or any(
             not isinstance(name, str)
             or not isinstance(digest, str)
@@ -370,9 +396,47 @@ def load_policy(
         if hashlib.sha256(asset).hexdigest() != digests[name]:
             raise LauncherError("asset_invalid")
     profile_digest = digests.get("runtime_asset_profile")
-    if profile_digest is not None and profile_digest != profile_sha:
+    if runtime_profile and profile_digest is not None and profile_digest != profile_sha:
         raise LauncherError("policy_invalid")
     return MappingProxyType(cast(dict[str, object], loaded))
+
+
+def load_policy(
+    *,
+    policy_path: Path = POLICY_PATH,
+    asset_specs: Mapping[str, AssetSpec] = ASSET_SPECS,
+    expected_uid: int = 0,
+    expected_gid: int = 0,
+) -> Mapping[str, object]:
+    """Validate the canonical runtime policy and complete fixed inventory."""
+    return _load_asset_policy(
+        policy_path=policy_path,
+        asset_specs=asset_specs,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        schema=_POLICY_SCHEMA,
+        runtime_profile=True,
+    )
+
+
+def load_operator_material_policy(
+    *,
+    policy_path: Path = OPERATOR_MATERIAL_POLICY_PATH,
+    asset_specs: Mapping[str, AssetSpec] = OPERATOR_MATERIAL_ASSET_SPECS,
+    expected_uid: int = 0,
+    expected_gid: int = 0,
+) -> Mapping[str, object]:
+    """Validate only the sealed OLDLAB material-client inventory."""
+    if set(asset_specs) != _OPERATOR_MATERIAL_ASSET_NAMES:
+        raise LauncherError("policy_invalid")
+    return _load_asset_policy(
+        policy_path=policy_path,
+        asset_specs=asset_specs,
+        expected_uid=expected_uid,
+        expected_gid=expected_gid,
+        schema=_OPERATOR_MATERIAL_POLICY_SCHEMA,
+        runtime_profile=False,
+    )
 
 
 def verify_invocation(
@@ -495,10 +559,13 @@ __all__ = [
     "LIBEXEC_PATH",
     "LIBRARY_ROOT",
     "MATERIAL_CLIENT_PATH",
+    "OPERATOR_MATERIAL_ASSET_SPECS",
+    "OPERATOR_MATERIAL_POLICY_PATH",
     "POLICY_PATH",
     "AssetSpec",
     "LauncherError",
     "launch",
+    "load_operator_material_policy",
     "load_policy",
     "main",
     "sanitize_environment",

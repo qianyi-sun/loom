@@ -9,8 +9,10 @@ import subprocess
 import sys
 from io import BytesIO
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
+import scripts.ops.personal_dev_native_builder_runtime_authority_launcher as launcher
 from scripts.ops.personal_dev_native_builder_runtime_authority_protocol import (
     AuthorityRequestHeader,
     ProtocolError,
@@ -523,6 +525,81 @@ def test_policy_bound_material_client_passes_only_inherited_descriptors(
 
     assert observed == [(b"k" * 32, b"certificate bundle"), (b"k" * 32, None)]
     assert all("path" not in argument for call in calls for argument in call)
+
+
+def test_material_client_validates_operator_subset_before_loading_encoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches returning the OLDLAB client to the GB10 complete inventory."""
+    specification = importlib.util.spec_from_file_location(
+        "tested_native_authority_material_client_policy",
+        MATERIAL_CLIENT,
+    )
+    assert specification is not None and specification.loader is not None
+    material_client = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = material_client
+    try:
+        specification.loader.exec_module(material_client)
+    finally:
+        sys.modules.pop(specification.name, None)
+
+    validated = False
+    pinned = False
+
+    class Launcher:
+        AssetSpec = launcher.AssetSpec
+        OPERATOR_MATERIAL_ASSET_SPECS = MappingProxyType(
+            {
+                "authority_client": AssetSpec(material_client.CLIENT_PATH, 0o444),
+                "crypto_helper": AssetSpec(
+                    material_client.CLIENT_PATH.parent
+                    / "personal_dev_native_builder_runtime_crypto.py",
+                    0o444,
+                ),
+                "launcher": AssetSpec(material_client.LAUNCHER_PATH, 0o555),
+                "material_client": AssetSpec(
+                    material_client.MATERIAL_CLIENT_PATH, 0o555
+                ),
+                "protocol": AssetSpec(
+                    material_client.CLIENT_PATH.parent
+                    / "personal_dev_native_builder_runtime_authority_protocol.py",
+                    0o444,
+                ),
+            }
+        )
+
+        @staticmethod
+        def load_policy(**_arguments: object) -> None:
+            raise AssertionError("GB10 runtime policy must not be loaded on OLDLAB")
+
+        @staticmethod
+        def load_operator_material_policy(**_arguments: object) -> None:
+            nonlocal validated
+            validated = True
+
+        @staticmethod
+        def _pin_application_packages(root: Path) -> None:
+            nonlocal pinned
+            assert validated
+            assert root == material_client.LIBRARY_ROOT
+            pinned = True
+
+    class Client:
+        @staticmethod
+        def main(_arguments: list[str]) -> int:
+            return 0
+
+    def load_module(_name: str, path: Path) -> object:
+        if path == material_client.LAUNCHER_PATH:
+            return Launcher
+        assert path == material_client.CLIENT_PATH
+        assert validated and pinned
+        return Client
+
+    monkeypatch.setattr(material_client, "_load_module", load_module)
+
+    assert material_client._load_validated_client() is Client
+    assert validated and pinned
 
 
 def test_policy_bound_material_client_rejects_group_writable_parent(
