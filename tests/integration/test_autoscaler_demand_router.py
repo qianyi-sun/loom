@@ -304,6 +304,96 @@ async def test_route_reassignment_increments_generation_and_records_fresh_capaci
         await engine.dispose()
 
 
+async def test_route_clear_increments_generation_when_all_pools_blocked(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    team_id = uuid4()
+    trial_id = uuid4()
+    try:
+        async with factory() as session:
+            await session.execute(insert(Team).values(id=team_id, name="route-clear-team"))
+            await session.execute(
+                insert(Task).values(id="route-clear-task", checksum="0" * 64, config={})
+            )
+            for pool_name, actual_slots in (("gb10", 5), ("oldlab", 0)):
+                await session.execute(
+                    insert(WorkerPoolAutoscalerPolicy).values(
+                        environment="staging",
+                        pool_name=pool_name,
+                        actuator="slurm",
+                        enabled=True,
+                        min_slots=0,
+                        max_slots=20,
+                        scale_up_threshold_slots=1,
+                        scale_down_idle_seconds=60,
+                        scale_up_cooldown_seconds=0,
+                        scale_down_cooldown_seconds=0,
+                        drain_timeout_seconds=60,
+                        actuator_config={"backend": "docker", "cpu_arch": "any"},
+                        last_actual_slots=actual_slots,
+                        last_occupied_slots=0,
+                        last_pending_slots=0,
+                        last_decision_at=now,
+                    )
+                )
+            await session.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id="route-clear-task",
+                    config={},
+                    requires_caps={"backend": "docker", "cpu_arch": "any"},
+                    state="queued",
+                    idempotency_key="route-clear-trial",
+                    submitted_at=now,
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            await assign_neutral_queued_trials(session, environment="staging", now=now)
+            await session.commit()
+
+        async with factory() as session:
+            first = await session.get(Trial, trial_id)
+            assert first is not None
+            assert first.execution_route_pool_name == "gb10"
+            assert first.execution_route_generation == 1
+            await session.execute(
+                update(WorkerPoolAutoscalerPolicy).values(last_blocked_reason="maintenance")
+            )
+            await session.commit()
+
+        async with factory() as session:
+            summary = await assign_neutral_queued_trials(
+                session,
+                environment="staging",
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            cleared = await session.get(Trial, trial_id)
+            assert cleared is not None
+            assert cleared.autoscaler_pool_name is None
+            assert cleared.autoscaler_pool_assigned_at is None
+            assert cleared.execution_route_generation == 2
+            assert cleared.execution_route_pool_name is None
+            assert cleared.execution_route_json is None
+            assert cleared.execution_route_sha256 is None
+            route_json_is_sql_null = await session.scalar(
+                select(Trial.execution_route_json.is_(None)).where(Trial.id == trial_id)
+            )
+            assert route_json_is_sql_null is True
+        assert summary.cleared_count == 1
+        assert summary.unroutable_count == 1
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize("_iteration", range(5))
 async def test_router_lock_does_not_hide_concrete_trial_from_claim(
     postgres_url: str,

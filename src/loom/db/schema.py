@@ -4016,7 +4016,11 @@ class Trial(Base):
         default=0,
     )
     execution_route_pool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    execution_route_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # The route-group constraint and mutation trigger distinguish SQL NULL
+    # from JSON null when a queued route is withdrawn.
+    execution_route_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     execution_route_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)

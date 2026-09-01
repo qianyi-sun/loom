@@ -295,6 +295,15 @@ def _routing_decision(
     )
 
 
+def _clear_trial_pool_assignment(trial: Trial) -> None:
+    trial.autoscaler_pool_name = None
+    trial.autoscaler_pool_assigned_at = None
+    trial.execution_route_generation += 1
+    trial.execution_route_pool_name = None
+    trial.execution_route_json = None
+    trial.execution_route_sha256 = None
+
+
 async def assign_neutral_queued_trials(
     session: AsyncSession,
     *,
@@ -371,11 +380,7 @@ async def assign_neutral_queued_trials(
     for trial in trials:
         if not requires_neutral_pool_assignment(trial.requires_caps):
             if trial.autoscaler_pool_name is not None:
-                trial.autoscaler_pool_name = None
-                trial.autoscaler_pool_assigned_at = None
-                trial.execution_route_pool_name = None
-                trial.execution_route_json = None
-                trial.execution_route_sha256 = None
+                _clear_trial_pool_assignment(trial)
                 cleared_count += 1
             continue
 
@@ -391,12 +396,10 @@ async def assign_neutral_queued_trials(
         ):
             retained_count += 1
             continue
+        cleared_assignment = False
         if assigned_pool is not None:
-            trial.autoscaler_pool_name = None
-            trial.autoscaler_pool_assigned_at = None
-            trial.execution_route_pool_name = None
-            trial.execution_route_json = None
-            trial.execution_route_sha256 = None
+            _clear_trial_pool_assignment(trial)
+            cleared_assignment = True
             cleared_count += 1
 
         selection = choose_neutral_pool_selection(tuple(states.values()))
@@ -405,7 +408,7 @@ async def assign_neutral_queued_trials(
             continue
         selected_pool = selection.pool_name
         selected_state = states[selected_pool]
-        route_generation = trial.execution_route_generation + 1
+        route_generation = trial.execution_route_generation + (0 if cleared_assignment else 1)
         decision = (
             _routing_decision(
                 trial=trial,
