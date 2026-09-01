@@ -496,7 +496,8 @@ test "$("${native_authority_git[@]}" rev-parse --verify HEAD^{commit})" = \
   "$merged_source_sha"
 test -z "$("${native_authority_git[@]}" status --porcelain=v1 --untracked-files=all)"
 test -x "$loom_python"
-test -x "${native_authority_client[1]}"
+test -f "${native_authority_client[1]}"
+test ! -L "${native_authority_client[1]}"
 verify_loom_cli_source
 test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = \
   "$runtime_profile_sha256"

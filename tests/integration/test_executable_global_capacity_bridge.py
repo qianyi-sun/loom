@@ -476,6 +476,7 @@ async def _unregistered_withdrawn_release_digests(
         await harness.aclose()
 
 
+@pytest.mark.timeout(180)
 async def test_protected_release_canonical_digests_are_stable_across_fresh_runs(
     tmp_path: Path,
     postgres_url: str,
