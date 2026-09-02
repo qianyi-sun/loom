@@ -3,7 +3,7 @@ Description=Continuously publish durable oldlab-first CI routes
 
 [Timer]
 OnActiveSec=3s
-OnUnitActiveSec=30s
+OnUnitActiveSec=23s
 AccuracySec=1s
 Persistent=true
 Unit=loom-ci-runner-route-controller.service

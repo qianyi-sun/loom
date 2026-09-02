@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -25,6 +26,7 @@ from loom.models.taskset import (
     bundle_object_key,
     validate_bundle_relative_path,
 )
+from loom.service_execution_materialization import build_service_execution_input_manifest
 from loom.task_bundle_compat import (
     CompatibilitySeverity,
     TaskBundleCompatibilityIssue,
@@ -51,6 +53,7 @@ class TaskRowDraft:
     checksum: str
     config: dict[str, Any]
     source: str
+    source_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -219,6 +222,40 @@ def _upload_bundle_dir(
             content_type="application/octet-stream",
         )
     return cumulative_bytes
+
+
+def _publish_service_execution_input_manifest(
+    client: Any,
+    *,
+    bucket: str,
+    manifest_key: str,
+    bundle_dir: Path,
+    task_checksum_value: str,
+) -> tuple[dict[str, Any], int]:
+    manifest = build_service_execution_input_manifest(
+        bundle_dir,
+        task_checksum=task_checksum_value,
+    )
+    body = manifest.canonical_bytes()
+    _put_object(
+        client,
+        bucket=bucket,
+        key=manifest_key,
+        body=body,
+        content_type="application/json",
+    )
+    return (
+        {
+            "service_execution_input": {
+                "schema_version": "loom.service-execution-input.v1",
+                "manifest_uri": f"s3://{bucket}/{manifest_key}",
+                "manifest_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+                "file_count": len(manifest.files),
+                "total_bytes": sum(item.size_bytes for item in manifest.files),
+            },
+        },
+        len(body),
+    )
 
 
 def _assert_safe_tar_member(member: tarfile.TarInfo) -> PurePosixPath:
@@ -468,6 +505,29 @@ def _materialize_bundle_upload(
                         team_storage_baseline=team_storage_baseline,
                         max_team_storage_bytes=max_team_storage_bytes,
                     )
+                    manifest_key = (
+                        f"{output_tasks_prefix.rstrip('/')}-service-inputs/{short_id}.json"
+                    )
+                    source_provenance, manifest_bytes = (
+                        _publish_service_execution_input_manifest(
+                            minio_client,
+                            bucket=artifacts_bucket,
+                            manifest_key=manifest_key,
+                            bundle_dir=bundle_dir,
+                            task_checksum_value=checksum,
+                        )
+                    )
+                    cumulative_bytes += manifest_bytes
+                    if max_bundle_bytes is not None and cumulative_bytes > max_bundle_bytes:
+                        raise _BundleSizeExceededError(cumulative_bytes, max_bundle_bytes)
+                    if (
+                        max_team_storage_bytes is not None
+                        and team_storage_baseline + cumulative_bytes > max_team_storage_bytes
+                    ):
+                        raise _BundleSizeExceededError(
+                            team_storage_baseline + cumulative_bytes,
+                            max_team_storage_bytes,
+                        )
                     db_id = _db_task_id(
                         task_set_id=task_set_id,
                         rendered_task_id=rendered_task_id,
@@ -478,6 +538,7 @@ def _materialize_bundle_upload(
                             checksum=checksum,
                             config=task_config.model_dump(mode="json"),
                             source=f"s3://{artifacts_bucket}/{bundle_prefix}/",
+                            source_provenance=source_provenance,
                         ),
                     )
                 except (tomllib.TOMLDecodeError, ValidationError) as exc:
@@ -692,6 +753,29 @@ def materialize_task_set(
                         team_storage_baseline=team_storage_baseline,
                         max_team_storage_bytes=max_team_storage_bytes,
                     )
+                    manifest_key = (
+                        f"{output_tasks_prefix.rstrip('/')}-service-inputs/{short_id}.json"
+                    )
+                    source_provenance, manifest_bytes = (
+                        _publish_service_execution_input_manifest(
+                            minio_client,
+                            bucket=artifacts_bucket,
+                            manifest_key=manifest_key,
+                            bundle_dir=bundle_dir,
+                            task_checksum_value=checksum,
+                        )
+                    )
+                    cumulative_bytes += manifest_bytes
+                    if max_bundle_bytes is not None and cumulative_bytes > max_bundle_bytes:
+                        raise _BundleSizeExceededError(cumulative_bytes, max_bundle_bytes)
+                    if (
+                        max_team_storage_bytes is not None
+                        and team_storage_baseline + cumulative_bytes > max_team_storage_bytes
+                    ):
+                        raise _BundleSizeExceededError(
+                            team_storage_baseline + cumulative_bytes,
+                            max_team_storage_bytes,
+                        )
                 source = f"s3://{artifacts_bucket}/{bundle_prefix}/"
                 drafts.append(
                     TaskRowDraft(
@@ -699,6 +783,7 @@ def materialize_task_set(
                         checksum=checksum,
                         config=task_config.model_dump(mode="json"),
                         source=source,
+                        source_provenance=source_provenance,
                     ),
                 )
             except MappingError as exc:

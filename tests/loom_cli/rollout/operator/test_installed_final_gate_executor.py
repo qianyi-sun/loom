@@ -24,6 +24,9 @@ from loom_cli.rollout.operator.protected_apply_executor import PROTECTED_KUBECON
 from loom_cli.rollout.operator.protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
 )
+from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    ExternalSupervisorCapacityError,
+)
 from loom_cli.rollout.operator.staging_smoke_authority import staging_smoke_authority
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
@@ -382,12 +385,58 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
 
     assert authority.to_record() == {
         "admin_actor": "codex-v1-release-gate",
-        "agent": "oracle",
+        "agent": "direct-completion",
+        "agent_model": {
+            "provider": "yibu",
+            "name": "gpt-4o-mini",
+            "source": "local-server",
+            "local_server": "yibu",
+            "max_output_tokens": 64,
+        },
         "represented_username": "devansh",
         "required_worker_pool": "gb10",
         "task_id": "loom-smoke/gb10-oracle-hello-world",
         "team_id": "11111111-1111-4111-8111-111111111111",
     }
+    assert authority.agent_model is not None
+    assert authority.agent_model.to_gateway_model_string() == "local/yibu/gpt-4o-mini"
+
+
+def test_installed_smoke_dispatch_binds_protected_capacity_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    plan = _bound_plan(tmp_path)
+    refresh = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        installed_module,
+        "build_installed_rollout_capacity_refresh",
+        lambda config, *, service_uid: (
+            captured.update({"config": config, "service_uid": service_uid}) or refresh
+        ),
+        raising=False,
+    )
+
+    class _SmokeExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def __call__(self, actual_check: str, actual_operation: object, actual_plan: object):
+            assert (actual_check, actual_operation, actual_plan) == (
+                "final.smoke",
+                CheckOperation.APPLY,
+                plan,
+            )
+            return "dispatched"
+
+    monkeypatch.setattr(installed_module, "FinalSmokeExecutor", _SmokeExecutor)
+
+    assert executor("final.smoke", CheckOperation.APPLY, plan) == "dispatched"  # type: ignore[comparison-overlap]
+    assert captured["config"] == executor.config
+    assert captured["service_uid"] == os.geteuid()
+    assert captured["refresh_capacity"] is refresh
 
 
 @pytest.mark.parametrize(
@@ -602,6 +651,35 @@ def test_capacity_executor_normalizes_broker_failure_before_smoke(tmp_path: Path
     )
 
     assert result.blockers == {"capacity": "slurm-acceptance-unavailable"}
+    assert result.protected_mutation is True
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+
+
+def test_capacity_executor_preserves_typed_capacity_failure_before_smoke(
+    tmp_path: Path,
+) -> None:
+    plan = replace(
+        _bound_plan(tmp_path),
+        gb10_boot_ids={node: f"boot-{index}" for index, node in enumerate(FULL_GB10_HOSTS)},
+    )
+
+    class _Transport:
+        def accept_capacity(self, **_kwargs):
+            raise ExternalSupervisorCapacityError(
+                "busy-accounting-unverified",
+                node="trt-gb10-1",
+            )
+
+    result = installed_module.FinalCapacityExecutor(transport=_Transport())(
+        "final.capacity",
+        CheckOperation.APPLY,
+        plan,
+    )
+
+    assert result.blockers == {
+        "capacity": "busy-accounting-unverified",
+        "capacity-node": "trt-gb10-1",
+    }
     assert result.protected_mutation is True
     assert result.observed_epoch == plan.starting_mutation_epoch + 1
 

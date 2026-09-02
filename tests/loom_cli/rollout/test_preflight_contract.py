@@ -636,7 +636,10 @@ PreflightDag((check,), cancellation_grace_seconds=0.1).run(
         check=False,
         capture_output=True,
         text=True,
-        timeout=3,
+        # The child contract still times out after 1s and allows only 0.1s for
+        # cancellation. Leave headroom here for interpreter startup and
+        # coverage instrumentation on a loaded shared CI runner.
+        timeout=10,
     )
 
     assert result.returncode == 70

@@ -10,6 +10,7 @@ from loom_cli.cluster_cmd import render_manifests
 from loom_cli.cluster_config import ClusterConfig, load_cluster_config
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES
 from loom_cli.rollout.manifest_readiness import pin_rendered_manifest_images
+from loom_cli.rollout.operator import lifecycle_capacity_job
 from loom_cli.rollout.operator.lifecycle_capacity_job import (
     LifecycleCapacityJobError,
     LifecycleCapacityJobPlan,
@@ -201,3 +202,49 @@ def test_plan_rejects_record_or_manifest_drift() -> None:
         replace(plan, mutation_epoch=9)
     with pytest.raises(LifecycleCapacityJobError, match="identity"):
         replace(plan, job_manifest=plan.job_manifest + "# drift\n")
+
+
+def test_rollout_capacity_plan_binds_guard_and_post_apply_epoch() -> None:
+    build = getattr(lifecycle_capacity_job, "build_rollout_capacity_job_plan", None)
+    if build is None:
+        pytest.fail("rollout capacity Job authority is unavailable")
+
+    plan = build(
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        mutation_epoch=9,
+        artifact_bundle_sha256=_ARTIFACT,
+        rendered_manifest_sha256=_RENDERED,
+        control_plane_image_id=_IMAGE_ID,
+        image_tag=_TAG,
+        rendered_yaml=_rendered(),
+        expected_buckets=("trajectories", "artifacts"),
+        expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
+        request_id="req-1111111111111111",
+        attempt_number=2,
+        rollout_plan_digest="f" * 64,
+        guard_generation="1" * 32,
+        guard_backend_pid=4321,
+    )
+    document = yaml.safe_load(plan.job_manifest)
+    container = document["spec"]["template"]["spec"]["containers"][0]
+
+    assert document["metadata"]["name"] == "loom-staging-rollout-capacity-111111111111-2"
+    assert container["args"][-14:] == [
+        "--rollout-request-id",
+        "req-1111111111111111",
+        "--rollout-plan-digest",
+        "f" * 64,
+        "--rollout-candidate-sha",
+        _SHA,
+        "--rollout-candidate-tree",
+        _TREE,
+        "--rollout-guard-generation",
+        "1" * 32,
+        "--rollout-guard-backend-pid",
+        "4321",
+        "--rollout-mutation-epoch",
+        "9",
+    ]
+    assert container["args"][:2] == ["--action", "rollout-capacity"]
+    assert document["metadata"]["annotations"]["loom.carin.dev/rollout-plan"] == "f" * 64

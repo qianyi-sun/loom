@@ -27,6 +27,9 @@ from .final_capacity_executor import FinalCapacityExecutor
 from .final_gate_plan import FinalGatePlan
 from .final_smoke_executor import FinalSmokeExecutor
 from .final_summary_executor import FinalSummaryExecutor
+from .installed_rollout_capacity_refresh import (
+    build_installed_rollout_capacity_refresh,
+)
 from .protected_apply_executor import (
     KubernetesProtectedConvergenceExecutor,
     MigrationEpochProtectedApplyExecutor,
@@ -282,6 +285,10 @@ class InstalledFinalGateExecutor:
                 expected_token_fingerprint=effective_config.expect_admin_token_fingerprint,
                 authority=staging_smoke_authority(effective_config),
                 request=BoundedStagingSmokeTransport(plan.route),
+                refresh_capacity=build_installed_rollout_capacity_refresh(
+                    effective_config,
+                    service_uid=self.service_uid,
+                ),
             )(check_id, operation, plan)
         if check_id == "final.browser":
             return FinalBrowserExecutor(

@@ -17,11 +17,12 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    Batch,
     Task,
     TaskSet,
     Team,
@@ -87,6 +88,18 @@ async def fwd_setup(
                 },
             )
         if req.url.path.endswith("/cancel") and req.method == "POST":
+            trial_id = UUID(req.url.path.split("/")[-2])
+            with sl() as session:
+                session.execute(
+                    update(Trial)
+                    .where(Trial.id == trial_id)
+                    .values(
+                        state="cancelled",
+                        cancellation_requested_at=now,
+                        finished_at=now,
+                    )
+                )
+                session.commit()
             return httpx.Response(200, json={"state": "cancelled"})
         return httpx.Response(404)
 
@@ -104,20 +117,24 @@ async def fwd_setup(
     with sl() as s:
         s.execute(insert(Team).values(id=team_id, name=f"t-{team_id}"))
         username = f"submitter-{user_id.hex[:8]}"
-        s.execute(insert(User).values(
-            id=user_id,
-            username=username,
-            username_normalized=username,
-            status="active",
-            is_platform_admin=False,
-            created_at=now,
-        ))
-        s.execute(insert(TeamMembership).values(
-            team_id=team_id,
-            user_id=user_id,
-            role="member",
-            created_at=now,
-        ))
+        s.execute(
+            insert(User).values(
+                id=user_id,
+                username=username,
+                username_normalized=username,
+                status="active",
+                is_platform_admin=False,
+                created_at=now,
+            )
+        )
+        s.execute(
+            insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=user_id,
+                role="member",
+                created_at=now,
+            )
+        )
         s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(raw.encode()).digest(),
@@ -152,6 +169,7 @@ async def fwd_setup(
         await engine.dispose()
         with sl() as s:
             s.execute(delete(Trial))
+            s.execute(delete(Batch))
             s.execute(delete(Token))
             s.execute(delete(TeamMembership))
             s.execute(delete(Task))
@@ -233,20 +251,24 @@ async def test_post_trial_no_scope_403(
     sl = sessionmaker(sync_engine)
     with sl() as s:
         username = f"read-user-{other_user_id.hex[:8]}"
-        s.execute(insert(User).values(
-            id=other_user_id,
-            username=username,
-            username_normalized=username,
-            status="active",
-            is_platform_admin=False,
-            created_at=now,
-        ))
-        s.execute(insert(TeamMembership).values(
-            team_id=team_id,
-            user_id=other_user_id,
-            role="member",
-            created_at=now,
-        ))
+        s.execute(
+            insert(User).values(
+                id=other_user_id,
+                username=username,
+                username_normalized=username,
+                status="active",
+                is_platform_admin=False,
+                created_at=now,
+            )
+        )
+        s.execute(
+            insert(TeamMembership).values(
+                team_id=team_id,
+                user_id=other_user_id,
+                role="member",
+                created_at=now,
+            )
+        )
         s.execute(
             insert(Token).values(
                 token_hash=hashlib.sha256(other.encode()).digest(),
@@ -463,6 +485,82 @@ async def test_cancel_trial_forwards(
     cancel_reqs = [req for req in captured["reqs"] if req["url"].endswith("/cancel")]
     assert len(cancel_reqs) == 1
     assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_forward_count"),
+    [("nebius", 1), ("docker", 0)],
+)
+async def test_cancel_batch_respects_explicit_backend_fence(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+    postgres_url: str,
+    backend: str,
+    expected_forward_count: int,
+) -> None:
+    app, raw, team_id, captured = fwd_setup
+    batch_id = uuid4()
+    trial_id = uuid4()
+    task_id = "local/service-execution-cancel"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as session:
+        session.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="c" * 64,
+                config={"service_execution": {"logical_pool_id": "nebius-cpu"}},
+                source="local",
+            )
+        )
+        session.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="service execution cancellation",
+                task_filter={},
+                trial_config={},
+                backend=backend,
+                state="running",
+                created_by_token_prefix="test",
+                expected_trial_count=1,
+            )
+        )
+        session.execute(
+            insert(Trial).values(
+                id=trial_id,
+                task_id=task_id,
+                team_id=team_id,
+                batch_id=batch_id,
+                state="running",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/cancel",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "cancelled"
+    cancel_reqs = [req for req in captured["reqs"] if req["url"].endswith("/cancel")]
+    assert len(cancel_reqs) == expected_forward_count
+    if backend == "nebius":
+        assert cancel_reqs[0]["url"].endswith(f"/trials/{trial_id}/cancel")
+        assert cancel_reqs[0]["auth"] == f"Bearer {raw}"
+
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as session:
+        assert session.get(Trial, trial_id).state == "cancelled"
+        assert session.get(Batch, batch_id).state == "cancelled"
+    sync_engine.dispose()
 
 
 async def test_cancel_unknown_trial_404(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ctypes
 import fcntl
 import json
 import os
@@ -57,6 +58,7 @@ INSTALLED_BROKER = Path("/usr/local/libexec/loom-gb10-external-supervisor-broker
 REMOTE_SSH_USER = "qianyi"
 REMOTE_SSH_HOME = Path("/home/qianyi")
 _AUTHORIZED_KEY_MARKER = "loom-gb10-external-supervisor"
+_ROLLOUT_KEY_MARKER = "loom-staging-rollout"
 _LOCK_NAME = ".loom-gb10-external-supervisor-broker.lock"
 _HELPER_MODULE = "loom_cli.rollout.operator.protected_gb10_external_supervisor_transport"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -76,10 +78,34 @@ ROOT_UID = 0
 ROOT_GID = 0
 # Node 2 belongs to the separate exclusive task-image-builder reservation.
 _GB10_NODES = tuple(f"trt-gb10-{index}" for index in (1, *range(3, 16)))
+_CAPACITY_FAILURE_CODES = frozenset(
+    {
+        "acceptance-failed",
+        "busy-accounting-unverified",
+        "busy-node-state-unverified",
+        "node-allocation-failed",
+        "node-evidence-invalid",
+    }
+)
 
 
 class BrokerError(RuntimeError):
     """Secret-free fixed broker failure."""
+
+
+class BrokerCapacityFailureError(BrokerError):
+    """A validated typed capacity response that must retain exit status one."""
+
+    def __init__(self, response: bytes) -> None:
+        if (
+            type(response) is not bytes
+            or not response
+            or len(response) > _MAX_COMMAND_OUTPUT
+            or not response.endswith(b"\n")
+        ):
+            raise ValueError("GB10 capacity failure response is invalid")
+        self.response = response
+        super().__init__("GB10 capacity acceptance failed safely")
 
 
 class BrokerInterruptedError(BrokerError):
@@ -225,7 +251,12 @@ def _public_key_identity(payload: bytes) -> tuple[str, str]:
     return fields[0], fields[1]
 
 
-def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
+def render_authorized_keys(
+    existing: bytes,
+    public_key: bytes,
+    *,
+    predecessor_public_key: bytes | None = None,
+) -> bytes:
     """Add exactly one forced key while preserving unrelated file bytes."""
 
     if len(existing) > 4 * 1024 * 1024 or b"\x00" in existing:
@@ -241,6 +272,55 @@ def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
     )
     lines = text.splitlines()
     marked = [line for line in lines if line.rstrip().endswith(f" {_AUTHORIZED_KEY_MARKER}")]
+    if predecessor_public_key is not None:
+        predecessor_algorithm, predecessor_encoded = _public_key_identity(predecessor_public_key)
+        if predecessor_encoded == encoded:
+            raise BrokerError("GB10 external supervisor predecessor key is not distinct")
+        predecessor_forced = (
+            f'restrict,command="/usr/bin/sudo -n -- {INSTALLED_BROKER}" '
+            f"{predecessor_algorithm} {predecessor_encoded} {_AUTHORIZED_KEY_MARKER}"
+        )
+        predecessor_normal = f"{predecessor_algorithm} {predecessor_encoded} {_ROLLOUT_KEY_MARKER}"
+        predecessor_matching = [line for line in lines if predecessor_encoded in line]
+        controller_matching = [line for line in lines if encoded in line]
+        rollout_marked = [
+            line
+            for line in lines
+            if not line.lstrip().startswith("#")
+            and line.rstrip().endswith(f" {_ROLLOUT_KEY_MARKER}")
+        ]
+        if len(predecessor_matching) > 1:
+            raise BrokerError("GB10 external supervisor predecessor authority is duplicated")
+        if any(line.strip() != predecessor_normal for line in rollout_marked):
+            raise BrokerError("GB10 external supervisor rollout authority is ambiguous")
+        if len(marked) > 1:
+            raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
+        if marked and marked[0].strip() == predecessor_forced:
+            if predecessor_matching != marked or controller_matching:
+                raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
+            migrated = text.replace(predecessor_forced, predecessor_normal, 1)
+            migrated_prefix = (
+                migrated if not migrated or migrated.endswith("\n") else migrated + "\n"
+            )
+            return (migrated_prefix + expected + "\n").encode("utf-8")
+        if marked and marked[0].strip() == expected:
+            if controller_matching != marked or any(
+                line.strip() != predecessor_normal for line in predecessor_matching
+            ):
+                raise BrokerError("GB10 external supervisor key authority is duplicated")
+            if not predecessor_matching:
+                return (predecessor_normal + "\n").encode("ascii") + existing
+            return existing
+        if marked:
+            raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
+        if controller_matching:
+            raise BrokerError("GB10 external supervisor key is already present without force")
+        if any(line.strip() != predecessor_normal for line in predecessor_matching):
+            raise BrokerError("GB10 external supervisor predecessor key is ambiguous")
+        existing_prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
+        additions = [] if predecessor_matching else [predecessor_normal]
+        additions.append(expected)
+        return existing_prefix + ("\n".join(additions) + "\n").encode("ascii")
     if len(marked) > 1 or (marked and marked[0].strip() != expected):
         raise BrokerError("GB10 external supervisor forced key marker is ambiguous")
     matching = [line for line in lines if encoded in line]
@@ -250,82 +330,453 @@ def render_authorized_keys(existing: bytes, public_key: bytes) -> bytes:
         return existing
     if matching:
         raise BrokerError("GB10 external supervisor key is already present without force")
-    prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
-    return prefix + expected.encode("ascii") + b"\n"
+    authorized_keys_prefix = (
+        existing if not existing or existing.endswith(b"\n") else existing + b"\n"
+    )
+    return authorized_keys_prefix + expected.encode("ascii") + b"\n"
 
 
-def install_forced_key(public_key_path: Path) -> None:
+def _read_public_key_file(public_key_path: Path) -> bytes:
     if not public_key_path.is_absolute() or ".." in public_key_path.parts:
         raise BrokerError("GB10 external supervisor public key path is invalid")
+    authority_uid = os.geteuid()
+    authority_gid = os.getegid()
+    parent = os.lstat(public_key_path.parent)
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != authority_uid
+        or parent.st_gid != authority_gid
+        or stat.S_IMODE(parent.st_mode) & 0o022
+    ):
+        raise BrokerError("GB10 external supervisor public key parent is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(public_key_path, flags)
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or not 1 <= metadata.st_size <= 16 * 1024:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != authority_uid
+            or before.st_gid != authority_gid
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or not 1 <= before.st_size <= 16 * 1024
+        ):
             raise BrokerError("GB10 external supervisor public key metadata is unsafe")
-        public_key = os.read(descriptor, 16 * 1024 + 1)
+        payload = bytearray()
+        while chunk := os.read(descriptor, 16 * 1024 + 1 - len(payload)):
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if len(payload) != before.st_size or _metadata_identity(before) != _metadata_identity(
+            after
+        ):
+            raise BrokerError("GB10 external supervisor public key changed during inspection")
     finally:
         os.close(descriptor)
+    public_key = bytes(payload)
     _public_key_identity(public_key)
-    account = pwd.getpwnam(REMOTE_SSH_USER)
-    if account.pw_dir != str(REMOTE_SSH_HOME):
-        raise BrokerError("GB10 external supervisor SSH account drifted")
-    ssh_dir = REMOTE_SSH_HOME / ".ssh"
-    if os.path.lexists(ssh_dir):
-        metadata = os.lstat(ssh_dir)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid != account.pw_uid
-            or metadata.st_gid != account.pw_gid
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-        ):
-            raise BrokerError("GB10 external supervisor SSH directory is unsafe")
-    else:
-        os.mkdir(ssh_dir, mode=0o700)
-        os.chown(ssh_dir, account.pw_uid, account.pw_gid)
-    authorized_keys = ssh_dir / "authorized_keys"
-    existing = b""
-    if os.path.lexists(authorized_keys):
-        descriptor = os.open(authorized_keys, flags)
-        try:
-            metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != account.pw_uid
-                or metadata.st_gid != account.pw_gid
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_size > 4 * 1024 * 1024
-            ):
-                raise BrokerError("GB10 external supervisor authorized keys are unsafe")
-            existing = os.read(descriptor, 4 * 1024 * 1024 + 1)
-        finally:
-            os.close(descriptor)
-    rendered = render_authorized_keys(existing, public_key)
-    if rendered == existing:
-        return
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".authorized_keys.", dir=ssh_dir)
-    temporary = Path(temporary_name)
+    return public_key
+
+
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_authorized_keys(path: Path, *, uid: int, gid: int) -> tuple[bool, bytes]:
+    if not os.path.lexists(path):
+        return False, b""
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != uid
+            or before.st_gid != gid
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size > 4 * 1024 * 1024
+        ):
+            raise BrokerError("GB10 external supervisor authorized keys are unsafe")
+        payload = bytearray()
+        while chunk := os.read(descriptor, 4 * 1024 * 1024 + 1 - len(payload)):
+            payload.extend(chunk)
+        after = os.fstat(descriptor)
+        if len(payload) != before.st_size or _metadata_identity(before) != _metadata_identity(
+            after
+        ):
+            raise BrokerError("GB10 external supervisor authorized keys changed during inspection")
+        return True, bytes(payload)
+    finally:
+        os.close(descriptor)
+
+
+def _write_authorized_keys(
+    path: Path,
+    payload: bytes,
+    *,
+    uid: int,
+    gid: int,
+) -> tuple[int, int]:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".authorized_keys.", dir=path.parent)
+    temporary = Path(temporary_name)
+    staging_identity: tuple[int, int] | None = None
+    try:
+        created = os.fstat(descriptor)
+        if not stat.S_ISREG(created.st_mode) or created.st_nlink != 1:
+            raise BrokerError("GB10 external supervisor authorized keys staging is unsafe")
+        staging_identity = (created.st_dev, created.st_ino)
         os.fchmod(descriptor, 0o600)
-        os.fchown(descriptor, account.pw_uid, account.pw_gid)
+        os.fchown(descriptor, uid, gid)
         offset = 0
-        while offset < len(rendered):
-            offset += os.write(descriptor, rendered[offset:])
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise BrokerError("GB10 external supervisor authorized keys write failed")
+            offset += written
         os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != uid
+            or metadata.st_gid != gid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != len(payload)
+        ):
+            raise BrokerError("GB10 external supervisor authorized keys staging is unsafe")
         os.close(descriptor)
         descriptor = -1
-        os.replace(temporary, authorized_keys)
-        directory = os.open(ssh_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        os.replace(temporary, path)
+        return metadata.st_dev, metadata.st_ino
     finally:
         if descriptor >= 0:
             os.close(descriptor)
         if os.path.lexists(temporary):
+            current = os.lstat(temporary)
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or stat.S_ISLNK(current.st_mode)
+                or current.st_nlink != 1
+                or staging_identity is None
+                or (current.st_dev, current.st_ino) != staging_identity
+            ):
+                raise BrokerError(
+                    "GB10 external supervisor authorized keys staging cleanup target changed"
+                )
             os.unlink(temporary)
+            _fsync_path_directory(path.parent)
+
+
+def _assert_authorized_keys_publication(
+    path: Path,
+    identity: tuple[int, int],
+    payload: bytes,
+    *,
+    uid: int,
+    gid: int,
+) -> None:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_uid != uid
+            or before.st_gid != gid
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_size != len(payload)
+            or (before.st_dev, before.st_ino) != identity
+        ):
+            raise BrokerError("GB10 external supervisor authorized keys changed before rollback")
+        observed = bytearray()
+        while chunk := os.read(descriptor, len(payload) + 1 - len(observed)):
+            observed.extend(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            bytes(observed) != payload
+            or _metadata_identity(before) != _metadata_identity(after)
+            or (current.st_dev, current.st_ino) != identity
+        ):
+            raise BrokerError("GB10 external supervisor authorized keys changed before rollback")
+    finally:
+        os.close(descriptor)
+
+
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing a concurrent target."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as exc:  # pragma: no cover - GB10 glibc provides renameat2
+        raise BrokerError("GB10 external supervisor atomic rename is unavailable") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        1,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def _safe_directory_staging_parent(destination_parent: Path) -> Path:
+    authority_uid = os.geteuid()
+    authority_gid = os.getegid()
+    destination_metadata = os.lstat(destination_parent)
+    if not stat.S_ISDIR(destination_metadata.st_mode) or stat.S_ISLNK(destination_metadata.st_mode):
+        raise BrokerError("GB10 external supervisor directory parent is unsafe")
+    device = destination_metadata.st_dev
+    candidate = destination_parent
+    while True:
+        metadata = os.lstat(candidate)
+        if (
+            stat.S_ISDIR(metadata.st_mode)
+            and not stat.S_ISLNK(metadata.st_mode)
+            and metadata.st_dev == device
+            and metadata.st_uid == authority_uid
+            and metadata.st_gid == authority_gid
+            and not stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    raise BrokerError("GB10 external supervisor has no safe directory staging parent")
+
+
+def _create_directory_atomically(
+    path: Path,
+    *,
+    mode: int,
+    uid: int,
+    gid: int,
+) -> tuple[int, int]:
+    staging_parent = _safe_directory_staging_parent(path.parent)
+    temporary = Path(
+        tempfile.mkdtemp(
+            prefix=f".loom-directory-{path.name}.",
+            dir=staging_parent,
+        )
+    )
+    created = os.lstat(temporary)
+    if not stat.S_ISDIR(created.st_mode) or stat.S_ISLNK(created.st_mode):
+        raise BrokerError("GB10 external supervisor directory staging is unsafe")
+    identity = (created.st_dev, created.st_ino)
+    published = False
+    try:
+        os.chown(temporary, uid, gid)
+        os.chmod(temporary, mode)
+        _fsync_path_directory(temporary)
+        _rename_noreplace(temporary, path)
+        published = True
+        return identity
+    finally:
+        if not published and os.path.lexists(temporary):
+            metadata = os.lstat(temporary)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != identity
+            ):
+                raise BrokerError("GB10 external supervisor directory staging cleanup is unsafe")
+            os.rmdir(temporary)
+            _fsync_path_directory(staging_parent)
+
+
+def install_forced_key(
+    public_key_path: Path,
+    *,
+    predecessor_public_key_path: Path | None = None,
+) -> None:
+    public_key = _read_public_key_file(public_key_path)
+    predecessor_public_key = (
+        None
+        if predecessor_public_key_path is None
+        else _read_public_key_file(predecessor_public_key_path)
+    )
+    if predecessor_public_key is not None and _public_key_identity(
+        predecessor_public_key
+    ) == _public_key_identity(public_key):
+        raise BrokerError("GB10 external supervisor predecessor key is not distinct")
+    account = pwd.getpwnam(REMOTE_SSH_USER)
+    if account.pw_dir != str(REMOTE_SSH_HOME):
+        raise BrokerError("GB10 external supervisor SSH account drifted")
+    ssh_dir = REMOTE_SSH_HOME / ".ssh"
+    authorized_keys = ssh_dir / "authorized_keys"
+    created_ssh_dir_identity: tuple[int, int] | None = None
+    authorized_keys_existed = False
+    existing = b""
+    published_authorized_keys_identity: tuple[int, int] | None = None
+    previous_deferral = _begin_signal_deferral()
+    if previous_deferral:
+        _finish_signal_deferral(previous_deferral)
+        raise BrokerError("GB10 external supervisor authority signal scope is invalid")
+
+    def rollback() -> None:
+        if published_authorized_keys_identity is not None:
+            _assert_authorized_keys_publication(
+                authorized_keys,
+                published_authorized_keys_identity,
+                rendered,
+                uid=account.pw_uid,
+                gid=account.pw_gid,
+            )
+            if authorized_keys_existed:
+                _write_authorized_keys(
+                    authorized_keys,
+                    existing,
+                    uid=account.pw_uid,
+                    gid=account.pw_gid,
+                )
+                _fsync_path_directory(ssh_dir)
+                restored_exists, restored = _read_authorized_keys(
+                    authorized_keys,
+                    uid=account.pw_uid,
+                    gid=account.pw_gid,
+                )
+                if not restored_exists or restored != existing:
+                    raise BrokerError("GB10 external supervisor authorized keys rollback drifted")
+            else:
+                os.unlink(authorized_keys)
+                _fsync_path_directory(ssh_dir)
+        if created_ssh_dir_identity is not None and os.path.lexists(ssh_dir):
+            metadata = os.lstat(ssh_dir)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != created_ssh_dir_identity
+            ):
+                raise BrokerError("GB10 external supervisor SSH directory changed before rollback")
+            os.rmdir(ssh_dir)
+            _fsync_path_directory(ssh_dir.parent)
+
+    failure: BaseException | None = None
+    try:
+        if _DEFERRED_SIGNAL is not None:
+            raise BrokerInterruptedError(
+                f"GB10 external supervisor broker interrupted safely by signal {_DEFERRED_SIGNAL}"
+            )
+        if os.path.lexists(ssh_dir):
+            metadata = os.lstat(ssh_dir)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != account.pw_uid
+                or metadata.st_gid != account.pw_gid
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise BrokerError("GB10 external supervisor SSH directory is unsafe")
+        else:
+            created_ssh_dir_identity = _create_directory_atomically(
+                ssh_dir,
+                mode=0o700,
+                uid=account.pw_uid,
+                gid=account.pw_gid,
+            )
+            _fsync_path_directory(ssh_dir.parent)
+        authorized_keys_existed, existing = _read_authorized_keys(
+            authorized_keys,
+            uid=account.pw_uid,
+            gid=account.pw_gid,
+        )
+        rendered = render_authorized_keys(
+            existing,
+            public_key,
+            predecessor_public_key=predecessor_public_key,
+        )
+        if rendered != existing:
+            published_authorized_keys_identity = _write_authorized_keys(
+                authorized_keys,
+                rendered,
+                uid=account.pw_uid,
+                gid=account.pw_gid,
+            )
+            _fsync_path_directory(ssh_dir)
+            _assert_authorized_keys_publication(
+                authorized_keys,
+                published_authorized_keys_identity,
+                rendered,
+                uid=account.pw_uid,
+                gid=account.pw_gid,
+            )
+            readback_exists, readback = _read_authorized_keys(
+                authorized_keys,
+                uid=account.pw_uid,
+                gid=account.pw_gid,
+            )
+            if not readback_exists or readback != rendered:
+                raise BrokerError("GB10 external supervisor authorized keys publication drifted")
+        if _DEFERRED_SIGNAL is not None:
+            raise BrokerInterruptedError(
+                f"GB10 external supervisor broker interrupted safely by signal {_DEFERRED_SIGNAL}"
+            )
+    except BaseException as exc:
+        failure = exc
+
+    rollback_error: BaseException | None = None
+    if failure is not None:
+        try:
+            rollback()
+        except BaseException as exc:
+            rollback_error = exc
+
+    try:
+        _finish_signal_deferral(previous_deferral)
+    except BaseException as exc:
+        if failure is None:
+            failure = exc
+            rollback_previous = _begin_signal_deferral()
+            try:
+                rollback()
+            except BaseException as rollback_exc:
+                rollback_error = rollback_exc
+            try:
+                _finish_signal_deferral(rollback_previous)
+            except BaseException:
+                pass
+
+    if rollback_error is not None:
+        raise BrokerError("GB10 external supervisor authorized keys rollback failed") from (
+            rollback_error
+        )
+    if failure is None:
+        return
+    if isinstance(failure, BrokerError):
+        raise failure
+    if isinstance(failure, OSError):
+        raise BrokerError("GB10 external supervisor authorized keys publication failed") from (
+            failure
+        )
+    raise failure
 
 
 def _canonical_json(value: object) -> bytes:
@@ -433,7 +884,8 @@ def accept_capacity(payload: bytes) -> bytes:
         )
     artifact_bytes = result.stdout.encode()
     if (
-        not artifact_bytes
+        result.stderr
+        or not artifact_bytes
         or len(artifact_bytes) > _MAX_COMMAND_OUTPUT
         or not artifact_bytes.endswith(b"\n")
     ):
@@ -442,6 +894,27 @@ def accept_capacity(payload: bytes) -> bytes:
         artifact = json.loads(artifact_bytes)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise BrokerError("GB10 acceptance authority output is invalid") from exc
+    if result.returncode == 1:
+        failure_code = artifact.get("failure_code") if isinstance(artifact, dict) else None
+        node = artifact.get("node") if isinstance(artifact, dict) else None
+        if (
+            not isinstance(artifact, dict)
+            or _canonical_json(artifact) != artifact_bytes
+            or set(artifact) != {"failure_code", "node", "schema_version", "status"}
+            or type(artifact.get("schema_version")) is not int
+            or artifact.get("schema_version") != 1
+            or artifact.get("status") != "failed"
+            or type(failure_code) is not str
+            or failure_code not in _CAPACITY_FAILURE_CODES
+            or type(node) is not str
+            or node not in nodes
+        ):
+            raise BrokerError("GB10 acceptance authority output is invalid")
+        raise BrokerCapacityFailureError(
+            _canonical_json({**artifact, "operation": "accept_capacity"})
+        )
+    if result.returncode != 0:
+        raise BrokerError("GB10 acceptance authority output is invalid")
     if (
         not isinstance(artifact, dict)
         or _canonical_json(artifact) != artifact_bytes
@@ -1309,6 +1782,7 @@ def _run_contained_authority(
                 job_state_path=job_state_path,
             ),
             timeout=launch_timeout,
+            check=False,
         )
     except BaseException as exc:
         failure = exc
@@ -2097,9 +2571,12 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         if os.geteuid() != 0 or os.getegid() != 0:
             raise BrokerError("GB10 external supervisor broker identity is invalid")
-        if len(arguments) == 2 and arguments[0] == "--install-authority":
+        if len(arguments) in {2, 3} and arguments[0] == "--install-authority":
             _require_host_authority()
-            install_forced_key(Path(arguments[1]))
+            install_forced_key(
+                Path(arguments[1]),
+                predecessor_public_key_path=(None if len(arguments) == 2 else Path(arguments[2])),
+            )
             return 0
         if arguments:
             raise BrokerError("GB10 external supervisor broker arguments are invalid")
@@ -2115,6 +2592,12 @@ def _main(argv: list[str] | None = None) -> int:
         _safe_executable(SYSTEM_PYTHON, owner_uid=0, owner_gid=0, label="system Python")
         candidate = ensure_candidate(CANDIDATES_ROOT, candidate_sha, candidate_tree)
         _exec_helper(candidate, payload)
+    except BrokerCapacityFailureError as exc:
+        try:
+            sys.stdout.buffer.write(exc.response)
+        except OSError:
+            pass
+        return 1
     except (BrokerError, OSError, KeyError, subprocess.SubprocessError):
         return 1
     return 1  # pragma: no cover - execve never returns

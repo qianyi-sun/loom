@@ -41,7 +41,7 @@ body:
           required: true
         - label: "The fixed candidate and release evidence are complete before the CI-gated auto-merge."
           required: true
-        - label: "The trusted controller enables squash auto-merge; current-head CI gates are the only merge authority."
+        - label: "The direct `main-promotion-gate` bound the PR, current `dev` head, release gate, and evidence artifact to one SHA."
           required: true
         - label: "The manifest's `release_owner_approval` evidence and Production Environment approval are distinct controls and are not interchangeable with CI."
           required: true

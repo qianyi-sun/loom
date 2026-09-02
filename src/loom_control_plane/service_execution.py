@@ -341,6 +341,39 @@ async def set_execution_target_health(
     return target
 
 
+async def refresh_execution_target_health(
+    session: AsyncSession,
+    *,
+    target_id: str,
+    observed_at: datetime,
+) -> ServiceExecutionTarget:
+    """Refresh actuator-owned readiness without changing operator intent.
+
+    The actuator proves that it can list and reconcile the target namespace.
+    It must not silently re-enable a target that an operator has disabled or
+    placed into draining state, so ``desired_state`` is deliberately preserved.
+    """
+
+    target = (
+        await session.execute(
+            select(ServiceExecutionTarget)
+            .where(ServiceExecutionTarget.id == target_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise ServiceExecutionConflict("execution target not found")
+    if target.health_observed_at is not None and observed_at < target.health_observed_at:
+        raise ServiceExecutionConflict("execution target health observation regressed")
+    target.observed_state = "ready"
+    target.health_status = "healthy"
+    target.health_observed_at = observed_at
+    target.health_error_code = None
+    target.updated_at = datetime.now(UTC)
+    await session.flush()
+    return target
+
+
 def _bind_kubernetes_execution_route(
     *,
     trial: Trial,
@@ -830,6 +863,47 @@ async def enqueue_execution_transition(
     return command
 
 
+async def request_trial_execution_cancellation(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    now: datetime | None = None,
+) -> ServiceExecutionCommand | None:
+    """Revoke the active provider authority when a Trial is cancelled."""
+
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(
+                ServiceExecutionLease.trial_id == trial_id,
+                ServiceExecutionLease.execution_role == "attempt",
+                ServiceExecutionLease.deleted_at.is_(None),
+            )
+            .order_by(ServiceExecutionLease.attempt.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        return None
+    if lease.desired_state in {"create", "start"}:
+        desired_state = "cancel"
+    elif lease.desired_state == "finalize":
+        # Finalize is entered only after output is durably committed, so a
+        # late cancellation can safely advance straight to provider cleanup.
+        desired_state = "delete_pending"
+    else:
+        # Revocation/deletion is already durable. Repeated cancellation is
+        # idempotent at the provider-resource boundary.
+        return None
+    return await enqueue_execution_transition(
+        session,
+        lease_id=lease.id,
+        expected_generation=lease.generation,
+        desired_state=desired_state,
+        now=now,
+    )
+
+
 async def mark_execution_output_unavailable(
     session: AsyncSession,
     *,
@@ -837,6 +911,7 @@ async def mark_execution_output_unavailable(
     expected_generation: int,
     reason: str,
     now: datetime | None = None,
+    allow_cancel_before_deadline: bool = False,
 ) -> ServiceExecutionLease:
     """Close a revoked Pod's bounded output window before resource deletion."""
 
@@ -856,11 +931,12 @@ async def mark_execution_output_unavailable(
         raise ServiceExecutionFenceError("execution generation is stale")
     if lease.output_commit_state in {"committed", "unavailable"}:
         return lease
+    cancellation_may_close_now = allow_cancel_before_deadline and lease.desired_state == "cancel"
     if (
         lease.revoked_at is None
         or lease.cleanup_state != "pending"
         or lease.cleanup_deadline_at is None
-        or current_time < lease.cleanup_deadline_at
+        or (current_time < lease.cleanup_deadline_at and not cancellation_may_close_now)
     ):
         raise ServiceExecutionConflict("execution output window remains open")
     lease.output_commit_state = "unavailable"
@@ -1455,7 +1531,7 @@ async def finalize_committed_service_execution(
         raise ServiceExecutionConflict("execution lease not found")
     if (
         lease.desired_state != "finalize"
-        or lease.observed_state != "finalizing"
+        or lease.observed_state not in {"finalizing", "failed"}
         or lease.output_commit_state != "committed"
     ):
         return False
@@ -1680,6 +1756,7 @@ __all__ = [
     "record_execution_event",
     "record_kubernetes_observation",
     "refresh_service_execution_metrics",
+    "request_trial_execution_cancellation",
     "reserve_trial_execution",
     "set_execution_target_health",
     "verify_trial_execution_fence",

@@ -437,7 +437,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
     }.get(kind, "worker-tokens")
     url = f"{args.cp_url.rstrip('/')}/admin/{endpoint}"
     body: dict[str, int] = {}
-    if args.expires_in_days is not None:
+    if args.expires_in_days is not None and args.expires_in_days > 0:
         body["expires_in_days"] = args.expires_in_days
 
     try:
@@ -2418,7 +2418,8 @@ def dispatch(argv: list[str]) -> int:
         help=(
             f"Token lifetime in days "
             f"(default: {_DEFAULT_EXPIRES_DAYS}). Pass 0 to omit the "
-            f"expires_in_days field (server keeps default)."
+            f"expires_in_days field; persistent identity kinds that support "
+            f"it will then be non-expiring."
         ),
     )
     p_mint.add_argument(

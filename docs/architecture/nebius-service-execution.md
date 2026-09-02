@@ -110,21 +110,37 @@ The accepted service pool identities and adapter boundaries are:
 | `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
 | `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
 
-Converted tasks opt into normal Kubernetes scheduling with an immutable
-`service_execution` binding in `TaskConfig`. The binding selects the logical
-pool and carries a validated runtime template. It deliberately omits the task
-revision digest because that digest covers the complete task directory; after
-materialization the scheduler binds the published `Task.checksum` into the
-final runtime plan. Trial submission derives the required pool from that task
-binding, so ordinary users do not select a physical target.
+Every uploaded TaskSet receives an immutable, canonical input manifest and
+task revision before fan-out. For the deliberately narrow ordinary CPU task
+shape, the scheduler compiles an immutable runtime plan from a persisted
+deployment profile when a Batch is submitted with `backend=nebius`. The
+profile fixes the logical pool, execution class, digest-pinned task and runtime
+images, and accepted image-admission records; it is not user input. The target
+is selected later from the healthy binding in the Batch's environment. The
+accepted profile is frozen on the Batch, so a later deployment-profile rollout
+cannot reinterpret Trials that are already queued.
+The final plan also binds the published `Task.checksum`, input-manifest digest,
+trial configuration, and declared artifacts. Existing explicitly bound task
+revisions remain readable for migration and operator tests, but ordinary users
+do not select a physical target or hand-author a binding.
+
+Automatic compilation is fail-closed and intentionally not a general Docker
+converter. It accepts one Linux x86 CPU task with explicit positive CPU, RAM,
+ephemeral-storage and timeout bounds; `/workspace`; one safe instruction; a
+direct-completion/LiteLLM API agent; one safe script verifier; and safe relative
+artifact paths. It rejects GPU, multi-step, custom identity, sidecar, skill,
+MCP, environment-variable, custom DNS/host/tmpfs, health-check, capability,
+extended-runtime, mutable-image, or host-specialized shapes. Supporting one of
+those shapes requires a reviewed materializer change, not an implicit default.
 
 When the environment scheduler is enabled, it fairly selects one queued,
 converted Trial, requires a fresh healthy target in the bound environment,
 and records a `preexisting_assignment` routing decision before creating the
 lease. The later provisioning boundary still requires fresh executable target
-capacity before a Kubernetes create. Tasks without the explicit binding retain
-the legacy worker path. An explicit admin target binding remains audited and is
-not the normal workflow.
+capacity before a Kubernetes create. A Batch submitted with `backend=docker`
+retains the legacy worker path regardless of whether the task could compile for
+Nebius. An explicit admin target binding remains audited and is not the normal
+workflow.
 
 `Trial.execution_route_generation` advances while the Trial is queued. The
 selected pool, adapter, target/class when applicable, reason, candidate
@@ -275,21 +291,29 @@ raw API responses. A target Pod found outside the configured node selector is
 identity drift and prevents publication.
 
 `deploy/k8s/nebius-capacity-collector.yaml` packages the one-shot collector as
-a one-minute `CronJob` with concurrency forbidden, a read-only `get/list`
-ClusterRole for Nodes and Pods, a non-root/read-only-root filesystem, and
-owner-only copied credential files. It is checked in with `suspend=true` and
-depends on a separately provisioned ConfigMap containing the exact target,
-pool, namespace, node selector, project, node-group, region, control-plane URL,
-and quota name/unit bindings plus two separately provisioned Secrets for the
-Nebius service-account credential file and a Loom bearer carrying only
+an active development one-minute `CronJob` with concurrency forbidden, a
+read-only `get/list` ClusterRole for Nodes and Pods, a non-root/read-only-root
+filesystem, owner-only copied credential files, and the exact accepted
+development target, quota-parent, node-group, region, and quota bindings in a
+checked ConfigMap. Two separately provisioned Secrets hold the Nebius
+service-account credential file and a Loom bearer carrying only
 `execution:capacity:observe`. Operators mint that credential with
-`loom admin tokens worker mint --kind execution-capacity-collector`; it can
+`loom admin tokens worker mint --kind execution-capacity-collector
+--expires-in-days 0`; it can
 read only the collector policy projection and publish capacity observations,
-and cannot mutate policy or use ordinary worker authority. Repository
-merge neither creates those credentials nor unsuspends the collector. The
-collector uses the official Nebius Python SDK only for quota `list` and node
-group `get`; it contains no Nebius create, update, delete, or operation-wait
-path.
+and cannot mutate policy or use ordinary worker authority. The idempotent
+`scripts/ops/apply_nebius_development_runtime.sh` bootstrap creates that token
+only when its Secret is absent and never renews it on a calendar schedule. The
+same bootstrap applies the development-only Control Plane patch that binds the
+scheduler to `nebius-cpu` and the persisted image-admission keyring; the
+provider-neutral base Deployment remains disabled. The
+Nebius authorized public key deliberately has no `expires_at`; the SDK derives
+and refreshes short-lived access tokens from it. The collector uses the
+official Nebius Python SDK only for quota `list` and node group `get`; it
+contains no Nebius create, update, delete, or operation-wait path. Its recurring
+success is also the live permission/key check: failures make capacity evidence
+stale and stop new reservations rather than requiring a person to reconnect the
+runtime.
 
 Resource sizing and capacity forecasts are a fourth independent evidence
 boundary. Migration `0120` adds immutable
@@ -534,9 +558,13 @@ The proportionate baseline is documented in
 [Nebius execution security](nebius-execution-security.md) and the matching
 [operator check](../runbooks/nebius-execution-security.md).
 
-`deploy/k8s/nebius-execution-actuator.yaml` is deliberately inert at zero
-replicas. Repository merge cannot scale it or create its referenced database
-secret, namespace in a live target, runtime class, cluster, or cloud resource.
+`deploy/k8s/nebius-execution-actuator.yaml` is the active development runtime
+at one system-node replica, bound to `nebius-eu-north1-development` and an
+immutable registry digest. It creates no execution node itself: ordinary
+persisted Batch/Trial demand creates a Job, and the managed node-group
+autoscaler remains the only authority that changes the `0..1` execution-node
+count. The one-time bootstrap still requires the referenced database and
+credential Secrets; no per-Batch operator action is part of the path.
 The disposable k3s conformance test validates the real Kubernetes API seam
 with a suspended Job and makes no Nebius call.
 
@@ -599,18 +627,25 @@ backend keep their domain-specific names.
 
 | Current surface | Transitional read | Terminal service model |
 | --- | --- | --- |
-| `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | Server ignores no value silently; it derives and returns `execution_class_id`, while legacy value is read-only migration evidence. | Request field and column removed; admission resolves the execution class. |
-| `GET /api/v1/backends`, overview/monitor `available_backends` | Replaced by an execution-class catalog with admissibility and target-health summaries. | Backend catalog route removed. |
-| NewBatch backend picker and BatchDetail/Run Library backend labels | Display resolved execution class and compatibility reasons; no provider/target selector. | Backend picker removed. |
+| `POST /api/v1/batches.backend`, `Batch.backend`, clone/rerun payloads | User-visible, explicit execution choice: `docker` admits only GB10/OLDLAB worker execution; `nebius` admits only the `nebius-cpu` service-execution pool. | Retained as the stable user choice. No cross-backend fallback is allowed. |
+| `GET /api/v1/backends`, overview/monitor `available_backends` | Reports live-worker evidence separately from fresh scale-from-zero authority. | Retained as the user-facing backend catalog. |
+| NewBatch backend picker and BatchDetail/Run Library backend labels | Displays the explicit backend and whether it is live, scale-from-zero capable, or unavailable. | Retained. Users choose Docker or Nebius; they do not choose a physical node or target. |
 | `Trial.requires_caps` | Versioned frozen `WorkloadRequirementsV1` projection is stored alongside legacy JSON during bounded migration. | Legacy unversioned caps removed. |
 | Worker `capabilities[].backend` and `Worker.pool_name` | Observed adapter capability and pool identity; never normal user submission identity. | Retained for accepted OLDLAB/GB10 worker claims and joined with provider-neutral route observability. |
-| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence; user batches remain forbidden from setting it. | Operator control remains distinct from normal provider-neutral scheduling. |
+| `required_worker_pools` / `required_worker_pool` | Operator-only smoke/pin evidence within the already selected backend; user batches remain forbidden from setting it. | Operator control remains distinct from the stable user-facing backend choice. |
 | `autoscaler_pool_name`, physical pool policies, slot counts | Legacy-adapter assignment must match the versioned Trial route; configured and fresh capacity are reported separately. | Retained while OLDLAB/GB10 operate, alongside target/Pod evidence for Nebius. |
-| `loom run --backend` | Unchanged local-only driver selection. | Docker, Modal, and fake may remain CLI-only and never appear in service admission or capacity. |
+| `loom run --backend` | Unchanged local-only driver selection; it is distinct from service Batch admission. | Local Docker, Modal, and fake drivers may remain CLI-only. Service `backend=nebius` is handled by the durable control-plane path, not a local Nebius driver. |
 
 Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
 specific fields have an owner and telemetry, but their existence is not a
 deprecation or retirement schedule.
+
+The explicit backend is a routing fence, not a preference. `backend=docker`
+admits only the GB10/OLDLAB worker adapter, even when a task revision already
+carries a compatible service-execution binding. `backend=nebius` admits only
+the `nebius-cpu` lease adapter: it uses a valid legacy binding or compiles the
+exact supported ordinary task shape from the persisted runtime profile, and
+otherwise rejects the Batch. Neither direction falls back across the fence.
 
 ## Migration and authority gates
 
@@ -627,8 +662,9 @@ The accepted repository and rollout boundaries are:
    merge authority.
 6. Provision isolated staging, run bounded canaries, and record target health,
    node-backed capacity, Pod outcomes, artifact hashes, cleanup, and cost.
-7. Provision and accept both production regions before any production route
-   can use them.
+7. Accept the approved production binding on the shared baseline cluster before
+   production can use it. A second cluster, region, or automatic regional
+   failover is outside this architecture unless separately required.
 8. Change pool weights, enable a Nebius route, or independently drain one pool
    only through protected rollout authority with explicit candidate, route,
    health, capacity, rollback, and operator approval evidence.
@@ -662,7 +698,8 @@ traffic routing, or retirement.
 - #1540: durable execution state and provider-neutral lease schema; implemented
   and held traffic-disabled in this change.
 - #1549: namespace-scoped Kubernetes Job actuator and observed-state
-  reconciliation; implemented and held at zero replicas in this change.
+  reconciliation; the persistent system-node actuator remains available while
+  user execution nodes scale independently to zero.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
 - #1551: proportionate Kubernetes execution security baseline.

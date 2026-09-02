@@ -33,6 +33,7 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
         "scripts/staging_smoke_gate.py",
         "scripts/ops/worker_capacity_manifest.py status",
         "gh workflow run release-promotion-gate.yml",
+        "gh workflow run main-promotion-gate.yml",
     ):
         assert fragment in operator or fragment in staging
 

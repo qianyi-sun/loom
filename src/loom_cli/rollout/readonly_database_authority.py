@@ -8,6 +8,8 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import cast
+from uuid import UUID
 
 from loom.data_lifecycle import (
     STAGING_ADMISSION_OBJECT_LIMIT,
@@ -40,6 +42,7 @@ SELECT current_user AS role_name,
        ) AS write_table_privileges,
        has_table_privilege(current_user, 'public.teams', 'SELECT')
        AND has_table_privilege(current_user, 'public.users', 'SELECT')
+       AND has_table_privilege(current_user, 'public.team_memberships', 'SELECT')
        AND has_table_privilege(current_user, 'public.agents', 'SELECT')
        AND has_table_privilege(current_user, 'public.tasks', 'SELECT')
        AND has_table_privilege(current_user, 'public.provider_models_cache', 'SELECT')
@@ -92,6 +95,55 @@ ORDER BY obj.bucket, obj.object_key, obj.version_id
 """.strip()
 
 DatabaseQuery = Callable[[str], tuple[Mapping[str, object], ...]]
+
+_SMOKE_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+@dataclass(frozen=True, slots=True)
+class ReadonlySmokeAuthorityEvidence:
+    """Secret-free readiness for one configured admin-on-behalf identity."""
+
+    mutation_epoch: int
+    team_exists: bool
+    team_active: bool
+    team_submissions_enabled: bool
+    user_exists: bool
+    user_active: bool
+    membership_present: bool
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        flags = (
+            self.team_exists,
+            self.team_active,
+            self.team_submissions_enabled,
+            self.user_exists,
+            self.user_active,
+            self.membership_present,
+        )
+        if (
+            self.mutation_epoch < 0
+            or any(type(value) is not bool for value in flags)
+            or (self.team_active and not self.team_exists)
+            or (self.team_submissions_enabled and not self.team_exists)
+            or (self.user_active and not self.user_exists)
+            or (self.membership_present and not (self.team_exists and self.user_exists))
+            or re.fullmatch(r"[0-9a-f]{64}", self.evidence_sha256) is None
+        ):
+            raise ValueError("readonly smoke authority evidence is invalid")
+
+    @property
+    def ready(self) -> bool:
+        return all(
+            (
+                self.team_exists,
+                self.team_active,
+                self.team_submissions_enabled,
+                self.user_exists,
+                self.user_active,
+                self.membership_present,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +398,92 @@ def probe_readonly_mutation_epoch(query: DatabaseQuery) -> ReadonlyMutationEpoch
     )
 
 
+def probe_readonly_smoke_authority(
+    query: DatabaseQuery,
+    *,
+    represented_username: str,
+    team_id: str,
+) -> ReadonlySmokeAuthorityEvidence:
+    """Prove one on-behalf username/team pair through the SELECT-only role."""
+
+    normalized_username = represented_username.casefold()
+    try:
+        parsed_team_id = UUID(team_id)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("readonly smoke authority binding is invalid") from exc
+    canonical_team_id = str(parsed_team_id)
+    if (
+        _SMOKE_USERNAME_RE.fullmatch(represented_username) is None
+        or parsed_team_id.version != 4
+        or canonical_team_id != team_id
+    ):
+        raise ValueError("readonly smoke authority binding is invalid")
+
+    epoch = probe_readonly_mutation_epoch(query).mutation_epoch
+    sql = f"""
+WITH target_team AS (
+  SELECT id, disabled_at, submissions_paused_at
+  FROM teams
+  WHERE id = '{canonical_team_id}'::uuid
+), target_user AS (
+  SELECT id, status, disabled_at
+  FROM users
+  WHERE username_normalized = '{normalized_username}'
+)
+SELECT
+  EXISTS(SELECT 1 FROM target_team) AS team_exists,
+  COALESCE((SELECT disabled_at IS NULL FROM target_team), FALSE) AS team_active,
+  COALESCE(
+    (SELECT submissions_paused_at IS NULL FROM target_team),
+    FALSE
+  ) AS team_submissions_enabled,
+  EXISTS(SELECT 1 FROM target_user) AS user_exists,
+  COALESCE(
+    (SELECT status = 'active' AND disabled_at IS NULL FROM target_user),
+    FALSE
+  ) AS user_active,
+  EXISTS(
+    SELECT 1
+    FROM team_memberships AS membership
+    JOIN target_team ON target_team.id = membership.team_id
+    JOIN target_user ON target_user.id = membership.user_id
+  ) AS membership_present
+""".strip()
+    row = dict(_one(query, sql, label="smoke authority"))
+    expected = {
+        "team_exists",
+        "team_active",
+        "team_submissions_enabled",
+        "user_exists",
+        "user_active",
+        "membership_present",
+    }
+    if set(row) != expected or any(type(value) is not bool for value in row.values()):
+        raise ValueError("readonly database smoke authority evidence is invalid")
+    flags = cast(dict[str, bool], row)
+    binding_sha256 = hashlib.sha256(
+        f"{normalized_username}\0{canonical_team_id}".encode()
+    ).hexdigest()
+    canonical = {
+        "binding_sha256": binding_sha256,
+        "mutation_epoch": epoch,
+        **row,
+        "version": "v1",
+    }
+    return ReadonlySmokeAuthorityEvidence(
+        mutation_epoch=epoch,
+        team_exists=flags["team_exists"],
+        team_active=flags["team_active"],
+        team_submissions_enabled=flags["team_submissions_enabled"],
+        user_exists=flags["user_exists"],
+        user_active=flags["user_active"],
+        membership_present=flags["membership_present"],
+        evidence_sha256=hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+
 def _probe_readonly_database(
     query: DatabaseQuery,
     *,
@@ -483,7 +621,9 @@ __all__ = [
     "DatabaseQuery",
     "ReadonlyDatabaseEvidence",
     "ReadonlyMutationEpochEvidence",
+    "ReadonlySmokeAuthorityEvidence",
     "probe_readonly_database",
     "probe_readonly_database_baseline",
     "probe_readonly_mutation_epoch",
+    "probe_readonly_smoke_authority",
 ]

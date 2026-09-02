@@ -1259,10 +1259,10 @@ def test_busy_deferral_requires_the_exact_persisted_job(
         assert len(accounting_commands) == 1
         assert "--jobs=456" in accounting_commands[0]
     else:
-        with pytest.raises(
-            authority.AcceptanceError, match=f"node allocation failed safely: {busy_node}"
-        ):
+        with pytest.raises(authority.CapacityAcceptanceError) as raised:
             probe()
+        assert raised.value.failure_code == "busy-accounting-unverified"
+        assert raised.value.node == busy_node
 
 
 @pytest.mark.parametrize(
@@ -1339,7 +1339,7 @@ def test_started_allocation_with_busy_phrase_is_a_capacity_failure(
         worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
     )
 
-    with pytest.raises(authority.AcceptanceError, match="node allocation failed safely"):
+    with pytest.raises(authority.CapacityAcceptanceError) as raised:
         authority._probe_nodes(
             candidate_sha,
             verified,
@@ -1351,7 +1351,66 @@ def test_started_allocation_with_busy_phrase_is_a_capacity_failure(
             },
         )
 
+    assert raised.value.failure_code == "node-allocation-failed"
+    assert raised.value.node == "trt-gb10-1"
     assert not any("/usr/bin/sacct" in command for command in commands)
+
+
+def test_busy_allocation_with_unverified_accounting_emits_a_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    monkeypatch.setattr(authority, "SLURM_NODES", ("trt-gb10-1",))
+
+    def run(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[:4] == ["/usr/bin/scontrol", "show", "node", "trt-gb10-1"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    "NodeName=trt-gb10-1 CPUAlloc=20 AllocMem=115000 State=ALLOCATED "
+                    "Partitions=gb10,loom-staging "
+                ),
+                stderr="",
+            )
+        if "/usr/bin/srun" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="",
+                stderr="srun: Requested nodes are busy\n",
+            )
+        if "/usr/bin/squeue" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(authority, "_run", run)
+    monkeypatch.setattr(authority, "_allocation_never_started", lambda *_args, **_kwargs: False)
+    verified = authority.VerifiedCandidateInputs(
+        candidate_tree="b" * 40,
+        registry_probe_sha256="c" * 64,
+        registry_ca_sha256=authority.TRIAL_CACHE_CA_SHA256,
+        worker_inputs={"head": candidate_sha, "env_sha256": "d" * 64},
+    )
+
+    with pytest.raises(authority.CapacityAcceptanceError) as raised:
+        authority._probe_nodes(
+            candidate_sha,
+            verified,
+            {
+                "repo_dir": Path("/worker/repo"),
+                "env_file": Path("/worker/env"),
+                "image_tag": "staging-aaaaaaa",
+                "requested_concurrency": 10,
+            },
+        )
+
+    assert raised.value.failure_code == "busy-accounting-unverified"
+    assert raised.value.node == "trt-gb10-1"
 
 
 def test_command_deadline_kills_the_whole_slurm_launcher_process_group(
@@ -2377,6 +2436,31 @@ def test_authority_emits_the_canonical_artifact_consumed_by_the_broker(
     assert emitted["candidate_tree"] == candidate_tree
     assert emitted["profile_sha256"] == "c" * 64
     assert emitted["nodes"] == list(authority.SLURM_NODES)
+
+
+def test_authority_emits_only_a_canonical_typed_capacity_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    authority = _load_authority()
+    monkeypatch.setattr(authority, "_install_signal_handlers", lambda: {})
+    monkeypatch.setattr(authority, "_restore_signal_handlers", lambda _previous: None)
+
+    def fail() -> int:
+        raise authority.CapacityAcceptanceError(
+            "busy-accounting-unverified",
+            node="trt-gb10-1",
+        )
+
+    monkeypatch.setattr(authority, "_main", fail)
+
+    assert authority.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == (
+        '{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+        '"schema_version":1,"status":"failed"}\n'
+    )
+    assert captured.err == ""
 
 
 def test_installer_publishes_only_root_owned_fixed_authority() -> None:

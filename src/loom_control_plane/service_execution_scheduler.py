@@ -16,7 +16,12 @@ from loom.execution_contract import ExecutionRoutingReason, workload_requirement
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.models.task import TaskConfig, bind_service_execution_runtime_plan
+from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
+from loom.service_execution_materialization import (
+    ServiceExecutionRuntimeProfileV1,
+    compile_service_execution_plan,
+)
 from loom_control_plane.service_execution import reserve_trial_execution
 
 _LOG = logging.getLogger(__name__)
@@ -26,15 +31,19 @@ _NEXT_SERVICE_TRIAL = text("""
 SELECT t.id,
        t.attempt_count,
        task_definition.checksum AS task_checksum,
-       task_definition.config AS task_config
+       task_definition.config AS task_config,
+       task_definition.source_provenance AS task_source_provenance,
+       t.config AS trial_config,
+       b.service_execution_runtime_profile AS batch_runtime_profile
   FROM trials t
+  JOIN batches b ON b.id = t.batch_id
   JOIN tasks task_definition ON task_definition.id = t.task_id
   JOIN team_quotas q ON q.team_id = t.team_id
  WHERE t.state = 'queued'
    AND t.attempt_count < q.max_attempts_ceiling
    AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= :now)
    AND t.family_key IS NULL
-   AND task_definition.config ? 'service_execution'
+   AND b.backend = 'nebius'
    AND t.requires_caps->>'worker_pool' = :pool_id
    AND (
          t.execution_route_pool_name IS NULL
@@ -134,14 +143,29 @@ async def reserve_next_service_execution(
     if row is None:
         return None
     task = TaskConfig.model_validate(row["task_config"])
-    binding = task.service_execution
-    if binding is None or binding.logical_pool_id != pool_id:
-        raise ValueError("queued service-execution task binding drift")
     task_revision = _task_revision(row["task_checksum"])
-    runtime_plan = bind_service_execution_runtime_plan(
-        binding.runtime_template,
-        task_revision_sha256=task_revision,
-    )
+    binding = task.service_execution
+    if binding is not None:
+        if binding.logical_pool_id != pool_id:
+            raise ValueError("queued service-execution task binding drift")
+        runtime_plan = bind_service_execution_runtime_plan(
+            binding.runtime_template,
+            task_revision_sha256=task_revision,
+        )
+    else:
+        raw_profile = row["batch_runtime_profile"]
+        if raw_profile is None:
+            return None
+        runtime_profile = ServiceExecutionRuntimeProfileV1.model_validate(raw_profile)
+        if runtime_profile.logical_pool_id != pool_id:
+            raise ValueError("queued service-execution runtime profile pool drift")
+        runtime_plan = compile_service_execution_plan(
+            task=task,
+            trial=TrialConfig.model_validate(row["trial_config"]),
+            task_revision_sha256=task_revision,
+            source_provenance=dict(row["task_source_provenance"] or {}),
+            profile=runtime_profile,
+        )
     target = await _ready_target(
         session,
         environment=environment,

@@ -20,6 +20,7 @@ from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.readonly_database_authority import (
     _CAPACITY_FIRST_REVISION,
     ReadonlyDatabaseEvidence,
+    ReadonlySmokeAuthorityEvidence,
 )
 from loom_cli.rollout.staging_baseline_readiness import (
     BaselineProbeResult,
@@ -475,6 +476,7 @@ class CrossVersionStagingBaselineProbeSource:
         *,
         route: str,
         database: ReadonlyDatabaseEvidence,
+        smoke_authority: ReadonlySmokeAuthorityEvidence | None,
         object_store_probe: ObjectStoreProbe,
         public_http_get: PublicHttpGet = bounded_public_http_get,
         tls_probe: TlsProbe = probe_tls_route,
@@ -482,6 +484,7 @@ class CrossVersionStagingBaselineProbeSource:
         canonical, _hostname, _port = _validated_route(route)
         self._route = canonical
         self._database = database
+        self._smoke_authority = smoke_authority
         self._object_store_probe = object_store_probe
         self._public_http_get = public_http_get
         self._tls_probe = tls_probe
@@ -537,13 +540,35 @@ class CrossVersionStagingBaselineProbeSource:
         )
 
     def _auth(self) -> BaselineProbeResult:
+        smoke = self._smoke_authority
+        if smoke is None:
+            raise ValueError("staging smoke authority evidence is unavailable")
+        blockers: dict[str, str] = {}
+        if smoke.mutation_epoch != self._database.mutation_epoch:
+            blockers["smoke-epoch"] = "represented-authority-epoch-drift"
+        else:
+            if not smoke.team_exists:
+                blockers["smoke-team"] = "represented-team-not-found"
+            else:
+                if not smoke.team_active:
+                    blockers["smoke-team"] = "represented-team-disabled"
+                if not smoke.team_submissions_enabled:
+                    blockers["smoke-submissions"] = "represented-team-submissions-paused"
+            if not smoke.user_exists:
+                blockers["smoke-user"] = "represented-user-not-found"
+            elif not smoke.user_active:
+                blockers["smoke-user"] = "represented-user-inactive"
+            if smoke.team_exists and smoke.user_exists and not smoke.membership_present:
+                blockers["smoke-membership"] = "represented-user-team-membership-missing"
         return self._result(
             "staging.auth",
             summaries={
                 "authority": "postgres-select-only-v1",
                 "database-evidence": self._database.evidence_sha256,
+                "smoke-authority-evidence": smoke.evidence_sha256,
+                "smoke-authority-ready": smoke.ready,
             },
-            blockers={},
+            blockers=blockers,
         )
 
     def _catalog_task(self) -> BaselineProbeResult:

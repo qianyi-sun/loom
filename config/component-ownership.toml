@@ -10,6 +10,32 @@ ci_lanes = [
   "tests-packages",
   "tests-root",
 ]
+ci_ignored_paths = [
+  "deploy/Dockerfile.behavior-stage1-sim",
+  "deploy/behavior-stage1-sim/**",
+  "migrations/versions/0094_pipeline_stage1_smoke_authority.py",
+  "migrations/versions/0095_pipeline_stage1_smoke_two_phase.py",
+  "scripts/behavior/**",
+  "src/loom/integrations/behavior/**",
+  "src/loom/pipeline/behavior_*.py",
+  "src/loom/pipeline/renderers/behavior_*.py",
+  "src/loom/pipeline/renderers/schemas/behavior.*.json",
+  "src/loom/pipeline/stage1_smoke.py",
+  "src/loom_pipeline_orchestrator/stage1_runtime.py",
+  "src/loom_service/behavior_pipeline_adapter.py",
+  "src/loom_service/pipeline_stage1_smoke_*.py",
+  "src/loom_service/routes/pipeline_stage1_smoke*.py",
+  "tests/integration/test_behavior_pipeline_inputs.py",
+  "tests/integration/test_pipeline_stage1_smoke_authority.py",
+  "tests/integrations/behavior/**",
+  "tests/unit/pipeline/test_behavior_input_import.py",
+  "tests/unit/test_pipeline_stage1_*.py",
+  "third_party/behavior-stage1/**",
+  "web/e2e/behavior-rollout-*.test.ts",
+  "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
+  "web/src/components/artifacts/BehaviorRollout*.tsx",
+  "web/src/components/artifacts/useBoundedJson.ts",
+]
 smoke_owners = [
   "agent-runtime-conformance",
   "egress-conformance",
@@ -29,6 +55,28 @@ scan_owners = [
 attestation_owners = [
   "release-provenance",
   "runtime-payload-provenance",
+]
+
+[[test_sharding]]
+lane = "tests-root"
+shard_count = 2
+strategy = "stable-hash"
+# 2026-09-02 collection snapshot: 15,260 tests split 7,630 / 7,630.
+# Keep salt changes measurement-backed because existing path assignments are stable.
+salt = "tests-root-v2-8275"
+pins = [
+  # Pair measured hotspots across shards; see #1680 and PR #1731 telemetry.
+  { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
+  { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
+]
+
+[[test_sharding]]
+lane = "integration"
+shard_count = 2
+strategy = "contiguous"
+pins = [
+  { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
+  { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
 ]
 
 [[execution_policies]]
@@ -404,32 +452,6 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
-id = "behavior-stage1-sim"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.behavior-stage1-sim"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "deploy/Dockerfile.behavior-stage1-sim",
-  "deploy/behavior-stage1-sim/**",
-  "scripts/prepare_behavior_stage1_image_sources.py",
-  "src/loom/integrations/behavior/**",
-  "src/loom/pipeline/**",
-  "src/loom_worker/__init__.py",
-  "src/loom_worker/pipeline_attempt_workspace.py",
-  "src/loom_worker/pipeline_live_preview.py",
-  "third_party/behavior-stage1/**",
-]
-smoke_owner = "worker-runtime-conformance"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-behavior-stage1-sim"
-publisher = "behavior-stage1"
-platforms = ["linux/amd64"]
-runtime_policy = "conformance"
-rollout_role = "none"
-
-[[components]]
 id = "pipeline-core-fixture"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.pipeline-core-fixture"
@@ -446,6 +468,32 @@ attestation_owner = "release-provenance"
 release_digest = "loom-pipeline-core-fixture"
 runtime_policy = "conformance"
 rollout_role = "none"
+
+# Behavior Stage 1 is retained as dormant source/deployment ownership only.
+# It is deliberately excluded from release image planning, scanning, and publishing.
+[[components]]
+id = "behavior-stage1-sim"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.behavior-stage1-sim"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.behavior-stage1-sim",
+  "deploy/behavior-stage1-sim/**",
+  "src/loom/integrations/behavior/**",
+  "src/loom/pipeline/behavior_*.py",
+  "src/loom/pipeline/stage1_smoke.py",
+  "src/loom/pipeline/**",
+  "third_party/behavior-stage1/**",
+]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-behavior-stage1-sim"
+platforms = ["linux/amd64"]
+runtime_policy = "conformance"
+rollout_role = "none"
+ci_enabled = false
 
 [[components]]
 id = "llm-gateway"
@@ -776,6 +824,10 @@ include_paths = [
   "tests/support/**/*.py",
   "tests/unit/**/*.py",
 ]
+exclude_paths = [
+  "tests/unit/pipeline/test_behavior_input_import.py",
+  "tests/unit/test_pipeline_stage1_*.py",
+]
 
 [[test_suites]]
 id = "python-integration-fast"
@@ -786,6 +838,7 @@ include_paths = [
   "tests/integrations/**/*.py",
 ]
 exclude_paths = [
+  "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",
@@ -803,6 +856,21 @@ exclude_paths = [
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
+  "tests/integration/test_pipeline_stage1_smoke_authority.py",
+  "tests/integrations/behavior/**/*.py",
+]
+
+[[test_suites]]
+id = "python-behavior-disabled"
+language = "python"
+lane = "tests-root"
+ci_enabled = false
+include_paths = [
+  "tests/integration/test_behavior_pipeline_inputs.py",
+  "tests/integration/test_pipeline_stage1_smoke_authority.py",
+  "tests/integrations/behavior/**/*.py",
+  "tests/unit/pipeline/test_behavior_input_import.py",
+  "tests/unit/test_pipeline_stage1_*.py",
 ]
 
 [[test_suites]]
@@ -882,4 +950,18 @@ lane = "frontend"
 include_paths = [
   "web/**/*.test.ts",
   "web/**/*.test.tsx",
+]
+exclude_paths = [
+  "web/e2e/behavior-rollout-*.test.ts",
+  "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
+]
+
+[[test_suites]]
+id = "web-behavior-disabled"
+language = "web"
+lane = "frontend"
+ci_enabled = false
+include_paths = [
+  "web/e2e/behavior-rollout-*.test.ts",
+  "web/src/__tests__/components/artifacts/BehaviorRollout*.test.tsx",
 ]

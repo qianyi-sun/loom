@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +17,7 @@ class ExecutionCapacityCollectorSettings(BaseSettings):
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
     node_label_selector: str = Field(min_length=1, max_length=500)
     nebius_project_id: str = Field(min_length=1, max_length=160)
+    nebius_quota_parent_id: str | None = Field(default=None, min_length=1, max_length=160)
     nebius_node_group_id: str = Field(min_length=1, max_length=160)
     nebius_region: str = Field(min_length=1, max_length=80)
     nebius_credentials_file: Path
@@ -24,11 +25,11 @@ class ExecutionCapacityCollectorSettings(BaseSettings):
     control_plane_bearer_token_file: Path
     quota_nodes_name: str = Field(min_length=1, max_length=255)
     quota_vcpu_name: str = Field(min_length=1, max_length=255)
-    quota_memory_name: str = Field(min_length=1, max_length=255)
+    quota_memory_name: str | None = Field(default=None, min_length=1, max_length=255)
     quota_storage_name: str = Field(min_length=1, max_length=255)
     quota_nodes_unit: str = Field(min_length=1, max_length=40)
     quota_vcpu_unit: str = Field(min_length=1, max_length=40)
-    quota_memory_unit: str = Field(min_length=1, max_length=40)
+    quota_memory_unit: str | None = Field(default=None, min_length=1, max_length=40)
     quota_storage_unit: str = Field(min_length=1, max_length=40)
     quota_service: str = Field(default="compute", min_length=1, max_length=120)
     source: str = Field(
@@ -36,6 +37,12 @@ class ExecutionCapacityCollectorSettings(BaseSettings):
     )
     request_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
     request_attempts: int = Field(default=3, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def _optional_memory_quota_is_complete(self) -> "ExecutionCapacityCollectorSettings":
+        if (self.quota_memory_name is None) != (self.quota_memory_unit is None):
+            raise ValueError("memory quota name and unit must be configured together")
+        return self
 
 
 __all__ = ["ExecutionCapacityCollectorSettings"]

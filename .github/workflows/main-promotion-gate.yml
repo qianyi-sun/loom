@@ -1,0 +1,75 @@
+name: main-promotion-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact current dev SHA being promoted."
+        required: true
+        type: string
+      pr_number:
+        description: "Open same-repository dev to main pull request number."
+        required: true
+        type: string
+      release_gate_run_id:
+        description: "Successful release-promotion-gate workflow run for candidate_sha."
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: main-promotion-gate-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  main-promotion-gate:
+    name: main-promotion-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      DISPATCH_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      RELEASE_GATE_RUN_ID: ${{ inputs.release_gate_run_id }}
+      REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Validate dispatch identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${CANDIDATE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'error: candidate_sha must be exactly 40 lowercase hexadecimal characters\n' >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_SHA}" != "${CANDIDATE_SHA}" ]]; then
+            printf 'error: workflow dispatch SHA must match candidate_sha\n' >&2
+            exit 1
+          fi
+          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'error: pr_number must be a positive integer\n' >&2
+            exit 1
+          fi
+          if [[ ! "${RELEASE_GATE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'error: release_gate_run_id must be a positive integer\n' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 1
+
+      - name: Verify protected promotion evidence
+        run: |
+          python3 scripts/ops/main_promotion_gate.py \
+            --repository "${REPOSITORY}" \
+            --candidate-sha "${CANDIDATE_SHA}" \
+            --dispatch-sha "${DISPATCH_SHA}" \
+            --pr-number "${PR_NUMBER}" \
+            --release-gate-run-id "${RELEASE_GATE_RUN_ID}"

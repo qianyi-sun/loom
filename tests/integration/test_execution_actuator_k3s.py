@@ -526,7 +526,7 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
                 root=root,
                 ordinal=1,
             )
-            attempt_namespace = "loom-nebius-staging"
+            attempt_namespace = "loom-nebius-development"
             platform_namespace = "loom"
             for namespace in (attempt_namespace, platform_namespace):
                 await asyncio.to_thread(

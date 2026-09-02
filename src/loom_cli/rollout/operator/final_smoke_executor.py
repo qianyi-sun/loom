@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom.models.types import ModelSpec
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority,
     AdminSmokeContract,
@@ -51,6 +52,9 @@ class FinalSmokeError(RuntimeError):
         self.code = code
 
 
+CapacityRefresh = Callable[[FinalGatePlan], str]
+
+
 @dataclass(frozen=True, slots=True)
 class FinalSmokeExecutor:
     """Submit or recover one exact bounded batch and require terminal success."""
@@ -60,6 +64,7 @@ class FinalSmokeExecutor:
     expected_token_fingerprint: str
     authority: AdminSmokeAuthority
     request: SmokeTransport
+    refresh_capacity: CapacityRefresh
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     terminal_timeout_seconds: float = 900.0
@@ -73,6 +78,7 @@ class FinalSmokeExecutor:
             or any(character in str(self.token_path) for character in (",", "\n", "\r", "\x00"))
             or not self.expected_token_fingerprint.startswith("sha256:")
             or not callable(self.request)
+            or not callable(self.refresh_capacity)
             or not callable(self.monotonic)
             or not callable(self.sleep)
             or not 0 < self.terminal_timeout_seconds <= 3600
@@ -138,25 +144,34 @@ class FinalSmokeExecutor:
                 accepted=frozenset({200}),
             )
 
-            batch_name = self._batch_name(plan)
-            query = urllib.parse.urlencode(
-                {
-                    "team_id": self.authority.team_id,
-                    "q": batch_name,
-                    "limit": "20",
-                }
-            )
-            existing = self._expect_json(
+            batch_id, batch_name = self._existing_batch(
                 evidence,
-                "existing",
                 token,
-                "GET",
-                f"/api/v1/batches?{query}",
+                contract,
+                plan,
             )
-            batch_id = contract.existing_batch_id(existing, batch_name=batch_name)
             if batch_id is not None:
+                # The exact batch is protected work already owned by this
+                # request's single claimed epoch; recovery does not claim a
+                # second epoch or submit replacement demand.
                 mutated = True
             if batch_id is None:
+                # Admission evidence expires after five minutes while the
+                # protected rollout guard intentionally suspends the combined
+                # capacity/GC CronJob.  Refresh only the capacity publication
+                # immediately before the one request that consumes it.
+                mutated = True
+                try:
+                    capacity_digest = self.refresh_capacity(plan)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise FinalSmokeError("smoke-capacity-refresh-failed") from exc
+                if (
+                    not isinstance(capacity_digest, str)
+                    or len(capacity_digest) != 64
+                    or any(character not in "0123456789abcdef" for character in capacity_digest)
+                ):
+                    raise FinalSmokeError("smoke-capacity-refresh-failed")
+                evidence["capacity"] = capacity_digest
                 submitted = self._expect_json(
                     evidence,
                     "submit",
@@ -167,7 +182,6 @@ class FinalSmokeExecutor:
                     headers={"X-Loom-Admin-Actor": self.authority.admin_actor},
                     accepted=frozenset({200, 201}),
                 )
-                mutated = True
                 value = submitted.get("id") or submitted.get("batch_id")
                 if not isinstance(value, str) or not value:
                     raise FinalSmokeError("smoke-submit-identity-invalid")
@@ -186,7 +200,17 @@ class FinalSmokeExecutor:
                 nonrecoverable = contract.nonrecoverable_failure(batch)
                 if nonrecoverable is not None:
                     raise FinalSmokeError("smoke-batch-nonrecoverable")
-                if batch.get("state") in {"finished", "failed", "cancelled"}:
+                state = batch.get("state")
+                if state not in {"failed", "cancelled"} and (
+                    contract.validate_admitted_batch(
+                        batch,
+                        batch_id=batch_id,
+                        batch_name=batch_name,
+                    )
+                    is not None
+                ):
+                    raise FinalSmokeError("smoke-batch-identity-invalid")
+                if state in {"finished", "failed", "cancelled"}:
                     terminal = batch
                     break
                 self.sleep(self.poll_interval_seconds)
@@ -194,6 +218,13 @@ class FinalSmokeExecutor:
                 raise FinalSmokeError("smoke-terminal-timeout")
             if contract.validate_terminal_batch(terminal) is not None:
                 raise FinalSmokeError("smoke-terminal-invalid")
+            if self.authority.agent_model is not None:
+                self._verify_model_backed_trials(
+                    evidence,
+                    token,
+                    batch_id=batch_id,
+                    terminal=terminal,
+                )
         except (FinalSmokeError, OSError, RuntimeError, ValueError) as exc:
             code = exc.code if isinstance(exc, FinalSmokeError) else "smoke-transport-failed"
             return self._result(plan, blocker=code, evidence=evidence, mutated=mutated)
@@ -225,6 +256,134 @@ class FinalSmokeExecutor:
         ):
             return None
         return token
+
+    def _verify_model_backed_trials(
+        self,
+        evidence: dict[str, str],
+        token: str,
+        *,
+        batch_id: str,
+        terminal: Mapping[str, object],
+    ) -> None:
+        expected_count = _positive_int(terminal.get("expected_trial_count"))
+        if expected_count is None or expected_count > 200:
+            raise FinalSmokeError("smoke-trial-list-invalid")
+        query = urllib.parse.urlencode({"batch_id": batch_id, "limit": "200"})
+        listing = self._expect_json(
+            evidence,
+            "trials",
+            token,
+            "GET",
+            f"/api/v1/trials?{query}",
+        )
+        items = listing.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) != expected_count
+            or listing.get("next_cursor") is not None
+        ):
+            raise FinalSmokeError("smoke-trial-list-invalid")
+
+        trial_ids: list[str] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise FinalSmokeError("smoke-trial-list-invalid")
+            trial_id = item.get("id")
+            if (
+                not isinstance(trial_id, str)
+                or not trial_id
+                or trial_id in trial_ids
+                or item.get("batch_id") != batch_id
+                or item.get("state") != "succeeded"
+            ):
+                raise FinalSmokeError("smoke-trial-list-invalid")
+            trial_ids.append(trial_id)
+
+        for index, trial_id in enumerate(trial_ids, start=1):
+            quoted = urllib.parse.quote(trial_id, safe="")
+            detail = self._expect_json(
+                evidence,
+                f"trial-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}",
+            )
+            if not self._valid_model_trial_detail(
+                detail,
+                batch_id=batch_id,
+                trial_id=trial_id,
+            ):
+                raise FinalSmokeError("smoke-trial-llm-evidence-invalid")
+
+            trajectory = self._expect(
+                evidence,
+                f"trajectory-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}/trajectory/download",
+                accepted=frozenset({200}),
+            )
+            if not self._valid_trajectory(trajectory):
+                raise FinalSmokeError("smoke-trajectory-evidence-invalid")
+
+            atif = self._expect(
+                evidence,
+                f"atif-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}/atif",
+                accepted=frozenset({200}),
+            )
+            if not _valid_atif(atif):
+                raise FinalSmokeError("smoke-atif-evidence-invalid")
+
+    def _valid_model_trial_detail(
+        self,
+        detail: Mapping[str, object],
+        *,
+        batch_id: str,
+        trial_id: str,
+    ) -> bool:
+        model = self.authority.agent_model
+        assert model is not None
+        return bool(
+            detail.get("id") == trial_id
+            and detail.get("batch_id") == batch_id
+            and detail.get("task_id") == self.authority.task_id
+            and detail.get("state") == "succeeded"
+            and detail.get("agent_name") == self.authority.agent
+            and _model_matches(detail.get("model"), model)
+            and _positive_int(detail.get("llm_calls_count")) is not None
+            and _positive_int(detail.get("total_prompt_tokens")) is not None
+            and _positive_int(detail.get("total_completion_tokens")) is not None
+            and detail.get("failed_upstream_llm_calls_count") == 0
+            and detail.get("llm_evidence_status") == "calls_observed"
+            and detail.get("no_call") is False
+            and detail.get("trajectory_ready") is True
+            and detail.get("atif_ready") is True
+        )
+
+    def _valid_trajectory(self, payload: bytes) -> bool:
+        model = self.authority.agent_model
+        assert model is not None
+        llm_events = 0
+        try:
+            for line in payload.splitlines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, Mapping) or event.get("kind") != "llm_call":
+                    continue
+                if (
+                    not _model_matches(event.get("model"), model)
+                    or _positive_int(event.get("input_tokens")) is None
+                    or _positive_int(event.get("output_tokens")) is None
+                ):
+                    return False
+                llm_events += 1
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return llm_events > 0
 
     def _expect_json(
         self,
@@ -279,6 +438,41 @@ class FinalSmokeExecutor:
     def _batch_name(plan: FinalGatePlan) -> str:
         return f"rollout-{plan.request_id.removeprefix('req-')}-{plan.attempt_number}"
 
+    def _existing_batch(
+        self,
+        evidence: dict[str, str],
+        token: str,
+        contract: AdminSmokeContract,
+        plan: FinalGatePlan,
+    ) -> tuple[str | None, str]:
+        current_name = self._batch_name(plan)
+        # A validated resume changes only the attempt suffix.  Reconcile the
+        # newest exact batch before admitting any new Slurm-backed demand.
+        for attempt_number in range(plan.attempt_number, 0, -1):
+            batch_name = (
+                current_name
+                if attempt_number == plan.attempt_number
+                else f"rollout-{plan.request_id.removeprefix('req-')}-{attempt_number}"
+            )
+            query = urllib.parse.urlencode(
+                {
+                    "team_id": self.authority.team_id,
+                    "q": batch_name,
+                    "limit": "20",
+                }
+            )
+            existing = self._expect_json(
+                evidence,
+                "existing" if attempt_number == plan.attempt_number else f"prior-{attempt_number}",
+                token,
+                "GET",
+                f"/api/v1/batches?{query}",
+            )
+            batch_id = contract.existing_batch_id(existing, batch_name=batch_name)
+            if batch_id is not None:
+                return batch_id, batch_name
+        return None, current_name
+
     @staticmethod
     def _result(
         plan: FinalGatePlan,
@@ -307,4 +501,35 @@ class FinalSmokeExecutor:
         )
 
 
-__all__ = ["FinalSmokeExecutor", "SmokeTransport"]
+def _positive_int(value: object) -> int | None:
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
+def _model_matches(value: object, expected: ModelSpec) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    expected_record = expected.model_dump(
+        mode="json",
+        exclude_defaults=True,
+        exclude_none=True,
+    )
+    return all(value.get(key) == item for key, item in expected_record.items())
+
+
+def _valid_atif(payload: bytes) -> bool:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(value, Mapping)
+        and isinstance(value.get("trajectory_id"), str)
+        and value.get("trajectory_id")
+        and isinstance(value.get("steps"), list)
+        and value.get("steps")
+    )
+
+
+__all__ = ["CapacityRefresh", "FinalSmokeExecutor", "SmokeTransport"]

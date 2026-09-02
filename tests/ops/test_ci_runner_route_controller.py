@@ -124,6 +124,8 @@ class FakeRouteAPI:
         self.checks: dict[tuple[str, str], list[dict[str, object]]] = {}
         self.created_checks: list[dict[str, object]] = []
         self.dispatches: list[dict[str, object]] = []
+        self.route_artifact_reads = 0
+        self.artifact_downloads = 0
         self.publisher_error = False
         self.jobs: dict[tuple[int, int], list[dict[str, object]]] = {
             (request.workflow_run_id, request.run_attempt): []
@@ -146,12 +148,14 @@ class FakeRouteAPI:
         return [
             run
             for run in self.runs.values()
-            if run["workflow_id"] == workflow_id and run["status"] == "in_progress"
+            if run["workflow_id"] == workflow_id
+            and run["status"] in routes.ROUTE_DISCOVERY_STATUSES
         ]
 
     def route_artifact(
         self, *, workflow_id: int, workflow_run_id: int, run_attempt: int
     ) -> dict[str, object] | None:
+        self.route_artifact_reads += 1
         expected = f"{routes.ARTIFACT_PREFIX}{workflow_id}-{workflow_run_id}-{run_attempt}"
         matches = [
             artifact
@@ -163,6 +167,7 @@ class FakeRouteAPI:
         return matches[0] if matches else None
 
     def download_artifact(self, artifact_id: int) -> bytes:
+        self.artifact_downloads += 1
         return self.archives[artifact_id]
 
     def workflow_run(self, run_id: int) -> dict[str, object]:
@@ -307,6 +312,19 @@ def test_controller_publishes_exact_oldlab_first_route(tmp_path: Path) -> None:
     assert status["trusted_workflow_observation"]["publisher_app_id"] == PUBLISHER_APP_ID
     assert status["metrics"]["route_decisions_by_eligibility_reason"]["trusted_workflow_match"] == 1
     assert len(api.dispatches) == 1
+
+
+def test_controller_discovers_route_while_workflow_aggregate_is_queued(
+    tmp_path: Path,
+) -> None:
+    request = _request(job_count=1)
+    controller, api, _broker = _controller(tmp_path, request)
+    api.runs[request.workflow_run_id]["status"] = "queued"
+
+    result = controller.reconcile()
+
+    assert result.requests_seen == 1
+    assert result.routes_published == 1
 
 
 def test_dynamic_run_name_does_not_replace_workflow_identity(tmp_path: Path) -> None:
@@ -735,7 +753,7 @@ def test_invalid_artifact_time_fails_before_persistent_capacity_mutation(
     assert broker.route_decisions() == ()
 
 
-def test_restart_replays_the_exact_persisted_route_decision(
+def test_restart_skips_rediscovery_of_the_exact_persisted_route_decision(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=2)
@@ -752,8 +770,11 @@ def test_restart_replays_the_exact_persisted_route_decision(
 
     assert first.routes_published == 1
     assert replay.routes_published == 0
-    assert replay.routes_replayed == 1
+    assert replay.routes_replayed == 0
+    assert replay.requests_seen == 0
     assert len(api.created_checks) == 1
+    assert api.route_artifact_reads == 1
+    assert api.artifact_downloads == 1
 
 
 def test_legacy_actions_app_check_replays_after_direct_publisher_upgrade(
@@ -967,8 +988,21 @@ def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
         assert method == "GET"
         assert payload is None
         requested_paths.append(path)
-        if path.startswith(f"/actions/workflows/{workflow_id}/runs?"):
-            return {"total_count": 1, "workflow_runs": [{"id": 30_000}]}
+        if path.startswith("/actions/runs?"):
+            runs = (
+                [
+                    {
+                        "id": 30_000,
+                        "workflow_id": workflow_id,
+                        "run_attempt": 1,
+                        "head_sha": HEAD_SHA,
+                        "status": "queued",
+                    }
+                ]
+                if "status=queued" in path
+                else []
+            )
+            return {"total_count": len(runs), "workflow_runs": runs}
         return {
             "total_count": 1,
             "artifacts": [
@@ -982,7 +1016,14 @@ def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.active_workflow_runs(workflow_id) == [{"id": 30_000}]
+    run = {
+        "id": 30_000,
+        "workflow_id": workflow_id,
+        "run_attempt": 1,
+        "head_sha": HEAD_SHA,
+        "status": "queued",
+    }
+    assert api.active_workflow_runs(workflow_id) == (run,)
     assert api.route_artifact(
         workflow_id=workflow_id,
         workflow_run_id=30_000,
@@ -992,8 +1033,11 @@ def test_github_discovery_is_bounded_to_active_runs_and_exact_artifact_name(
         "name": f"{routes.ARTIFACT_PREFIX}{workflow_id}-30000-1",
         "expired": False,
     }
-    assert "status=in_progress" in requested_paths[0]
-    assert requested_paths[1].startswith(
+    assert requested_paths[:2] == [
+        f"/actions/runs?status=queued&per_page={routes.MAX_ACTIVE_RUNS_PER_STATUS}",
+        f"/actions/runs?status=in_progress&per_page={routes.MAX_ACTIVE_RUNS_PER_STATUS}",
+    ]
+    assert requested_paths[2].startswith(
         f"/actions/artifacts?name={routes.ARTIFACT_PREFIX}{workflow_id}-30000-1&"
     )
 
@@ -1006,7 +1050,7 @@ def test_github_active_run_inventory_overflow_fails_closed(
         api,
         "_request",
         lambda *_args, **_kwargs: {
-            "total_count": routes.MAX_ACTIVE_RUNS_PER_WORKFLOW + 1,
+            "total_count": routes.MAX_ACTIVE_RUNS_PER_STATUS + 1,
             "workflow_runs": [],
         },
     )
@@ -1024,12 +1068,32 @@ def test_github_active_run_inventory_accepts_bounded_count_race(
     def request(*_args: object, **_kwargs: object) -> object:
         nonlocal requests
         requests += 1
-        return {"total_count": 2, "workflow_runs": [{"id": 30_000}]}
+        workflow_id = leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
+        run = {
+            "id": 30_000,
+            "workflow_id": workflow_id,
+            "run_attempt": 1,
+            "head_sha": HEAD_SHA,
+            "status": "queued",
+        }
+        return {
+            "total_count": 2 if requests == 1 else 0,
+            "workflow_runs": [run] if requests == 1 else [],
+        }
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == [{"id": 30_000}]
-    assert requests == 1
+    workflow_id = leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
+    run = {
+        "id": 30_000,
+        "workflow_id": workflow_id,
+        "run_attempt": 1,
+        "head_sha": HEAD_SHA,
+        "status": "queued",
+    }
+    assert api.active_workflow_runs(workflow_id) == (run,)
+    assert api.workflow_run(30_000) == run
+    assert requests == 2
 
 
 def test_github_active_run_inventory_accepts_empty_count_race(
@@ -1045,8 +1109,114 @@ def test_github_active_run_inventory_accepts_empty_count_race(
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == []
-    assert requests == 1
+    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == ()
+    assert requests == 2
+
+
+def test_global_active_run_overflow_falls_back_to_exact_workflow_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    workflow_id = leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]
+    requested_paths: list[str] = []
+    run = {
+        "id": 30_000,
+        "workflow_id": workflow_id,
+        "run_attempt": 1,
+        "head_sha": HEAD_SHA,
+        "status": "queued",
+    }
+
+    def request(method: str, path: str, *, payload: object | None = None) -> object:
+        assert method == "GET"
+        assert payload is None
+        requested_paths.append(path)
+        if path.startswith("/actions/runs?"):
+            return {
+                "total_count": routes.MAX_ACTIVE_RUNS_PER_STATUS + 1,
+                "workflow_runs": [],
+            }
+        return {
+            "total_count": 1 if "status=queued" in path else 0,
+            "workflow_runs": [run] if "status=queued" in path else [],
+        }
+
+    monkeypatch.setattr(api, "_request", request)
+
+    assert api.active_workflow_runs(workflow_id) == (run,)
+    assert requested_paths == [
+        f"/actions/runs?status=queued&per_page={routes.MAX_ACTIVE_RUNS_PER_STATUS}",
+        (
+            f"/actions/workflows/{workflow_id}/runs?status=queued&per_page="
+            f"{routes.MAX_ACTIVE_RUNS_PER_STATUS}"
+        ),
+        (
+            f"/actions/workflows/{workflow_id}/runs?status=in_progress&per_page="
+            f"{routes.MAX_ACTIVE_RUNS_PER_STATUS}"
+        ),
+    ]
+
+
+def test_repository_active_inventory_deduplicates_status_transition_and_is_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = routes.GitHubRouteAPI(repository="qianyi-sun/loom", token="opaque")
+    workflow_ids = sorted({contract[0] for contract in leases.WORKFLOW_CLASS_CONTRACTS.values()})
+    requested_paths: list[str] = []
+
+    def active_run(*, run_id: int, workflow_id: int, status: str) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "workflow_id": workflow_id,
+            "run_attempt": 1,
+            "head_sha": HEAD_SHA,
+            "status": status,
+        }
+
+    def request(method: str, path: str, *, payload: object | None = None) -> object:
+        assert method == "GET"
+        assert payload is None
+        requested_paths.append(path)
+        if "status=queued" in path:
+            runs = [
+                active_run(run_id=30_000, workflow_id=workflow_ids[0], status="queued"),
+                active_run(run_id=30_001, workflow_id=9_999_999, status="queued"),
+            ]
+        else:
+            runs = [
+                active_run(
+                    run_id=30_000,
+                    workflow_id=workflow_ids[0],
+                    status="in_progress",
+                ),
+                active_run(
+                    run_id=30_002,
+                    workflow_id=workflow_ids[-1],
+                    status="in_progress",
+                ),
+            ]
+        return {"total_count": len(runs), "workflow_runs": runs}
+
+    monkeypatch.setattr(api, "_request", request)
+
+    discovered = {
+        workflow_id: tuple(api.active_workflow_runs(workflow_id)) for workflow_id in workflow_ids
+    }
+
+    assert discovered[workflow_ids[0]][0]["status"] == "in_progress"
+    assert discovered[workflow_ids[-1]] == (
+        active_run(
+            run_id=30_002,
+            workflow_id=workflow_ids[-1],
+            status="in_progress",
+        ),
+    )
+    assert all(not discovered[workflow_id] for workflow_id in workflow_ids[1:-1])
+    assert api.workflow_run(30_000)["status"] == "in_progress"
+    assert requested_paths == [
+        f"/actions/runs?status=queued&per_page={routes.MAX_ACTIVE_RUNS_PER_STATUS}",
+        f"/actions/runs?status=in_progress&per_page={routes.MAX_ACTIVE_RUNS_PER_STATUS}",
+    ]
 
 
 def test_github_active_run_inventory_persistent_structural_malformed_fails_closed(
@@ -1339,9 +1509,11 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
     assert "LOOM_CI_RUNNER_POOL_CANDIDATE_SHA" not in route_command
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
-    assert "OnUnitActiveSec=30s" in timer
-    assert routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * (3600 // 30) == 4200
-    assert 4200 + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
+    assert "OnUnitActiveSec=23s" in timer
+    max_activations_per_hour = (3600 + 22) // 23
+    hourly_request_ceiling = routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * max_activations_per_hour
+    assert hourly_request_ceiling == 4553
+    assert hourly_request_ceiling + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
     assert routes.OLDLAB_REQUEST_MAX_AGE_SECONDS < 180
     assert "Unit=loom-ci-runner-route-controller.service" in timer
     assert "loom-ci-runner-route-controller" not in pool_service

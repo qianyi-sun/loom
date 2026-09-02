@@ -75,11 +75,13 @@ pending_job_cap = 2
 # that exact ceiling.
 time_limit = "1-00:00:00"
 # Resource-aware admission keeps Loom within each node's currently free Slurm
-# CPU/memory envelope while sharing the institution's GB10 nodes.
+# CPU/memory envelope while sharing the institution's GB10 nodes. Slurm exposes
+# 19 effective CPUs on each 20-CPU GB10 node, so keep that one-CPU difference
+# out of Loom worker allocations.
 resource_aware = true
 cpu_per_slot = 2
 memory_mib_per_slot = 11500
-reserved_cpus = 0
+reserved_cpus = 1
 reserved_memory_mib = 0
 max_concurrency_per_node = 10
 max_cpu_load_ratio = 1.0

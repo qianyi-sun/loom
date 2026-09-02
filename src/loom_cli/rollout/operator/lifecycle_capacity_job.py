@@ -16,6 +16,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_REQUEST_RE = re.compile(r"^req-[a-z0-9](?:[-a-z0-9]{6,75}[a-z0-9])$")
+_GENERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _NAMESPACE = "loom-staging"
 _CRONJOB = "loom-staging-data-lifecycle"
 _APP_LABEL = "loom-staging-data-lifecycle"
@@ -410,8 +412,115 @@ def build_lifecycle_capacity_job_plan(
     )
 
 
+def build_rollout_capacity_job_plan(
+    *,
+    candidate_sha: str,
+    candidate_tree: str,
+    mutation_epoch: int,
+    artifact_bundle_sha256: str,
+    rendered_manifest_sha256: str,
+    control_plane_image_id: str,
+    image_tag: str,
+    rendered_yaml: str,
+    expected_buckets: tuple[str, ...],
+    expected_filesystem_paths: tuple[str, ...],
+    request_id: str,
+    attempt_number: int,
+    rollout_plan_digest: str,
+    guard_generation: str,
+    guard_backend_pid: int,
+    capacity_source: str = "filesystem",
+    expected_drive_count: int | None = None,
+    container_registry: str = "",
+    registry_digest: str = "",
+) -> LifecycleCapacityJobPlan:
+    """Clone the attested CronJob for one request-bound pre-smoke refresh."""
+
+    if (
+        _REQUEST_RE.fullmatch(request_id) is None
+        or type(attempt_number) is not int
+        or attempt_number < 1
+        or _SHA256_RE.fullmatch(rollout_plan_digest) is None
+        or _GENERATION_RE.fullmatch(guard_generation) is None
+        or type(guard_backend_pid) is not int
+        or guard_backend_pid < 1
+    ):
+        raise LifecycleCapacityJobError("rollout capacity authority is invalid")
+    plan = build_lifecycle_capacity_job_plan(
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        mutation_epoch=mutation_epoch,
+        artifact_bundle_sha256=artifact_bundle_sha256,
+        rendered_manifest_sha256=rendered_manifest_sha256,
+        control_plane_image_id=control_plane_image_id,
+        image_tag=image_tag,
+        rendered_yaml=rendered_yaml,
+        expected_buckets=expected_buckets,
+        expected_filesystem_paths=expected_filesystem_paths,
+        capacity_source=capacity_source,
+        expected_drive_count=expected_drive_count,
+        container_registry=container_registry,
+        registry_digest=registry_digest,
+    )
+    document = _mapping(yaml.safe_load(plan.job_manifest), "rollout capacity Job")
+    metadata = _mapping(document["metadata"], "rollout capacity Job metadata")
+    job_spec = _mapping(document["spec"], "rollout capacity Job spec")
+    template = _mapping(job_spec["template"], "rollout capacity Pod template")
+    pod_metadata = _mapping(template["metadata"], "rollout capacity Pod metadata")
+    pod_spec = _mapping(template["spec"], "rollout capacity Pod spec")
+    container = _mapping(
+        _sequence(pod_spec["containers"], "rollout capacity containers")[0],
+        "rollout capacity container",
+    )
+    suffix = request_id.removeprefix("req-")[:12]
+    job_name = f"loom-staging-rollout-capacity-{suffix}-{attempt_number}"
+    annotations = {
+        **cast(dict[str, str], metadata["annotations"]),
+        "loom.carin.dev/rollout-request": request_id,
+        "loom.carin.dev/rollout-plan": rollout_plan_digest,
+        "loom.carin.dev/rollout-guard-generation": guard_generation,
+        "loom.carin.dev/rollout-guard-backend-pid": str(guard_backend_pid),
+        "loom.carin.dev/rollout-mutation-epoch": str(mutation_epoch),
+    }
+    metadata["name"] = job_name
+    metadata["annotations"] = annotations
+    pod_metadata["annotations"] = annotations
+    args = _sequence(container["args"], "rollout capacity arguments")
+    args[1] = "rollout-capacity"
+    args.extend(
+        (
+            "--rollout-request-id",
+            request_id,
+            "--rollout-plan-digest",
+            rollout_plan_digest,
+            "--rollout-candidate-sha",
+            candidate_sha,
+            "--rollout-candidate-tree",
+            candidate_tree,
+            "--rollout-guard-generation",
+            guard_generation,
+            "--rollout-guard-backend-pid",
+            str(guard_backend_pid),
+            "--rollout-mutation-epoch",
+            str(mutation_epoch),
+        )
+    )
+    job_manifest = yaml.safe_dump(document, sort_keys=True)
+    raw = plan.to_dict()
+    raw.pop("plan_digest")
+    raw.update(
+        {
+            "job_manifest": job_manifest,
+            "job_manifest_sha256": hashlib.sha256(job_manifest.encode()).hexdigest(),
+            "job_name": job_name,
+        }
+    )
+    return LifecycleCapacityJobPlan(**cast(Any, raw), plan_digest=_digest(raw))
+
+
 __all__ = [
     "LifecycleCapacityJobError",
     "LifecycleCapacityJobPlan",
     "build_lifecycle_capacity_job_plan",
+    "build_rollout_capacity_job_plan",
 ]

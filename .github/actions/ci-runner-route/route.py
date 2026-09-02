@@ -70,7 +70,6 @@ CONTRACTS = {
             "staging-admin-browser-smoke",
             "rehearsal-postgres",
             "worker",
-            "behavior-stage1-sim",
         ),
     },
     "cluster-smoke": {

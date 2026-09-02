@@ -3111,7 +3111,7 @@ def build_staging_baseline_checks(
                     secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
                     admission_phases=(AdmissionPhase.PRE_APPLY,),
                 ),
-                implementation_version="v2",
+                implementation_version="v3" if check_id == "staging.auth" else "v2",
                 operations={CheckOperation.PROBE: probe},
             )
         )

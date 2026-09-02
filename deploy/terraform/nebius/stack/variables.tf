@@ -51,3 +51,36 @@ variable "evidence_bucket_max_bytes" {
   type        = number
   default     = 107374182400
 }
+
+variable "capacity_observer_public_key_pem" {
+  description = "PEM public key for the non-expiring capacity-observer authorized key."
+  type        = string
+  sensitive   = true
+}
+
+variable "deployment_access_public_pool_id" {
+  description = "Existing project public IPv4 pool for the persistent deployment gateway."
+  type        = string
+}
+
+variable "deployment_access_ssh_public_key" {
+  description = "OpenSSH public key for the non-root deployment gateway operator."
+  type        = string
+}
+
+variable "deployment_access_image_id" {
+  description = "Pinned Nebius image ID for the persistent deployment gateway."
+  type        = string
+}
+
+variable "deployment_access_preset" {
+  description = "Pinned regular CPU preset for the deployment gateway."
+  type        = string
+  default     = "2vcpu-8gb"
+}
+
+variable "deployment_access_disk_gib" {
+  description = "Deployment gateway boot disk size."
+  type        = number
+  default     = 40
+}

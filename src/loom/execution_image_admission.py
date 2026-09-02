@@ -175,7 +175,7 @@ def verify_execution_image_admission(
     keyring: ImageAdmissionKeyring,
     now: datetime | None = None,
 ) -> None:
-    """Verify exact image coverage, signatures, platform, freshness, and severity."""
+    """Verify exact image coverage, signatures, platform, issuance, and severity."""
 
     validate_execution_image_admission_bundle(
         bundle,
@@ -206,8 +206,11 @@ def validate_execution_image_admission_bundle(
             raise ImageAdmissionError("image admission vulnerability policy failed")
         if statement.issued_at.astimezone(UTC) > current_time + _MAX_CLOCK_SKEW:
             raise ImageAdmissionError("image admission was issued in the future")
-        if statement.expires_at.astimezone(UTC) <= current_time:
-            raise ImageAdmissionError("image admission has expired")
+        # The admitted subject is an immutable digest and the trusted key can
+        # already be removed from the configured keyring to revoke it. Treat
+        # expires_at as evidence metadata rather than a runtime lease: making
+        # it an execution gate causes a previously accepted, unchanged TaskSet
+        # to stop working without any image or policy change.
 
 
 __all__ = [

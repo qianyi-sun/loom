@@ -80,10 +80,9 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
     )
 
     assert result.errors == ()
-    assert result.workflow_count == 11
-    assert result.reference_count == 113
+    assert result.workflow_count == 12
+    assert result.reference_count == 97
     assert set(result.remote_actions) == {
-        "actions/attest",
         "actions/attest-build-provenance",
         "actions/checkout",
         "actions/download-artifact",

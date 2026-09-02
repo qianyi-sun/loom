@@ -64,3 +64,25 @@ output "evidence" {
 output "node_registry_pull_service_account_id" {
   value = nebius_iam_v1_service_account.node_registry_pull.id
 }
+
+output "capacity_observer_service_account_id" {
+  description = "Least-privilege Nebius identity used by the recurring capacity collector."
+  value       = nebius_iam_v1_service_account.capacity_observer.id
+}
+
+output "capacity_observer_public_key_id" {
+  description = "Non-expiring authorized public key used by the recurring capacity collector."
+  value       = nebius_iam_v1_auth_public_key.capacity_observer.id
+}
+
+output "deployment_access" {
+  description = "Persistent private-control-plane deployment gateway and non-expiring instance identity."
+  value = {
+    instance_id        = nebius_compute_v1_instance.deployment_access.id
+    service_account_id = nebius_iam_v1_service_account.deployment_access.id
+    subnet_id          = nebius_vpc_v1_subnet.deployment_access.id
+    public_allocation  = nebius_vpc_v1_allocation.deployment_access.id
+    public_address     = nebius_compute_v1_instance.deployment_access.status.network_interfaces[0].public_ip_address.address
+    private_address    = nebius_compute_v1_instance.deployment_access.status.network_interfaces[0].ip_address.address
+  }
+}

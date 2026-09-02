@@ -374,6 +374,7 @@ async def publish_if_current(
                     checksum=row.checksum,
                     config=row.config,
                     source=row.source,
+                    source_provenance=row.source_provenance,
                     task_set_id=task_set_id,
                     benchmark_id=None,
                 ),

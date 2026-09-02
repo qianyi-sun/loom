@@ -51,6 +51,13 @@ Do not print or commit the profile configuration. Automation must use a
 dedicated service account with reviewed least privilege and an authorized-key
 profile, never a copied human token.
 
+The recurring capacity observer uses a Terraform-managed authorized public key
+with no `expires_at`. Generate the key pair once in a protected directory, put
+only the public PEM in `capacity_observer_public_key_pem`, and install the full
+Nebius credential JSON through the runtime bootstrap below. The SDK exchanges
+that key for short-lived access tokens and refreshes them automatically. Do not
+substitute a copied human access token or a static registry token.
+
 The cluster needs a pre-existing versioned state bucket with object access
 limited to its operators and CI identity. Bootstrap that bucket in a separately
 approved operation, enable access logging and retention appropriate to state,
@@ -118,9 +125,21 @@ identity input to #1552's collector, alert, and accounting layer. Account-side
 budget enforcement is separately configurable, while telemetry and cost
 readback remain acceptance evidence; audit logs alone are not a substitute.
 
-For a private control plane, run `kubectl` from an approved VM in the same
-region and subnet. For an approved restricted public endpoint, use `--external`.
-Always write a private mode-0600 kubeconfig outside the repository:
+For a private control plane, use the Terraform-managed `deployment_access`
+gateway. Its fixed public allocation, subnet, boot disk, SSH operator key, and
+resource-scoped instance service account are part of the same remote state as
+the cluster. The VM identity is obtained from instance metadata, so normal
+deployment does not depend on a human browser session, copied access token, or
+expiring authorized key. Nebius does not support an access permit scoped to a
+Managed Kubernetes cluster, so the identity uses the minimum supported project
+`editor` permit plus an explicit registry permit; it is not a task worker and
+cannot receive Loom trials.
+
+The gateway stays running so the private control plane remains recoverably
+reachable. User execution still scales independently from zero to one and back
+to zero. Do not substitute a date-named VM, temporary public endpoint, unrelated
+user VM, or ad hoc tunnel. For an approved restricted public endpoint, use
+`--external`. Always write a private mode-0600 kubeconfig outside the repository:
 
 ```bash
 export LOOM_NB_CLUSTER=mk8scluster-REPLACE
@@ -142,15 +161,25 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    labels and install only its environment-local identities/policies.
 4. Run a system-node connectivity pod and record node identity, DNS, HTTPS
    egress, logs, exit code, and deletion.
-5. Run one execution pod with the required toleration and node selector. Record
-   Pending to Running to Succeeded, selected node, image digest, stdout, and
-   artifact upload/readback. Delete the pod and verify no workload remains.
-6. From execution minimum zero, submit one bounded pod, observe the execution
-   group scale to one, complete it, delete it, and observe scale-down to zero.
-7. Create the separately reviewed staging/production bindings without traffic,
+5. Through the normal user API, upload an ordinary supported TaskSet that has
+   no hand-written `service_execution` field, create a `backend=nebius` Batch,
+   and record its automatically frozen input manifest, runtime plan, target,
+   images, Trial and Job identity.
+6. From execution minimum zero, observe that Batch's Job move Pending to
+   Running to Succeeded; verify model/verifier output and immutable artifact
+   readback; then verify Job cleanup and execution-node scale-down to zero.
+   A manually created Pod or manually patched Task binding is not evidence for
+   this gate.
+7. Run staged true-overlap acceptance at 1, 20, 50, 100, 150, then 200 active
+   execution units. At every stage prove the persisted concurrency seats,
+   simultaneous non-terminal Jobs/Pods, node-backed capacity, successful
+   results, artifact digests, released seats, no orphan Jobs, and return to zero
+   execution nodes. Merely submitting 200 queued tasks does not pass. Stop,
+   diagnose, and clean up before advancing after any failed stage.
+8. Create the separately reviewed staging/production bindings without traffic,
    then attempt cross-environment namespace, bucket-prefix, and credential
    access; acceptance requires denial.
-8. Only after development passes, repeat the same gates in staging. Production
+9. Only after development passes, repeat the same gates in staging. Production
    work and traffic require separate approval. A second cluster or region is
    outside baseline scope.
 
@@ -159,6 +188,75 @@ does not prove the Loom scheduler, worker, model, verifier, or artifact path.
 Use the managed cluster's default container runtime with the repository's
 restricted, non-root Pod settings. A custom sandbox RuntimeClass is optional
 defense in depth, not an admission requirement for this project.
+
+## Persistent development runtime
+
+After the platform Deployment and its database/admin Secrets exist, attach the
+development execution runtime once:
+
+```bash
+scripts/ops/apply_nebius_development_runtime.sh \
+  --kubeconfig /secure/path/development-eu-north1.kubeconfig \
+  --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --model-provider-api-key-file /secure/path/model-provider-api-key \
+  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
+```
+
+From outside the Nebius VPC, run the same convergence through the managed
+gateway. Pin the gateway host key once after Terraform creates or replaces the
+VM, verify the fingerprint against the apply evidence, and retain that
+`known_hosts` file with the operator SSH key:
+
+```bash
+scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
+  --gateway "$(terraform -chdir=deploy/terraform/nebius/stack output -json deployment_access | jq -r .public_address | cut -d/ -f1)" \
+  --ssh-key /secure/path/deployment-access-ed25519 \
+  --known-hosts /secure/path/deployment-access-known-hosts \
+  --cluster-id mk8scluster-REPLACE \
+  --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --model-provider-api-key-file /secure/path/model-provider-api-key \
+  --gateway-image cr.eu-north1.nebius.cloud/REGISTRY/loom-llm-gateway@sha256:DIGEST \
+  --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
+  --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
+  --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
+  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
+```
+
+The helper accepts only digest-pinned platform images, transfers only the
+reviewed runtime manifests plus the capacity observer credential into a
+mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
+attached identity, rolls out Control Plane then Service, applies the idempotent
+runtime, and deletes the remote and local staging directories. No human Nebius
+token is copied to the gateway.
+
+The runtime profile is a protected non-secret deployment input whose images
+must exactly match the images being rolled out. The helper validates its schema,
+pool/class identity and image-admission coverage, persists it as a Kubernetes
+Secret before the first Deployment references it, and stamps its content
+digest on the Service pod template. Changing the profile therefore causes an
+ordinary rolling restart of the accepting API instead of leaving it on stale
+configuration. The Control Plane reads the immutable profile snapshot from the
+accepted Batch rather than from mutable deployment configuration.
+
+The operation is idempotent. It applies the development-only Control Plane
+patch that enables the `nebius-cpu` scheduler and loads its image-admission
+keyring from the existing Secret, reuses the existing single-scope Loom
+collector token, applies the active actuator and one-minute collector, and
+waits for both rollouts plus a scheduled collector Job. The provider-neutral
+base manifest stays disabled. The operation does not create a user Job or
+change the node-group target count. Subsequent users only upload/submit through
+Loom; the persisted scheduler, lease/outbox, actuator, and managed `0..1`
+autoscaler complete the connection automatically.
+
+Kubernetes rotates the actuator's projected ServiceAccount token. Nebius
+refreshes access tokens from the non-expiring authorized key. Node-group image
+pulls use the attached node service account instead of a registry login token.
+The Loom batch-runner and capacity-collector identities are non-expiring and
+single-scope. Human browser sessions and user API tokens may expire without
+interrupting an already persisted Batch. A missing/revoked key or permission
+makes the minute collector fail and capacity evidence become stale, which
+fails closed before new reservations; it is an incident, not a periodic renewal
+procedure.
 
 ## Workload placement contract
 

@@ -147,6 +147,7 @@ class LoomServiceSettings(BaseSettings):
     pipeline_stage1_smoke_public_key_file: Path | None = None
     pipeline_stage1_smoke_signature_max_age_sec: int = 300
     public_base_url: HttpUrl | None = None
+    service_execution_runtime_profile_json: str = "{}"
     signed_url_expiry_sec: int = 3600
     stale_running_trial_grace_sec: float = 900.0
     stale_running_trial_reclaim_enabled: bool = True

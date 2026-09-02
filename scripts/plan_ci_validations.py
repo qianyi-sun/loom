@@ -4,7 +4,13 @@ import argparse
 import json
 from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
+
+if __package__:
+    from scripts.component_ownership import Manifest, load_manifest
+else:
+    from component_ownership import Manifest, load_manifest
 
 HEAVY_CHECKS = (
     "integration",
@@ -69,25 +75,40 @@ NEBIUS_IAC_EXACT = {
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 
 PROTECTED_STAGING_ROLLOUT_EXACT = {
+    ".github/workflows/deploy-environment.yml",
+    ".github/workflows/release-promotion-gate.yml",
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
     "deploy/worker-pools/gb10/known_hosts",
     "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
     "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
     "deploy/worker-pools/gb10/ssh_config",
+    "scripts/ops/deploy_environment.sh",
+    "scripts/ops/release_gate.py",
+    "scripts/ops/release_identity.py",
+    "scripts/ops/verify_production_release_gate.sh",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
+    "scripts/validate_environment_isolation.py",
     "src/loom_cli/rollout/steps/s04_gb10_prep.py",
     "src/loom_cli/rollout/steps/s10_env_state.py",
+    "src/loom_cli/rollout_lock.py",
+    "src/loom_cli/rollout_lock_cli.py",
     "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
+    "tests/loom_cli/test_rollout_lock.py",
+    "tests/loom_cli/test_rollout_lock_cli.py",
     "tests/loom_cli/test_cluster_render.py",
     "tests/loom_cli/test_environment_state.py",
+    "tests/ops/test_deploy_environment_release_manifest.py",
+    "tests/ops/test_environment_isolation.py",
+    "tests/ops/test_release_identity.py",
+    "tests/ops/test_release_promotion_gate.py",
 }
 
 PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "deploy/staging-rollout/",
     "scripts/ops/staging_rollout_",
-    "src/loom_cli/rollout/operator/",
-    "tests/loom_cli/rollout/operator/",
+    "src/loom_cli/rollout/",
+    "tests/loom_cli/rollout/",
     "tests/ops/test_staging_rollout_",
 )
 
@@ -124,6 +145,9 @@ PROTECTED_NATIVE_AUTHORITY_EXACT = {
 }
 
 PROTECTED_NATIVE_AUTHORITY_PREFIXES = ("deploy/personal-dev-native-builder/",)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COMPONENT_OWNERSHIP_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
 
 
 @dataclass(frozen=True)
@@ -165,16 +189,23 @@ class ValidationPlan:
 
 def _pull_request_gate_mode(
     *,
+    action: str,
+    action_label: str,
     draft: bool,
+    base_changed: bool,
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Every non-draft PR event emits the four protected contexts. Drafts are
-    filtered. Validation labels remain additive selectors, but no label,
-    author, reviewer, or coordinator grants merge authority.
+    Head, base, readiness, and supported validation-selector changes emit the
+    four protected contexts. Drafts and unrelated metadata events are filtered
+    before checkout. Unknown actions remain fail-closed and run the full gate.
     """
 
-    if draft:
+    if draft or action == "converted_to_draft":
+        return False, False, "filtered"
+    if action == "edited" and not base_changed:
+        return False, False, "filtered"
+    if action in {"labeled", "unlabeled"} and action_label not in LABEL_TO_CHECK:
         return False, False, "filtered"
     return True, True, "full"
 
@@ -213,6 +244,16 @@ def _is_protected_native_authority_path(path: str) -> bool:
     )
 
 
+@lru_cache(maxsize=512)
+def _test_owner_lanes(path: str) -> tuple[str, ...]:
+    return tuple(owner.lane for owner in _component_ownership_manifest().test_owners_for_path(path))
+
+
+@lru_cache(maxsize=1)
+def _component_ownership_manifest() -> Manifest:
+    return load_manifest(COMPONENT_OWNERSHIP_MANIFEST)
+
+
 def plan_validations(
     *,
     changed_paths: Sequence[str],
@@ -231,7 +272,10 @@ def plan_validations(
     gate_mode = "full"
     if event_name == "pull_request":
         event_relevant, full_gate, gate_mode = _pull_request_gate_mode(
+            action=pull_request_action,
+            action_label=pull_request_action_label,
             draft=pull_request_draft,
+            base_changed=pull_request_base_changed,
         )
 
     paths = tuple(dict.fromkeys(path.strip() for path in changed_paths if path.strip()))
@@ -381,15 +425,35 @@ def plan_validations(
     }
 
     for path in paths:
+        if _component_ownership_manifest().ci_ignores_path(path):
+            continue
         if _is_documentation_path(path):
             continue
+        test_owner_lanes = _test_owner_lanes(path)
         matched_owner = (
-                path in PLANNER_PATHS
-                or path in OWNERSHIP_AUTHORITY_PATHS
-                or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
-                or _is_protected_staging_rollout_path(path)
-                or _is_protected_native_authority_path(path)
-            )
+            path in PLANNER_PATHS
+            or path in OWNERSHIP_AUTHORITY_PATHS
+            or _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES)
+            or _is_protected_staging_rollout_path(path)
+            or _is_protected_native_authority_path(path)
+            or bool(test_owner_lanes)
+        )
+        for lane in test_owner_lanes:
+            reason = f"test-owner:{lane}:{path}"
+            if lane == "integration":
+                select("integration", reason)
+            elif lane == "integration-docker":
+                # Retain the existing tests/integration contract: changes to a
+                # Docker-owned module exercise both integration tiers.
+                select("integration", reason)
+                select("integration_docker", reason)
+            elif lane == "cluster-smoke":
+                select("cluster_smoke", reason)
+            elif lane == "system-smoke":
+                select("staging_smoke", reason)
+        if _matches(path, exact=NEBIUS_IAC_EXACT, prefixes=NEBIUS_IAC_PREFIXES):
+            select("integration", f"nebius-iac:{path}")
+            matched_owner = True
         if _is_dependency_authority_path(path):
             for name in HEAVY_CHECKS:
                 select(name, f"dependency-authority:{path}")
@@ -397,7 +461,7 @@ def plan_validations(
         if _matches(path, exact=integration_exact, prefixes=integration_prefixes):
             select("integration", f"path:{path}")
             matched_owner = True
-        else:
+        elif not test_owner_lanes:
             select("integration", f"non-doc-path:{path}")
         if _matches(path, exact=docker_exact, prefixes=docker_prefixes):
             select("integration_docker", f"path:{path}")

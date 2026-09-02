@@ -37,6 +37,11 @@ _EPOCH_SQL = (
     "WHERE environment = 'staging' AND namespace = 'loom-staging'"
 )
 _UNLOCK_SQL = "SELECT pg_advisory_unlock(5498691230183247727) AS released"
+_BIND_GUARD_SQL = (
+    "SELECT set_config('application_name', "
+    "'loom-rollout-guard-67670a760acecd1dccb6e04de1dbd705728335db', false) "
+    "AS application_name"
+)
 _HEALTH_SQL = (
     "SELECT pg_backend_pid() AS backend_pid, count(*) = 1 AS owns_lock "
     "FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() "
@@ -243,6 +248,15 @@ def _query_context(
     @contextmanager
     def opened() -> Iterator[DatabaseQuery]:
         def query(sql: str) -> tuple[dict[str, object], ...]:
+            if sql == _BIND_GUARD_SQL:
+                events.append("bind-identity")
+                return (
+                    {
+                        "application_name": (
+                            "loom-rollout-guard-67670a760acecd1dccb6e04de1dbd705728335db"
+                        )
+                    },
+                )
             if sql == _TRY_SQL:
                 events.append("try-lock")
                 return ({"acquired": acquired.pop(0)},)
@@ -352,6 +366,7 @@ def test_guard_suspends_waits_locks_and_restores_before_unlock(tmp_path: Path) -
     )
     assert cluster.events == [
         "suspend",
+        "bind-identity",
         "try-lock",
         "try-lock",
         "lock-health",
@@ -499,6 +514,7 @@ def test_guard_repeats_stable_job_inventory_after_lock_before_ready_publication(
     assert cluster.job_list_calls == 5
     assert cluster.events == [
         "suspend",
+        "bind-identity",
         "try-lock",
         "lock-health",
         "lock-health",
@@ -778,7 +794,13 @@ def test_guard_lock_exhaustion_restores_without_ready_evidence(tmp_path: Path) -
             max_lock_attempts=2,
         )
 
-    assert cluster.events == ["suspend", "try-lock", "try-lock", "restore"]
+    assert cluster.events == [
+        "suspend",
+        "bind-identity",
+        "try-lock",
+        "try-lock",
+        "restore",
+    ]
     assert not guard_evidence_path(config, _REQUEST_ID).exists()
 
 
@@ -820,6 +842,7 @@ def test_guard_release_accepts_candidate_apply_already_unsuspended(tmp_path: Pat
     assert evidence.state == "released"
     assert cluster.events == [
         "suspend",
+        "bind-identity",
         "try-lock",
         "lock-health",
         "lock-health",

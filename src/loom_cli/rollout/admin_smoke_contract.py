@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from loom.models.types import ModelSpec
 from loom.security.redaction import redact_mapping, redact_text
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -27,6 +28,7 @@ class AdminSmokeAuthority:
     task_id: str
     required_worker_pool: str | None
     agent: str
+    agent_model: ModelSpec | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -45,13 +47,22 @@ class AdminSmokeAuthority:
                 and _SAFE_NAME_RE.fullmatch(self.required_worker_pool) is None
             )
             or _SAFE_NAME_RE.fullmatch(self.agent) is None
+            or not (self.agent_model is None or isinstance(self.agent_model, ModelSpec))
+            or (
+                self.agent_model is not None
+                and (
+                    type(self.agent_model.max_output_tokens) is not int
+                    or not 1 <= self.agent_model.max_output_tokens <= 256
+                )
+            )
         ):
             raise ValueError("admin smoke authority is invalid")
 
-    def to_record(self) -> dict[str, str | None]:
+    def to_record(self) -> dict[str, object]:
         return {
             "admin_actor": self.admin_actor,
             "agent": self.agent,
+            "agent_model": _model_record(self.agent_model),
             "represented_username": self.represented_username,
             "required_worker_pool": self.required_worker_pool,
             "task_id": self.task_id,
@@ -63,12 +74,14 @@ class AdminSmokeAuthority:
         expected = {
             "admin_actor",
             "agent",
+            "agent_model",
             "represented_username",
             "required_worker_pool",
             "task_id",
             "team_id",
         }
-        string_fields = expected - {"required_worker_pool"}
+        string_fields = expected - {"agent_model", "required_worker_pool"}
+        model_value = value.get("agent_model")
         if (
             set(value) != expected
             or any(not isinstance(value.get(field), str) for field in string_fields)
@@ -76,8 +89,17 @@ class AdminSmokeAuthority:
                 value.get("required_worker_pool") is None
                 or isinstance(value.get("required_worker_pool"), str)
             )
+            or not (model_value is None or isinstance(model_value, Mapping))
         ):
             raise ValueError("admin smoke authority schema is invalid")
+        try:
+            agent_model = (
+                ModelSpec.model_validate(dict(model_value))
+                if isinstance(model_value, Mapping)
+                else None
+            )
+        except ValueError as exc:
+            raise ValueError("admin smoke authority schema is invalid") from exc
         return cls(
             represented_username=str(value["represented_username"]),
             team_id=str(value["team_id"]),
@@ -89,6 +111,7 @@ class AdminSmokeAuthority:
                 else None
             ),
             agent=str(value["agent"]),
+            agent_model=agent_model,
         )
 
 
@@ -97,6 +120,25 @@ class AdminSmokeContract:
     """Pure payload, identity and result predicates shared by both stages."""
 
     authority: AdminSmokeAuthority
+
+    def trial_config_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "agent_name": self.authority.agent,
+            "agent_model": _model_record(self.authority.agent_model),
+        }
+        model = self.authority.agent_model
+        if model is not None:
+            assert model.max_output_tokens is not None
+            payload.update(
+                {
+                    "request_params": {
+                        "temperature": 0,
+                        "max_tokens": model.max_output_tokens,
+                    },
+                    "override_agent_timeout_sec": 180,
+                }
+            )
+        return payload
 
     def submission_payload(
         self,
@@ -111,10 +153,7 @@ class AdminSmokeContract:
             "represented_username": self.authority.represented_username,
             "team_id": self.authority.team_id,
             "task_filter": {"task_ids": [self.authority.task_id]},
-            "trial_config": {
-                "agent_name": self.authority.agent,
-                "agent_model": None,
-            },
+            "trial_config": self.trial_config_payload(),
             "n_per_task": n_per_task,
         }
         if self.authority.required_worker_pool is not None:
@@ -171,6 +210,10 @@ class AdminSmokeContract:
                 or submitted_by_user.get("team_id") != self.authority.team_id
                 or not isinstance(task_filter, Mapping)
                 or task_filter.get("task_ids") != [self.authority.task_id]
+                or (
+                    self.authority.agent_model is not None
+                    and item.get("trial_config") != self.trial_config_payload()
+                )
             ):
                 continue
             batch_id = item.get("id")
@@ -245,6 +288,11 @@ class AdminSmokeContract:
             self.authority.task_id
         ]:
             return "admin smoke persisted task authority drifted"
+        if (
+            self.authority.agent_model is not None
+            and payload.get("trial_config") != self.trial_config_payload()
+        ):
+            return "admin smoke persisted agent/model authority drifted"
         if required_worker_pools != expected_pools:
             return "admin smoke persisted worker-pool authority drifted"
         if payload.get("state") not in {"submitted", "pending", "running", "finished"}:
@@ -297,6 +345,16 @@ def decode_json_object(payload: bytes) -> Mapping[str, object] | None:
 
 def _mapping(value: object) -> Mapping[str, object] | None:
     return value if isinstance(value, Mapping) else None
+
+
+def _model_record(model: ModelSpec | None) -> dict[str, object] | None:
+    if model is None:
+        return None
+    return model.model_dump(
+        mode="json",
+        exclude_defaults=True,
+        exclude_none=True,
+    )
 
 
 def _same_username(left: object, right: str) -> bool:

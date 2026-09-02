@@ -75,19 +75,12 @@
     },
     {
       "name": "image-supply-chain",
-      "actions": [
-        "actions/attest",
-        "actions/attest-build-provenance"
-      ],
+      "actions": ["actions/attest-build-provenance"],
       "compatibility_tests": [
         "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py tests/ops/test_install_trivy.py tests/ops/test_ci_trivy_release_policy.py tests/ops/test_ci_image_release_evidence.py tests/ops/test_ci_throughput_workflows.py",
         "actionlint .github/workflows/images.yml"
       ],
       "rollback": {
-        "actions/attest": {
-          "sha": "508db95dd578ae2727ebd6217d5ba78e4fbda05d",
-          "version": "v4.2.1"
-        },
         "actions/attest-build-provenance": {
           "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
           "version": "v4.1.1"

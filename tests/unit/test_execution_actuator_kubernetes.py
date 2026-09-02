@@ -222,7 +222,7 @@ def test_health_readiness_requires_fresh_database_and_reconcile_success() -> Non
     assert client.get("/readyz").json() == {"status": "ready"}
 
 
-def test_actuator_manifest_is_namespace_scoped_and_inert() -> None:
+def test_actuator_manifest_is_namespace_scoped_and_active_for_development() -> None:
     documents = list(
         yaml.safe_load_all(
             (_ROOT / "deploy/k8s/nebius-execution-actuator.yaml").read_text(encoding="utf-8")
@@ -232,7 +232,7 @@ def test_actuator_manifest_is_namespace_scoped_and_inert() -> None:
     assert "ClusterRole" not in kinds
     assert "ClusterRoleBinding" not in kinds
     role = next(document for document in documents if document["kind"] == "Role")
-    assert role["metadata"]["namespace"] == "loom-nebius-staging"
+    assert role["metadata"]["namespace"] == "loom-nebius-development"
     assert role["rules"] == [
         {
             "apiGroups": ["batch"],
@@ -261,10 +261,62 @@ def test_actuator_manifest_is_namespace_scoped_and_inert() -> None:
     )
     assert attempt["automountServiceAccountToken"] is False
     deployment = next(document for document in documents if document["kind"] == "Deployment")
-    assert deployment["spec"]["replicas"] == 0
+    assert deployment["spec"]["replicas"] == 1
     pod = deployment["spec"]["template"]["spec"]
     assert pod["securityContext"]["runAsNonRoot"] is True
     assert pod["containers"][0]["readinessProbe"]["httpGet"]["path"] == "/readyz"
+
+
+def test_development_patch_persists_service_execution_scheduler_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-control-plane-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "control-plane"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"]["value"] == "True"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] == "development"
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] == "nebius-cpu"
+    assert env["LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON"]["valueFrom"] == {
+        "secretKeyRef": {"name": "loom-image-admission", "key": "keyring-json"}
+    }
+
+
+def test_development_service_patch_persists_backend_environment_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-service-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "service"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
+    assert env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["valueFrom"] == {
+        "secretKeyRef": {
+            "name": "loom-service-execution-runtime-profile",
+            "key": "profile-json",
+        }
+    }
+
+
+def test_development_gateway_patch_persists_model_provider_identity() -> None:
+    patch = yaml.safe_load(
+        (_ROOT / "deploy/k8s/nebius-gateway-development-patch.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    container = patch["spec"]["template"]["spec"]["containers"][0]
+    assert container["name"] == "gateway"
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["LOOM_ENV"]["value"] == "development"
+    assert env["LOOM_GW_LOCAL_YIBU_BASE_URL"]["value"] == "https://yibuapi.com/v1"
+    assert env["LOOM_GW_LOCAL_YIBU_API_KEY"]["valueFrom"] == {
+        "secretKeyRef": {"name": "loom-nebius-model-provider", "key": "api-key"}
+    }
 
 
 def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> None:
@@ -280,7 +332,7 @@ def test_attempt_network_policy_is_default_deny_with_exact_egress_peers() -> Non
     }
     selector = {"app.kubernetes.io/component": "execution-unit"}
     deny = policies["loom-execution-attempt-default-deny"]
-    assert deny["metadata"]["namespace"] == "loom-nebius-staging"
+    assert deny["metadata"]["namespace"] == "loom-nebius-development"
     assert deny["spec"] == {
         "podSelector": {"matchLabels": selector},
         "policyTypes": ["Ingress", "Egress"],
@@ -341,12 +393,12 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
             if peer.get("namespaceSelector", {})
             .get("matchLabels", {})
             .get("kubernetes.io/metadata.name")
-            == "loom-nebius-staging"
+            == "loom-nebius-development"
         ]
         assert nebius_peers == [
             {
                 "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": "loom-nebius-staging"}
+                    "matchLabels": {"kubernetes.io/metadata.name": "loom-nebius-development"}
                 },
                 "podSelector": {"matchLabels": {"app.kubernetes.io/component": "execution-unit"}},
             }
@@ -354,7 +406,39 @@ def test_platform_network_policies_admit_only_execution_units_from_nebius_namesp
     minio = policies["loom-minio"]
     assert not any(
         peer.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
-        == "loom-nebius-staging"
+        == "loom-nebius-development"
         for rule in minio["spec"]["ingress"]
         for peer in rule["from"]
     )
+
+
+def test_platform_network_policies_support_kube_dns_and_coredns_labels() -> None:
+    documents = list(
+        yaml.safe_load_all((_ROOT / "deploy/k8s/network-policies.yaml").read_text(encoding="utf-8"))
+    )
+    dns_rules = []
+    for document in documents:
+        if document.get("kind") != "NetworkPolicy":
+            continue
+        for rule in document["spec"].get("egress", []):
+            if {port.get("port") for port in rule.get("ports", [])} == {53}:
+                dns_rules.append(rule)
+
+    assert dns_rules
+    for rule in dns_rules:
+        assert rule["to"] == [
+            {
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                },
+                "podSelector": {
+                    "matchExpressions": [
+                        {
+                            "key": "k8s-app",
+                            "operator": "In",
+                            "values": ["kube-dns", "coredns"],
+                        }
+                    ]
+                },
+            }
+        ]

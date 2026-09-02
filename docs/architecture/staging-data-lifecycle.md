@@ -117,6 +117,19 @@ does no capacity collection, inventory, GC, resume, or other lifecycle work;
 it exits successfully with the explicit `rollout_guard_active` coordination
 status. This is an intentional no-op, not a retry or a second writer.
 
+The sole guarded exception is the final-smoke `rollout-capacity` action. It is
+not a scheduled or operator-invoked maintenance run: the installed final-gate
+helper reconstructs one request/attempt-specific Job from the immutable
+rendered artifact immediately before a new smoke submission. The Job carries
+the exact request, final-plan digest, candidate/tree, guard generation and
+database backend PID, plus the post-apply mutation epoch. Its database session
+requires both that exact epoch row and the request-derived `application_name`
+of the session still holding the advisory lock before and after publication.
+It collects and publishes capacity only; GC, resume, deletion, and mutation-
+epoch advancement are unreachable on this action. This keeps five-minute
+admission evidence fresh without unsuspending the combined capacity/GC
+CronJob or releasing the rollout guard.
+
 Before acquiring the same database lock, a non-preview rollout suspends the
 legacy staging lifecycle CronJob using the exact CronJob UID and resource
 version and annotates it with its request and candidate SHA/tree. It lists

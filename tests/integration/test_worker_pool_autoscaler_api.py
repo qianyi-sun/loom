@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -442,9 +443,16 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         collector_token = client.post(
             "/admin/execution-capacity-collector-tokens",
             headers=headers,
-            json={"expires_in_days": 30},
+            json={},
         )
         assert collector_token.status_code == 201, collector_token.text
+        collector_token_hash = hashlib.sha256(
+            collector_token.json()["token"].encode()
+        ).digest()
+        with sessionmaker(engine)() as session:
+            persisted_collector_token = session.get(Token, collector_token_hash)
+            assert persisted_collector_token is not None
+            assert persisted_collector_token.expires_at is None
         collector_headers = {"Authorization": f"Bearer {collector_token.json()['token']}"}
         collector_policy = client.get(
             "/admin/execution-capacity-collector-policy/nebius-finance-api",

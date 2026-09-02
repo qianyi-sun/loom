@@ -1,5 +1,10 @@
 name: cluster-smoke
 
+# Credential-free candidate validation. Selected PRs run the manifest-owned
+# cluster tests, environment-isolation policy, and render/audit both staging
+# and production profiles. Live-cluster readiness remains a protected
+# post-merge rollout/promotion concern.
+
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' &&
       format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
@@ -18,7 +23,13 @@ run-name: >-
              github.event.pull_request.number || 'none') ||
       github.event_name == 'pull_request' &&
       (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' &&
+        github.event.changes.base == null) ||
+       ((github.event.action == 'labeled' ||
+         github.event.action == 'unlabeled') &&
+        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
+                  github.event.label.name))) &&
       format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.event.pull_request.head.sha,
              github.event.pull_request.base.sha,
@@ -77,8 +88,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: cluster-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    cluster-smoke-${{ github.event.pull_request.number || github.ref }}-${{
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.draft ||
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' && github.event.changes.base == null) ||
+       ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
+      format('filtered-{0}', github.run_id) || 'authoritative' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        !(github.event.pull_request.draft ||
+          github.event.action == 'converted_to_draft' ||
+          (github.event.action == 'edited' && github.event.changes.base == null) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+           !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
 
 jobs:
   plan:
@@ -88,14 +113,20 @@ jobs:
       required: ${{ steps.plan.outputs.cluster_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
     steps:
-      - name: Classify draft event before checkout
+      - name: Classify filtered event before checkout
         id: event
         shell: bash
         env:
           FILTERED_EVENT: >-
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft') }}
+                 github.event.action == 'converted_to_draft' ||
+                 (github.event.action == 'edited' &&
+                  github.event.changes.base == null) ||
+                 ((github.event.action == 'labeled' ||
+                   github.event.action == 'unlabeled') &&
+                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
+                            github.event.label.name))) }}
         run: |
           set -euo pipefail
           if [[ "$FILTERED_EVENT" == "true" ]]; then
@@ -237,7 +268,7 @@ jobs:
           uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
           uv pip check --python .venv/bin/python
 
-      - name: Verify manifest-owned k3s contract
+      - name: Verify manifest-owned k3s and rollout candidate contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -246,8 +277,22 @@ jobs:
           )
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest "${test_paths[@]}"
-          uv run --no-sync loom cluster audit \
-            --config deploy/environments/staging.multinode.cluster.toml
+          uv run --no-sync python scripts/validate_environment_isolation.py \
+            --profiles-dir deploy/environments \
+            --workflow .github/workflows/deploy-environment.yml
+          candidate_render_dir="$(mktemp -d)"
+          trap 'rm -rf "${candidate_render_dir}"' EXIT
+          for config in \
+            deploy/environments/staging.multinode.cluster.toml \
+            deploy/environments/production.cluster.toml
+          do
+            rendered="${candidate_render_dir}/$(basename "${config}" .toml).yaml"
+            uv run --no-sync loom cluster render \
+              --config "${config}" > "${rendered}"
+            test -s "${rendered}"
+            uv run --no-sync loom cluster audit \
+              --config "${config}"
+          done
 
   cluster-smoke-gate:
     name: >-

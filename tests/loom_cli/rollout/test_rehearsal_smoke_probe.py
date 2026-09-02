@@ -11,6 +11,7 @@ from loom_cli.rollout.admin_smoke_contract import AdminSmokeAuthority
 from loom_cli.rollout.rehearsal_smoke_probe import (
     RehearsalSmokeProbeError,
     load_rehearsal_admin_token,
+    main,
     run_probe,
 )
 
@@ -100,6 +101,64 @@ def test_probe_validates_admission_and_returns_only_hashed_evidence(
     assert "loom_admin_" not in serialized
     assert "Devansh" not in serialized
     assert ("POST", "/api/v1/admin/batches/on-behalf") in requests
+
+
+def test_main_parses_model_backed_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: list[AdminSmokeAuthority] = []
+
+    def fake_run_probe(**kwargs):
+        captured.append(kwargs["authority"])
+        return {
+            "batch_id": "batch-1",
+            "batch_name": "rehearsal-abc123",
+            "evidence": {},
+            "persisted": True,
+            "plan_sha256": "a" * 64,
+            "recovered": False,
+            "schema_version": 1,
+            "status": "ready",
+        }
+
+    monkeypatch.setattr("loom_cli.rollout.rehearsal_smoke_probe.run_probe", fake_run_probe)
+    result = main(
+        [
+            "--plan-sha256",
+            "a" * 64,
+            "--batch-name",
+            "rehearsal-abc123",
+            "--represented-username",
+            "devansh",
+            "--team-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--admin-actor",
+            "loom-staging-rollout",
+            "--task-id",
+            "loom-smoke/gb10-oracle-hello-world",
+            "--required-worker-pool",
+            "gb10",
+            "--agent",
+            "direct-completion",
+            "--agent-model-json",
+            json.dumps(
+                {
+                    "provider": "yibu",
+                    "name": "gpt-4o-mini",
+                    "source": "local-server",
+                    "local_server": "yibu",
+                    "max_output_tokens": 64,
+                }
+            ),
+        ]
+    )
+
+    assert result == 0
+    assert len(captured) == 1
+    assert captured[0].agent_model is not None
+    assert captured[0].agent_model.to_gateway_model_string() == "local/yibu/gpt-4o-mini"
+    assert json.loads(capsys.readouterr().out)["status"] == "ready"
 
 
 def test_secret_reader_rejects_symlink_mode_owner_and_read_drift(

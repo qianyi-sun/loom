@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import insert, null, text, update
+from sqlalchemy import null, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
@@ -57,6 +57,11 @@ from loom_control_plane.scheduler.claim import (
     WorkClaimConflictError,
     claim_one,
     claim_work,
+)
+from loom_control_plane.slurm_worker_jobs import (
+    SlurmWorkerRegistrationError,
+    lock_slurm_worker_job_for_registration,
+    parse_slurm_worker_registration_provenance,
 )
 
 router = APIRouter()
@@ -827,6 +832,14 @@ async def register_worker(
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized to register")
 
+    try:
+        slurm_provenance = parse_slurm_worker_registration_provenance(payload)
+    except SlurmWorkerRegistrationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid Slurm registration provenance",
+        ) from exc
+
     # Bug 5 fix: validate each capabilities entry against the Capabilities
     # Pydantic model so garbage (typo'd OS, unknown gpu_vendor, etc.) is
     # rejected at the boundary rather than silently mis-matching DRF claim
@@ -1014,8 +1027,24 @@ async def register_worker(
 
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
-        await session.execute(
-            insert(Worker).values(
+        if slurm_provenance is not None:
+            try:
+                slurm_job = await lock_slurm_worker_job_for_registration(
+                    session,
+                    provenance=slurm_provenance,
+                    hostname=str(payload.get("hostname", "unknown")),
+                    pool_name=pool_name,
+                    max_concurrent=max_concurrent,
+                )
+            except SlurmWorkerRegistrationError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Slurm worker registration conflict",
+                ) from exc
+        else:
+            slurm_job = None
+        session.add(
+            Worker(
                 id=worker_id,
                 hostname=payload.get("hostname", "unknown"),
                 version=payload.get("version", "unknown"),
@@ -1048,6 +1077,9 @@ async def register_worker(
                 status="active",
             )
         )
+        await session.flush()
+        if slurm_job is not None:
+            slurm_job.worker_id = worker_id
         await session.commit()
 
     return {

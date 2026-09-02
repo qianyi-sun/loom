@@ -224,23 +224,21 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert scan["env"]["IMAGE_NAME"] == "${{ matrix.image }}"
         assert scan["env"]["ARCHITECTURE"] == "${{ matrix.architecture }}"
 
-        next_step = steps[scan_index + 1]
         if job_name == "build":
-            assert next_step["name"] == "Record candidate archive provenance"
+            assert scan_index == len(steps) - 1
         else:
+            next_step = steps[scan_index + 1]
             assert next_step["name"] == "Record trusted scan digest"
 
 
-def test_workflow_validates_complete_reports_before_hashing_or_recording() -> None:
+def test_workflow_validates_complete_reports_before_release_recording() -> None:
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8")
     )
 
     build_steps = workflow["jobs"]["build"]["steps"]
     build_names = [step.get("name") for step in build_steps]
-    assert build_names.index("Scan native image archive") < build_names.index(
-        "Record candidate archive provenance"
-    )
+    assert build_names[-1] == "Scan native image archive"
 
     publish_steps = workflow["jobs"]["publish"]["steps"]
     publish_names = [step.get("name") for step in publish_steps]

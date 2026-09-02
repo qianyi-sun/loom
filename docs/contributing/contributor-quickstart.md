@@ -147,10 +147,23 @@ report. Runtime Markdown outside that boundary, executable files in `docs/`,
 and unknown non-document paths do not take the fast path; unknown runtime paths
 select all heavy lanes until they gain an explicit owner.
 
-`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
-root-test shards, and sibling-package tests run in parallel jobs, then it combines their
-coverage artifacts, applies the 70% fast-tier gate, and writes the default
-fast-tier coverage summary. CI restores only uv's package/download cache and
+Rollout and production-release authority paths are fail-closed owners: changes
+under `src/loom_cli/rollout/` and their tests, installed staging-rollout assets,
+deployment/release workflows, or release evidence verification select every
+heavy lane. The selected `cluster-smoke-gate` validates environment isolation
+and renders and audits both the staging and production cluster profiles. These
+checks are credential-free candidate evidence; real Yibu-backed tasks and live
+environment readiness remain staging promotion gates rather than PR jobs.
+
+For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
+ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
+parallel jobs, then it combines their coverage artifacts, applies the 70%
+fast-tier gate, and writes the default fast-tier coverage summary.
+`repository-checks` enforces every selected result after the independent lanes
+finish. Docs-only PRs skip the no-input `fast-checks` job and let
+`repository-checks` validate that skipped result directly, avoiding a no-op
+runner queue hop while preserving the same stable required context. CI restores
+only uv's package/download cache and
 never restores `.venv` or `.mypy_cache`; PR and merge-group runs cannot save
 cache entries. Every job creates a clean environment with `uv sync --locked`,
 then uses `uv run --no-sync` so a test command cannot silently resolve a new
@@ -335,8 +348,10 @@ trusted post-merge/release workflow rather than the required PR context.
 
 - **Fast tier:** gated at **70 %** via
   `coverage report --fail-under=70` in CI. Drops below fail
-  `repository-checks` for everyone. The same job writes the default fast-tier
-  coverage summary to the GitHub Actions step summary.
+  `fast-checks`, which makes the final `repository-checks` gate fail for
+  non-document changes. `fast-checks` also writes the default fast-tier
+  coverage summary to the GitHub Actions step summary; docs-only PRs skip it
+  because they produce no coverage inputs.
 - **Combined fast + integration:** measured and posted to the GitHub Actions
   step summary only on PRs labelled `ci:integration` or
   `ci:coverage-summary`. It is reported but is not a required threshold.
@@ -345,8 +360,9 @@ trusted post-merge/release workflow rather than the required PR context.
 To reproduce the protected fast coverage gate locally, run the equivalent
 serial form of the two pytest coverage steps, then run the threshold check.
 CI runs these pytest commands in parallel and combines their coverage data in
-the final `repository-checks` job; local serial runs need `--cov-append` on the
-second command:
+`fast-checks` while independent integration lanes are still running. The final
+`repository-checks` job validates the selected result instead of recomputing
+coverage. Local serial runs need `--cov-append` on the second command:
 
 ```bash
 rm -f .coverage coverage.xml
@@ -392,9 +408,10 @@ approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
 For `main`, enable native squash auto-merge only for a same-repository `dev`
-promotion after release evidence is attached. GitHub has no active `main`
-ruleset, so maintainers must not use a direct push or manual merge to bypass
-the checked-in release flow.
+production candidate. The active `main protected promotion` ruleset requires
+only `main-promotion-gate`, which binds the open PR, current `dev` head,
+successful release gate, and evidence artifact to one SHA. Direct pushes,
+deletion, force-pushes, and bypasses remain prohibited.
 
 Current `dev protected admission` ruleset:
 
@@ -409,10 +426,13 @@ Current `dev protected admission` ruleset:
 
 Current `main` promotion boundary:
 
-- only a same-repository `dev` -> `main` promotion with the four current-head
-  checks and release evidence is eligible for native squash auto-merge;
-- GitHub has no active `main` branch ruleset, so maintainers must not bypass the
-  release flow with a direct push or manual merge.
+- only a same-repository `dev` -> `main` promotion with
+  `main-promotion-gate` is eligible for native squash auto-merge;
+- the composite gate requires the PR head and current `dev` head to equal the
+  exact SHA that passed `release-promotion-gate` with an unexpired evidence
+  artifact;
+- production deployment still re-verifies candidate tree and artifact identity
+  before releasing production credentials.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

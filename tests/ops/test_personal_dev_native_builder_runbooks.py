@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -111,6 +112,20 @@ def _native_authority_request(document: str) -> str:
         + "\n"
         + _shell_function(document, "native_authority_request")
     )
+
+
+@pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))
+def test_native_authority_client_uses_interpreter_without_executable_mode(
+    runbook: Path,
+) -> None:
+    shell = _shell(_read(runbook))
+    client = ROOT / "scripts/ops/personal_dev_native_builder_runtime_authority_client.py"
+
+    assert client.is_file()
+    assert stat.S_IMODE(client.stat().st_mode) == 0o644
+    assert 'test -f "${native_authority_client[1]}"' in shell
+    assert 'test ! -L "${native_authority_client[1]}"' in shell
+    assert 'test -x "${native_authority_client[1]}"' not in shell
 
 
 @pytest.mark.parametrize("runbook", (RUNTIME, ACCEPTANCE))

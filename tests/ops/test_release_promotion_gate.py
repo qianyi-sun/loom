@@ -317,6 +317,7 @@ def _run_release_input_preflight(
     *,
     candidate_sha: str,
     image_selector: str,
+    dispatch_sha: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     workflow = _release_promotion_workflow()
     preflight = workflow["jobs"]["preflight"]
@@ -325,6 +326,7 @@ def _run_release_input_preflight(
     env.update(
         {
             "CANDIDATE_SHA": candidate_sha,
+            "DISPATCH_SHA": dispatch_sha or candidate_sha,
             "IMAGE_SELECTOR": image_selector,
         }
     )
@@ -884,6 +886,17 @@ def test_release_promotion_preflight_accepts_safe_inputs(image_selector: str) ->
     assert result.returncode == 0, result.stderr
 
 
+def test_release_promotion_preflight_rejects_dispatch_candidate_mismatch() -> None:
+    result = _run_release_input_preflight(
+        candidate_sha=_candidate_sha(),
+        dispatch_sha="f" * 40,
+        image_selector="release-0123456789ab",
+    )
+
+    assert result.returncode != 0
+    assert "dispatch SHA must match candidate_sha" in result.stderr
+
+
 @pytest.mark.parametrize(
     "candidate_sha",
     [
@@ -1033,18 +1046,19 @@ def test_production_deploy_requires_successful_release_gate() -> None:
     assert verify_index < setup_uv_index
 
 
-def test_release_pr_template_requires_promotion_evidence() -> None:
+def test_release_pr_template_requires_exact_promotion_evidence() -> None:
     template = (REPO_ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
     assert "## Release Promotion" in template
     for required_text in (
         "Candidate SHA",
         "Staging URL",
         "Image digests",
-        "Release gate workflow run",
+        "Release gate workflow run and run ID",
         "Gate evidence artifact",
-        "Rollback notes",
+        "Main promotion gate workflow run",
         "Previous production image digest",
         "DB recovery point",
+        "main-promotion-gate",
     ):
         assert required_text in template
 

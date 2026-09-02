@@ -35,7 +35,11 @@ from .protected_external_supervisor_credential_transport import (
     ProtectedExternalSupervisorCredentialTransport,
 )
 from .protected_external_supervisor_transport import (
+    COMPENSATION_RECONCILIATION_FAILURE_CODES,
+    EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES,
     AtomicUserUnitStore,
+    ExternalSupervisorApplyError,
+    ExternalSupervisorCompensationError,
     ExternalSupervisorLiveObservation,
     FixedExternalSupervisorTransport,
     FixedUserSystemdControl,
@@ -60,6 +64,15 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_WIRE_BYTES = 4 * 1024 * 1024
 _CREDENTIAL_MISSING = object()
+CAPACITY_ACCEPTANCE_FAILURE_CODES = frozenset(
+    {
+        "acceptance-failed",
+        "busy-accounting-unverified",
+        "busy-node-state-unverified",
+        "node-allocation-failed",
+        "node-evidence-invalid",
+    }
+)
 
 
 class CommandResult(Protocol):
@@ -69,6 +82,20 @@ class CommandResult(Protocol):
 
 
 CommandRunner = Callable[[Sequence[str], str], CommandResult]
+
+
+class ExternalSupervisorCapacityError(RuntimeError):
+    """Secret-safe GB10 capacity failure classification."""
+
+    def __init__(self, failure_code: str, *, node: str) -> None:
+        if (
+            failure_code not in CAPACITY_ACCEPTANCE_FAILURE_CODES
+            or node not in GB10_SLURM_WORKER_HOSTS
+        ):
+            raise ValueError("GB10 capacity failure is invalid")
+        self.failure_code = failure_code
+        self.node = node
+        super().__init__("GB10 capacity acceptance failed safely")
 
 
 def _canonical_json(value: object) -> str:
@@ -459,6 +486,101 @@ def _decode_helper_credential(
         raise RuntimeError("GB10 controller credential response drifted") from exc
 
 
+def _encode_helper_failure_response(*, operation: str, failure_code: str) -> str:
+    if (
+        operation != "reconcile_compensations"
+        or failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+    ):
+        raise ValueError("GB10 controller failure response is invalid")
+    return _canonical_json(
+        {
+            "failure_code": failure_code,
+            "operation": operation,
+            "schema_version": 1,
+            "status": "failed",
+        }
+    )
+
+
+def _decode_helper_failure_response(payload: str, *, operation: str) -> str:
+    value = _strict_json(payload, label="GB10 controller failure response")
+    failure_code = value.get("failure_code")
+    if (
+        operation != "reconcile_compensations"
+        or set(value) != {"failure_code", "operation", "schema_version", "status"}
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("operation") != operation
+        or value.get("status") != "failed"
+        or type(failure_code) is not str
+        or failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+    ):
+        raise ValueError("GB10 controller failure response drifted")
+    return failure_code
+
+
+def _decode_capacity_failure_response(payload: str) -> tuple[str, str]:
+    value = _strict_json(payload, label="GB10 capacity failure response")
+    failure_code = value.get("failure_code")
+    node = value.get("node")
+    if (
+        set(value) != {"failure_code", "node", "operation", "schema_version", "status"}
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("operation") != "accept_capacity"
+        or value.get("status") != "failed"
+        or type(failure_code) is not str
+        or failure_code not in CAPACITY_ACCEPTANCE_FAILURE_CODES
+        or type(node) is not str
+        or node not in GB10_SLURM_WORKER_HOSTS
+    ):
+        raise ValueError("GB10 capacity failure response drifted")
+    return failure_code, node
+
+
+def _encode_helper_apply_failure_response(error: ExternalSupervisorApplyError) -> str:
+    return _canonical_json(
+        {
+            "compensation_failure_code": error.compensation_failure_code,
+            "failure_code": error.failure_code,
+            "operation": "apply",
+            "schema_version": 1,
+            "status": "failed",
+        }
+    )
+
+
+def _decode_helper_apply_failure_response(payload: str) -> tuple[str, str | None]:
+    value = _strict_json(payload, label="GB10 controller apply failure response")
+    failure_code = value.get("failure_code")
+    compensation_failure_code = value.get("compensation_failure_code")
+    if (
+        set(value)
+        != {
+            "compensation_failure_code",
+            "failure_code",
+            "operation",
+            "schema_version",
+            "status",
+        }
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != 1
+        or value.get("operation") != "apply"
+        or value.get("status") != "failed"
+        or type(failure_code) is not str
+        or failure_code not in EXTERNAL_SUPERVISOR_APPLY_FAILURE_CODES
+        or (
+            compensation_failure_code is not None
+            and (
+                type(compensation_failure_code) is not str
+                or compensation_failure_code not in COMPENSATION_RECONCILIATION_FAILURE_CODES
+            )
+        )
+    ):
+        raise ValueError("GB10 controller apply failure response drifted")
+    return failure_code, compensation_failure_code
+
+
 @dataclass(frozen=True, slots=True)
 class FixedGB10ExternalSupervisorTransport:
     """Invoke only fixed typed controller operations through one forced key."""
@@ -491,7 +613,7 @@ class FixedGB10ExternalSupervisorTransport:
             artifact=artifact,
             predecessor_authority=predecessor_authority,
         )
-        return _decode_helper_observation(self._invoke(request))
+        return _decode_helper_observation(self._invoke(request, operation="observe"))
 
     def apply(
         self,
@@ -513,7 +635,7 @@ class FixedGB10ExternalSupervisorTransport:
             attestation_digest=attestation_digest,
             transition_digest=transition_digest,
         )
-        _decode_helper_response(self._invoke(request), operation="apply")
+        _decode_helper_response(self._invoke(request, operation="apply"), operation="apply")
 
     def reconcile_compensations(self) -> None:
         request = _encode_helper_request(
@@ -522,7 +644,7 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
         )
         _decode_helper_response(
-            self._invoke(request),
+            self._invoke(request, operation="reconcile_compensations"),
             operation="reconcile_compensations",
         )
 
@@ -533,7 +655,7 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
         )
         return _decode_helper_credential(
-            self._invoke(request),
+            self._invoke(request, operation="observe_credential"),
             operation="observe_credential",
         )
 
@@ -544,7 +666,7 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
         )
         evidence = _decode_helper_credential(
-            self._invoke(request),
+            self._invoke(request, operation="publish_credential"),
             operation="publish_credential",
         )
         if evidence is None:  # narrowed by the decoder; retains explicit fail-closed type.
@@ -568,7 +690,7 @@ class FixedGB10ExternalSupervisorTransport:
             nodes=expected_nodes,
         )
         response = _decode_helper_response(
-            self._invoke(request),
+            self._invoke(request, operation="accept_capacity"),
             operation="accept_capacity",
         )
         acceptance = response.get("acceptance")
@@ -589,14 +711,37 @@ class FixedGB10ExternalSupervisorTransport:
             candidate_tree=self.candidate_tree,
         )
 
-    def _invoke(self, request: str) -> str:
+    def _invoke(self, request: str, *, operation: str) -> str:
         result = self.run(self._ssh_argv(), request)
-        if (
-            result.returncode != 0
-            or result.stderr
-            or not result.stdout
-            or len(result.stdout.encode()) > _MAX_WIRE_BYTES
-        ):
+        if result.stderr or not result.stdout or len(result.stdout.encode()) > _MAX_WIRE_BYTES:
+            raise RuntimeError("GB10 controller operation failed safely")
+        if result.returncode == 1 and operation == "reconcile_compensations":
+            try:
+                failure_code = _decode_helper_failure_response(
+                    result.stdout,
+                    operation=operation,
+                )
+            except ValueError as exc:
+                raise RuntimeError("GB10 controller operation failed safely") from exc
+            raise ExternalSupervisorCompensationError(failure_code)
+        if result.returncode == 1 and operation == "apply":
+            try:
+                failure_code, compensation_failure_code = _decode_helper_apply_failure_response(
+                    result.stdout
+                )
+            except ValueError as exc:
+                raise RuntimeError("GB10 controller operation failed safely") from exc
+            raise ExternalSupervisorApplyError(
+                failure_code,
+                compensation_failure_code=compensation_failure_code,
+            )
+        if result.returncode == 1 and operation == "accept_capacity":
+            try:
+                failure_code, node = _decode_capacity_failure_response(result.stdout)
+            except ValueError as exc:
+                raise RuntimeError("GB10 controller operation failed safely") from exc
+            raise ExternalSupervisorCapacityError(failure_code, node=node)
+        if result.returncode != 0:
             raise RuntimeError("GB10 controller operation failed safely")
         return result.stdout
 
@@ -788,12 +933,14 @@ def _helper_runtime_matches(candidate_sha: str) -> bool:
 
 
 def main() -> int:
+    operation: object = None
     try:
         payload = sys.stdin.buffer.read(_MAX_WIRE_BYTES + 1)
         if not payload or len(payload) > _MAX_WIRE_BYTES:
             raise ValueError("GB10 controller helper input is invalid")
         text = payload.decode("utf-8")
         request = _strict_json(text, label="GB10 controller request")
+        operation = request.get("operation")
         candidate_sha = _sha(
             request.get("candidate_sha"),
             label="GB10 controller candidate SHA",
@@ -805,6 +952,19 @@ def main() -> int:
             transport=_fixed_local_transport(),
             credential_transport=_fixed_local_credential_transport(candidate_sha),
         )
+    except ExternalSupervisorApplyError as exc:
+        if operation == "apply":
+            sys.stdout.write(_encode_helper_apply_failure_response(exc))
+        return 1
+    except ExternalSupervisorCompensationError as exc:
+        if operation == "reconcile_compensations":
+            sys.stdout.write(
+                _encode_helper_failure_response(
+                    operation=operation,
+                    failure_code=exc.failure_code,
+                )
+            )
+        return 1
     except (OSError, RuntimeError, UnicodeError, ValueError):
         return 1
     sys.stdout.write(response)
@@ -816,9 +976,11 @@ if __name__ == "__main__":  # pragma: no cover - exercised through installed bro
 
 
 __all__ = [
+    "CAPACITY_ACCEPTANCE_FAILURE_CODES",
     "GB10_CONTROLLER_EXECUTION_HOST",
     "GB10_CONTROLLER_HOME",
     "GB10_CONTROLLER_UNIT_DIR",
+    "ExternalSupervisorCapacityError",
     "FixedGB10ExternalSupervisorTransport",
     "GB10ExternalSupervisorCredentialTransport",
     "build_fixed_gb10_external_supervisor_transport",

@@ -306,6 +306,7 @@ def test_plan_schema_round_trips_smoke_authority(tmp_path: Path) -> None:
     plan = backend.calls[-1][1]
 
     record = plan.to_record()
+    assert record["schema_version"] == 9
     assert RehearsalPlan.from_record(record) == plan
 
     record["schema_version"] = 1

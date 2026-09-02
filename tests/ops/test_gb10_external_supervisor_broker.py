@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transiti
 )
 
 from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    CAPACITY_ACCEPTANCE_FAILURE_CODES,
     _encode_helper_request,
 )
 
@@ -297,6 +299,190 @@ def test_broker_capacity_operation_invokes_only_fixed_installed_authority(
         "schema_version": 1,
         "status": "ok",
     }
+
+
+def test_broker_capacity_preserves_only_a_canonical_authority_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    failure = {
+        "failure_code": "busy-accounting-unverified",
+        "node": "trt-gb10-1",
+        "schema_version": 1,
+        "status": "failed",
+    }
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            1,
+            json.dumps(failure, sort_keys=True, separators=(",", ":")) + "\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(broker.BrokerCapacityFailureError) as raised:
+        broker.accept_capacity(request)
+
+    assert json.loads(raised.value.response) == {
+        **failure,
+        "operation": "accept_capacity",
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        {
+            "failure_code": "raw-slurm-error",
+            "node": "trt-gb10-1",
+            "schema_version": 1,
+            "status": "failed",
+        },
+        {
+            "failure_code": "node-allocation-failed",
+            "node": "trt-gb10-2",
+            "schema_version": 1,
+            "status": "failed",
+        },
+    ),
+)
+def test_broker_capacity_rejects_unsafe_authority_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: dict[str, object],
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            1,
+            json.dumps(failure, sort_keys=True, separators=(",", ":")) + "\n",
+            "",
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="output is invalid"):
+        broker.accept_capacity(request)
+
+
+_CANONICAL_AUTHORITY_FAILURE = (
+    '{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+    '"schema_version":1,"status":"failed"}\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "stderr"),
+    [
+        (_CANONICAL_AUTHORITY_FAILURE.removesuffix("\n"), 1, ""),
+        ('{"failure_code":\n', 1, ""),
+        (
+            '{"failure_code":"busy-accounting-unverified",'
+            '"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+            '"schema_version":1,"status":"failed"}\n',
+            1,
+            "",
+        ),
+        (
+            json.dumps(
+                {
+                    "failure_code": "busy-accounting-unverified",
+                    "node": "trt-gb10-1",
+                    "schema_version": 1,
+                    "status": "failed",
+                }
+            )
+            + "\n",
+            1,
+            "",
+        ),
+        (_CANONICAL_AUTHORITY_FAILURE * 2, 1, ""),
+        ("x" * (1024 * 1024 + 1), 1, ""),
+        (_CANONICAL_AUTHORITY_FAILURE, 1, "unexpected stderr"),
+        (_CANONICAL_AUTHORITY_FAILURE, 0, ""),
+    ],
+    ids=(
+        "missing-newline",
+        "truncated-json",
+        "duplicate-keys",
+        "noncanonical-encoding",
+        "trailing-frame",
+        "oversized-stdout",
+        "stderr-contamination",
+        "typed-frame-wrong-exit",
+    ),
+)
+def test_broker_capacity_rejects_malformed_authority_failure_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    returncode: int,
+    stderr: str,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    monkeypatch.setattr(broker, "_safe_executable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_acceptance_lock", lambda: nullcontext())
+    monkeypatch.setattr(broker, "_reconcile_stale_job_states", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        broker,
+        "_run_contained_authority",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            ["contained-authority"],
+            returncode,
+            stdout,
+            stderr,
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError) as raised:
+        broker.accept_capacity(request)
+
+    assert not isinstance(raised.value, broker.BrokerCapacityFailureError)
+
+
+def test_capacity_failure_code_allowlists_match_every_protocol_boundary() -> None:
+    authority_spec = importlib.util.spec_from_file_location(
+        "gb10_acceptance_allowlist_test",
+        AUTHORITY_PATH,
+    )
+    assert authority_spec is not None and authority_spec.loader is not None
+    authority = importlib.util.module_from_spec(authority_spec)
+    authority_spec.loader.exec_module(authority)
+
+    assert broker._CAPACITY_FAILURE_CODES == CAPACITY_ACCEPTANCE_FAILURE_CODES
+    assert authority.CAPACITY_FAILURE_CODES == CAPACITY_ACCEPTANCE_FAILURE_CODES
 
 
 def test_broker_sanitized_environment_composes_fixed_authority_executables(
@@ -766,6 +952,33 @@ def test_broker_timeout_cleans_exact_persisted_job_and_reads_back_empty(
         ],
     ]
     assert not state_path.exists()
+
+
+def test_contained_authority_preserves_a_nonzero_typed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    expected = subprocess.CompletedProcess(["authority"], 1, "typed\n", "")
+
+    def run(_argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(broker, "_write_persisted_job_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(broker, "_run", run)
+    monkeypatch.setattr(broker, "_terminate_and_verify_containment", lambda **_kwargs: None)
+
+    result = broker._run_contained_authority(
+        candidate_sha="a" * 40,
+        unit_name=_TEST_UNIT_NAME,
+        job_state_path=tmp_path / "job.json",
+        cgroup_path=tmp_path / "cgroup",
+        timeout=1200,
+    )
+
+    assert result is expected
+    assert calls == [{"check": False, "timeout": 1110.0}]
 
 
 def test_contained_authority_reserves_cleanup_inside_absolute_hard_deadline(
@@ -1470,6 +1683,38 @@ def test_broker_main_dispatches_capacity_without_candidate_runtime(
     assert output.buffer.getvalue() == response
 
 
+def test_broker_main_returns_one_with_a_typed_capacity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    request = _encode_helper_request(
+        operation="accept_capacity",
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        profile_sha256="c" * 64,
+        nodes=NORMAL_GB10_WORKER_HOSTS,
+    ).encode()
+    response = (
+        b'{"failure_code":"busy-accounting-unverified","node":"trt-gb10-1",'
+        b'"operation":"accept_capacity","schema_version":1,"status":"failed"}\n'
+    )
+    output = SimpleNamespace(buffer=io.BytesIO())
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(request)))
+    monkeypatch.setattr(broker.sys, "stdout", output)
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(
+        broker,
+        "accept_capacity",
+        lambda _payload: (_ for _ in ()).throw(broker.BrokerCapacityFailureError(response)),
+    )
+
+    assert broker.main([]) == 1
+    assert output.buffer.getvalue() == response
+
+
 def test_broker_main_dispatches_non_capacity_through_candidate_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1543,6 +1788,657 @@ def test_forced_key_render_rejects_same_key_with_unrestricted_authority() -> Non
 
     with pytest.raises(broker.BrokerError, match="already present"):
         broker.render_authorized_keys(public_key, public_key)
+
+
+def test_forced_key_render_migrates_exact_legacy_controller_key() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    predecessor = (
+        b"# preserve loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    expected = (
+        b"# preserve loom-staging-rollout\n" + legacy_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    migrated = broker.render_authorized_keys(
+        predecessor,
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == expected
+    assert (
+        broker.render_authorized_keys(
+            migrated,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+        == expected
+    )
+
+
+def test_forced_key_migration_rejects_foreign_rollout_marker() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    foreign_public_key = _public_key(9, "foreign")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    foreign_identity = b" ".join(foreign_public_key.split()[:2])
+    ambiguous = (
+        foreign_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    with pytest.raises(broker.BrokerError, match="rollout authority is ambiguous"):
+        broker.render_authorized_keys(
+            ambiguous,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+
+
+def test_forced_key_migration_installs_missing_predecessor_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+
+    migrated = broker.render_authorized_keys(
+        b"",
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == (
+        legacy_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+
+def test_forced_key_migration_repairs_controller_only_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    controller_only = (
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    migrated = broker.render_authorized_keys(
+        controller_only,
+        controller_public_key,
+        predecessor_public_key=legacy_public_key,
+    )
+
+    assert migrated == legacy_identity + b" loom-staging-rollout\n" + controller_only
+
+
+def test_forced_key_migration_rejects_reused_controller_identity() -> None:
+    public_key = _public_key()
+
+    with pytest.raises(broker.BrokerError, match="not distinct"):
+        broker.render_authorized_keys(
+            b"",
+            public_key,
+            predecessor_public_key=public_key,
+        )
+
+
+def test_forced_key_migration_rejects_duplicate_predecessor_authority() -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    duplicated = (
+        legacy_identity + b" loom-staging-rollout\n" + legacy_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+
+    with pytest.raises(broker.BrokerError, match="duplicated"):
+        broker.render_authorized_keys(
+            duplicated,
+            controller_public_key,
+            predecessor_public_key=legacy_public_key,
+        )
+
+
+def test_install_forced_key_migrates_predecessor_authority_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path = tmp_path / "controller.pub"
+    legacy_path.write_bytes(legacy_public_key)
+    controller_path.write_bytes(controller_public_key)
+    legacy_path.chmod(0o600)
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    broker.install_forced_key(
+        controller_path,
+        predecessor_public_key_path=legacy_path,
+    )
+
+    assert authorized_keys.read_bytes() == (
+        legacy_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    assert authorized_keys.stat().st_mode & 0o777 == 0o600
+
+
+def test_install_forced_key_rejects_writable_public_key_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o666)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="public key metadata is unsafe"):
+        broker.install_forced_key(controller_path)
+
+    assert not (tmp_path / ".ssh").exists()
+
+
+def test_install_forced_key_rejects_reused_key_before_creating_ssh_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    legacy_path.write_bytes(_public_key(8, "legacy"))
+    controller_path.chmod(0o600)
+    legacy_path.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    with pytest.raises(broker.BrokerError, match="predecessor key is not distinct"):
+        broker.install_forced_key(
+            controller_path,
+            predecessor_public_key_path=legacy_path,
+        )
+
+    assert not (tmp_path / ".ssh").exists()
+
+
+def test_install_forced_key_preserves_authorized_keys_changed_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# preserve exactly\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_replace = os.replace
+    publications = 0
+
+    def corrupt_first_publication(source: Path | str, destination: Path | str) -> None:
+        nonlocal publications
+        real_replace(source, destination)
+        if Path(destination) == authorized_keys and publications == 0:
+            publications += 1
+            authorized_keys.write_bytes(b"corrupt after publication\n")
+            authorized_keys.chmod(0o600)
+
+    monkeypatch.setattr(broker.os, "replace", corrupt_first_publication)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert authorized_keys.read_bytes() == b"corrupt after publication\n"
+    assert authorized_keys.stat().st_mode & 0o777 == 0o600
+
+
+def test_install_forced_key_preserves_replacement_authorized_keys_during_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(b"# original\n" + _public_key(9, "unrelated"))
+    authorized_keys.chmod(0o600)
+    displaced = ssh_dir / "transaction-publication"
+    replacement = b"# concurrent external update\n" + _public_key(10, "external")
+    replacement_inode: int | None = None
+    readbacks = 0
+    real_read = broker._read_authorized_keys
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_on_publication_readback(
+        path: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[bool, bytes]:
+        nonlocal readbacks, replacement_inode
+        readbacks += 1
+        if readbacks == 2:
+            path.rename(displaced)
+            path.write_bytes(replacement)
+            path.chmod(0o600)
+            replacement_inode = path.stat().st_ino
+            raise broker.BrokerError("injected publication readback failure")
+        return real_read(path, uid=uid, gid=gid)
+
+    monkeypatch.setattr(broker, "_read_authorized_keys", replace_on_publication_readback)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_file()
+    assert replacement_inode is not None
+    assert authorized_keys.stat().st_ino == replacement_inode
+    assert authorized_keys.read_bytes() == replacement
+
+
+def test_install_forced_key_preserves_replacement_authorized_keys_staging_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# original\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    displaced = ssh_dir / "displaced-authorized-keys-staging"
+    replacement = b"external staging replacement\n"
+    replacement_path: Path | None = None
+    replacement_inode: int | None = None
+    real_fsync = broker.os.fsync
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_staging_then_fail(descriptor: int) -> None:
+        nonlocal replacement_path, replacement_inode
+        candidates = list(ssh_dir.glob(".authorized_keys.*"))
+        if candidates and replacement_path is None:
+            staging = candidates[0]
+            staging.rename(displaced)
+            staging.write_bytes(replacement)
+            staging.chmod(0o600)
+            replacement_path = staging
+            replacement_inode = staging.stat().st_ino
+            raise OSError("injected authorized-keys staging fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(broker.os, "fsync", replace_staging_then_fail)
+
+    with pytest.raises(broker.BrokerError):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_file()
+    assert replacement_path is not None
+    assert replacement_inode is not None
+    assert replacement_path.stat().st_ino == replacement_inode
+    assert replacement_path.read_bytes() == replacement
+    assert authorized_keys.read_bytes() == original
+
+
+def test_install_forced_key_removes_new_ssh_directory_when_chown_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_chown = broker.os.chown
+
+    def fail_ssh_chown(path: Path | str, uid: int, gid: int) -> None:
+        if Path(path).name.startswith(".loom-directory-.ssh."):
+            raise OSError("injected chown failure")
+        real_chown(path, uid, gid)
+
+    monkeypatch.setattr(broker.os, "chown", fail_ssh_chown)
+
+    with pytest.raises(broker.BrokerError, match="authorized keys publication failed"):
+        broker.install_forced_key(controller_path)
+
+    assert not ssh_dir.exists()
+
+
+def test_install_forced_key_removes_new_ssh_directory_when_parent_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_fsync = broker._fsync_path_directory
+    failed = False
+
+    def fail_first_parent_fsync(path: Path) -> None:
+        nonlocal failed
+        if path == ssh_dir.parent and ssh_dir.exists() and not failed:
+            failed = True
+            raise OSError("injected parent fsync failure")
+        real_fsync(path)
+
+    monkeypatch.setattr(broker, "_fsync_path_directory", fail_first_parent_fsync)
+
+    with pytest.raises(broker.BrokerError, match="publication failed"):
+        broker.install_forced_key(controller_path)
+
+    assert failed is True
+    assert not ssh_dir.exists()
+
+
+def test_install_forced_key_preserves_replacement_ssh_directory_during_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    displaced = tmp_path / "displaced-ssh"
+    replacement_inode: int | None = None
+    real_read = broker._read_authorized_keys
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    def replace_ssh_directory_then_fail(
+        path: Path,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[bool, bytes]:
+        nonlocal replacement_inode
+        if path == ssh_dir / "authorized_keys" and replacement_inode is None:
+            ssh_dir.rename(displaced)
+            ssh_dir.mkdir(mode=0o700)
+            replacement_inode = ssh_dir.stat().st_ino
+            raise broker.BrokerError("injected authority inspection failure")
+        return real_read(path, uid=uid, gid=gid)
+
+    monkeypatch.setattr(broker, "_read_authorized_keys", replace_ssh_directory_then_fail)
+
+    with pytest.raises(broker.BrokerError, match="rollback failed"):
+        broker.install_forced_key(controller_path)
+
+    assert displaced.is_dir()
+    assert replacement_inode is not None
+    assert ssh_dir.stat().st_ino == replacement_inode
+
+
+def test_install_forced_key_rerun_recovers_hard_stop_after_ssh_directory_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    real_rename = broker._rename_noreplace
+
+    class SimulatedHardStop(BaseException):
+        pass
+
+    def rename_then_stop(source: Path, destination: Path) -> None:
+        real_rename(source, destination)
+        raise SimulatedHardStop
+
+    monkeypatch.setattr(broker, "_rename_noreplace", rename_then_stop)
+
+    with pytest.raises(SimulatedHardStop):
+        broker.install_forced_key(controller_path)
+
+    assert ssh_dir.is_dir()
+    assert stat.S_IMODE(ssh_dir.stat().st_mode) == 0o700
+    assert list(ssh_dir.iterdir()) == []
+
+    monkeypatch.setattr(broker, "_rename_noreplace", real_rename)
+    broker.install_forced_key(controller_path)
+
+    assert (ssh_dir / "authorized_keys").read_bytes().endswith(b" loom-gb10-external-supervisor\n")
+
+
+def test_install_forced_key_rolls_back_before_reporting_deferred_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller_path = tmp_path / "controller.pub"
+    controller_path.write_bytes(_public_key(8, "controller"))
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    original = b"# preserve exactly\n" + _public_key(9, "unrelated")
+    authorized_keys.write_bytes(original)
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+    monkeypatch.setattr(broker, "_SIGNALS_DEFERRED", False)
+    monkeypatch.setattr(broker, "_DEFERRED_SIGNAL", None)
+    real_write = broker._write_authorized_keys
+    writes = 0
+
+    def signal_after_first_write(
+        path: Path,
+        payload: bytes,
+        *,
+        uid: int,
+        gid: int,
+    ) -> tuple[int, int]:
+        nonlocal writes
+        assert broker._SIGNALS_DEFERRED is True
+        identity = real_write(path, payload, uid=uid, gid=gid)
+        writes += 1
+        if writes == 1:
+            broker._handle_broker_signal(signal.SIGTERM, None)
+        return identity
+
+    monkeypatch.setattr(broker, "_write_authorized_keys", signal_after_first_write)
+
+    with pytest.raises(broker.BrokerInterruptedError, match="interrupted safely"):
+        broker.install_forced_key(controller_path)
+
+    assert writes == 2
+    assert authorized_keys.read_bytes() == original
+    assert broker._SIGNALS_DEFERRED is False
+    assert broker._DEFERRED_SIGNAL is None
+
+
+def test_broker_install_authority_dispatches_exact_predecessor_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_public_key = _public_key(7, "legacy-rollout")
+    controller_public_key = _public_key(8, "controller")
+    legacy_identity = b" ".join(legacy_public_key.split()[:2])
+    controller_identity = b" ".join(controller_public_key.split()[:2])
+    legacy_path = tmp_path / "legacy.pub"
+    controller_path = tmp_path / "controller.pub"
+    legacy_path.write_bytes(legacy_public_key)
+    controller_path.write_bytes(controller_public_key)
+    legacy_path.chmod(0o600)
+    controller_path.chmod(0o600)
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir(mode=0o700)
+    authorized_keys = ssh_dir / "authorized_keys"
+    authorized_keys.write_bytes(
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + legacy_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
+    authorized_keys.chmod(0o600)
+    monkeypatch.setattr(broker.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(broker.os, "getegid", lambda: 0)
+    monkeypatch.setattr(broker, "_read_public_key_file", lambda path: path.read_bytes())
+    monkeypatch.setattr(broker, "_require_host_authority", lambda: None)
+    monkeypatch.setattr(broker, "REMOTE_SSH_HOME", tmp_path)
+    monkeypatch.setattr(
+        broker.pwd,
+        "getpwnam",
+        lambda _user: SimpleNamespace(
+            pw_dir=str(tmp_path),
+            pw_uid=os.getuid(),
+            pw_gid=os.getgid(),
+        ),
+    )
+
+    assert broker.main(["--install-authority", str(controller_path), str(legacy_path)]) == 0
+    assert authorized_keys.read_bytes() == (
+        legacy_identity + b" loom-staging-rollout\n"
+        b'restrict,command="/usr/bin/sudo -n -- '
+        b'/usr/local/libexec/loom-gb10-external-supervisor-broker" '
+        + controller_identity
+        + b" loom-gb10-external-supervisor\n"
+    )
 
 
 def test_existing_candidate_requires_exact_clean_hardened_root_owned_runtime(

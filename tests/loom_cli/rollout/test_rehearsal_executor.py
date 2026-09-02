@@ -18,6 +18,7 @@ import yaml  # type: ignore[import-untyped]
 import loom_cli.rollout.operator.protected_external_supervisor_transport as transport_module
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom.models.types import ModelSpec
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     ExternalSupervisorCanonicalIdentity,
@@ -828,6 +829,36 @@ def test_database_pod_manifest_uses_bounded_termination_grace() -> None:
     manifest = _database_pod_manifest(_plan())
 
     assert manifest["spec"]["terminationGracePeriodSeconds"] == 10
+
+
+def test_database_pod_manifest_waits_for_final_postgres_process() -> None:
+    plan = _plan()
+
+    manifest = _database_pod_manifest(plan)
+
+    postgres = manifest["spec"]["containers"][0]
+    assert postgres["readinessProbe"]["exec"]["command"] == [
+        "sh",
+        "-ceu",
+        'test "$(cat /proc/1/comm)" = postgres\n'
+        'exec pg_isready --dbname "$POSTGRES_DB" --username "$POSTGRES_USER"',
+    ]
+
+
+def test_database_pod_manifest_keeps_database_name_out_of_readiness_shell() -> None:
+    database = "loom_rehearsal_$(invalid-command)"
+    plan = replace(_plan(), resources=replace(_plan().resources, database=database))
+
+    manifest = _database_pod_manifest(plan)
+
+    postgres = manifest["spec"]["containers"][0]
+    assert postgres["readinessProbe"]["exec"]["command"] == [
+        "sh",
+        "-ceu",
+        'test "$(cat /proc/1/comm)" = postgres\n'
+        'exec pg_isready --dbname "$POSTGRES_DB" --username "$POSTGRES_USER"',
+    ]
+    assert {item["name"]: item["value"] for item in postgres["env"]}["POSTGRES_DB"] == database
 
 
 def test_registry_rehearsal_uses_preflight_published_digest_without_republish() -> None:
@@ -1704,6 +1735,20 @@ def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
 
 def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
     plan = _plan()
+    plan = replace(
+        plan,
+        smoke_authority=replace(
+            plan.smoke_authority,
+            agent="direct-completion",
+            agent_model=ModelSpec(
+                provider="yibu",
+                name="gpt-4o-mini",
+                source="local-server",
+                local_server="yibu",
+                max_output_tokens=64,
+            ),
+        ),
+    )
     release = _release_artifact(plan)
     batch_id = "11111111-1111-4111-8111-111111111111"
     calls: list[tuple[str, ...]] = []
@@ -1805,6 +1850,14 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
         "-m",
         "loom_cli.rollout.rehearsal_smoke_probe",
     )
+    model_json = probe[probe.index("--agent-model-json") + 1]
+    assert json.loads(model_json) == {
+        "provider": "yibu",
+        "name": "gpt-4o-mini",
+        "source": "local-server",
+        "local_server": "yibu",
+        "max_output_tokens": 64,
+    }
     assert "loom_admin_" not in " ".join(probe)
 
 

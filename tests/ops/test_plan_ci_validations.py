@@ -13,13 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("ready_for_review", "", False),
         ("reopened", "", False),
         ("synchronize", "", False),
-        ("labeled", "triage", False),
-        ("unlabeled", "triage", False),
-        ("edited", "", False),
         ("edited", "", True),
+        ("labeled", "ci:integration", False),
+        ("unlabeled", "ci:integration", False),
+        ("unexpected-action", "", False),
     ],
 )
-def test_every_non_draft_pr_event_runs_full_protected_gate(
+def test_authoritative_non_draft_pr_event_runs_full_protected_gate(
     action: str,
     action_label: str,
     base_changed: bool,
@@ -31,6 +31,59 @@ def test_every_non_draft_pr_event_runs_full_protected_gate(
         pull_request_action=action,
         pull_request_action_label=action_label,
         pull_request_base_changed=base_changed,
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+
+
+@pytest.mark.parametrize(
+    ("action", "action_label"),
+    [
+        ("edited", ""),
+        ("labeled", "triage"),
+        ("unlabeled", "priority:P1"),
+        ("labeled", ""),
+    ],
+)
+def test_unrelated_pr_metadata_event_is_filtered(
+    action: str,
+    action_label: str,
+) -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels={"ci:images"},
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=action_label,
+        pull_request_base_changed=False,
+    )
+
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "ci:integration",
+        "ci:integration-docker",
+        "ci:images",
+        "cluster-smoke",
+        "staging-smoke",
+        "ci:coverage-summary",
+    ],
+)
+@pytest.mark.parametrize("action", ["labeled", "unlabeled"])
+def test_supported_selector_metadata_event_runs_full_gate(action: str, label: str) -> None:
+    plan = plan_validations(
+        changed_paths=["docs/user-guide.md"],
+        labels=set(),
+        event_name="pull_request",
+        pull_request_action=action,
+        pull_request_action_label=label,
     )
 
     assert plan.event_relevant is True
@@ -58,7 +111,9 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
         labels=set(),
         event_name="pull_request",
         pull_request_action="converted_to_draft",
-        pull_request_draft=True,
+        # The action itself must remain filtered even if a synthetic or
+        # replayed payload has not yet reflected the new draft state.
+        pull_request_draft=False,
     )
 
     assert plan.event_relevant is False
@@ -73,6 +128,30 @@ def test_docs_only_selects_no_heavy_validation() -> None:
         event_name="pull_request",
     )
     assert plan.docs_only is True
+    assert plan.selected_heavy_checks() == set()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "deploy/Dockerfile.behavior-stage1-sim",
+        "src/loom/integrations/behavior/contracts.py",
+        "src/loom/pipeline/stage1_smoke.py",
+        "src/loom_service/behavior_pipeline_adapter.py",
+        "tests/integrations/behavior/test_contracts.py",
+        "third_party/behavior-stage1/omnigibson/omnigibson/__init__.py",
+        "web/src/components/artifacts/BehaviorRolloutViewer.tsx",
+        "web/src/components/artifacts/useBoundedJson.ts",
+    ],
+)
+def test_disabled_behavior_paths_select_no_heavy_validation(path: str) -> None:
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == set()
 
 
@@ -301,6 +380,56 @@ def test_planner_change_selects_every_heavy_gate() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "tests/unit/test_metrics_enumeration.py",
+        "tests/loom_cli/test_config.py",
+        "tests/ops/test_release_runbook.py",
+    ],
+)
+def test_manifest_owned_root_tests_do_not_select_unrelated_heavy_lanes(path: str) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.docs_only is False
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set()
+
+
+def test_docs_plus_manifest_owned_root_test_keeps_only_the_root_test_lane() -> None:
+    plan = plan_validations(
+        changed_paths=["docs/user-guide.md", "tests/unit/test_metrics_enumeration.py"],
+        labels=set(),
+        event_name="pull_request",
+    )
+
+    assert plan.docs_only is False
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == set()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("tests/contract/test_driver_contract.py", {"integration"}),
+        (
+            "tests/integration/test_docker_driver_exec.py",
+            {"integration", "integration_docker"},
+        ),
+        ("tests/cluster/test_staging_k3s_render_contract.py", {"cluster_smoke"}),
+        ("tests/system/test_full_stack_hello.py", {"staging_smoke"}),
+    ],
+)
+def test_manifest_owned_heavy_tests_select_their_required_lanes(
+    path: str,
+    expected: set[str],
+) -> None:
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+
+    assert plan.unowned_runtime is False
+    assert plan.selected_heavy_checks() == expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "config/component-ownership.toml",
         "scripts/component_ownership.py",
         "tests/ops/test_component_ownership_manifest.py",
@@ -355,12 +484,29 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "scripts/ops/staging_rollout_shared_work2_export.py",
         "scripts/ops/staging_rollout_shared_work2_export_authority.py",
         "scripts/ops/staging_rollout_shared_repo_consumer.py",
+        "scripts/ops/deploy_environment.sh",
+        "scripts/ops/release_gate.py",
+        "scripts/ops/release_identity.py",
+        "scripts/ops/verify_production_release_gate.sh",
         "scripts/ops/verify_staging_rollout_secret_boundary.py",
+        "scripts/validate_environment_isolation.py",
+        ".github/workflows/deploy-environment.yml",
+        ".github/workflows/release-promotion-gate.yml",
+        "src/loom_cli/rollout/rehearsal_executor.py",
         "src/loom_cli/rollout/operator/broker.py",
         "src/loom_cli/rollout/steps/s04_gb10_prep.py",
         "src/loom_cli/rollout/steps/s10_env_state.py",
+        "src/loom_cli/rollout_lock.py",
+        "src/loom_cli/rollout_lock_cli.py",
+        "tests/loom_cli/rollout/test_rehearsal_executor.py",
         "tests/loom_cli/rollout/operator/test_broker.py",
         "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
+        "tests/loom_cli/test_rollout_lock.py",
+        "tests/loom_cli/test_rollout_lock_cli.py",
+        "tests/ops/test_deploy_environment_release_manifest.py",
+        "tests/ops/test_environment_isolation.py",
+        "tests/ops/test_release_identity.py",
+        "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",
         "tests/loom_cli/test_environment_state.py",
         "tests/ops/test_staging_rollout_host.py",
@@ -380,7 +526,7 @@ def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> N
     assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
-def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> None:
+def test_rollout_module_changes_are_protected_staging_authority() -> None:
     plan = plan_validations(
         changed_paths=["src/loom_cli/rollout/operator_notes.py"],
         labels=set(),
@@ -388,8 +534,8 @@ def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> No
     )
 
     assert plan.unowned_runtime is False
-    assert plan.selected_heavy_checks() == {"integration", "images"}
-    assert all("protected-staging-rollout" not in plan.reasons[check] for check in HEAVY_CHECKS)
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
 @pytest.mark.parametrize(

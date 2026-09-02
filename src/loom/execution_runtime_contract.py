@@ -126,6 +126,13 @@ class SidecarContainerV1(_Strict):
         return value
 
 
+class RuntimeTaskInputV1(_Strict):
+    schema_version: Literal["loom.runtime-task-input.v1"] = "loom.runtime-task-input.v1"
+    manifest_sha256: str = Field(pattern=_SHA256.pattern)
+    file_count: int = Field(gt=0, le=10_000)
+    total_bytes: int = Field(ge=0, le=10 * 1024**3)
+
+
 class ExecutionRuntimePlanV1(_Strict):
     schema_version: Literal["loom.execution-runtime-plan.v1"] = "loom.execution-runtime-plan.v1"
     candidate_sha: str = Field(pattern=_CANDIDATE.pattern)
@@ -152,6 +159,7 @@ class ExecutionRuntimePlanV1(_Strict):
     sidecars: tuple[SidecarContainerV1, ...] = Field(default=(), max_length=32)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
+    task_input: RuntimeTaskInputV1 | None = None
 
     @field_validator("task_image_ref", "runtime_image_ref")
     @classmethod
@@ -315,6 +323,7 @@ __all__ = [
     "RuntimeComposition",
     "RuntimePhaseEvidenceV1",
     "RuntimeStreamEvidenceV1",
+    "RuntimeTaskInputV1",
     "SidecarContainerV1",
     "VerifierExecution",
     "validate_runtime_plan_requirements",

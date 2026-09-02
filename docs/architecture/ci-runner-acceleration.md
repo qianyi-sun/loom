@@ -45,9 +45,8 @@ generations cannot partially update the matrix.
 inside a fresh QEMU/KVM guest. The host does not run repository job code
 directly.
 
-The disposable guest disk is a sparse 128 GiB boundary. This is required by
-the locked Stage 1 simulator image, whose local build, vulnerability scan,
-SPDX SBOM generation, and publish readback exceed the former 64 GiB boundary.
+The disposable guest disk is a sparse 128 GiB boundary so image builds and
+their local vulnerability scans cannot exhaust the former 64 GiB boundary.
 Large-image jobs must still use a job-owned Buildx builder and remove only that
 builder, exact local tags, and job-scoped temporary directories; broad Docker
 pruning is forbidden on the shared host.
@@ -70,13 +69,17 @@ prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
 the pool is draining, or health cannot be proven. Only a route request first
 observed within 90 seconds of its GitHub artifact creation may consume oldlab
-capacity. The controller discovers requests from the bounded inventories of the
-four active routed workflows and then performs an exact artifact-name lookup
-for each run. It does not walk repository-wide artifact history or rely on a
-global artifact cursor, so unrelated artifact bursts and one failed delivery
-cannot block newer workflows.
+capacity. The controller discovers requests from bounded repository-wide
+`queued` and `in_progress` run snapshots, filters them to the four exact
+routed workflow IDs, and then performs an exact artifact-name lookup for each
+run. Including `queued` is required because GitHub can keep the aggregate run
+queued while its route job is already executing. If either repository-wide
+snapshot exceeds 100 runs, discovery falls back to the same two bounded
+inventories for each exact routed workflow. It does not walk repository-wide
+artifact history or rely on a global artifact cursor, so unrelated artifact
+bursts and one failed delivery cannot block newer workflows.
 
-Route reconciliation has its own thirty-second systemd timer and state-only
+Route reconciliation has its own twenty-three-second systemd timer and state-only
 service. It is not a second `ExecStart` behind runner-pool reconciliation and
 does not share the pool's QEMU, Docker, cache, or 300-second service deadline.
 Pool builds, guest cleanup, GitHub JIT registration, and drain work therefore
@@ -182,18 +185,21 @@ Install and enable `loom-ci-runner-route-controller.service` and
 service and timer. The pool unit must contain only the pool reconcile command;
 the route unit must contain only the route controller. During rollout, fail the
 preflight if either unit contains both commands or if the route timer is not
-active with a thirty-second interval. Each process may make at most 35 GitHub
-core requests, so even a continuously saturated timer is bounded to 4,200
+active with a twenty-three-second interval. Each process may make at most 29 GitHub
+core requests, so even a continuously saturated timer is bounded to 4,553
 requests per hour, below the installation's 5,000-request budget. The
 controller records the core `limit`, `remaining`, and `reset` response headers
 in the existing SQLite metadata after every request. A new oneshot process
 therefore inherits the previous process's budget and stops before the final 250
 requests until the recorded reset time; it never turns a local restart into a
-rate-limit bypass. A no-work pass performs five GitHub read requests (the
-trusted branch plus four bounded workflow inventories), keeping steady-state
-use near 600 requests per hour. Repeated run, job, workflow-blob, and CheckRun
-reads within one reconcile use the first validated snapshot instead of spending
-the installation budget twice. The route freshness window is 90 seconds and
+rate-limit bypass. A no-work pass performs three GitHub read requests (the
+trusted branch plus two bounded run-state inventories), keeping steady-state
+use no more than 471 requests per hour. Active-run snapshots are reused by release
+reconciliation, and persisted route decisions suppress repeated artifact
+lookup, download, and CheckRun validation while the same workflow remains
+active. Repeated run, job, workflow-blob, and CheckRun reads
+within one reconcile use the first validated snapshot instead of spending the
+installation budget twice. The route freshness window is 90 seconds and
 the workflow-side bounded wait remains 180 seconds, leaving one full timer
 interval for ordinary API, artifact-publication, and service latency. A
 transient malformed or count-inconsistent active-run inventory is re-read at
@@ -230,7 +236,7 @@ Activation is one bounded transition:
 4. Start only the route service once. Require schema-3 readback, the exact
    runtime/App/generation identities, zero generation lag/blob drift, and one
    direct App-owned CheckRun that arrives before the pinned action deadline.
-5. Enable the thirty-second route timer and the existing pool timer. Exercise
+5. Enable the twenty-three-second route timer and the existing pool timer. Exercise
    one fresh normal, image, cluster-smoke, and staging-smoke route; verify the
    actual disposable runner identity and terminal lease release for every
    oldlab job.
@@ -291,15 +297,16 @@ exception IDs, package scopes, statements, expiries, and resulting report
 digest. A failed scan prints a bounded, log-safe critical-finding summary
 while preserving Trivy's exit code.
 
-The hosted publisher rebuilds every architecture archive from the protected
-release commit and captures the single digest emitted by each architecture
-push. Official evidence accepts only `trusted-rebuild` and binds the release
-head, tree, ref, and current run. PR candidate archives remain untrusted CI
-evidence only and are never downloaded, loaded, scanned as release, attested,
-or published by the publisher. After immutable-digest attestation verification,
-each architecture uploads one uniquely named canonical record. The manifest job
-downloads and accepts exactly the current image's AMD64 and ARM64 records,
-verifies their recorded registry subjects, and joins only their immutable
+The untrusted PR builder keeps each architecture archive job-local, scans it
+with the controlled Trivy policy, and does not upload it. The hosted publisher
+rebuilds every architecture archive from the protected release commit and
+captures the single digest emitted by each architecture push. Official evidence
+accepts only `trusted-rebuild` and binds the release head, tree, ref, and current
+run; it never downloads, loads, attests, or publishes PR-built bytes. After
+immutable-digest attestation verification, each architecture uploads one
+uniquely named canonical record. The manifest job downloads and accepts exactly
+the current image's AMD64 and ARM64 records, verifies their recorded registry
+subjects, and joins only their immutable
 digests.
 
 Manifest creation writes only the temporary `manifest-${HEAD_SHA}` tag and

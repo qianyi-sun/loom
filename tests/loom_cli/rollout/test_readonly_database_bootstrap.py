@@ -76,6 +76,7 @@ def test_role_bootstrap_is_exact_select_only_and_idempotent() -> None:
         "artifacts",
         "batches",
         "llm_calls",
+        "team_memberships",
         "trial_events",
         "trials",
     ):

@@ -384,6 +384,16 @@ class _TaskImageServiceTokenPayload(BaseModel):
     expires_in_days: int = Field(default=90, ge=1, le=365)
 
 
+class _ExecutionCapacityCollectorTokenPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # Capacity collection is a continuously scheduled control-plane identity.
+    # An omitted lifetime produces a non-expiring, single-scope token so the
+    # collector cannot silently stop after a calendar deadline. Operators may
+    # still request a bounded token for temporary collectors.
+    expires_in_days: int | None = Field(default=None, ge=1, le=365)
+
+
 async def _require_admin_scope(
     request: Request,
     authorization: str | None,
@@ -571,7 +581,7 @@ async def issue_task_image_builder_token(
 @router.post("/execution-capacity-collector-tokens", status_code=201)
 async def issue_execution_capacity_collector_token(
     request: Request,
-    payload: _TaskImageServiceTokenPayload,
+    payload: _ExecutionCapacityCollectorTokenPayload,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
     """Mint a token that can only read its policy and publish observations."""
@@ -579,7 +589,11 @@ async def issue_execution_capacity_collector_token(
 
     raw = "loom_ecc_" + secrets.token_bytes(32).hex()
     token_hash = hashlib.sha256(raw.encode()).digest()
-    expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
+    expires_at = (
+        datetime.now(UTC) + timedelta(days=payload.expires_in_days)
+        if payload.expires_in_days is not None
+        else None
+    )
     async with request.app.state.session_factory() as session:
         await session.execute(
             insert(Token).values(

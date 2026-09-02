@@ -18,7 +18,13 @@ run-name: >-
              github.event.pull_request.number || 'none') ||
       github.event_name == 'pull_request' &&
       (github.event.pull_request.draft ||
-       github.event.action == 'converted_to_draft') &&
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' &&
+        github.event.changes.base == null) ||
+       ((github.event.action == 'labeled' ||
+         github.event.action == 'unlabeled') &&
+        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
+                  github.event.label.name))) &&
       format('gate=filtered / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.event.pull_request.head.sha,
              github.event.pull_request.base.sha,
@@ -50,7 +56,9 @@ run-name: >-
 
 on:
   push:
-    branches: [dev, main]
+    # PR heads already passed the protected four-gate admission path before
+    # they reach dev. Keep the push safety net only for production promotion.
+    branches: [main]
   pull_request:
     # `labeled` is included so adding the `ci:integration` label to an
     # existing PR re-triggers CI and runs the gated `integration` job.
@@ -72,11 +80,26 @@ on:
         type: boolean
         default: false
 
-# Every PR event supersedes older runs for that PR. Non-PR runs are never
-# canceled by this workflow.
+# Authoritative PR events supersede older admission runs for that PR. Draft and
+# unrelated metadata events use a unique slot so they cannot evict a running or
+# pending head/base/selector validation when GitHub delivers events out of order.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.draft ||
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' && github.event.changes.base == null) ||
+       ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+        !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
+      format('filtered-{0}', github.run_id) || 'authoritative' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        !(github.event.pull_request.draft ||
+          github.event.action == 'converted_to_draft' ||
+          (github.event.action == 'edited' && github.event.changes.base == null) ||
+          ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
+           !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
 
 permissions:
   contents: read
@@ -100,22 +123,21 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
-    # Skip on push to dev: every squash-merge to dev carries the same
-    # content the PR CI just validated, so re-running burns minutes
-    # for no signal. Push to main still runs (release-branch safety
-    # net). All PRs still run.
-    if: >-
-      github.event_name != 'push' ||
-      github.ref != 'refs/heads/dev'
     steps:
-      - name: Classify draft event before checkout
+      - name: Classify filtered event before checkout
         id: event
         shell: bash
         env:
           FILTERED_EVENT: >-
             ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
-                 github.event.action == 'converted_to_draft') }}
+                 github.event.action == 'converted_to_draft' ||
+                 (github.event.action == 'edited' &&
+                  github.event.changes.base == null) ||
+                 ((github.event.action == 'labeled' ||
+                   github.event.action == 'unlabeled') &&
+                  !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'),
+                            github.event.label.name))) }}
         run: |
           set -euo pipefail
           if [[ "$FILTERED_EVENT" == "true" ]]; then
@@ -472,6 +494,7 @@ jobs:
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest "${test_paths[@]}" \
+            --durations=25 \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
@@ -688,13 +711,16 @@ jobs:
           set -euo pipefail
           terraform fmt -check -recursive deploy/terraform/nebius
           terraform -chdir=deploy/terraform/nebius/modules/execution-target init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/modules/execution-target validate
+          # The reusable module requires an aliased provider configuration;
+          # its mock-backed tests supply both provider instances explicitly.
           terraform -chdir=deploy/terraform/nebius/modules/execution-target test
           terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/stack validate
 
   # The fast Python checks run in parallel above; this aggregator owns
-  # their result validation and the final fast-tier coverage gate.
+  # their result validation and the final fast-tier coverage gate. Docs-only
+  # changes have no coverage inputs, so their final repository gate validates
+  # the skipped result directly instead of starting this no-op queue hop.
   fast-checks:
     name: fast-checks
     runs-on: ubuntu-latest
@@ -709,8 +735,8 @@ jobs:
     timeout-minutes: 10
     if: >-
       always() &&
-      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
-      needs.workflow-plan.outputs.gate_mode == 'full'
+      needs.workflow-plan.outputs.gate_mode == 'full' &&
+      needs.workflow-plan.outputs.docs_only != 'true'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -945,7 +971,7 @@ jobs:
     runs-on: >-
       ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
     needs: [workflow-plan, ci-route]
-    timeout-minutes: 30
+    timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration == 'true'
@@ -990,7 +1016,6 @@ jobs:
           manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
           uv run --no-sync python scripts/component_ownership.py test-paths --lane integration \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
-            --shard-strategy contiguous \
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
@@ -1128,7 +1153,7 @@ jobs:
             combined_pct=$(uv run --no-sync coverage report --format=total)
             combined_block="**Combined (fast + integration): ${combined_pct} %** (no gate yet — Phase 3 baseline)."
           elif [ "$INTEGRATION_RESULT" = "skipped" ]; then
-            combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label (or merge to dev) to run the integration tier._"
+            combined_block="_Combined coverage **not measured** this PR — apply the \`ci:integration\` label to run the integration tier._"
           else
             combined_block="_Combined coverage **not measured** — integration job result: \`${INTEGRATION_RESULT}\`._"
           fi
@@ -1156,7 +1181,6 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       always() &&
-      (github.event_name != 'push' || github.ref != 'refs/heads/dev') &&
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
@@ -1222,10 +1246,11 @@ jobs:
           require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
-          require_success fast-checks "$FAST_RESULT"
           if [[ "$DOCS_ONLY" == "true" ]]; then
+            require_selected false fast-checks "$FAST_RESULT"
             require_selected false go-checks "$GO_RESULT"
           else
+            require_success fast-checks "$FAST_RESULT"
             require_success go-checks "$GO_RESULT"
           fi
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"

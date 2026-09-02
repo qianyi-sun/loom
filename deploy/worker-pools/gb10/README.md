@@ -221,9 +221,11 @@ evidence; resource pressure alone is not a trust revocation.
 ## Maintenance
 
 Drain or prove a worker idle before pruning Loom-labeled containers, networks,
-images, or build cache. Normal restarts preserve the remote-worker trajectory
-and benchmark cache volumes. Rotate worker tokens with an overlap, confirm all
-active allocations use the new generation, then revoke the old prefix.
+images, or build cache. Normal fixed-worker restarts preserve the stable
+remote-worker trajectory and benchmark cache volumes. Elastic Slurm allocation
+teardown removes its job-ID-scoped cache volumes because later allocations
+cannot reuse them. Rotate worker tokens with an overlap, confirm all active
+allocations use the new generation, then revoke the old prefix.
 
 If a node or supervisor becomes unhealthy, preserve request, Slurm job, worker,
 and host evidence; fix the network, resource, Docker, storage, or credential

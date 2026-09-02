@@ -29,8 +29,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.schema import Worker, WorkerPoolAutoscalerPolicy
+from loom.db.schema import (
+    ServiceExecutionClass,
+    ServiceExecutionTarget,
+    Worker,
+    WorkerPoolAutoscalerPolicy,
+)
 from loom.models.task import TaskConfig
+from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 
 # Freshness window — 30s = 6 heartbeat intervals. Generous enough to
@@ -63,6 +69,15 @@ class ColdStartPool:
     pool_name: str
     backend: str
     cpu_arch: str
+
+
+@dataclass(frozen=True)
+class ServiceExecutionBackendPool:
+    """One fresh target that can accept explicitly selected service execution."""
+
+    pool_name: str
+    backend: str
+    execution_class_id: str
 
 
 def runtime_environment() -> str:
@@ -141,6 +156,68 @@ async def get_cold_start_pools(
         for policy in policies
         if _policy_is_cold_start_healthy(policy, now=observed_now)
     )
+
+
+async def get_service_execution_backend_pools(
+    session: AsyncSession,
+    *,
+    environment: str | None = None,
+    now: datetime | None = None,
+) -> tuple[ServiceExecutionBackendPool, ...]:
+    """Return fresh Nebius targets without claiming that a node is already live.
+
+    The user-facing ``nebius`` backend maps only to the durable
+    ``nebius-cpu`` service-execution pool. A healthy target is cold-start
+    authority; quota and provisioning admission still run transactionally
+    before the actuator creates a Job.
+    """
+
+    scoped_environment = environment or runtime_environment()
+    observed_now = now or datetime.now(UTC)
+    targets = (
+        (
+            await session.execute(
+                select(ServiceExecutionTarget)
+                .join(
+                    ServiceExecutionClass,
+                    ServiceExecutionClass.id == ServiceExecutionTarget.execution_class_id,
+                )
+                .where(
+                    ServiceExecutionTarget.environment == scoped_environment,
+                    ServiceExecutionTarget.provider == NEBIUS_BACKEND,
+                    ServiceExecutionTarget.logical_pool_id == NEBIUS_LOGICAL_POOL_ID,
+                    ServiceExecutionTarget.desired_state == "active",
+                    ServiceExecutionTarget.observed_state == "ready",
+                    ServiceExecutionTarget.health_status == "healthy",
+                    ServiceExecutionClass.enabled.is_(True),
+                )
+                .order_by(ServiceExecutionTarget.region, ServiceExecutionTarget.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pools: dict[str, ServiceExecutionBackendPool] = {}
+    for target in targets:
+        observed_at = target.health_observed_at
+        if observed_at is None:
+            continue
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        stale_after = target.spec_json.get("health_stale_after_seconds")
+        if not isinstance(stale_after, int) or stale_after <= 0:
+            continue
+        if observed_at + timedelta(seconds=stale_after) <= observed_now:
+            continue
+        pools.setdefault(
+            target.logical_pool_id,
+            ServiceExecutionBackendPool(
+                pool_name=target.logical_pool_id,
+                backend=NEBIUS_BACKEND,
+                execution_class_id=target.execution_class_id,
+            ),
+        )
+    return tuple(pools.values())
 
 
 def compatible_cold_start_pool_names(

@@ -32,6 +32,7 @@ from .protected_apply_journal import (
     ComponentObservation,
     ComponentState,
     ComponentTerminal,
+    ProtectedApplyComponent,
     ProtectedApplyJournal,
 )
 from .protected_environment_state_component import (
@@ -82,6 +83,9 @@ _EXTERNAL_SUPERVISOR_CREDENTIAL_ORDER = (
     "TRT-EAI-OLDLAB-1",
     "gx10-01c7",
 )
+_EXTERNAL_SUPERVISOR_RECONCILIATION_IMPLEMENTATION_DIGEST = hashlib.sha256(
+    b"loom-protected-external-supervisor-reconciliation-v1"
+).hexdigest()
 
 
 class ProtectedApplyCommandRunner(Protocol):
@@ -355,8 +359,10 @@ class MigrationEpochProtectedApplyExecutor:
             execution_host=self.external_supervisor_execution_host,
             transports=self.external_supervisor_transports,
         )
-        for supervisor_component in supervisor_components:
-            supervisor_component.transport.reconcile_compensations()
+        supervisor_reconciliation = _external_supervisor_reconciliation_component(
+            plan,
+            supervisor_components,
+        )
         epoch = KubernetesProtectedEpochComponent(
             runner=self.runner,
             environment=environment,
@@ -415,6 +421,7 @@ class MigrationEpochProtectedApplyExecutor:
         )
         components = (
             (
+                supervisor_reconciliation,
                 migration,
                 epoch,
                 manifests,
@@ -428,6 +435,7 @@ class MigrationEpochProtectedApplyExecutor:
             )
             if requires_legacy_epoch_bootstrap(plan)
             else (
+                supervisor_reconciliation,
                 epoch,
                 migration,
                 manifests,
@@ -650,6 +658,61 @@ def _terminal_evidence_digest(terminals: Mapping[str, ComponentTerminal]) -> str
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _external_supervisor_reconciliation_component(
+    plan: FinalGatePlan,
+    supervisors: Sequence[ProtectedExternalSupervisorComponent],
+) -> ProtectedApplyComponent:
+    execution_hosts = tuple(
+        supervisor.execution_host or "local-controller" for supervisor in supervisors
+    )
+    if not supervisors or len(set(execution_hosts)) != len(execution_hosts):
+        raise ValueError("protected external supervisor reconciliation coverage drifted")
+    input_fingerprint = hashlib.sha256(
+        json.dumps(
+            {"execution_hosts": execution_hosts},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    evidence_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "execution_hosts": execution_hosts,
+                "reconciled": True,
+                "starting_epoch": plan.starting_mutation_epoch,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    def classify(bound_plan: FinalGatePlan) -> ComponentObservation:
+        return ComponentObservation(
+            state=(
+                ComponentState.EXACT
+                if bound_plan.plan_digest == plan.plan_digest
+                else ComponentState.DRIFTED
+            ),
+            evidence_digest=evidence_digest,
+            observed_epoch=plan.starting_mutation_epoch,
+        )
+
+    def reconcile(bound_plan: FinalGatePlan) -> None:
+        if bound_plan.plan_digest != plan.plan_digest:
+            raise ValueError("protected external supervisor reconciliation plan drifted")
+        for supervisor in supervisors:
+            supervisor.transport.reconcile_compensations()
+
+    return ProtectedApplyComponent(
+        component_id="external-supervisor-reconciliation",
+        implementation_digest=_EXTERNAL_SUPERVISOR_RECONCILIATION_IMPLEMENTATION_DIGEST,
+        input_fingerprint=input_fingerprint,
+        classify=classify,
+        apply=reconcile,
+        reconcile_before_apply=True,
+    )
 
 
 def _external_supervisor_components(

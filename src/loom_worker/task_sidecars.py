@@ -23,7 +23,7 @@ import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
 from loom.driver.build_containment import forbid_build_when_contained
-from loom.driver.task_image import _registry_tag_for
+from loom.driver.task_image import TaskImageBuildTimeoutError, _registry_tag_for
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.resource_usage import ResourceLimits
 from loom.models.task import TaskConfig, TaskSidecarConfig
@@ -127,6 +127,7 @@ class DockerTaskSidecarRuntime:
         cpu_arch: str | None = None,
         registry_repo: str | None = None,
         registry_images: Mapping[str, str] | None = None,
+        materialized_image_pull_timeout_sec: float = 1800.0,
         pull_only: bool = False,
         attempt_count: int | None = None,
         worker_id: UUID | None = None,
@@ -150,6 +151,7 @@ class DockerTaskSidecarRuntime:
         self.cpu_arch = cpu_arch
         self.registry_repo = registry_repo
         self.registry_images = dict(registry_images) if registry_images is not None else None
+        self.materialized_image_pull_timeout_sec = materialized_image_pull_timeout_sec
         self.pull_only = pull_only
         self.attempt_count = attempt_count
         self.worker_id = worker_id
@@ -310,7 +312,16 @@ class DockerTaskSidecarRuntime:
             assert client is not None
             try:
                 async with self._setup_slot():
-                    await asyncio.to_thread(client.images.pull, registry_ref)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(client.images.pull, registry_ref),
+                        timeout=self.materialized_image_pull_timeout_sec,
+                    )
+            except TimeoutError as exc:
+                raise TaskImageBuildTimeoutError(
+                    f"pulling materialized sidecar image {registry_ref!r} exceeded "
+                    f"{self.materialized_image_pull_timeout_sec:g}s; execution is fenced "
+                    "to the recorded registry digest"
+                ) from exc
             except (ImageNotFound, NotFound, APIError) as exc:
                 raise TaskImageBuildError(
                     f"materialized sidecar image {registry_ref!r} is unavailable; "

@@ -84,6 +84,58 @@ labelled `loom.task-image-storage-probe=true`. It is shared across allocation
 project names, contains no task data, is never pruned by Loom, and avoids
 mounting the daemon's Docker-root directory into the container.
 
+## One-time trusted GB10 controller bootstrap
+
+Before the ordered convergence below, the fixed controller bootstrap must
+migrate the GB10 forced SSH authority and transactionally install the exact
+merged controller assets. Do not execute a bootstrap or installer from the
+candidate checkout. Establish the initial trust anchor through a root-owned
+out-of-band transport that publishes the reviewed merged bytes as
+`/usr/local/libexec/loom-gb10-controller-bootstrap`, owned by `root:root` with
+mode `0755`. Publish the distinct controller and legacy public-key inputs into
+a root-owned directory with mode `0700`, with each key file owned by `root:root`
+and mode `0600`; never stage those inputs in the operator account's home for the
+activation call.
+
+Record the merged 40-hex commit and the SHA-256 of the reviewed bootstrap bytes
+before transport. Run the activation itself locally on `gx10-01c7`; do not run
+it on `trt-gb10-2`, which is the dynamically allocated builder node. The fixed
+bootstrap clones only the approved origin and exact commit into its root-owned
+trust root, rejects checkout metadata drift before Git or checkout code can
+run, serializes the full activation, and delegates live mutation to the
+transactional installer.
+
+```bash
+MERGED_SHA=REVIEWED_MERGED_DEV_40_HEX_SHA
+BOOTSTRAP_SHA256=REVIEWED_BOOTSTRAP_64_HEX_SHA256
+BOOTSTRAP=/usr/local/libexec/loom-gb10-controller-bootstrap
+KEY_DIRECTORY=/root/loom-gb10-controller-bootstrap
+CONTROLLER_PUBLIC_KEY="$KEY_DIRECTORY/controller.pub"
+LEGACY_PUBLIC_KEY="$KEY_DIRECTORY/legacy.pub"
+
+[[ "$MERGED_SHA" =~ ^[0-9a-f]{40}$ ]]
+[[ "$BOOTSTRAP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+test "$(sudo stat -c '%U:%G:%a:%F' "$BOOTSTRAP")" = \
+  "root:root:755:regular file"
+test "$(sudo stat -c '%U:%G:%a:%F' "$KEY_DIRECTORY")" = \
+  "root:root:700:directory"
+test "$(sudo stat -c '%U:%G:%a:%F' "$CONTROLLER_PUBLIC_KEY")" = \
+  "root:root:600:regular file"
+test "$(sudo stat -c '%U:%G:%a:%F' "$LEGACY_PUBLIC_KEY")" = \
+  "root:root:600:regular file"
+printf '%s  %s\n' "$BOOTSTRAP_SHA256" "$BOOTSTRAP" \
+  | sudo /usr/bin/sha256sum --check -
+sudo /usr/bin/python3 -I /usr/local/libexec/loom-gb10-controller-bootstrap \
+  --source-sha "$MERGED_SHA" \
+  --controller-public-key "$CONTROLLER_PUBLIC_KEY" \
+  --legacy-deploy-public-key "$LEGACY_PUBLIC_KEY"
+```
+
+Stop on any nonzero result. Do not repair individual files, rewrite
+`authorized_keys`, or continue to the protected rollout: the installer and
+broker either publish the complete reviewed state or compensate their changes,
+and a rerun of the same exact command is the only accepted recovery.
+
 ## Ordered Phase 1 convergence
 
 Perform the following sequence in order. Each numbered acceptance command is a

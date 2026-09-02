@@ -59,9 +59,15 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
+    RuntimeTaskInputV1,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
+from loom.service_execution_materialization import (
+    ServiceExecutionInputFileV1,
+    ServiceExecutionInputManifestV1,
+    ServiceExecutionRuntimeProfileV1,
+)
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
 from loom_control_plane.execution_capacity import (
@@ -86,6 +92,8 @@ from loom_control_plane.service_execution import (
     execution_lease_projection,
     persist_execution_catalog,
     record_execution_event,
+    refresh_execution_target_health,
+    request_trial_execution_cancellation,
     reserve_trial_execution,
     set_execution_target_health,
     verify_trial_execution_fence,
@@ -98,6 +106,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionPeerV1,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
+    resolve_service_execution_input,
 )
 from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
 from loom_execution_actuator.contracts import (
@@ -614,6 +623,57 @@ async def _reserve(
     )
 
 
+async def test_actuator_refreshes_target_health_without_reenabling_operator_state(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            _trial_id, target = await _seed_ready_trial(session, now=now)
+            await set_execution_target_health(
+                session,
+                target_id=target.target_id,
+                desired_state="draining",
+                observed_state="ready",
+                health_status="healthy",
+                observed_at=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        actuator = ExecutionActuator(
+            sessions=sessions,
+            kubernetes=_FakeKubernetesJobApi(),
+            target=ExecutionTargetRuntime(
+                target_id=target.target_id,
+                namespace=target.namespace_name,
+            ),
+            controller_id="target-health-refresh-test",
+        )
+        refreshed_at = now + timedelta(seconds=2)
+        assert await actuator.reconcile_full_once(now=refreshed_at) == 0
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionTarget, target.target_id)
+            assert persisted is not None
+            assert persisted.desired_state == "draining"
+            assert persisted.observed_state == "ready"
+            assert persisted.health_status == "healthy"
+            assert persisted.health_observed_at == refreshed_at
+            with pytest.raises(
+                ServiceExecutionConflict,
+                match="health observation regressed",
+            ):
+                await refresh_execution_target_health(
+                    session,
+                    target_id=target.target_id,
+                    observed_at=refreshed_at - timedelta(seconds=1),
+                )
+    finally:
+        await engine.dispose()
+
+
 async def test_reservation_persists_trial_lease_command_and_history_atomically(
     postgres_url: str,
 ) -> None:
@@ -728,8 +788,14 @@ async def test_reservation_persists_trial_lease_command_and_history_atomically(
         await engine.dispose()
 
 
-async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
+@pytest.mark.parametrize(
+    ("batch_backend", "expects_lease"),
+    [("nebius", True), ("docker", False)],
+)
+async def test_normal_scheduler_requires_explicit_nebius_backend(
     postgres_url: str,
+    batch_backend: str,
+    expects_lease: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -740,6 +806,21 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
             trial = await session.get(Trial, trial_id)
             assert trial is not None
             session.add(TeamQuota(team_id=trial.team_id))
+            batch_id = uuid4()
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=trial.team_id,
+                    name=f"service scheduler {batch_backend}",
+                    task_filter={},
+                    trial_config={},
+                    backend=batch_backend,
+                    state="submitted",
+                    created_by_token_prefix="test",
+                    expected_trial_count=1,
+                )
+            )
+            trial.batch_id = batch_id
             task = await session.get(Task, trial.task_id)
             assert task is not None
             plan = _runtime_contract(now=now)
@@ -774,7 +855,7 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
                 "cpu_arch": "x86_64",
                 "gpu_vendor": "none",
                 "network_policies": ["gateway-only"],
-                "backend": "docker",
+                "backend": "nebius",
                 "worker_pool": "nebius-cpu",
             }
             await session.execute(
@@ -793,6 +874,9 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
                 now=now,
             )
             await session.commit()
+            if not expects_lease:
+                assert lease is None
+                return
             assert lease is not None
             assert lease.trial_id == trial_id
             assert lease.target_id == target.target_id
@@ -824,6 +908,126 @@ async def test_normal_scheduler_reserves_converted_task_without_budget_policy(
                 )
                 == 0
             )
+    finally:
+        await engine.dispose()
+
+
+async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    plan = _runtime_contract(now=now)
+    runtime_profile = ServiceExecutionRuntimeProfileV1(
+        candidate_sha=plan.candidate_sha,
+        execution_class_id=plan.execution_class_id,
+        task_image_ref=plan.task_image_ref,
+        runtime_image_ref=plan.runtime_image_ref,
+        runtime_binary_sha256=plan.runtime_binary_sha256,
+        image_admission=plan.image_admission,
+    )
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            session.add(TeamQuota(team_id=trial.team_id))
+            batch_id = uuid4()
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=trial.team_id,
+                    name="automatic service scheduler",
+                    task_filter={},
+                    trial_config={},
+                    backend="nebius",
+                    service_execution_runtime_profile=runtime_profile.model_dump(mode="json"),
+                    state="submitted",
+                    created_by_token_prefix="test",
+                    expected_trial_count=1,
+                )
+            )
+            trial.batch_id = batch_id
+            trial.config = {
+                "schema_version": "1",
+                "agent_name": "direct-completion",
+                "agent_model": {
+                    "provider": "openai",
+                    "name": "gpt-5",
+                    "source": "api",
+                },
+            }
+            trial.requires_caps = {
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "gpu_vendor": "none",
+                "network_policies": ["gateway-only"],
+                "backend": "nebius",
+                "worker_pool": "nebius-cpu",
+            }
+            task = await session.get(Task, trial.task_id)
+            assert task is not None
+            task.checksum = plan.task_revision_sha256.removeprefix("sha256:")
+            task.config = {
+                "schema_version": "1",
+                "task": {"id": task.id, "name": "Automatic service execution"},
+                "environment": {
+                    "os": "linux",
+                    "cpu_arch": "x86_64",
+                    "gpu_vendor": "none",
+                    "docker_image": plan.task_image_ref,
+                    "cpus": 1,
+                    "memory_mb": 1024,
+                    "storage_mb": 2048,
+                    "baseline_network_policy": {"kind": "gateway-only"},
+                    "network_policies_supported": ["gateway-only"],
+                },
+                "agent": {"name": "direct-completion"},
+                "verifier": {
+                    "name": "script",
+                    "args": {"script_path": "verifier/check.sh"},
+                },
+                "steps": [
+                    {
+                        "name": "main",
+                        "instruction_file": "instruction.md",
+                        "artifacts": ["answer.txt"],
+                    }
+                ],
+            }
+            task.source_provenance = {
+                "service_execution_input": {
+                    "schema_version": "loom.service-execution-input.v1",
+                    "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                    "manifest_sha256": "sha256:" + "d" * 64,
+                    "file_count": 3,
+                    "total_bytes": 4096,
+                }
+            }
+            await session.execute(
+                delete(ExecutionBudgetPolicy).where(
+                    ExecutionBudgetPolicy.scope_key.in_((target.logical_pool_id, target.target_id))
+                )
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session,
+                environment="staging",
+                pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+                now=now,
+            )
+            await session.commit()
+
+        assert lease is not None
+        persisted_plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+        assert persisted_plan.task_input is not None
+        assert persisted_plan.task_input.file_count == 3
+        assert persisted_plan.main.environment["LOOM_TASK_MODEL"] == "openai/gpt-5"
+        assert persisted_plan.main.argv[-1] == "direct-completion"
     finally:
         await engine.dispose()
 
@@ -2003,6 +2207,49 @@ async def test_revocation_fences_old_generation_and_database_rejects_generation_
         await engine.dispose()
 
 
+async def test_trial_cancellation_persists_service_execution_revocation(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+
+        async with sessions() as session:
+            command = await request_trial_execution_cancellation(
+                session,
+                trial_id=trial_id,
+                now=now + timedelta(seconds=1),
+            )
+            await session.commit()
+            assert command is not None
+            assert command.command_type == "cancel"
+            assert command.generation == 2
+
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            assert persisted.desired_state == "cancel"
+            assert persisted.generation == 2
+            assert persisted.revoked_at == now + timedelta(seconds=1)
+            assert persisted.cleanup_state == "pending"
+            assert (
+                await request_trial_execution_cancellation(
+                    session,
+                    trial_id=trial_id,
+                    now=now + timedelta(seconds=2),
+                )
+                is None
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 async def test_retry_creates_a_new_attempt_and_finalization_is_idempotent(
     postgres_url: str,
 ) -> None:
@@ -2257,8 +2504,13 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
         await engine.dispose()
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    [NormalizedJobState.SUCCEEDED, NormalizedJobState.FAILED],
+)
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,
+    terminal_state: NormalizedJobState,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -2422,7 +2674,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             resource_generation=lease.resource_generation,
             target_id=target.target_id,
             execution_unit_key=str(lease.execution_unit_key),
-            normalized_state=NormalizedJobState.SUCCEEDED,
+            normalized_state=terminal_state,
             job_uid="job-uid-1",
             pod_uid="pod-uid-1",
             pod_ip=pod_ip,
@@ -2492,6 +2744,103 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                     peer_ip="10.24.7.20",
                     identity=identity,
                     purpose="output",
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_service_execution_input_is_resolved_from_persisted_task_binding(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    store = FakeObjectStore()
+    body = b"answer the question\n"
+    manifest = ServiceExecutionInputManifestV1(
+        task_revision_sha256="sha256:" + "2" * 64,
+        files=(
+            ServiceExecutionInputFileV1(
+                relative_path="instruction.md",
+                size_bytes=len(body),
+                sha256=digest_bytes(body),
+                mode="0644",
+            ),
+        ),
+    )
+    manifest_body = manifest.canonical_bytes()
+    manifest_digest = digest_bytes(manifest_body)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            task = await session.get(Task, trial.task_id)
+            assert task is not None
+            task.source = "s3://artifacts/task-bundles/example/"
+            task.source_provenance = {
+                "service_execution_input": {
+                    "schema_version": "loom.service-execution-input.v1",
+                    "manifest_uri": "s3://artifacts/task-inputs/example.json",
+                    "manifest_sha256": manifest_digest,
+                    "file_count": 1,
+                    "total_bytes": len(body),
+                }
+            }
+            plan = _runtime_contract(now=now).model_copy(
+                update={
+                    "task_input": RuntimeTaskInputV1(
+                        manifest_sha256=manifest_digest,
+                        file_count=1,
+                        total_bytes=len(body),
+                    )
+                }
+            )
+            lease = await _reserve(
+                session,
+                trial_id=trial_id,
+                target=target,
+                now=now,
+                runtime_contract=plan,
+            )
+            await session.commit()
+
+        await store.put_object(
+            bucket="artifacts",
+            key="task-inputs/example.json",
+            body=manifest_body,
+        )
+        await store.put_object(
+            bucket="artifacts",
+            key="task-bundles/example/instruction.md",
+            body=body,
+        )
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            resolved = await resolve_service_execution_input(
+                session,
+                lease=persisted,
+                store=store,
+                artifacts_bucket="artifacts",
+            )
+            assert resolved.manifest == manifest
+            assert resolved.prefix == "task-bundles/example/"
+
+        await store.put_object(
+            bucket="artifacts",
+            key="task-inputs/example.json",
+            body=manifest_body + b"\n",
+        )
+        async with sessions() as session:
+            persisted = await session.get(ServiceExecutionLease, lease.id)
+            assert persisted is not None
+            with pytest.raises(ServiceExecutionBrokerError, match="task_input_manifest_drift"):
+                await resolve_service_execution_input(
+                    session,
+                    lease=persisted,
+                    store=store,
+                    artifacts_bucket="artifacts",
                 )
     finally:
         await engine.dispose()
@@ -2773,11 +3122,9 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             await session.commit()
 
         assert await restarted.run_commands_once(now=now + timedelta(seconds=2)) == 1
-        assert kubernetes.delete_count == 0
-        assert await restarted.run_commands_once(now=now + timedelta(minutes=5, seconds=2)) == 1
         assert kubernetes.delete_count == 1
         assert kubernetes.jobs == {}
-        assert await restarted.reconcile_full_once(now=now + timedelta(minutes=5, seconds=3)) == 1
+        assert await restarted.reconcile_full_once(now=now + timedelta(seconds=3)) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
@@ -2786,8 +3133,8 @@ async def test_actuator_create_cancel_restart_and_missing_reconcile_converge(
             assert persisted.observed_state == "deleted"
             assert persisted.cleanup_state == "complete"
             assert persisted.output_commit_state == "unavailable"
-            assert persisted.output_unavailable_reason == "cleanup_deadline_elapsed"
-            assert persisted.deleted_at == now + timedelta(minutes=5, seconds=3)
+            assert persisted.output_unavailable_reason == "operator_cancelled"
+            assert persisted.deleted_at == now + timedelta(seconds=3)
             capacity_authorization = (
                 await session.execute(
                     select(ExecutionProvisioningAuthorization).where(
@@ -2913,17 +3260,10 @@ async def test_actuator_records_unavailable_before_accepting_an_already_absent_j
 
         assert await actuator.run_commands_once(now=now + timedelta(seconds=1)) == 1
         async with sessions() as session:
-            pending = await session.get(ServiceExecutionLease, lease.id)
-            assert pending is not None
-            assert pending.observed_state != "deleted"
-            assert pending.output_commit_state == "not_started"
-
-        assert await actuator.run_commands_once(now=now + timedelta(minutes=5, seconds=1)) == 1
-        async with sessions() as session:
             closed = await session.get(ServiceExecutionLease, lease.id)
             assert closed is not None
             assert closed.observed_state == "deleted"
             assert closed.output_commit_state == "unavailable"
-            assert closed.output_unavailable_reason == "cleanup_deadline_elapsed"
+            assert closed.output_unavailable_reason == "operator_cancelled"
     finally:
         await engine.dispose()

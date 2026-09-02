@@ -135,6 +135,11 @@ Elastic Slurm workers are allocation-bound processes rather than fixed
 services. The Control Plane's elastic controller and worker-pool autoscaler
 submit from the checked-in environment desired state, register the Slurm job,
 and set a bounded idle exit so capacity returns after the queue drains.
+Their Compose project includes the Slurm job ID, so normal allocation teardown
+removes the project-scoped trajectory and benchmark cache volumes after the
+worker and its sandboxes stop. Those volumes cannot be reused by a later job.
+The shared task-image-builder storage-probe volume is never selected by that
+cleanup.
 
 For non-exclusive allocations, the policy must provide positive per-container
 CPU, memory, and PID limits plus an allocation-owned cgroup parent. The worker

@@ -740,6 +740,17 @@ async def _register_worker_with_retry(
         "max_concurrent": max(1, settings.max_concurrent),
         "pool_name": settings.pool_name,
     }
+    slurm_job_id = str(getattr(settings, "slurm_job_id", "") or "").strip()
+    if slurm_job_id:
+        slurm_provenance = {
+            "sandbox_identity": str(getattr(settings, "sandbox_identity", "") or "").strip(),
+            "candidate_sha": str(getattr(settings, "candidate_sha", "") or "").strip(),
+            "slurm_job_id": slurm_job_id,
+            "compose_project": str(getattr(settings, "compose_project", "") or "").strip(),
+        }
+        if not all(slurm_provenance.values()):
+            raise ValueError("Slurm registration provenance fields must be supplied together")
+        register_kwargs.update(slurm_provenance)
     if pipeline_enabled:
         register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
         registration = (
@@ -1252,6 +1263,16 @@ async def _spawn_trial(
                     source_provenance=provenance,
                 )
             validate_task_dir_compatibility(task_dir)
+            # Optional shared-cache pulls may fall back to a local build after
+            # a short timeout. A materialization grant is different: its
+            # immutable digest is the only executable image, so give that base
+            # image the existing long pull window instead of failing closed
+            # after the short cache-probe window.
+            registry_pull_timeout_sec = (
+                getattr(settings, "trial_cache_base_image_pull_timeout_sec", 1800.0)
+                if task_image_materialization is not None
+                else getattr(settings, "trial_cache_registry_pull_timeout_sec", 15.0)
+            )
             # #275: serialize concurrent task-image builds so a burst of
             # trials cannot fan out unbounded apt-get / dpkg / build
             # containers on a shared host Docker daemon (e.g. OLDLAB).
@@ -1272,9 +1293,7 @@ async def _spawn_trial(
                     if task_image_materialization is not None
                     else None
                 ),
-                registry_pull_timeout_sec=getattr(
-                    settings, "trial_cache_registry_pull_timeout_sec", 15.0
-                ),
+                registry_pull_timeout_sec=registry_pull_timeout_sec,
                 cpu_arch=_host_cpu_arch(),
                 build_if_missing=False,
             )
@@ -1438,6 +1457,9 @@ async def _spawn_trial(
                     task_image_materialization.registry_images
                     if task_image_materialization is not None
                     else None
+                ),
+                materialized_image_pull_timeout_sec=getattr(
+                    settings, "trial_cache_base_image_pull_timeout_sec", 1800.0
                 ),
                 pull_only=True,
                 attempt_count=attempt_count,
@@ -1805,6 +1827,11 @@ def _classify_setup_failure(detail: str) -> FailureReason:
     if "TASK_COMPAT_" in detail:
         return FailureReason.TASK_COMPATIBILITY
     if "building Docker image" in detail and " from " in detail and " exceeded " in detail:
+        return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+    if (
+        "pulling materialized task image" in detail
+        or "pulling materialized sidecar image" in detail
+    ) and " exceeded " in detail:
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
     lowered = detail.lower()
     if "failed to build layered image" in lowered and (

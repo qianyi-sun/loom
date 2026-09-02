@@ -86,6 +86,15 @@ bound to the request ID, candidate SHA/tree, epoch, guard PID, database backend
 PID, entry-anchored absolute deadline, CronJob UID, and suspension resource
 version.
 
+The guard also assigns its PostgreSQL session a bounded request/candidate/tree/
+generation-derived `application_name`. After protected apply advances the
+epoch, the final smoke gate may use that identity for one request-bound
+capacity-only refresh while the CronJob remains suspended. The refresh must
+prove the exact backend PID still owns the advisory lock and that the epoch row
+is `rollout_apply` for the same request and immutable final-plan digest before
+and after publication. It never obtains independent mutation authority and
+cannot invoke lifecycle GC.
+
 The broker rechecks that evidence and the epoch before it publishes the
 request-bound detached backup job. The backup worker independently rechecks
 the same complete binding before backup work, then hands ownership to the
