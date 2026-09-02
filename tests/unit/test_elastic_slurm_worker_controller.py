@@ -465,8 +465,8 @@ test -d "$HOME"
 test -d "$DOCKER_CONFIG"
 test -d "$XDG_CONFIG_HOME"
 test -d "$XDG_RUNTIME_DIR"
-printf '%s|%s|%s|%s\n' \
-  "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" \
+printf '%s|%s|%s|%s|%s\n' \
+  "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$*" \
   >> "$FAKE_DOCKER_LOG"
 """,
         encoding="utf-8",
@@ -513,13 +513,26 @@ printf '%s|%s|%s|%s\n' \
     assert not export_arg.startswith("--export=ALL,")
     assert result.returncode == 0, result.stderr
     runtime_lines = docker_log.read_text(encoding="utf-8").splitlines()
-    assert len(runtime_lines) == 2
-    home, docker_config, xdg_config, xdg_runtime = runtime_lines[0].split("|")
+    assert len(runtime_lines) == 6
+    home, docker_config, xdg_config, xdg_runtime, _ = runtime_lines[0].split("|", 4)
     job_runtime = Path(home).parent
     assert job_runtime.parent == runtime_root
     assert docker_config == str(job_runtime / "docker")
     assert xdg_config == str(job_runtime / "xdg-config")
     assert xdg_runtime == str(job_runtime / "xdg-runtime")
+    docker_commands = [line.split("|", 4)[4] for line in runtime_lines]
+    project = "loom-staging-aaaaaaaaaaaa-4242"
+    assert docker_commands[0].startswith("compose --project-name ")
+    assert docker_commands[0].endswith("up --build")
+    assert docker_commands[1].startswith("compose --project-name ")
+    assert docker_commands[1].endswith("down --remove-orphans")
+    assert docker_commands[2:] == [
+        f"volume inspect {project}_remote_worker_trajectories",
+        f"volume rm {project}_remote_worker_trajectories",
+        f"volume inspect {project}_remote_worker_benchmarks",
+        f"volume rm {project}_remote_worker_benchmarks",
+    ]
+    assert all("loom-task-image-builder-storage-probe" not in line for line in runtime_lines)
     assert not job_runtime.exists()
 
 

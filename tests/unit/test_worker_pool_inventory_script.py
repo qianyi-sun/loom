@@ -162,15 +162,19 @@ def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
         encoding="utf-8",
     )
 
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("LOOM_IMAGE_TAG=test\n", encoding="utf-8")
     result = subprocess.run(
         [
             "bash",
             str(_SLURM_SCRIPT),
             str(plan),
             "--env-file",
-            "/secure/.env.remote-worker",
+            str(env_file),
             "--repo-dir",
-            "/opt/loom",
+            str(repo),
             "--sandbox-identity",
             "staging",
             "--candidate-sha",
@@ -191,7 +195,76 @@ def test_worker_pool_slurm_submit_dry_run_cleans_up_compose_on_exit(
     assert "trap cleanup EXIT" in result.stdout
     assert "trap 'cleanup 130' INT" in result.stdout
     assert "trap 'cleanup 143' TERM" in result.stdout
-    assert "docker compose \"${compose_args[@]}\" up --build &" in result.stdout
+    assert 'docker compose "${compose_args[@]}" up --build &' in result.stdout
     assert "compose_pid=$!" in result.stdout
-    assert "wait \"$compose_pid\"" in result.stdout
-    assert "docker compose \"${compose_args[@]}\" down --remove-orphans" in result.stdout
+    assert 'wait "$compose_pid"' in result.stdout
+    assert 'docker compose "${compose_args[@]}" down --remove-orphans' in result.stdout
+
+    emitted_script = result.stdout.split("<<'SLURM'\n", 1)[1].rsplit("\nSLURM", 1)[0]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "${FAKE_DOCKER_FAILURE:-}" = "volume-rm" ] \
+    && [ "${1:-}" = "volume" ] && [ "${2:-}" = "rm" ]; then
+  exit 17
+fi
+if [ "${FAKE_DOCKER_FAILURE:-}" = "compose-down" ] \
+    && [ "${1:-}" = "compose" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "down" ]; then
+      exit 17
+    fi
+  done
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = {
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "SLURM_JOB_ID": "4242",
+        "LOOM_WORKER_SANDBOX_IDENTITY": "staging",
+        "LOOM_WORKER_CANDIDATE_SHA": "a" * 40,
+        "FAKE_DOCKER_LOG": str(docker_log),
+    }
+
+    emitted = subprocess.run(
+        ["/bin/bash"],
+        input=emitted_script,
+        cwd=repo,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert emitted.returncode == 0, emitted.stderr
+    project = "loom-staging-aaaaaaaaaaaa-4242"
+    assert docker_log.read_text(encoding="utf-8").splitlines()[-4:] == [
+        f"volume inspect {project}_remote_worker_trajectories",
+        f"volume rm {project}_remote_worker_trajectories",
+        f"volume inspect {project}_remote_worker_benchmarks",
+        f"volume rm {project}_remote_worker_benchmarks",
+    ]
+
+    for failure in ("compose-down", "volume-rm"):
+        failed_environment = {
+            **environment,
+            "FAKE_DOCKER_FAILURE": failure,
+            "SLURM_JOB_ID": f"4243-{failure}",
+        }
+        failed = subprocess.run(
+            ["/bin/bash"],
+            input=emitted_script,
+            cwd=repo,
+            env=failed_environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert failed.returncode == 17, failure
