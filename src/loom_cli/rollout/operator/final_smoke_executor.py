@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from loom.models.types import ModelSpec
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority,
     AdminSmokeContract,
@@ -217,6 +218,13 @@ class FinalSmokeExecutor:
                 raise FinalSmokeError("smoke-terminal-timeout")
             if contract.validate_terminal_batch(terminal) is not None:
                 raise FinalSmokeError("smoke-terminal-invalid")
+            if self.authority.agent_model is not None:
+                self._verify_model_backed_trials(
+                    evidence,
+                    token,
+                    batch_id=batch_id,
+                    terminal=terminal,
+                )
         except (FinalSmokeError, OSError, RuntimeError, ValueError) as exc:
             code = exc.code if isinstance(exc, FinalSmokeError) else "smoke-transport-failed"
             return self._result(plan, blocker=code, evidence=evidence, mutated=mutated)
@@ -248,6 +256,134 @@ class FinalSmokeExecutor:
         ):
             return None
         return token
+
+    def _verify_model_backed_trials(
+        self,
+        evidence: dict[str, str],
+        token: str,
+        *,
+        batch_id: str,
+        terminal: Mapping[str, object],
+    ) -> None:
+        expected_count = _positive_int(terminal.get("expected_trial_count"))
+        if expected_count is None or expected_count > 200:
+            raise FinalSmokeError("smoke-trial-list-invalid")
+        query = urllib.parse.urlencode({"batch_id": batch_id, "limit": "200"})
+        listing = self._expect_json(
+            evidence,
+            "trials",
+            token,
+            "GET",
+            f"/api/v1/trials?{query}",
+        )
+        items = listing.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) != expected_count
+            or listing.get("next_cursor") is not None
+        ):
+            raise FinalSmokeError("smoke-trial-list-invalid")
+
+        trial_ids: list[str] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise FinalSmokeError("smoke-trial-list-invalid")
+            trial_id = item.get("id")
+            if (
+                not isinstance(trial_id, str)
+                or not trial_id
+                or trial_id in trial_ids
+                or item.get("batch_id") != batch_id
+                or item.get("state") != "succeeded"
+            ):
+                raise FinalSmokeError("smoke-trial-list-invalid")
+            trial_ids.append(trial_id)
+
+        for index, trial_id in enumerate(trial_ids, start=1):
+            quoted = urllib.parse.quote(trial_id, safe="")
+            detail = self._expect_json(
+                evidence,
+                f"trial-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}",
+            )
+            if not self._valid_model_trial_detail(
+                detail,
+                batch_id=batch_id,
+                trial_id=trial_id,
+            ):
+                raise FinalSmokeError("smoke-trial-llm-evidence-invalid")
+
+            trajectory = self._expect(
+                evidence,
+                f"trajectory-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}/trajectory/download",
+                accepted=frozenset({200}),
+            )
+            if not self._valid_trajectory(trajectory):
+                raise FinalSmokeError("smoke-trajectory-evidence-invalid")
+
+            atif = self._expect(
+                evidence,
+                f"atif-{index}",
+                token,
+                "GET",
+                f"/api/v1/trials/{quoted}/atif",
+                accepted=frozenset({200}),
+            )
+            if not _valid_atif(atif):
+                raise FinalSmokeError("smoke-atif-evidence-invalid")
+
+    def _valid_model_trial_detail(
+        self,
+        detail: Mapping[str, object],
+        *,
+        batch_id: str,
+        trial_id: str,
+    ) -> bool:
+        model = self.authority.agent_model
+        assert model is not None
+        return bool(
+            detail.get("id") == trial_id
+            and detail.get("batch_id") == batch_id
+            and detail.get("task_id") == self.authority.task_id
+            and detail.get("state") == "succeeded"
+            and detail.get("agent_name") == self.authority.agent
+            and _model_matches(detail.get("model"), model)
+            and _positive_int(detail.get("llm_calls_count")) is not None
+            and _positive_int(detail.get("total_prompt_tokens")) is not None
+            and _positive_int(detail.get("total_completion_tokens")) is not None
+            and detail.get("failed_upstream_llm_calls_count") == 0
+            and detail.get("llm_evidence_status") == "calls_observed"
+            and detail.get("no_call") is False
+            and detail.get("trajectory_ready") is True
+            and detail.get("atif_ready") is True
+        )
+
+    def _valid_trajectory(self, payload: bytes) -> bool:
+        model = self.authority.agent_model
+        assert model is not None
+        llm_events = 0
+        try:
+            for line in payload.splitlines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, Mapping) or event.get("kind") != "llm_call":
+                    continue
+                if (
+                    not _model_matches(event.get("model"), model)
+                    or _positive_int(event.get("input_tokens")) is None
+                    or _positive_int(event.get("output_tokens")) is None
+                ):
+                    return False
+                llm_events += 1
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return llm_events > 0
 
     def _expect_json(
         self,
@@ -363,6 +499,37 @@ class FinalSmokeExecutor:
             protected_mutation=mutated,
             blockers=({"smoke": blocker} if blocker is not None else {}),
         )
+
+
+def _positive_int(value: object) -> int | None:
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
+def _model_matches(value: object, expected: ModelSpec) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    expected_record = expected.model_dump(
+        mode="json",
+        exclude_defaults=True,
+        exclude_none=True,
+    )
+    return all(value.get(key) == item for key, item in expected_record.items())
+
+
+def _valid_atif(payload: bytes) -> bool:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(value, Mapping)
+        and isinstance(value.get("trajectory_id"), str)
+        and value.get("trajectory_id")
+        and isinstance(value.get("steps"), list)
+        and value.get("steps")
+    )
 
 
 __all__ = ["CapacityRefresh", "FinalSmokeExecutor", "SmokeTransport"]

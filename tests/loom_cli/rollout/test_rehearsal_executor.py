@@ -18,6 +18,7 @@ import yaml  # type: ignore[import-untyped]
 import loom_cli.rollout.operator.protected_external_supervisor_transport as transport_module
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom.models.types import ModelSpec
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     ExternalSupervisorCanonicalIdentity,
@@ -1734,6 +1735,20 @@ def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
 
 def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
     plan = _plan()
+    plan = replace(
+        plan,
+        smoke_authority=replace(
+            plan.smoke_authority,
+            agent="direct-completion",
+            agent_model=ModelSpec(
+                provider="yibu",
+                name="gpt-4o-mini",
+                source="local-server",
+                local_server="yibu",
+                max_output_tokens=64,
+            ),
+        ),
+    )
     release = _release_artifact(plan)
     batch_id = "11111111-1111-4111-8111-111111111111"
     calls: list[tuple[str, ...]] = []
@@ -1835,6 +1850,14 @@ def test_api_smoke_executes_fixed_probe_in_exact_service_pod() -> None:
         "-m",
         "loom_cli.rollout.rehearsal_smoke_probe",
     )
+    model_json = probe[probe.index("--agent-model-json") + 1]
+    assert json.loads(model_json) == {
+        "provider": "yibu",
+        "name": "gpt-4o-mini",
+        "source": "local-server",
+        "local_server": "yibu",
+        "max_output_tokens": 64,
+    }
     assert "loom_admin_" not in " ".join(probe)
 
 

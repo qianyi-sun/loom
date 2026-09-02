@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from loom.admin_secret import AdminSecretConfigError, AdminSecretVerifier
+from loom.models.types import ModelSpec
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority,
     AdminSmokeContract,
@@ -352,7 +353,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--required-worker-pool", required=True)
     parser.add_argument("--agent", required=True)
+    parser.add_argument("--agent-model-json", required=True, type=_agent_model)
     return parser
+
+
+def _agent_model(value: str) -> ModelSpec | None:
+    try:
+        decoded = json.loads(value)
+        if decoded is None:
+            return None
+        if not isinstance(decoded, Mapping):
+            raise ValueError("model is not an object")
+        return ModelSpec.model_validate(dict(decoded))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("agent model JSON is invalid") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -368,6 +382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 task_id=args.task_id,
                 required_worker_pool=args.required_worker_pool,
                 agent=args.agent,
+                agent_model=args.agent_model_json,
             ),
         )
     except (RehearsalSmokeProbeError, ValueError) as exc:

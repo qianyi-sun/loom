@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from loom.models.types import ModelSpec
 from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority,
     AdminSmokeContract,
@@ -20,6 +21,20 @@ def _authority() -> AdminSmokeAuthority:
         task_id="loom-smoke/gb10-oracle-hello-world",
         required_worker_pool="gb10",
         agent="oracle",
+    )
+
+
+def _model_authority() -> AdminSmokeAuthority:
+    return replace(
+        _authority(),
+        agent="direct-completion",
+        agent_model=ModelSpec(
+            provider="yibu",
+            name="gpt-4o-mini",
+            source="local-server",
+            local_server="yibu",
+            max_output_tokens=64,
+        ),
     )
 
 
@@ -48,6 +63,83 @@ def test_authority_round_trips_and_builds_exact_payload() -> None:
         task_id="skilllearnbench/fix-security-bug/fix-security-bug-1",
     )
     assert nested_task.task_id.count("/") == 2
+
+
+def test_model_backed_authority_builds_bounded_payload_and_requires_exact_recovery() -> None:
+    authority = _model_authority()
+    contract = AdminSmokeContract(authority)
+    expected_trial_config = {
+        "agent_name": "direct-completion",
+        "agent_model": {
+            "provider": "yibu",
+            "name": "gpt-4o-mini",
+            "source": "local-server",
+            "local_server": "yibu",
+            "max_output_tokens": 64,
+        },
+        "request_params": {"temperature": 0, "max_tokens": 64},
+        "override_agent_timeout_sec": 180,
+    }
+
+    assert AdminSmokeAuthority.from_record(authority.to_record()) == authority
+    assert contract.submission_payload(batch_name="rollout-real-model") == {
+        "name": "rollout-real-model",
+        "represented_username": "devansh",
+        "team_id": authority.team_id,
+        "task_filter": {"task_ids": [authority.task_id]},
+        "trial_config": expected_trial_config,
+        "n_per_task": 1,
+        "required_worker_pools": ["gb10"],
+    }
+
+    base = {
+        "id": "batch-1",
+        "name": "rollout-real-model",
+        "team_id": authority.team_id,
+        "submitted_by_user": {
+            "username": "devansh",
+            "team_id": authority.team_id,
+        },
+        "task_filter": {"task_ids": [authority.task_id]},
+    }
+    assert (
+        contract.existing_batch_id(
+            {"items": [{**base, "trial_config": expected_trial_config}]},
+            batch_name="rollout-real-model",
+        )
+        == "batch-1"
+    )
+    assert (
+        contract.existing_batch_id(
+            {
+                "items": [
+                    {
+                        **base,
+                        "trial_config": {
+                            "agent_name": "oracle",
+                            "agent_model": None,
+                        },
+                    }
+                ]
+            },
+            batch_name="rollout-real-model",
+        )
+        is None
+    )
+
+
+def test_model_backed_authority_rejects_unbounded_output() -> None:
+    with pytest.raises(ValueError, match="admin smoke"):
+        replace(
+            _model_authority(),
+            agent_model=ModelSpec(
+                provider="yibu",
+                name="gpt-4o-mini",
+                source="local-server",
+                local_server="yibu",
+                max_output_tokens=1024,
+            ),
+        )
 
 
 @pytest.mark.parametrize(

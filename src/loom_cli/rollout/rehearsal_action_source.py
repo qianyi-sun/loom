@@ -273,7 +273,7 @@ class RehearsalPlan:
             "production_defaults_path": str(self.production_defaults_path),
             "production_defaults_sha256": self.production_defaults_sha256,
             "schema_revision": self.schema_revision,
-            "schema_version": 8,
+            "schema_version": 9,
             "smoke_authority": self.smoke_authority.to_record(),
         }
 
@@ -327,7 +327,7 @@ class RehearsalPlan:
         if (
             set(value) != expected
             or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 8
+            or value.get("schema_version") != 9
             or type(mutation_epoch) is not int
             or not isinstance(resources, Mapping)
             or set(resources) != {"database", "namespace", "object_prefix", "route", "systemd_unit"}
@@ -693,7 +693,7 @@ class RehearsalActionSource:
             "route_origin": self.route_origin,
             "gb10_authority": self.gb10_authority.to_record(),
             "smoke_authority": self.smoke_authority.to_record(),
-            "schema_version": 8,
+            "schema_version": 9,
         }
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
