@@ -44,6 +44,10 @@ _SUBJECT_ID = UUID("00000000-0000-0000-0000-000000000013")
 _INCARNATION = UUID("00000000-0000-0000-0000-000000000014")
 _OWNER = UUID("00000000-0000-0000-0000-000000000015")
 _TEAM = UUID("00000000-0000-0000-0000-000000000016")
+_RUNTIME_PASSWORD = "r" * 48
+_RUNTIME_DATABASE_URL = (
+    "postgresql+psycopg://loom_cap_alice_runtime:" + _RUNTIME_PASSWORD + "@db/loom_dev_alice"
+)
 
 
 def _images() -> dict[str, str]:
@@ -736,7 +740,11 @@ async def test_capacity_installer_configuration_uses_candidate_publication_diges
 
     class _Kubectl:
         def __init__(self) -> None:
-            self.secrets: dict[str, dict[str, bytes]] = {}
+            self.secrets: dict[str, dict[str, bytes]] = {
+                "loom-protected-worker-runtime": {
+                    "database-url": _RUNTIME_DATABASE_URL.encode("ascii")
+                }
+            }
 
         async def read_secret_optional(self, namespace, name):
             assert namespace == "loom-dev-alice"
@@ -753,9 +761,11 @@ async def test_capacity_installer_configuration_uses_candidate_publication_diges
     class _Database:
         def __init__(self) -> None:
             self.configuration = None
+            self.runtime_password = None
 
         async def converge(self, *, configuration, credentials, **_kwargs):
             self.configuration = configuration
+            self.runtime_password = credentials.runtime_password
             return CapacityDatabaseInstallation(
                 protected_admission_sha256="7" * 64,
                 agent_database_url=(
@@ -763,6 +773,7 @@ async def test_capacity_installer_configuration_uses_candidate_publication_diges
                     + credentials.agent_password
                     + "@loom-dev-postgres/loom_dev_alice"
                 ),
+                runtime_database_url=_RUNTIME_DATABASE_URL,
             )
 
     def credential(name: str, payload: str) -> Path:
@@ -801,6 +812,144 @@ async def test_capacity_installer_configuration_uses_candidate_publication_diges
     assert database.configuration is not None
     assert database.configuration.candidate_digest == "a" * 64
     assert database.configuration.candidate_publication_sha256 == "f" * 64
+    assert database.runtime_password == _RUNTIME_PASSWORD
+
+
+@pytest.mark.asyncio
+async def test_capacity_installer_requires_runtime_secret_before_database_mutation(
+    tmp_path: Path,
+) -> None:
+    class _Kubectl:
+        async def read_secret_optional(self, namespace, name):
+            assert namespace == "loom-dev-alice"
+            assert name == "loom-protected-worker-runtime"
+            return None
+
+        async def apply(self, _manifest):
+            raise AssertionError("credentials must fail before persistence")
+
+    class _Database:
+        called = False
+
+        async def converge(self, **_kwargs):
+            self.called = True
+            raise AssertionError("credentials must fail before database mutation")
+
+    def credential(name: str) -> Path:
+        path = tmp_path / name
+        path.write_text(name)
+        path.chmod(0o600)
+        return path
+
+    database = _Database()
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=_Kubectl(),  # type: ignore[arg-type]
+        database=database,  # type: ignore[arg-type]
+        config=PersonalDevCapacityRuntimeConfig(
+            manager_origin="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+            tls_files=DemandReporterTLSFiles(
+                ca_file=credential("missing-ca.pem"),
+                certificate_file=credential("missing-certificate.pem"),
+                private_key_file=credential("missing-private-key.pem"),
+            ),
+            trusted_agent_image="registry.example/loom-service@sha256:" + "1" * 64,
+            pool_capabilities=(
+                AgentPoolCapabilityV1(
+                    capability_id="oldlab-x86-none",
+                    pool_id="oldlab",
+                    operating_system="linux",
+                    cpu_architecture="x86_64",
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        PersonalDevCapacityInstallationError,
+        match="runtime credential is unavailable",
+    ):
+        await installer.converge(_claim())
+
+    assert database.called is False
+
+
+@pytest.mark.asyncio
+async def test_capacity_installer_rejects_seed_runtime_secret_mismatch_before_mutation(
+    tmp_path: Path,
+) -> None:
+    class _Kubectl:
+        def __init__(self) -> None:
+            self.secrets = {
+                "loom-protected-worker-runtime": {
+                    "database-url": _RUNTIME_DATABASE_URL.encode("ascii")
+                },
+                "loom-capacity-agent-credentials": {
+                    "agent-password": b"a" * 48,
+                    "observer-password": b"o" * 48,
+                    "operation-id": str(_OPERATION_ID).encode("ascii"),
+                    "reporter-incarnation": str(
+                        UUID("00000000-0000-0000-0000-000000000099")
+                    ).encode("ascii"),
+                    "reporter-token": b"t" * 48,
+                    "runtime-password": b"s" * 48,
+                    "subject-incarnation": str(_INCARNATION).encode("ascii"),
+                },
+            }
+
+        async def read_secret_optional(self, namespace, name):
+            assert namespace == "loom-dev-alice"
+            return self.secrets.get(name)
+
+        async def apply(self, _manifest):
+            raise AssertionError("mismatch must fail before persistence")
+
+    class _Database:
+        called = False
+
+        async def converge(self, **_kwargs):
+            self.called = True
+            raise AssertionError("mismatch must fail before database mutation")
+
+    def credential(name: str) -> Path:
+        path = tmp_path / name
+        path.write_text(name)
+        path.chmod(0o600)
+        return path
+
+    database = _Database()
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=_Kubectl(),  # type: ignore[arg-type]
+        database=database,  # type: ignore[arg-type]
+        config=PersonalDevCapacityRuntimeConfig(
+            manager_origin="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+            tls_files=DemandReporterTLSFiles(
+                ca_file=credential("mismatch-ca.pem"),
+                certificate_file=credential("mismatch-certificate.pem"),
+                private_key_file=credential("mismatch-private-key.pem"),
+            ),
+            trusted_agent_image="registry.example/loom-service@sha256:" + "1" * 64,
+            pool_capabilities=(
+                AgentPoolCapabilityV1(
+                    capability_id="oldlab-x86-none",
+                    pool_id="oldlab",
+                    operating_system="linux",
+                    cpu_architecture="x86_64",
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        PersonalDevCapacityInstallationError,
+        match="runtime credential was superseded",
+    ):
+        await installer.converge(_claim())
+
+    assert database.called is False
 
 
 @pytest.mark.asyncio
@@ -809,14 +958,22 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
 ) -> None:
     class _Kubectl:
         def __init__(self) -> None:
-            self.secrets: dict[str, dict[str, bytes]] = {}
+            self.secrets: dict[str, dict[str, bytes]] = {
+                "loom-protected-worker-runtime": {
+                    "database-url": _RUNTIME_DATABASE_URL.encode("ascii")
+                }
+            }
             self.documents: list[dict[str, object]] = []
             self.applied: list[list[dict[str, object]]] = []
             self.waited: list[tuple[str, str]] = []
 
         async def read_secret_optional(self, namespace, name):
             assert namespace == "loom-dev-alice"
-            assert name in {"loom-capacity-agent", "loom-capacity-agent-credentials"}
+            assert name in {
+                "loom-capacity-agent",
+                "loom-capacity-agent-credentials",
+                "loom-protected-worker-runtime",
+            }
             return self.secrets.get(name)
 
         async def apply(self, manifest):
@@ -848,6 +1005,7 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
                     + credentials.agent_password
                     + "@loom-dev-postgres/loom_dev_alice"
                 ),
+                runtime_database_url=_RUNTIME_DATABASE_URL,
             )
 
     def credential(name: str, payload: str) -> Path:
@@ -900,6 +1058,7 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
     assert seed["reporter-token"] == runtime_secret["reporter-token"]
     assert seed["operation-id"] == runtime_secret["operation-id"]
     assert seed["agent-password"] in runtime_secret["database-url"]
+    assert seed["runtime-password"] == _RUNTIME_PASSWORD.encode("ascii")
     assert kubectl.waited == []
     await installer.verify_publishing(create, first)
     assert kubectl.waited == [("loom-dev-alice", "loom-capacity-agent")]
@@ -1006,7 +1165,11 @@ async def test_capacity_installer_persists_credentials_before_database_mutation(
 ) -> None:
     class _Kubectl:
         def __init__(self) -> None:
-            self.secrets: dict[str, dict[str, bytes]] = {}
+            self.secrets: dict[str, dict[str, bytes]] = {
+                "loom-protected-worker-runtime": {
+                    "database-url": _RUNTIME_DATABASE_URL.encode("ascii")
+                }
+            }
             self.mutate_seed = False
 
         async def read_secret_optional(self, namespace, name):

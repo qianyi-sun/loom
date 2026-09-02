@@ -220,7 +220,7 @@ def test_0123_downgrade_removes_only_native_builder_objects(
     engine = create_engine(isolated_migration_postgres_url)
     try:
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0123"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0126"
             candidate_columns_before = {
                 column["name"]
                 for column in inspect(connection).get_columns("personal_dev_candidates")

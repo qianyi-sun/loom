@@ -281,6 +281,7 @@ def test_personal_runtime_uses_candidate_aware_executor_without_legacy_candidate
 
     assert runtime is not None
     assert runtime.config.minio_endpoint == settings.minio_endpoint
+    assert runtime.vault.protected_worker_runtime is True
 
 
 def test_controller_wiring_requires_complete_candidate_and_slurm_contract(

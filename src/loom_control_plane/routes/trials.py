@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.auth import is_admin, verify_bearer_token
+from loom.auth import AuthContext, is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
 from loom.db.schema import (
@@ -30,6 +31,17 @@ from loom.request_params import coerce_request_params
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
+from loom_capacity_agent.contracts import AtomicTrialSubmissionV1
+from loom_capacity_guard.contracts import SealedRequirementsV1, canonical_digest
+from loom_control_plane.protected_worker_session import (
+    EXECUTOR_WORKER_CREDENTIAL_HEADER,
+    ProtectedPrincipalTrialSession,
+    ProtectedTrialSubmissionConflictError,
+    ProtectedTrialSubmissionError,
+    ProtectedWorkerPrincipal,
+    ProtectedWorkerSession,
+    protected_trial_worker_session,
+)
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.service_execution import request_trial_execution_cancellation
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
@@ -119,6 +131,32 @@ def _required_worker_pool(payload: dict[str, Any]) -> str | None:
     return pool
 
 
+def _protected_physical_pool(
+    pool: str | None,
+) -> Literal["oldlab", "gb10"] | None:
+    if pool is None:
+        return None
+    if pool == "oldlab":
+        return "oldlab"
+    if pool == "gb10":
+        return "gb10"
+    if pool == "behavior-gpu-gb10":
+        return "gb10"
+    if pool in {
+        "behavior-cpu-data",
+        "behavior-gpu-oldlab",
+        "terminalgen-generate-gateway",
+        "terminalgen-package-none",
+        "terminalgen-plan-none",
+        "terminalgen-validate-none",
+    }:
+        return "oldlab"
+    raise HTTPException(
+        status_code=400,
+        detail="required_worker_pool is not managed by protected OLDLAB/GB10 capacity",
+    )
+
+
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -193,6 +231,12 @@ async def submit_trial(
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
+    protected_submission_store = (
+        getattr(request.app.state, "protected_worker_session_store", None)
+        if batch_backend == "docker"
+        else None
+    )
+
     # Plan 19: if `idempotency_key` was supplied and a trial with that
     # key already exists FOR THIS TEAM, return its trial_id without
     # minting a new row. The team-scoping is important — without it,
@@ -201,7 +245,10 @@ async def submit_trial(
     # has `ON CONFLICT DO NOTHING` which closes the race window; the
     # early read just skips the (heavier) license + quota work on the
     # common "runner re-submits an already-emitted trial" path.
-    if idempotency_key is not None:
+    # Protected Docker replays must traverse the atomic guard procedure so a
+    # crash between origin creation and prerequisite publication can repair the
+    # original inert row before it becomes observable as demand.
+    if idempotency_key is not None and protected_submission_store is None:
         async with request.app.state.session_factory() as session:
             existing_row = (
                 await session.execute(
@@ -311,6 +358,11 @@ async def submit_trial(
     )
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool
+    protected_required_pool = (
+        _protected_physical_pool(required_worker_pool)
+        if protected_submission_store is not None
+        else None
+    )
 
     trial_id = uuid4()
     async with request.app.state.session_factory() as session:
@@ -394,6 +446,113 @@ async def submit_trial(
             "provider_model_id": provider_model_id,
             "family_key": family_key,
         }
+        if protected_submission_store is not None:
+            await session.commit()
+            requirements = SealedRequirementsV1(
+                os=requires_caps.os,
+                cpu_arch=requires_caps.cpu_arch,
+                gpu_vendor=requires_caps.gpu_vendor,
+                network_policies=tuple(sorted(requires_caps.network_policies)),
+                required_pool=protected_required_pool,
+            )
+            try:
+                registration = await protected_submission_store.current_registration()
+                protected_submission = AtomicTrialSubmissionV1(
+                    **registration.model_dump(mode="python"),
+                    trial_id=trial_id,
+                    protected_attempt_id=uuid4(),
+                    execution_generation=registration.deployment_generation,
+                    requirements=requirements,
+                    requirements_digest=canonical_digest(requirements),
+                    team_id=submit_team_id,
+                    task_id=task_id,
+                    config=trial_config.model_dump(mode="json"),
+                    submit_priority=trial_config.submit_priority,
+                    batch_id=UUID(str(batch_id)) if batch_id is not None else None,
+                    idempotency_key=(
+                        str(idempotency_key) if idempotency_key is not None else None
+                    ),
+                    sample_idx=sample_idx,
+                    combination_idx=combination_idx,
+                    provider_connection_id=(
+                        UUID(str(provider_connection_id))
+                        if provider_connection_id is not None
+                        else None
+                    ),
+                    provider_model_id=(
+                        str(provider_model_id) if provider_model_id is not None else None
+                    ),
+                    submitted_by_user_id=submitter_user_id,
+                    usage_attributed_user_id=usage_user_id,
+                    usage_attributed_actor=usage_actor,
+                    family_key=family_key,
+                )
+                receipt = await protected_submission_store.submit_trial(
+                    registration=registration,
+                    submission=protected_submission,
+                    public_requires_caps=requires_caps_json,
+                )
+            except ProtectedTrialSubmissionConflictError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="protected trial idempotency conflict",
+                ) from exc
+            except (ProtectedTrialSubmissionError, ValidationError) as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="protected trial submission unavailable",
+                ) from exc
+            trial_id = receipt.trial_id
+            submitted_at = receipt.submitted_at
+            await _ensure_trial_task_image_links(
+                session,
+                trial_id=trial_id,
+                task_row=task_row,
+            )
+            if trial_config.multi_model is not None and trial_config.multi_model.enabled:
+                from loom.model_switch_store import persist_model_switch_plan
+
+                conn_id = None
+                if provider_connection_id:
+                    conn_id = UUID(str(provider_connection_id))
+                inherit_raw = payload.get("inherit_model_switch_plan_from_trial_id")
+                inherit_from = UUID(str(inherit_raw)) if inherit_raw else None
+                conn_row = None
+                if conn_id is not None:
+                    conn_row = (
+                        await session.execute(
+                            select(ProviderConnection).where(
+                                ProviderConnection.id == conn_id,
+                            ),
+                        )
+                    ).scalar_one_or_none()
+                dumped = trial_config.model_dump(mode="json")
+                await persist_model_switch_plan(
+                    session,
+                    trial_id=trial_id,
+                    trial_config=dumped,
+                    agent_model=trial_config.agent_model,
+                    provider_connection_id=conn_id,
+                    combination_idx=combination_idx,
+                    inherit_from_trial_id=inherit_from,
+                    provider_connection=conn_row,
+                )
+            await session.commit()
+            try:
+                await protected_submission_store.publish_trial_readiness(
+                    trial_id=trial_id,
+                    protected_attempt_id=receipt.protected_attempt_id,
+                )
+            except ProtectedTrialSubmissionError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="protected trial readiness unavailable",
+                ) from exc
+            return {
+                "trial_id": str(trial_id),
+                "state": "queued",
+                "submitted_at": submitted_at.isoformat(),
+            }
         if idempotency_key is not None:
             # The partial unique index is `WHERE idempotency_key IS NOT
             # NULL`; the ON CONFLICT predicate must match it for
@@ -580,10 +739,10 @@ async def cancel_trial(
 async def get_trial(
     trial_id: UUID,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: ProtectedWorkerPrincipal,
+    protected_worker_session: ProtectedPrincipalTrialSession,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
 
@@ -621,13 +780,13 @@ async def get_trial(
 async def get_trial_llm_calls(
     trial_id: UUID,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: ProtectedWorkerPrincipal,
+    protected_worker_session: ProtectedPrincipalTrialSession,
 ) -> dict[str, Any]:
     """List every llm_calls row for this trial, ordered by capture time.
     Read by the worker at finalize to project LLMCallEvents into the
     trajectory before ATIF projection runs (Plan 9 amendment A9.2)."""
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
 
@@ -704,15 +863,52 @@ class _EpisodeCheckpointBody(BaseModel):
     tmux_session_id: str | None = None
 
 
+async def _terminus_principal(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> AuthContext | None:
+    async with request.app.state.session_factory() as session:
+        return await verify_bearer_token(session, authorization)
+
+
+TerminusPrincipal = Annotated[AuthContext | None, Depends(_terminus_principal)]
+
+
+async def _protected_terminus_worker_session(
+    trial_id: UUID,
+    request: Request,
+    principal: TerminusPrincipal,
+    worker_credential: str | None = Header(
+        default=None,
+        alias=EXECUTOR_WORKER_CREDENTIAL_HEADER,
+    ),
+) -> AsyncIterator[ProtectedWorkerSession | None]:
+    if principal is None or principal.type != "worker":
+        yield None
+        return
+    async for protected_session in protected_trial_worker_session(
+        trial_id,
+        request,
+        worker_credential,
+    ):
+        yield protected_session
+
+
+ProtectedTerminusWorkerSession = Annotated[
+    ProtectedWorkerSession | None,
+    Depends(_protected_terminus_worker_session),
+]
+
+
 @router.post("/trials/{trial_id}/terminus/reclaim")
 async def reclaim_terminus(
     trial_id: UUID,
     payload: _TerminusReclaimBody,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: TerminusPrincipal,
+    protected_worker_session: ProtectedTerminusWorkerSession,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     from loom_control_plane.terminus_recovery import reclaim_terminus_execution
@@ -742,10 +938,10 @@ async def post_episode_checkpoint(
     trial_id: UUID,
     payload: _EpisodeCheckpointBody,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: TerminusPrincipal,
+    protected_worker_session: ProtectedTerminusWorkerSession,
 ) -> dict[str, Any]:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     from loom_control_plane.terminus_recovery import write_episode_checkpoint

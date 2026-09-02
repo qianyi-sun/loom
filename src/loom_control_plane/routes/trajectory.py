@@ -25,6 +25,11 @@ from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
 )
+from loom_control_plane.protected_worker_session import (
+    ProtectedBodyWorkerSession,
+    ProtectedPrincipalTrialSession,
+    ProtectedWorkerPrincipal,
+)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -639,6 +644,7 @@ async def patch_trajectory_index(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -710,10 +716,10 @@ async def patch_trajectory_index(
 async def get_trajectory_url(
     trial_id: UUID,
     request: Request,
-    authorization: str | None = Header(default=None),
+    principal: ProtectedWorkerPrincipal,
+    protected_worker_session: ProtectedPrincipalTrialSession,
 ) -> RedirectResponse:
-    async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(session, authorization)
+    ctx = principal
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     async with request.app.state.session_factory() as session:
@@ -764,6 +770,7 @@ async def append_events(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,

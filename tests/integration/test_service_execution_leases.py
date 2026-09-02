@@ -2350,7 +2350,8 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
                 step_id="agent",
                 ttl_sec=600,
             ),
-            authorization="Bearer ignored",
+            principal=auth,
+            protected_worker_session=None,
             execution_lease_id=lease.id,
             execution_generation=lease.generation,
         )

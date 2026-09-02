@@ -22,6 +22,7 @@ owner_role = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE", "").strip()
 agent_role = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE", "").strip()
 executor_role = os.environ.get("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", "").strip()
 observer_role = os.environ.get("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", "").strip()
+runtime_role = os.environ.get("LOOM_CAPACITY_GUARD_RUNTIME_ROLE", "").strip()
 if not db_url:
     raise RuntimeError(
         "LOOM_CAPACITY_GUARD_DB_URL must be set to run protected capacity migrations"
@@ -38,6 +39,13 @@ if _ROLE_PATTERN.fullmatch(observer_role) is None or observer_role in {
     executor_role,
 }:
     raise RuntimeError("LOOM_CAPACITY_GUARD_OBSERVER_ROLE must name a distinct canonical SQL role")
+if _ROLE_PATTERN.fullmatch(runtime_role) is None or runtime_role in {
+    owner_role,
+    agent_role,
+    executor_role,
+    observer_role,
+}:
+    raise RuntimeError("LOOM_CAPACITY_GUARD_RUNTIME_ROLE must name a distinct canonical SQL role")
 # Alembic stores options in ConfigParser, where URL-encoded percent signs in
 # credentials are interpolation markers unless doubled at this one boundary.
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
@@ -212,9 +220,60 @@ def run_migrations_online() -> None:
                     "protected capacity observer must be a distinct least-privileged "
                     "NOINHERIT login with no memberships"
                 )
+            runtime = (
+                connection.execute(
+                    text(
+                        "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls, "
+                        "pg_has_role(rolname, :owner_role, 'MEMBER') AS owner_member, "
+                        "pg_has_role(rolname, :agent_role, 'MEMBER') AS agent_member, "
+                        "pg_has_role(rolname, :executor_role, 'MEMBER') AS executor_member, "
+                        "pg_has_role(rolname, :observer_role, 'MEMBER') AS observer_member, "
+                        "(SELECT count(*) FROM pg_auth_members AS m "
+                        "WHERE m.member = pg_roles.oid) AS role_memberships "
+                        "FROM pg_roles WHERE rolname = :runtime_role"
+                    ),
+                    {
+                        "runtime_role": runtime_role,
+                        "owner_role": owner_role,
+                        "agent_role": agent_role,
+                        "executor_role": executor_role,
+                        "observer_role": observer_role,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                runtime is None
+                or runtime["rolcanlogin"] is not True
+                or runtime["rolinherit"] is not False
+                or runtime["owner_member"] is not False
+                or runtime["agent_member"] is not False
+                or runtime["executor_member"] is not False
+                or runtime["observer_member"] is not False
+                or runtime["role_memberships"] != 0
+                or runtime["rolname"]
+                in {login["rolname"], owner_role, agent_role, executor_role, observer_role}
+                or any(
+                    runtime[field] is True
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "protected capacity runtime must be a distinct least-privileged "
+                    "NOINHERIT login with no memberships"
+                )
             config.attributes["capacity_guard_agent_role"] = agent_role
             config.attributes["capacity_guard_executor_role"] = executor_role
             config.attributes["capacity_guard_observer_role"] = observer_role
+            config.attributes["capacity_guard_runtime_role"] = runtime_role
             connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
             role = (
                 connection.execute(
@@ -249,16 +308,30 @@ def run_migrations_online() -> None:
                 )
             required_trial_columns = (
                 "id",
+                "team_id",
+                "task_id",
+                "config",
                 "state",
                 "requires_caps",
+                "submit_priority",
+                "batch_id",
+                "idempotency_key",
+                "sample_idx",
+                "combination_idx",
+                "provider_connection_id",
+                "provider_model_id",
+                "submitted_by_user_id",
+                "usage_attributed_user_id",
+                "usage_attributed_actor",
+                "family_key",
+                "lifecycle_authority_id",
+                "submitted_at",
                 "cancellation_requested_at",
                 "next_attempt_at",
                 "autoscaler_pool_name",
                 "worker_id",
                 "attempt_count",
-                "submit_priority",
-                "submitted_at",
-                "lifecycle_authority_id",
+                "execution_route_json",
             )
             missing_trial_columns = tuple(
                 column
@@ -313,7 +386,17 @@ def run_migrations_online() -> None:
                     "the bounded projection columns of public.trials: "
                     + ", ".join(missing_trial_insert_columns)
                 )
-            required_trial_update_columns = ("lifecycle_authority_id", "state")
+            required_trial_update_columns = (
+                "lifecycle_authority_id",
+                "state",
+                "requires_caps",
+                "worker_id",
+                "claimed_at",
+                "pre_start_heartbeat_at",
+                "failure_reason",
+                "failure_message",
+                "attempt_count",
+            )
             missing_trial_update_columns = tuple(
                 column
                 for column in required_trial_update_columns
@@ -389,6 +472,390 @@ def run_migrations_online() -> None:
                     "public.data_lifecycle_authorities.id"
                 )
 
+            prerequisite_select_columns = {
+                "tasks": (
+                    "id",
+                    "checksum",
+                    "config",
+                    "source",
+                    "source_provenance",
+                ),
+                "task_image_materializations": (
+                    "id",
+                    "materialization_key",
+                    "task_id",
+                    "task_checksum",
+                    "cpu_arch",
+                    "task_config",
+                    "task_source",
+                    "task_source_provenance",
+                    "state",
+                    "registry_images",
+                ),
+                "trial_task_image_materializations": (
+                    "trial_id",
+                    "materialization_id",
+                ),
+                "model_switch_plans": (
+                    "id",
+                    "trial_id",
+                    "combination_idx",
+                    "mix_mode",
+                    "k1",
+                    "k2",
+                    "teacher_episodes",
+                    "beta",
+                    "seed",
+                    "prng_version",
+                    "student_model_snapshot",
+                    "teacher_model_snapshot",
+                    "provider_connection_id",
+                    "pricing_snapshot",
+                    "capability_snapshot",
+                    "inherited_from_plan_id",
+                    "created_at",
+                ),
+            }
+            missing_prerequisite_columns = {
+                table: missing
+                for table, columns in prerequisite_select_columns.items()
+                if (
+                    missing := tuple(
+                        column
+                        for column in columns
+                        if not connection.execute(
+                            text(
+                                "SELECT has_column_privilege(current_user, "
+                                ":table, :column, 'SELECT')"
+                            ),
+                            {"table": f"public.{table}", "column": column},
+                        ).scalar_one()
+                    )
+                )
+            }
+            if missing_prerequisite_columns:
+                details = "; ".join(
+                    f"{table}: {', '.join(columns)}"
+                    for table, columns in missing_prerequisite_columns.items()
+                )
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privileges on "
+                    "the runtime submission prerequisite columns: " + details
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'public.task_image_materializations', 'state', 'UPDATE')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct UPDATE privilege on "
+                    "public.task_image_materializations.state for protected claim row locking"
+                )
+
+            required_worker_select_columns = (
+                "id",
+                "hostname",
+                "version",
+                "capabilities",
+                "supported_work_kinds",
+                "capability_snapshot_digest",
+                "capability_snapshot_json",
+                "slurm_gpu_allocation_evidence_json",
+                "slurm_gpu_allocation_evidence_digest",
+                "max_concurrent",
+                "pool_name",
+                "auth_token_hash",
+                "input_cache_capacity_bytes",
+                "input_cache_reserved_bytes",
+                "input_cache_ready_bytes",
+                "status",
+                "drain_state",
+            )
+            missing_worker_select_columns = tuple(
+                column
+                for column in required_worker_select_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.workers', :column, 'SELECT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_worker_select_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privileges on "
+                    "the bounded projection columns of public.workers: "
+                    + ", ".join(missing_worker_select_columns)
+                )
+            required_worker_insert_columns = (
+                "id",
+                "hostname",
+                "version",
+                "capabilities",
+                "supported_work_kinds",
+                "capability_snapshot_digest",
+                "capability_snapshot_json",
+                "slurm_gpu_allocation_evidence_json",
+                "slurm_gpu_allocation_evidence_digest",
+                "auth_token_hash",
+                "max_concurrent",
+                "pool_name",
+                "input_cache_capacity_bytes",
+                "input_cache_reserved_bytes",
+                "input_cache_ready_bytes",
+                "registered_at",
+                "last_seen_at",
+                "status",
+            )
+            missing_worker_insert_columns = tuple(
+                column
+                for column in required_worker_insert_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.workers', :column, 'INSERT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_worker_insert_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct INSERT privileges on "
+                    "the bounded projection columns of public.workers: "
+                    + ", ".join(missing_worker_insert_columns)
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'public.workers', 'status', 'UPDATE')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct UPDATE privilege on "
+                    "public.workers.status for protected claim row locking"
+                )
+            required_slurm_job_select_columns = (
+                "id",
+                "slurm_cluster_id",
+                "environment",
+                "pool_name",
+                "nodelist",
+                "requested_cpus",
+                "requested_memory_mib",
+                "requested_pids",
+                "requested_gpu_tres",
+                "requested_gpus",
+                "requested_concurrency",
+                "sandbox_identity",
+                "candidate_sha",
+                "compose_project",
+                "job_id",
+                "slurm_state",
+                "state",
+                "worker_id",
+            )
+            missing_slurm_job_select_columns = tuple(
+                column
+                for column in required_slurm_job_select_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.slurm_worker_jobs', :column, 'SELECT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_slurm_job_select_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privileges on "
+                    "the protected linkage columns of public.slurm_worker_jobs: "
+                    + ", ".join(missing_slurm_job_select_columns)
+                )
+            required_slurm_job_insert_columns = (
+                "id",
+                "slurm_cluster_id",
+                "environment",
+                "pool_name",
+                "nodelist",
+                "requested_cpus",
+                "requested_memory_mib",
+                "requested_gpu_tres",
+                "requested_gpus",
+                "requested_concurrency",
+                "sandbox_identity",
+                "candidate_sha",
+                "compose_project",
+                "job_id",
+                "slurm_state",
+                "state",
+                "submitted_at",
+                "started_at",
+                "last_reconciled_at",
+            )
+            missing_slurm_job_insert_columns = tuple(
+                column
+                for column in required_slurm_job_insert_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.slurm_worker_jobs', :column, 'INSERT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_slurm_job_insert_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct INSERT privileges on "
+                    "the protected projection columns of public.slurm_worker_jobs: "
+                    + ", ".join(missing_slurm_job_insert_columns)
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'public.slurm_worker_jobs', 'worker_id', 'UPDATE')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct UPDATE privilege on "
+                    "public.slurm_worker_jobs.worker_id"
+                )
+
+            claim_select_columns = {
+                "execution_attempts": ("worker_id", "state"),
+                "worker_pool_autoscaler_policies": (
+                    "id",
+                    "pool_name",
+                    "actuator",
+                    "actuator_config",
+                    "enabled",
+                    "prod_pressure_state",
+                    "updated_at",
+                ),
+                "pipeline_acceptance_preflight_prerequisites": (
+                    "worker_id",
+                    "fence_state",
+                ),
+                "team_quotas": (
+                    "team_id",
+                    "in_flight_count",
+                    "fair_share_weight",
+                    "max_attempts_ceiling",
+                ),
+                "batch_family_state": (
+                    "batch_id",
+                    "family_key",
+                    "state",
+                    "task_sequence",
+                    "current_index",
+                    "state_uri",
+                ),
+                "batches": ("id", "family_run_spec"),
+                "execution_admission_policies": (
+                    "scope_kind",
+                    "scope_key",
+                    "max_concurrent",
+                    "active_count",
+                    "enabled",
+                ),
+                "execution_admission_reservations": (
+                    "id",
+                    "trial_id",
+                    "attempt",
+                    "execution_role",
+                ),
+            }
+            missing_claim_select_columns = {
+                table: missing
+                for table, columns in claim_select_columns.items()
+                if (
+                    missing := tuple(
+                        column
+                        for column in columns
+                        if not connection.execute(
+                            text(
+                                "SELECT has_column_privilege(current_user, "
+                                ":table, :column, 'SELECT')"
+                            ),
+                            {"table": f"public.{table}", "column": column},
+                        ).scalar_one()
+                    )
+                )
+            }
+            if missing_claim_select_columns:
+                details = "; ".join(
+                    f"{table}: {', '.join(columns)}"
+                    for table, columns in missing_claim_select_columns.items()
+                )
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privileges on "
+                    "the protected claim columns: " + details
+                )
+            claim_update_columns = {
+                "batch_family_state": ("state", "updated_at"),
+                "batches": ("id",),
+                "execution_admission_policies": ("active_count", "counter_updated_at"),
+                "model_switch_plans": ("id",),
+                "team_quotas": ("in_flight_count",),
+            }
+            missing_claim_update_columns = {
+                table: missing
+                for table, columns in claim_update_columns.items()
+                if (
+                    missing := tuple(
+                        column
+                        for column in columns
+                        if not connection.execute(
+                            text(
+                                "SELECT has_column_privilege(current_user, "
+                                ":table, :column, 'UPDATE')"
+                            ),
+                            {"table": f"public.{table}", "column": column},
+                        ).scalar_one()
+                    )
+                )
+            }
+            if missing_claim_update_columns:
+                details = "; ".join(
+                    f"{table}: {', '.join(columns)}"
+                    for table, columns in missing_claim_update_columns.items()
+                )
+                raise RuntimeError(
+                    "protected capacity owner requires direct UPDATE privileges on "
+                    "the protected claim columns: " + details
+                )
+            required_reservation_insert_columns = (
+                "trial_id",
+                "attempt",
+                "execution_role",
+                "team_id",
+                "batch_id",
+                "environment",
+                "region",
+                "execution_class_id",
+                "pool_id",
+                "owner_kind",
+                "owner_id",
+                "acquired_at",
+            )
+            missing_reservation_insert_columns = tuple(
+                column
+                for column in required_reservation_insert_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.execution_admission_reservations', :column, 'INSERT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_reservation_insert_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct INSERT privileges on "
+                    "public.execution_admission_reservations: "
+                    + ", ".join(missing_reservation_insert_columns)
+                )
             connection.exec_driver_sql(
                 f"CREATE SCHEMA IF NOT EXISTS {quoted_schema} AUTHORIZATION {quoted_owner}"
             )

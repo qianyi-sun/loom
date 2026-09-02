@@ -13,7 +13,8 @@ import hashlib
 import json
 import secrets
 import shlex
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -30,6 +31,12 @@ from loom.dev_instance_manifest import (
     personal_dev_preparation_manifest_documents,
 )
 from loom.dev_instance_provisioner import OwnerAccessSnapshot, dev_buckets
+from loom.personal_dev_capacity_identity import (
+    PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+    CapacityRuntimeCredentialError,
+    capacity_runtime_database_password,
+    capacity_runtime_database_url,
+)
 from loom.personal_dev_reconciler import PersonalDevReadinessObservation
 
 
@@ -675,6 +682,11 @@ class KubectlSecretVault:
     kubectl: KubectlClient
     database_admin_url: str
     manifest_config: DevInstanceManifestConfig | None = None
+    protected_worker_runtime: bool = False
+    runtime_password_factory: Callable[[], str] = field(
+        default=lambda: secrets.token_urlsafe(48),
+        repr=False,
+    )
     _admin_tokens: dict[str, str] | None = None
     _object_credentials: dict[str, tuple[str, str]] | None = None
     _database_passwords: dict[str, str] | None = None
@@ -717,6 +729,10 @@ class KubectlSecretVault:
         return password
 
     async def store(self, identity: DevInstanceIdentity, password: str) -> str:
+        labels = {
+            "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
+            "loom.dev/instance": identity.name,
+        }
         existing_main = await self.kubectl.read_secret_optional(
             identity.namespace,
             "loom-secrets",
@@ -724,6 +740,14 @@ class KubectlSecretVault:
         existing_admin = await self.kubectl.read_secret_optional(
             identity.namespace,
             "loom-admin-secret",
+        )
+        existing_runtime = (
+            await self.kubectl.read_secret_optional(
+                identity.namespace,
+                PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+            )
+            if self.protected_worker_runtime
+            else None
         )
         if (existing_main is None) != (existing_admin is None):
             raise DevInstanceRuntimeError("instance secret set is incomplete")
@@ -739,6 +763,19 @@ class KubectlSecretVault:
             except (KeyError, UnicodeDecodeError):
                 raise DevInstanceRuntimeError("instance object credential is invalid") from None
             admin_token = self._admin_token_from_secret(existing_admin)
+            if self.protected_worker_runtime:
+                if existing_runtime is None:
+                    await self.kubectl.apply(
+                        yaml.safe_dump(
+                            self._protected_worker_runtime_secret(identity, labels),
+                            sort_keys=False,
+                        )
+                    )
+                else:
+                    self._assert_protected_worker_runtime_secret(
+                        identity,
+                        existing_runtime,
+                    )
             assert self._admin_tokens is not None
             assert self._object_credentials is not None
             assert self._database_passwords is not None
@@ -773,10 +810,6 @@ class KubectlSecretVault:
         else:
             namespace = dev_instance_manifest_documents(identity, self.manifest_config)[0]
         await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
-        labels = {
-            "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
-            "loom.dev/instance": identity.name,
-        }
         secret = {
             "apiVersion": "v1",
             "kind": "Secret",
@@ -807,10 +840,69 @@ class KubectlSecretVault:
             "type": "Opaque",
             "stringData": {"secrets.toml": f'[admin]\ntoken = "{admin_token}"\n'},
         }
+        runtime = (
+            (self._protected_worker_runtime_secret(identity, labels),)
+            if self.protected_worker_runtime
+            else ()
+        )
         await self.kubectl.apply(
-            yaml.safe_dump_all((secret, admin), sort_keys=False, explicit_start=True),
+            yaml.safe_dump_all((secret, admin, *runtime), sort_keys=False, explicit_start=True),
         )
         return f"k8s-secret://{identity.namespace}/loom-secrets"
+
+    def _assert_protected_worker_runtime_secret(
+        self,
+        identity: DevInstanceIdentity,
+        data: dict[str, bytes],
+    ) -> None:
+        try:
+            if set(data) != {"database-url"}:
+                raise CapacityRuntimeCredentialError
+            value = data["database-url"].decode("utf-8")
+            password = capacity_runtime_database_password(value, identity)
+            expected = capacity_runtime_database_url(
+                self.database_admin_url,
+                identity,
+                password,
+            )
+        except (CapacityRuntimeCredentialError, KeyError, UnicodeDecodeError):
+            raise DevInstanceRuntimeError(
+                "protected worker runtime credential is invalid"
+            ) from None
+        if not secrets.compare_digest(value, expected):
+            raise DevInstanceRuntimeError(
+                "protected worker runtime credential is invalid"
+            )
+
+    def _protected_worker_runtime_secret(
+        self,
+        identity: DevInstanceIdentity,
+        labels: dict[str, str],
+    ) -> dict[str, Any]:
+        runtime_password = self.runtime_password_factory()
+        try:
+            encoded = runtime_password.encode("ascii")
+        except UnicodeEncodeError:
+            raise DevInstanceRuntimeError("protected worker runtime credential is invalid") from None
+        if not 32 <= len(encoded) <= 1024 or any(not 0x21 <= byte <= 0x7E for byte in encoded):
+            raise DevInstanceRuntimeError("protected worker runtime credential is invalid")
+        return {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+                "namespace": identity.namespace,
+                "labels": labels,
+            },
+            "type": "Opaque",
+            "stringData": {
+                "database-url": capacity_runtime_database_url(
+                    self.database_admin_url,
+                    identity,
+                    runtime_password,
+                )
+            },
+        }
 
     async def admin_token(self, identity: DevInstanceIdentity) -> str:
         assert self._admin_tokens is not None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -48,6 +49,15 @@ from loom.pipeline.work_protocol import (
 )
 from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
+from loom_control_plane.protected_worker_session import (
+    EXECUTOR_WORKER_CREDENTIAL_HEADER,
+    ProtectedBodyWorkerClaim,
+    ProtectedBodyWorkerSession,
+    ProtectedPathWorkerSession,
+    ProtectedWorkerSessionAuthenticationRejected,
+    ProtectedWorkerSessionRejected,
+    ProtectedWorkerSessionStore,
+)
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -216,6 +226,7 @@ UPDATE trials
 async def claim_trial(
     request: Request,
     payload: dict[str, Any],
+    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> Response:
     async with request.app.state.session_factory() as session:
@@ -231,6 +242,39 @@ async def claim_trial(
             status_code=400,
             detail=f"worker_id + caps required: {exc}",
         ) from exc
+
+    if protected_worker_claim is not None:
+        try:
+            protected_claim = await protected_worker_claim.store.claim_assigned_trial(
+                worker_id=worker_id,
+                worker_credential=protected_worker_claim.worker_credential,
+                claim_request={
+                    "schema_version": 1,
+                    "protocol": "trial",
+                    "worker_id": str(worker_id),
+                    "capabilities": caps,
+                },
+            )
+        except ProtectedWorkerSessionAuthenticationRejected as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="protected worker session rejected",
+            ) from exc
+        except ProtectedWorkerSessionRejected as exc:
+            raise HTTPException(status_code=409, detail="protected_worker_claim_rejected") from exc
+        if protected_claim is None:
+            return Response(status_code=204)
+        try:
+            claim_payload = TrialClaimV1.model_validate_json(
+                json.dumps(
+                    dict(protected_claim),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=503, detail="protected_worker_claim_invalid") from exc
+        return JSONResponse(claim_payload.model_dump(mode="json", exclude_none=False))
 
     worker_os = sorted({c["os"] for c in caps})
     worker_cpu_arches = sorted({c.get("cpu_arch", "x86_64") for c in caps})
@@ -310,18 +354,72 @@ async def claim_trial(
 @router.post("/work/claim")
 async def claim_any_work(
     request: Request,
-    payload: WorkClaimRequestV1,
+    payload: dict[str, Any],
+    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> Response:
+    try:
+        claim_request = WorkClaimRequestV1.model_validate(payload, strict=False)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
         if ctx is None or "worker:claim" not in ctx.scopes:
             raise HTTPException(status_code=401, detail="not authorized to claim")
+        if protected_worker_claim is not None:
+            try:
+                protected_claim = await protected_worker_claim.store.claim_assigned_trial(
+                    worker_id=claim_request.worker_id,
+                    worker_credential=protected_worker_claim.worker_credential,
+                    claim_request={
+                        "schema_version": 1,
+                        "protocol": "work",
+                        "worker_id": str(claim_request.worker_id),
+                        "capability_snapshot_digest": (
+                            claim_request.capability_snapshot_digest
+                        ),
+                        "supported_work_kinds": list(
+                            claim_request.supported_work_kinds
+                        ),
+                        "free_slots": claim_request.free_slots,
+                    },
+                )
+            except ProtectedWorkerSessionAuthenticationRejected as exc:
+                raise HTTPException(
+                    status_code=401,
+                    detail="protected worker session rejected",
+                ) from exc
+            except ProtectedWorkerSessionRejected as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="protected_worker_claim_rejected",
+                ) from exc
+            if protected_claim is None:
+                return Response(status_code=204)
+            try:
+                protected_payload = TrialClaimV1.model_validate_json(
+                    json.dumps(
+                        dict(protected_claim),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="protected_worker_claim_invalid",
+                ) from exc
+            envelope = WorkClaimV1(
+                schema_version="loom.work-claim.v1",
+                work_kind="trial",
+                payload=protected_payload,
+            )
+            return JSONResponse(envelope.model_dump(mode="json", exclude_none=False))
         worker = (
             (
                 await session.execute(
                     text("SELECT capabilities FROM workers WHERE id=(:worker_id)::uuid"),
-                    {"worker_id": payload.worker_id},
+                    {"worker_id": claim_request.worker_id},
                 )
             )
             .mappings()
@@ -338,11 +436,11 @@ async def claim_any_work(
         try:
             claimed = await claim_work(
                 session,
-                worker_id=payload.worker_id,
-                capability_snapshot_digest=payload.capability_snapshot_digest,
+                worker_id=claim_request.worker_id,
+                capability_snapshot_digest=claim_request.capability_snapshot_digest,
                 worker_token_hash=ctx.token_hash,
-                supported_work_kinds=list(payload.supported_work_kinds),
-                free_slots=payload.free_slots,
+                supported_work_kinds=list(claim_request.supported_work_kinds),
+                free_slots=claim_request.free_slots,
                 worker_os=worker_os,
                 worker_cpu_arches=worker_cpu_arches,
                 worker_gpu_vendors=worker_gpu,
@@ -691,6 +789,7 @@ async def requeue_trial_retry(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_claim: ProtectedBodyWorkerClaim,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
@@ -740,6 +839,48 @@ async def requeue_trial_retry(
             detail="retry_after_sec must be >= 0",
         )
 
+    if protected_worker_claim is not None:
+        try:
+            protected_retry = await protected_worker_claim.store.retry_claimed_trial(
+                worker_id=worker_id,
+                worker_credential=protected_worker_claim.worker_credential,
+                retry_request={
+                    "schema_version": 1,
+                    "trial_id": str(trial_id),
+                    "worker_id": str(worker_id),
+                    "failure_reason": failure_reason.value,
+                    "failure_message": failure_message,
+                    "retry_after_sec": retry_after_sec,
+                },
+            )
+        except ProtectedWorkerSessionAuthenticationRejected as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="protected worker session rejected",
+            ) from exc
+        except ProtectedWorkerSessionRejected as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "worker lost claim, trial has started, or retry transition "
+                    "is not allowed"
+                ),
+            ) from exc
+        if protected_retry is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "worker lost claim, trial has started, or retry transition "
+                    "is not allowed"
+                ),
+            )
+        if (
+            protected_retry.get("trial_id") != str(trial_id)
+            or protected_retry.get("state") != "protected-pending"
+        ):
+            raise HTTPException(status_code=503, detail="protected_worker_retry_invalid")
+        return {"trial_id": str(trial_id), "state": "protected-pending"}
+
     async with request.app.state.session_factory() as session:
         row = (
             (
@@ -772,6 +913,7 @@ async def pre_start_heartbeat(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,
@@ -826,11 +968,31 @@ async def register_worker(
     request: Request,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
+    executor_worker_credential: str | None = Header(
+        default=None,
+        alias=EXECUTOR_WORKER_CREDENTIAL_HEADER,
+    ),
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
     if ctx is None or "worker:report" not in ctx.scopes:
         raise HTTPException(status_code=401, detail="not authorized to register")
+
+    protected_store: ProtectedWorkerSessionStore | None = getattr(
+        request.app.state,
+        "protected_worker_session_store",
+        None,
+    )
+    if protected_store is None and executor_worker_credential is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="protected worker runtime unavailable",
+        )
+    if protected_store is not None and executor_worker_credential is None:
+        raise HTTPException(
+            status_code=401,
+            detail="protected worker session rejected",
+        )
 
     try:
         slurm_provenance = parse_slurm_worker_registration_provenance(payload)
@@ -1025,6 +1187,69 @@ async def register_worker(
     if supplied_digest is not None and supplied_digest != capability_snapshot_digest:
         raise HTTPException(status_code=409, detail="capability_snapshot_mismatch")
 
+    if protected_store is not None:
+        if slurm_provenance is None:
+            raise HTTPException(
+                status_code=401,
+                detail="protected worker session rejected",
+            )
+        assert executor_worker_credential is not None
+        allocation_evidence_digest = (
+            canonical_digest(allocation_evidence)
+            if allocation_evidence is not None
+            else None
+        )
+        try:
+            registered = await protected_store.register(
+                worker_credential=executor_worker_credential,
+                projection={
+                    "hostname": str(payload.get("hostname", "unknown")),
+                    "version": str(payload.get("version", "unknown")),
+                    "capabilities": validated_caps,
+                    "supported_work_kinds": supported_work_kinds,
+                    "capability_snapshot_digest": capability_snapshot_digest,
+                    "capability_snapshot_json": (
+                        capability_snapshot.model_dump(mode="json")
+                        if capability_snapshot is not None
+                        else None
+                    ),
+                    "slurm_gpu_allocation_evidence_json": (
+                        allocation_evidence.model_dump(mode="json")
+                        if allocation_evidence is not None
+                        else None
+                    ),
+                    "slurm_gpu_allocation_evidence_digest": allocation_evidence_digest,
+                    "max_concurrent": max_concurrent,
+                    "pool_name": pool_name,
+                    "input_cache_capacity_bytes": capacity_bytes,
+                    "input_cache_reserved_bytes": reserved_bytes,
+                    "input_cache_ready_bytes": ready_bytes,
+                    "sandbox_identity": slurm_provenance.sandbox_identity,
+                    "candidate_sha": slurm_provenance.candidate_sha,
+                    "slurm_job_id": slurm_provenance.slurm_job_id,
+                    "compose_project": slurm_provenance.compose_project,
+                },
+            )
+        except ProtectedWorkerSessionRejected as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="protected worker session rejected",
+            ) from exc
+        return {
+            "worker_id": str(registered.worker_id),
+            "capability_snapshot_digest": registered.capability_snapshot_digest,
+            "supported_work_kinds": list(registered.supported_work_kinds),
+            "input_cache_capacity_bytes": registered.input_cache_capacity_bytes,
+            "input_cache_reserved_bytes": registered.input_cache_reserved_bytes,
+            "input_cache_ready_bytes": registered.input_cache_ready_bytes,
+            "slurm_gpu_allocation_evidence_digest": (
+                registered.slurm_gpu_allocation_evidence_digest
+            ),
+            "heartbeat_interval_sec": registered.heartbeat_interval_sec,
+            "claim_poll_interval_sec": registered.claim_poll_interval_sec,
+            "drain_timeout_sec": registered.drain_timeout_sec,
+        }
+
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
         if slurm_provenance is not None:
@@ -1102,6 +1327,7 @@ async def register_worker(
 async def heartbeat(
     worker_id: UUID,
     request: Request,
+    protected_worker_session: ProtectedPathWorkerSession,
     payload: dict[str, Any] | None = None,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:

@@ -80,6 +80,56 @@ def _active_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIn
 
 
 @pytest.mark.asyncio
+async def test_capacity_role_convergence_provisions_isolated_runtime_role(
+    postgres_url: str,
+) -> None:
+    name = f"runtime-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    credentials = _new_credentials()
+
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        observer,
+        runtime,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, credentials)
+
+    async with await psycopg.AsyncConnection.connect(
+        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+    ) as connection:
+        role = await connection.execute(
+            "SELECT rolcanlogin, rolinherit, rolpassword IS NULL, "
+            "(SELECT count(*) FROM pg_auth_members membership "
+            "WHERE membership.member = pg_roles.oid OR membership.roleid = pg_roles.oid) "
+            "FROM pg_authid AS pg_roles WHERE rolname = %s",
+            (runtime,),
+        )
+        assert await role.fetchone() == (True, False, False, 0)
+        assert runtime not in {owner, migrator, agent, executor, observer}
+
+    runtime_url = (
+        make_url(postgres_url)
+        .set(
+            database=database_name,
+            username=runtime,
+            password=credentials.runtime_password,
+        )
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1)
+    )
+    async with await psycopg.AsyncConnection.connect(runtime_url) as runtime_connection:
+        current_user = await runtime_connection.execute("SELECT session_user")
+        assert await current_user.fetchone() == (runtime,)
+
+
+@pytest.mark.asyncio
 async def test_capacity_role_convergence_seals_migrator_when_cancelled(
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +167,7 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
         agent,
         executor,
         _observer,
+        _runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
@@ -181,6 +232,7 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
         _agent,
         _executor,
         _observer,
+        _runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, _new_credentials())
@@ -202,7 +254,85 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
             "'environment', 'SELECT')",
             (owner, owner, owner, owner, owner, owner, owner),
         )
-        assert await privileges.fetchone() == (True, False, False, True, False, True, False)
+        assert await privileges.fetchone() == (True, False, False, True, True, True, False)
+
+
+@pytest.mark.asyncio
+async def test_capacity_role_convergence_grants_bounded_protected_claim_surface(
+    postgres_url: str,
+) -> None:
+    """A protected claim can mutate only its exact public scheduler surface."""
+
+    name = f"claimsurf-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+
+    (
+        owner,
+        _migrator,
+        _agent,
+        _executor,
+        _observer,
+        _runtime,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, _new_credentials())
+
+    expected_columns = {
+        ("workers", "status", "SELECT"),
+        ("workers", "drain_state", "SELECT"),
+        ("workers", "status", "UPDATE"),
+        ("trials", "execution_route_json", "SELECT"),
+        ("trials", "worker_id", "UPDATE"),
+        ("trials", "claimed_at", "UPDATE"),
+        ("trials", "pre_start_heartbeat_at", "UPDATE"),
+        ("trials", "failure_reason", "UPDATE"),
+        ("trials", "failure_message", "UPDATE"),
+        ("trials", "attempt_count", "UPDATE"),
+        ("execution_attempts", "worker_id", "SELECT"),
+        ("execution_attempts", "state", "SELECT"),
+        ("worker_pool_autoscaler_policies", "actuator_config", "SELECT"),
+        ("worker_pool_autoscaler_policies", "prod_pressure_state", "SELECT"),
+        ("pipeline_acceptance_preflight_prerequisites", "worker_id", "SELECT"),
+        ("pipeline_acceptance_preflight_prerequisites", "fence_state", "SELECT"),
+        ("team_quotas", "max_attempts_ceiling", "SELECT"),
+        ("task_image_materializations", "state", "SELECT"),
+        ("task_image_materializations", "state", "UPDATE"),
+        ("task_image_materializations", "registry_images", "SELECT"),
+        ("batch_family_state", "state_uri", "SELECT"),
+        ("batch_family_state", "state", "UPDATE"),
+        ("batch_family_state", "updated_at", "UPDATE"),
+        ("batches", "family_run_spec", "SELECT"),
+        ("batches", "id", "UPDATE"),
+        ("model_switch_plans", "id", "UPDATE"),
+        ("team_quotas", "in_flight_count", "UPDATE"),
+        ("execution_admission_policies", "active_count", "SELECT"),
+        ("execution_admission_policies", "active_count", "UPDATE"),
+        ("execution_admission_reservations", "id", "SELECT"),
+        ("execution_admission_reservations", "trial_id", "SELECT"),
+        ("execution_admission_reservations", "attempt", "SELECT"),
+        ("execution_admission_reservations", "execution_role", "SELECT"),
+        ("execution_admission_reservations", "trial_id", "INSERT"),
+    }
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(connect_url) as connection:
+        missing: set[tuple[str, str, str]] = set()
+        for table, column, privilege in expected_columns:
+            result = await connection.execute(
+                "SELECT has_column_privilege(%s, %s, %s, %s)",
+                (owner, f"public.{table}", column, privilege),
+            )
+            if await result.fetchone() != (True,):
+                missing.add((table, column, privilege))
+        assert missing == set()
+        for table in {table for table, _column, _privilege in expected_columns}:
+            result = await connection.execute(
+                "SELECT has_table_privilege(%s, %s, 'SELECT,INSERT,UPDATE,DELETE')",
+                (owner, f"public.{table}"),
+            )
+            assert await result.fetchone() == (False,)
 
 
 @pytest.mark.asyncio
@@ -221,6 +351,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         _agent,
         executor,
         _observer,
+        _runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
@@ -329,6 +460,7 @@ async def test_capacity_role_convergence_isolates_executor_from_public_functions
             _agent,
             executor,
             _observer,
+            _runtime,
             _migrator_url,
             _agent_url,
         ) = await database._converge_roles(identity, _new_credentials())
@@ -393,6 +525,7 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
         _agent,
         _executor,
         _observer,
+        _runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, _new_credentials())
@@ -442,6 +575,7 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         agent,
         executor,
         observer,
+        runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, _new_credentials())
@@ -452,11 +586,11 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         roles = await connection.execute(
             "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
             "WHERE rolname = ANY(%s) ORDER BY rolname",
-            ([identity.db_role, owner, migrator, agent, executor, observer],),
+            ([identity.db_role, owner, migrator, agent, executor, observer, runtime],),
         )
         assert await roles.fetchall() == sorted(
             (role, False, True)
-            for role in (identity.db_role, owner, migrator, agent, executor, observer)
+            for role in (identity.db_role, owner, migrator, agent, executor, observer, runtime)
         )
 
 
@@ -482,6 +616,7 @@ async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
         agent,
         executor,
         observer,
+        runtime,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
@@ -571,11 +706,19 @@ async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
             roles = await admin.execute(
                 "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
                 "WHERE rolname = ANY(%s) ORDER BY rolname",
-                ([identity.db_role, owner, migrator, agent, executor, observer],),
+                ([identity.db_role, owner, migrator, agent, executor, observer, runtime],),
             )
             assert await roles.fetchall() == sorted(
                 (role, False, True)
-                for role in (identity.db_role, owner, migrator, agent, executor, observer)
+                for role in (
+                    identity.db_role,
+                    owner,
+                    migrator,
+                    agent,
+                    executor,
+                    observer,
+                    runtime,
+                )
             )
             active = await admin.execute(
                 "SELECT pid FROM pg_stat_activity WHERE pid = ANY(%s)",
@@ -642,6 +785,7 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
             agent,
             executor,
             observer,
+            runtime,
             migrator_url,
             _agent_url,
         ) = await database._converge_roles(identity, credentials)
@@ -651,12 +795,14 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
             agent=agent,
             executor=executor,
             observer=observer,
+            runtime=runtime,
         )
         await database._converge_executor_surface(
             migrator_url=migrator_url,
             owner=owner,
             executor=executor,
             observer=observer,
+            runtime=runtime,
         )
 
         subject_id = uuid4()

@@ -209,6 +209,41 @@ class AtomicTrialSubmissionReceiptV1(StrictGuardModel):
         return _utc(value)
 
 
+class ProtectedRuntimeTrialReadinessReceiptV1(StrictGuardModel):
+    """Guard-owned publication that makes one runtime submission observable."""
+
+    trial_id: UUID
+    protected_attempt_id: UUID
+    public_requires_caps_digest: Digest
+    task_image_prerequisites_digest: Digest
+    model_switch_prerequisite_digest: Digest
+    ready_at: datetime
+    replayed: bool
+    executable: Literal[False] = False
+
+    @field_validator("ready_at", mode="before")
+    @classmethod
+    def _parse_ready_at(cls, value: datetime | str) -> datetime | str:
+        if isinstance(value, str):
+            timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(timestamp)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("ready_at")
+    @classmethod
+    def _ready_at_utc(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+    @model_validator(mode="after")
+    def _distinct_identities(self) -> ProtectedRuntimeTrialReadinessReceiptV1:
+        if self.trial_id == self.protected_attempt_id:
+            raise ValueError("trial and protected attempt identities must be distinct")
+        return self
+
+
 def _postgres_jsonb_text(value: Any) -> str:
     """Encode JSON exactly as PostgreSQL ``jsonb::text`` emits it."""
 
@@ -477,6 +512,7 @@ __all__ = [
     "GuardLifecycleDemandAttemptV2",
     "GuardLifecycleDemandObservationV2",
     "InertTrialSubmissionV1",
+    "ProtectedRuntimeTrialReadinessReceiptV1",
     "ReporterConfigurationV1",
     "atomic_submission_bytes",
     "atomic_submission_digest",

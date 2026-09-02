@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -30,6 +31,15 @@ from loom.personal_dev_capacity import (
     PersonalDevCapacityAvailability,
     PersonalDevCapacityInstallation,
     PersonalDevCapacityInstaller,
+)
+from loom.personal_dev_capacity_identity import (
+    PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+    CapacityRuntimeCredentialError,
+    capacity_runtime_database_password,
+    capacity_runtime_database_url,
+)
+from loom.personal_dev_capacity_identity import (
+    capacity_role_names as _role_names,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
@@ -58,10 +68,14 @@ _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "acknowledge_executable_release(uuid,uuid,jsonb,bytea,text,text)",
     "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
 )
+_STAGING_WORKER_RUNTIME_FUNCTIONS = (
+    "register_staging_public_worker(text,jsonb)",
+    "assert_staging_worker_session(uuid,text)",
+    "claim_staging_assigned_trial(uuid,text,jsonb)",
+)
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
 _DEPLOYMENT_NAME = "loom-capacity-agent"
-_ROLE_REPLACEMENTS = {"-": "_"}
 _IMMUTABLE_IMAGE_RE = re.compile(
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
     r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}"
@@ -83,19 +97,6 @@ def _sha256_json(value: object) -> str:
         allow_nan=False,
     ).encode("ascii")
     return hashlib.sha256(payload).hexdigest()
-
-
-def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str, str, str]:
-    slug = identity.name
-    for old, new in _ROLE_REPLACEMENTS.items():
-        slug = slug.replace(old, new)
-    return (
-        f"loom_cap_{slug}_owner",
-        f"loom_cap_{slug}_migrator",
-        f"loom_cap_{slug}_agent",
-        f"loom_cap_{slug}_executor",
-        f"loom_cap_{slug}_observer",
-    )
 
 
 def _retarget_database_url(
@@ -186,12 +187,14 @@ class _CapacityCredentials:
     migrator_password: str
     agent_password: str
     observer_password: str
+    runtime_password: str
 
 
 @dataclass(frozen=True, slots=True)
 class CapacityDatabaseInstallation:
     protected_admission_sha256: str
     agent_database_url: str
+    runtime_database_url: str
 
 
 class PersonalDevCapacityDatabase(Protocol):
@@ -224,8 +227,8 @@ class PsycopgPersonalDevCapacityDatabase:
         self,
         identity: DevInstanceIdentity,
         credentials: _CapacityCredentials,
-    ) -> tuple[str, str, str, str, str, str, str]:
-        owner, migrator, agent, executor, observer = _role_names(identity)
+    ) -> tuple[str, str, str, str, str, str, str, str]:
+        owner, migrator, agent, executor, observer, runtime = _role_names(identity)
         migrator_url = _retarget_database_url(
             self._admin_url,
             database=identity.database,
@@ -244,9 +247,10 @@ class PsycopgPersonalDevCapacityDatabase:
                 autocommit=True,
             ) as connection:
                 protected_roles = sql.SQL(", ").join(
-                    sql.Identifier(role) for role in (owner, migrator, agent, executor, observer)
+                    sql.Identifier(role)
+                    for role in (owner, migrator, agent, executor, observer, runtime)
                 )
-                for role in (owner, migrator, agent, executor, observer):
+                for role in (owner, migrator, agent, executor, observer, runtime):
                     await connection.execute(
                         sql.SQL(
                             "DO $loom$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles "
@@ -267,6 +271,15 @@ class PsycopgPersonalDevCapacityDatabase:
                         "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
                         "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
                     ).format(sql.Identifier(executor))
+                )
+                await connection.execute(
+                    sql.SQL(
+                        "ALTER ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                    ).format(
+                        sql.Identifier(runtime),
+                        sql.Literal(credentials.runtime_password),
+                    )
                 )
                 for role, password, inherit in (
                     (migrator, credentials.migrator_password, "INHERIT"),
@@ -296,11 +309,12 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                 )
                 await connection.execute(
-                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}").format(
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}, {}").format(
                         sql.Identifier(identity.database),
                         sql.Identifier(migrator),
                         sql.Identifier(agent),
                         sql.Identifier(observer),
+                        sql.Identifier(runtime),
                     )
                 )
                 await connection.execute(
@@ -316,8 +330,8 @@ class PsycopgPersonalDevCapacityDatabase:
                     "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
                     "ORDER BY member.rolname, granted.rolname",
                     (
-                        [owner, migrator, agent, executor, observer],
-                        [owner, migrator, agent, executor, observer],
+                        [owner, migrator, agent, executor, observer, runtime],
+                        [owner, migrator, agent, executor, observer, runtime],
                     ),
                 )
                 observed = {(row[0], row[1]) for row in await memberships.fetchall()}
@@ -340,7 +354,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 async with connection.transaction():
                     protected_roles = sql.SQL(", ").join(
                         sql.Identifier(role)
-                        for role in (owner, migrator, agent, executor, observer)
+                        for role in (owner, migrator, agent, executor, observer, runtime)
                     )
                     for object_kind in (
                         "SCHEMA public",
@@ -395,6 +409,11 @@ class PsycopgPersonalDevCapacityDatabase:
                                     "REVOKE ALL PRIVILEGES ON " + object_kind + " FROM {}"
                                 ).format(sql.Identifier(schema_name), sql.Identifier(observer))
                             )
+                            await connection.execute(
+                                sql.SQL(
+                                    "REVOKE ALL PRIVILEGES ON " + object_kind + " FROM {}"
+                                ).format(sql.Identifier(schema_name), sql.Identifier(runtime))
+                            )
                         if public_usage:
                             await connection.execute(
                                 sql.SQL("REVOKE USAGE ON SCHEMA {} FROM PUBLIC").format(
@@ -418,15 +437,24 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT SELECT (id, state, requires_caps, cancellation_requested_at, "
-                            "next_attempt_at, autoscaler_pool_name, worker_id, attempt_count, "
-                            "submit_priority, submitted_at) ON TABLE public.trials TO {}"
+                            "GRANT SELECT (id, team_id, task_id, config, state, requires_caps, "
+                            "submit_priority, batch_id, idempotency_key, sample_idx, "
+                            "combination_idx, provider_connection_id, provider_model_id, "
+                            "submitted_by_user_id, usage_attributed_user_id, "
+                            "usage_attributed_actor, family_key, lifecycle_authority_id, "
+                            "submitted_at, started_at, cancellation_requested_at, "
+                            "next_attempt_at, "
+                            "autoscaler_pool_name, worker_id, attempt_count, "
+                            "execution_route_json) "
+                            "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
                     await connection.execute(
                         sql.SQL(
-                            "GRANT SELECT (lifecycle_authority_id), "
-                            "UPDATE (lifecycle_authority_id, state) ON TABLE public.trials TO {}"
+                            "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, "
+                            "worker_id, claimed_at, pre_start_heartbeat_at, failure_reason, "
+                            "failure_message, attempt_count, next_attempt_at) "
+                            "ON TABLE public.trials TO {}"
                         ).format(sql.Identifier(owner))
                     )
                     await connection.execute(
@@ -455,6 +483,199 @@ class PsycopgPersonalDevCapacityDatabase:
                             "GRANT REFERENCES (id) ON TABLE public.data_lifecycle_authorities TO {}"
                         ).format(sql.Identifier(owner))
                     )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id, checksum, config, source, source_provenance) "
+                            "ON TABLE public.tasks TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id, materialization_key, task_id, task_checksum, "
+                            "cpu_arch, task_config, task_source, task_source_provenance, "
+                            "state, registry_images) "
+                            "ON TABLE public.task_image_materializations TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (trial_id, materialization_id) "
+                            "ON TABLE public.trial_task_image_materializations TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (state) "
+                            "ON TABLE public.task_image_materializations TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id, trial_id, combination_idx, mix_mode, k1, k2, "
+                            "teacher_episodes, beta, seed, prng_version, "
+                            "student_model_snapshot, teacher_model_snapshot, "
+                            "provider_connection_id, pricing_snapshot, capability_snapshot, "
+                            "inherited_from_plan_id, created_at) "
+                            "ON TABLE public.model_switch_plans TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id, hostname, version, capabilities, "
+                            "supported_work_kinds, capability_snapshot_digest, "
+                            "capability_snapshot_json, slurm_gpu_allocation_evidence_json, "
+                            "slurm_gpu_allocation_evidence_digest, auth_token_hash, "
+                            "max_concurrent, pool_name, input_cache_capacity_bytes, "
+                            "input_cache_reserved_bytes, input_cache_ready_bytes, status, "
+                            "drain_state) "
+                            "ON TABLE public.workers TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT INSERT (id, hostname, version, capabilities, "
+                            "supported_work_kinds, capability_snapshot_digest, "
+                            "capability_snapshot_json, slurm_gpu_allocation_evidence_json, "
+                            "slurm_gpu_allocation_evidence_digest, auth_token_hash, "
+                            "max_concurrent, pool_name, input_cache_capacity_bytes, "
+                            "input_cache_reserved_bytes, input_cache_ready_bytes, "
+                            "registered_at, last_seen_at, status) "
+                            "ON TABLE public.workers TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT UPDATE (status) ON TABLE public.workers TO {}").format(
+                            sql.Identifier(owner)
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id, slurm_cluster_id, environment, pool_name, "
+                            "nodelist, requested_cpus, requested_memory_mib, "
+                            "requested_pids, requested_gpu_tres, requested_gpus, "
+                            "requested_concurrency, "
+                            "sandbox_identity, candidate_sha, compose_project, job_id, "
+                            "slurm_state, state, worker_id) "
+                            "ON TABLE public.slurm_worker_jobs TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT INSERT (id, slurm_cluster_id, environment, pool_name, "
+                            "nodelist, requested_cpus, requested_memory_mib, "
+                            "requested_gpu_tres, requested_gpus, requested_concurrency, "
+                            "sandbox_identity, candidate_sha, compose_project, job_id, "
+                            "slurm_state, state, submitted_at, started_at, "
+                            "last_reconciled_at) ON TABLE public.slurm_worker_jobs TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    claim_select_columns = {
+                        "execution_attempts": ("worker_id", "state"),
+                        "worker_pool_autoscaler_policies": (
+                            "id",
+                            "pool_name",
+                            "actuator",
+                            "actuator_config",
+                            "enabled",
+                            "prod_pressure_state",
+                            "updated_at",
+                        ),
+                        "pipeline_acceptance_preflight_prerequisites": (
+                            "worker_id",
+                            "fence_state",
+                        ),
+                        "team_quotas": (
+                            "team_id",
+                            "in_flight_count",
+                            "fair_share_weight",
+                            "max_attempts_ceiling",
+                        ),
+                        "batch_family_state": (
+                            "batch_id",
+                            "family_key",
+                            "state",
+                            "task_sequence",
+                            "current_index",
+                            "state_uri",
+                        ),
+                        "batches": ("id", "family_run_spec"),
+                        "execution_admission_policies": (
+                            "scope_kind",
+                            "scope_key",
+                            "max_concurrent",
+                            "active_count",
+                            "enabled",
+                        ),
+                        "execution_admission_reservations": (
+                            "id",
+                            "trial_id",
+                            "attempt",
+                            "execution_role",
+                            "team_id",
+                            "batch_id",
+                            "environment",
+                            "region",
+                            "execution_class_id",
+                            "pool_id",
+                            "owner_kind",
+                            "state",
+                        ),
+                    }
+                    for table, columns in claim_select_columns.items():
+                        await connection.execute(
+                            sql.SQL("GRANT SELECT ({}) ON TABLE public.{} TO {}").format(
+                                sql.SQL(", ").join(map(sql.Identifier, columns)),
+                                sql.Identifier(table),
+                                sql.Identifier(owner),
+                            )
+                        )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (state, updated_at) "
+                            "ON TABLE public.batch_family_state TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (in_flight_count) "
+                            "ON TABLE public.team_quotas TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL("GRANT UPDATE (id) ON TABLE public.batches TO {}").format(
+                            sql.Identifier(owner)
+                        )
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (id) ON TABLE public.model_switch_plans TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (active_count, counter_updated_at) "
+                            "ON TABLE public.execution_admission_policies TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT INSERT (trial_id, attempt, execution_role, team_id, "
+                            "batch_id, environment, region, execution_class_id, pool_id, "
+                            "owner_kind, owner_id, acquired_at) "
+                            "ON TABLE public.execution_admission_reservations TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT UPDATE (state, released_at, release_reason) "
+                            "ON TABLE public.execution_admission_reservations TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
         except asyncio.CancelledError:
             await self._seal_migrator(identity, owner=owner, migrator=migrator)
             raise
@@ -466,7 +687,7 @@ class PsycopgPersonalDevCapacityDatabase:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity database role convergence failed"
             ) from None
-        return owner, migrator, agent, executor, observer, migrator_url, agent_url
+        return owner, migrator, agent, executor, observer, runtime, migrator_url, agent_url
 
     async def _seal_migrator(
         self,
@@ -511,8 +732,8 @@ class PsycopgPersonalDevCapacityDatabase:
     async def seal(self, identity: DevInstanceIdentity) -> None:
         """Disable every protected login before retained data can outlive its pod."""
 
-        owner, migrator, agent, executor, observer = _role_names(identity)
-        protected = (owner, migrator, agent, executor, observer, identity.db_role)
+        owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+        protected = (owner, migrator, agent, executor, observer, runtime, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -569,8 +790,8 @@ class PsycopgPersonalDevCapacityDatabase:
         """Drop the isolated database and every role after namespace termination."""
 
         await self.seal(identity)
-        owner, migrator, agent, executor, observer = _role_names(identity)
-        roles = (observer, executor, agent, migrator, owner, identity.db_role)
+        owner, migrator, agent, executor, observer, runtime = _role_names(identity)
+        roles = (runtime, observer, executor, agent, migrator, owner, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -607,6 +828,7 @@ class PsycopgPersonalDevCapacityDatabase:
         agent: str,
         executor: str,
         observer: str,
+        runtime: str,
     ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         config_path = repo_root / "capacity_guard_migrations" / "alembic.ini"
@@ -622,6 +844,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
                 "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
                 "LOOM_CAPACITY_GUARD_OBSERVER_ROLE": observer,
+                "LOOM_CAPACITY_GUARD_RUNTIME_ROLE": runtime,
             }
         )
         process = await asyncio.create_subprocess_exec(
@@ -661,11 +884,13 @@ class PsycopgPersonalDevCapacityDatabase:
         owner: str,
         executor: str,
         observer: str,
+        runtime: str,
     ) -> None:
         engine = create_async_engine(migrator_url, isolation_level="SERIALIZABLE")
         quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner)
         quoted_executor = engine.sync_engine.dialect.identifier_preparer.quote(executor)
         quoted_observer = engine.sync_engine.dialect.identifier_preparer.quote(observer)
+        quoted_runtime = engine.sync_engine.dialect.identifier_preparer.quote(runtime)
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session, session.begin():
@@ -682,6 +907,11 @@ class PsycopgPersonalDevCapacityDatabase:
                         f"FROM {quoted_observer}"
                     )
                 )
+                await session.execute(
+                    text(
+                        f"REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard FROM {quoted_runtime}"
+                    )
+                )
                 for object_kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
                     await session.execute(
                         text(
@@ -695,11 +925,20 @@ class PsycopgPersonalDevCapacityDatabase:
                             f"loom_capacity_guard FROM {quoted_observer}"
                         )
                     )
+                    await session.execute(
+                        text(
+                            f"REVOKE ALL PRIVILEGES ON ALL {object_kind} IN SCHEMA "
+                            f"loom_capacity_guard FROM {quoted_runtime}"
+                        )
+                    )
                 await session.execute(
                     text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_executor}")
                 )
                 await session.execute(
                     text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_observer}")
+                )
+                await session.execute(
+                    text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_runtime}")
                 )
                 for function in _EXECUTABLE_ADMISSION_FUNCTIONS:
                     await session.execute(
@@ -715,6 +954,13 @@ class PsycopgPersonalDevCapacityDatabase:
                         f"TO {quoted_observer}"
                     )
                 )
+                for function in _STAGING_WORKER_RUNTIME_FUNCTIONS:
+                    await session.execute(
+                        text(
+                            "GRANT EXECUTE ON FUNCTION loom_capacity_guard."
+                            f"{function} TO {quoted_runtime}"
+                        )
+                    )
         finally:
             await engine.dispose()
 
@@ -732,6 +978,7 @@ class PsycopgPersonalDevCapacityDatabase:
             agent,
             executor,
             observer,
+            runtime,
             migrator_url,
             agent_url,
         ) = await self._converge_roles(identity, credentials)
@@ -742,12 +989,14 @@ class PsycopgPersonalDevCapacityDatabase:
                 agent=agent,
                 executor=executor,
                 observer=observer,
+                runtime=runtime,
             )
             await self._converge_executor_surface(
                 migrator_url=migrator_url,
                 owner=owner,
                 executor=executor,
                 observer=observer,
+                runtime=runtime,
             )
             fence = GuardFenceV1(
                 environment_id=configuration.environment_id,
@@ -815,24 +1064,44 @@ class PsycopgPersonalDevCapacityDatabase:
             "environment_id": fence.environment_id,
             "guard_schema_generation": capacity_guard_schema_head()[1],
             "reporter_incarnation": str(fence.reporter_incarnation),
-            "roles": {"agent": agent, "executor": executor, "observer": observer, "owner": owner},
+            "roles": {
+                "agent": agent,
+                "executor": executor,
+                "observer": observer,
+                "owner": owner,
+                "runtime": runtime,
+            },
             "schema_version": 1,
             "subject_id": str(fence.subject_id),
             "subject_incarnation": str(fence.subject_incarnation),
         }
+        runtime_url = capacity_runtime_database_url(
+            self._admin_url,
+            identity,
+            credentials.runtime_password,
+        )
+        evidence["runtime_database_url_sha256"] = hashlib.sha256(
+            runtime_url.encode("utf-8")
+        ).hexdigest()
         return CapacityDatabaseInstallation(
             protected_admission_sha256=_sha256_json(evidence),
             agent_database_url=agent_url,
+            runtime_database_url=runtime_url,
         )
 
 
-def _new_credentials(*, reporter_incarnation: UUID | None = None) -> _CapacityCredentials:
+def _new_credentials(
+    *,
+    reporter_incarnation: UUID | None = None,
+    runtime_password: str | None = None,
+) -> _CapacityCredentials:
     return _CapacityCredentials(
         reporter_incarnation=reporter_incarnation or uuid4(),
         reporter_token=secrets.token_urlsafe(48),
         migrator_password=secrets.token_urlsafe(48),
         agent_password=secrets.token_urlsafe(48),
         observer_password=secrets.token_urlsafe(48),
+        runtime_password=runtime_password or secrets.token_urlsafe(48),
     )
 
 
@@ -895,6 +1164,23 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         claim: PersonalDevReconciliationClaim,
         identity: DevInstanceIdentity,
     ) -> _CapacityCredentials:
+        runtime_secret = await self._kubectl.read_secret_optional(
+            identity.namespace,
+            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+        )
+        if runtime_secret is None:
+            raise PersonalDevCapacityInstallationError(
+                "protected worker runtime credential is unavailable"
+            )
+        try:
+            runtime_password = capacity_runtime_database_password(
+                _decode_secret_text(runtime_secret, "database-url"),
+                identity,
+            )
+        except CapacityRuntimeCredentialError:
+            raise PersonalDevCapacityInstallationError(
+                "protected worker runtime credential is invalid"
+            ) from None
         existing = await self._kubectl.read_secret_optional(
             identity.namespace,
             _CREDENTIALS_SECRET_NAME,
@@ -906,7 +1192,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 _SECRET_NAME,
             )
         if existing is None:
-            return _new_credentials()
+            return _new_credentials(runtime_password=runtime_password)
         try:
             subject_incarnation = UUID(_decode_secret_text(existing, "subject-incarnation"))
             operation_id = UUID(_decode_secret_text(existing, "operation-id"))
@@ -942,7 +1228,19 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 if persisted_seed and "observer-password" in existing
                 else secrets.token_urlsafe(48)
             ),
+            runtime_password=(
+                _opaque_credential(
+                    _decode_secret_text(existing, "runtime-password"),
+                    label="worker runtime database",
+                )
+                if persisted_seed and "runtime-password" in existing
+                else runtime_password
+            ),
         )
+        if base.runtime_password != runtime_password:
+            raise PersonalDevCapacityInstallationError(
+                "protected worker runtime credential was superseded"
+            )
         if operation_id == claim.operation.id or claim.operation.kind == "capacity":
             return base
         return _CapacityCredentials(
@@ -951,6 +1249,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             migrator_password=base.migrator_password,
             agent_password=base.agent_password,
             observer_password=base.observer_password,
+            runtime_password=base.runtime_password,
         )
 
     def _credential_seed_manifest(
@@ -971,6 +1270,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "operation-id": str(claim.operation.id).encode("ascii"),
             "reporter-incarnation": str(credentials.reporter_incarnation).encode("ascii"),
             "reporter-token": credentials.reporter_token.encode("ascii"),
+            "runtime-password": credentials.runtime_password.encode("ascii"),
             "subject-incarnation": str(claim.operation.subject_incarnation).encode("ascii"),
         }
         return {
@@ -1007,6 +1307,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "operation-id": str(claim.operation.id).encode("ascii"),
             "reporter-incarnation": str(credentials.reporter_incarnation).encode("ascii"),
             "reporter-token": credentials.reporter_token.encode("ascii"),
+            "runtime-password": credentials.runtime_password.encode("ascii"),
             "subject-incarnation": str(claim.operation.subject_incarnation).encode("ascii"),
         }
         if observed != expected:
@@ -1025,7 +1326,11 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             _CREDENTIALS_SECRET_NAME,
         )
         runtime = await self._kubectl.read_secret_optional(identity.namespace, _SECRET_NAME)
-        if seed is None or runtime is None:
+        protected_runtime = await self._kubectl.read_secret_optional(
+            identity.namespace,
+            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+        )
+        if seed is None or runtime is None or protected_runtime is None:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity credential installation is unavailable"
             )
@@ -1056,7 +1361,15 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 label="observer database",
             )
             runtime_agent_password = _agent_password_from_secret(runtime)
-        except (UnicodeEncodeError, ValueError):
+            seed_runtime_password = _opaque_credential(
+                _decode_secret_text(seed, "runtime-password"),
+                label="worker runtime database",
+            )
+            protected_runtime_password = capacity_runtime_database_password(
+                _decode_secret_text(protected_runtime, "database-url"),
+                identity,
+            )
+        except (CapacityRuntimeCredentialError, UnicodeEncodeError, ValueError):
             raise PersonalDevCapacityInstallationError(
                 "protected capacity credential installation is invalid"
             ) from None
@@ -1069,6 +1382,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             or runtime_reporter_incarnation != installation.reporter_incarnation
             or seed_token != runtime_token
             or seed_agent_password != runtime_agent_password
+            or seed_runtime_password != protected_runtime_password
             or reporter_token_sha256 != installation.reporter_token_sha256
         ):
             raise PersonalDevCapacityInstallationError(
@@ -1436,6 +1750,19 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             credentials=credentials,
             configuration=configuration,
         )
+        protected_runtime = await self._kubectl.read_secret_optional(
+            identity.namespace,
+            PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+        )
+        if protected_runtime is None:
+            raise PersonalDevCapacityInstallationError(
+                "protected worker runtime credential is unavailable"
+            )
+        expected_runtime_url = _decode_secret_text(protected_runtime, "database-url")
+        if not hmac.compare_digest(database.runtime_database_url, expected_runtime_url):
+            raise PersonalDevCapacityInstallationError(
+                "protected worker runtime database credential changed during convergence"
+            )
         configuration = configuration.model_copy(
             update={"protected_admission_sha256": database.protected_admission_sha256}
         )

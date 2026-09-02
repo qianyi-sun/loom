@@ -299,7 +299,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0123",
+            "schema_head": "0126",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
@@ -397,7 +397,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-            "7f111bd818f41988f22c1103f371aa2458eab57405c46fc178e2f8a079939df5"
+        "57352268fe484603ac11b7837b79b15e0ebc8a3cd038d79cbeec94046dd38c24"
     )
 
     identities = {_identity(document) for document in documents}
@@ -2702,6 +2702,37 @@ def test_management_admission_blocks_indirect_personal_secret_reads(
         "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')" in expressions
     )
     assert "builder workload cannot acquire API or unrelated Secret authority" in messages
+
+
+def test_management_admission_limits_protected_runtime_secret_to_control_plane(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    workload = next(
+        item["expression"]
+        for item in policy["spec"]["validations"]
+        if "builder workload cannot acquire" in item["message"]
+    )
+    all_expressions = "\n".join(item["expression"] for item in policy["spec"]["validations"])
+    control_plane_secrets = (
+        "['loom-secrets','loom-admin-secret','loom-protected-worker-runtime']"
+    )
+
+    assert "loom-protected-worker-runtime" in all_expressions
+    assert "metadata.name.matches('^loom-control-plane-g[1-9][0-9]*$')" in workload
+    for reference in (
+        "volume.secret.secretName",
+        "source.secretRef.name",
+        "variable.valueFrom.secretKeyRef.name",
+    ):
+        assert f"{reference} in {control_plane_secrets}" in workload
+        assert f"{reference} in ['loom-secrets','loom-admin-secret']" in workload
 
 
 def test_management_admission_binds_capacity_lifecycle_ownership_to_exact_resources(

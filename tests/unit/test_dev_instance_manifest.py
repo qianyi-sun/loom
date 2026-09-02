@@ -129,6 +129,79 @@ def test_personal_manifest_uses_complete_immutable_candidate_image_set() -> None
     assert public_paths[1]["backend"]["service"]["name"] == "loom-web"
 
 
+def test_protected_candidate_mounts_runtime_database_only_in_control_plane() -> None:
+    documents = personal_dev_preparation_manifest_documents(
+        derive_identity("alice"),
+        _immutable_config(),
+    )
+    deployments = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "Deployment"
+    }
+    control_plane = deployments["loom-control-plane-g8"]
+    pod = control_plane["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    environment = {item["name"]: item for item in container["env"]}
+
+    assert environment["LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"] == {
+        "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
+        "value": "/run/loom/protected-worker-runtime/files/database-url",
+    }
+    assert container["volumeMounts"] == [
+        {
+            "name": "loom-admin-secret",
+            "mountPath": "/var/run/loom/admin",
+            "readOnly": True,
+        },
+        {
+            "name": "protected-worker-runtime",
+            "mountPath": "/run/loom/protected-worker-runtime",
+            "readOnly": True,
+        },
+    ]
+    credential_init = next(
+        item for item in pod["initContainers"] if item["name"] == "protected-worker-runtime-init"
+    )
+    assert credential_init["image"] == _immutable_config().image("control-plane")
+    assert credential_init["securityContext"]["runAsUser"] == 65532
+    assert credential_init["volumeMounts"] == [
+        {
+            "name": "protected-worker-runtime-projected",
+            "mountPath": "/var/run/loom/protected-worker-runtime-projected",
+            "readOnly": True,
+        },
+        {
+            "name": "protected-worker-runtime",
+            "mountPath": "/run/loom/protected-worker-runtime",
+        },
+    ]
+    volumes = {item["name"]: item for item in pod["volumes"]}
+    assert volumes["protected-worker-runtime-projected"]["secret"] == {
+        "secretName": "loom-protected-worker-runtime",
+        "defaultMode": 0o440,
+        "items": [{"key": "database-url", "path": "database-url"}],
+    }
+    assert volumes["protected-worker-runtime"] == {
+        "name": "protected-worker-runtime",
+        "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
+    }
+
+    for name, deployment in deployments.items():
+        if name == "loom-control-plane-g8":
+            continue
+        serialized = yaml.safe_dump(deployment)
+        assert "loom-protected-worker-runtime" not in serialized
+        assert "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE" not in serialized
+
+
+def test_legacy_dev_manifest_does_not_enable_protected_worker_runtime() -> None:
+    rendered = render_dev_instance_manifests(derive_identity("alice"), _config())
+
+    assert "loom-protected-worker-runtime" not in rendered
+    assert "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE" not in rendered
+
+
 def test_personal_manifest_stamps_exact_lifecycle_binding_on_every_object() -> None:
     documents = personal_dev_preparation_manifest_documents(
         derive_identity("alice"),

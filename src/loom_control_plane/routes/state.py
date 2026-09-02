@@ -28,6 +28,7 @@ from loom.family_run.registry import resolve_plugin
 from loom.family_run.spec import AdvanceDecision, ResolvedFamilyRunSpec
 from loom.models.result import FailureReason, TrialState
 from loom_control_plane.metrics import STATE_PATCH_TOTAL
+from loom_control_plane.protected_worker_session import ProtectedBodyWorkerStateSession
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -245,6 +246,7 @@ async def patch_state(
     trial_id: UUID,
     request: Request,
     payload: dict[str, Any],
+    protected_worker_session: ProtectedBodyWorkerStateSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,

@@ -13,6 +13,7 @@ from loom.auth import verify_bearer_token
 from loom.db.schema import Trial, TrialResourceUsage, Worker
 from loom.models.resource_usage import ResourceCounters, TrialResourceUsageReport
 from loom.resource_usage_store import report_values
+from loom_control_plane.protected_worker_session import ProtectedBodyWorkerSession
 from loom_control_plane.routes.execution_fence import (
     OptionalExecutionGenerationHeader,
     OptionalExecutionLeaseIdHeader,
@@ -36,6 +37,7 @@ async def put_trial_resource_usage(
     trial_id: UUID,
     report: TrialResourceUsageReport,
     request: Request,
+    protected_worker_session: ProtectedBodyWorkerSession,
     authorization: str | None = Header(default=None),
     execution_lease_id: OptionalExecutionLeaseIdHeader = None,
     execution_generation: OptionalExecutionGenerationHeader = None,

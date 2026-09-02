@@ -44,10 +44,15 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
 
 def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
-    assert tuple(script.get_heads()) == ("guard_0021",)
+    assert tuple(script.get_heads()) == ("guard_0026",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0021")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0026")
     ) == (
+        "guard_0026",
+        "guard_0025",
+        "guard_0024",
+        "guard_0023",
+        "guard_0022",
         "guard_0021",
         "guard_0020",
         "guard_0019",
@@ -63,11 +68,30 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     admission = script.get_revision("guard_0013")
     exact_assignment = script.get_revision("guard_0020")
     current_assignment = script.get_revision("guard_0021")
+    staging_atomic_submission = script.get_revision("guard_0022")
+    staging_worker_session = script.get_revision("guard_0023")
+    protected_trial_terminal_closure = script.get_revision("guard_0024")
+    protected_trial_retry = script.get_revision("guard_0025")
+    protected_trial_requeue = script.get_revision("guard_0026")
     assert handshake is not None
     assert admission is not None
     assert exact_assignment is not None
     assert current_assignment is not None
+    assert staging_atomic_submission is not None
+    assert staging_worker_session is not None
+    assert protected_trial_terminal_closure is not None
+    assert protected_trial_retry is not None
+    assert protected_trial_requeue is not None
     assert handshake.path.endswith("guard_0012_protected_bootstrap_handshake.py")
     assert admission.path.endswith("guard_0013_executable_admission.py")
     assert exact_assignment.path.endswith("guard_0020_exact_claim_assignment.py")
     assert current_assignment.path.endswith("guard_0021_current_assignment_assertion.py")
+    assert staging_atomic_submission.path.endswith("guard_0022_staging_atomic_submission.py")
+    assert staging_worker_session.path.endswith("guard_0023_staging_worker_session.py")
+    assert protected_trial_terminal_closure.path.endswith(
+        "guard_0024_protected_trial_terminal_closure.py"
+    )
+    assert protected_trial_retry.path.endswith("guard_0025_protected_trial_retry.py")
+    assert protected_trial_requeue.path.endswith(
+        "guard_0026_protected_trial_requeue.py"
+    )
