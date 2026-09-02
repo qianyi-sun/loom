@@ -2339,6 +2339,13 @@ class TaskImageBuildGrant(Base):
             name="task_image_build_grants_request_digest_check",
         ),
         CheckConstraint(
+            "jsonb_typeof(authority_spec) = 'object' "
+            "AND authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND authority_sha256 <> repeat('0', 64) "
+            "AND isfinite(grant_expires_at)",
+            name="task_image_build_grants_authority_check",
+        ),
+        CheckConstraint(
             "slurm_comment = 'loom-task-builder-v1:grant=' || id::text",
             name="task_image_build_grants_comment_check",
         ),
@@ -2418,6 +2425,11 @@ class TaskImageBuildGrant(Base):
     slurm_qos: Mapped[str] = mapped_column(Text, nullable=False)
     request_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    authority_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    authority_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    grant_expires_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
     slurm_comment: Mapped[str] = mapped_column(Text, nullable=False)
     ambiguity_settle_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     ambiguity_settle_until: Mapped[datetime | None] = mapped_column(
@@ -2487,6 +2499,330 @@ class TaskImageBuildGrantEvent(Base):
         default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskImageBuildProjection(Base):
+    """Credential-projection state for one exact released build grant."""
+
+    __tablename__ = "task_image_build_projections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["grant_id"],
+            ["task_image_build_grants.id"],
+            name="task_image_build_projections_grant_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            name="task_image_build_projections_grant_uidx",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "request_id",
+            name="task_image_build_projections_request_uidx",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "proof_id",
+            name="task_image_build_projections_proof_uidx",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "exchange_id",
+            name="task_image_build_projections_exchange_uidx",
+        ),
+        UniqueConstraint(
+            "session_id",
+            name="task_image_build_projections_session_uidx",
+        ),
+        CheckConstraint(
+            "state IN ('challenged','projected','exchanged','revoked','expired')",
+            name="task_image_build_projections_state_check",
+        ),
+        CheckConstraint(
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND request_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND node_boot_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND challenge_nonce <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND principal_id ~ '^[a-z0-9][a-z0-9_.-]{0,127}$' "
+            "AND principal_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND principal_sha256 <> repeat('0', 64) "
+            "AND request_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND request_sha256 <> repeat('0', 64) "
+            "AND challenge_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND challenge_sha256 <> repeat('0', 64) "
+            "AND node_name ~ '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$' "
+            "AND slurm_cluster_id IN ('oldlab','gb10') "
+            "AND slurm_job_id ~ '^[1-9][0-9]{0,31}$' "
+            "AND supervisor_pid > 0 AND supervisor_uid > 0 AND supervisor_gid > 0 "
+            "AND supervisor_executable_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND supervisor_executable_sha256 <> repeat('0', 64) "
+            "AND cgroup_path LIKE '/sys/fs/cgroup/%' AND cgroup_inode > 0 "
+            "AND jsonb_typeof(request_json) = 'object' "
+            "AND jsonb_typeof(challenge_json) = 'object' "
+            "AND event_sequence >= 0",
+            name="task_image_build_projections_identity_check",
+        ),
+        CheckConstraint(
+            "((proof_id IS NULL AND proof_json IS NULL AND proof_sha256 IS NULL "
+            "AND bootstrap_token_hash IS NULL AND bootstrap_secret_ref IS NULL "
+            "AND bootstrap_issued_at IS NULL AND bootstrap_expires_at IS NULL "
+            "AND attestation_generation IS NULL AND attestation_sha256 IS NULL "
+            "AND attestation_expires_at IS NULL) OR "
+            "(proof_id IS NOT NULL AND proof_json IS NOT NULL "
+            "AND jsonb_typeof(proof_json) = 'object' "
+            "AND proof_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proof_sha256 <> repeat('0', 64) "
+            "AND octet_length(bootstrap_token_hash) = 32 "
+            "AND bootstrap_secret_ref ~ "
+            "'^loom://task-image-bootstrap/[A-Za-z0-9._/-]+$' "
+            "AND octet_length(bootstrap_secret_ref) BETWEEN "
+            "octet_length('loom://task-image-bootstrap/') + 1 AND "
+            "octet_length('loom://task-image-bootstrap/') + 512 "
+            "AND bootstrap_issued_at IS NOT NULL AND bootstrap_expires_at IS NOT NULL "
+            "AND attestation_generation > 0 "
+            "AND attestation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND attestation_sha256 <> repeat('0', 64) "
+            "AND attestation_expires_at IS NOT NULL)) "
+            "AND ((exchange_id IS NULL AND exchange_json IS NULL "
+            "AND exchange_sha256 IS NULL AND session_id IS NULL "
+            "AND session_token_hash IS NULL AND session_secret_ref IS NULL "
+            "AND session_json IS NULL AND session_sha256 IS NULL "
+            "AND session_issued_at IS NULL AND session_expires_at IS NULL) OR "
+            "(exchange_id IS NOT NULL AND exchange_json IS NOT NULL "
+            "AND jsonb_typeof(exchange_json) = 'object' "
+            "AND exchange_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND exchange_sha256 <> repeat('0', 64) "
+            "AND session_id IS NOT NULL AND octet_length(session_token_hash) = 32 "
+            "AND session_secret_ref ~ "
+            "'^loom://task-image-session/[A-Za-z0-9._/-]+$' "
+            "AND octet_length(session_secret_ref) BETWEEN "
+            "octet_length('loom://task-image-session/') + 1 AND "
+            "octet_length('loom://task-image-session/') + 512 "
+            "AND jsonb_typeof(session_json) = 'object' "
+            "AND session_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND session_sha256 <> repeat('0', 64) "
+            "AND session_issued_at IS NOT NULL AND session_expires_at IS NOT NULL)) "
+            "AND (exchange_id IS NULL OR proof_id IS NOT NULL) "
+            "AND ((state = 'challenged' AND proof_id IS NULL AND exchange_id IS NULL) "
+            "OR (state = 'projected' AND proof_id IS NOT NULL AND exchange_id IS NULL) "
+            "OR (state = 'exchanged' AND proof_id IS NOT NULL "
+            "AND exchange_id IS NOT NULL) OR state IN ('revoked','expired'))",
+            name="task_image_build_projections_state_fields_check",
+        ),
+        CheckConstraint(
+            "(state NOT IN ('revoked','expired') AND revoked_at IS NULL "
+            "AND revoke_reason IS NULL AND expired_at IS NULL) OR "
+            "(state = 'revoked' AND revoked_at IS NOT NULL "
+            "AND revoke_reason ~ '^[a-z][a-z0-9_]{0,127}$' "
+            "AND expired_at IS NULL) OR "
+            "(state = 'expired' AND expired_at IS NOT NULL "
+            "AND revoked_at IS NULL AND revoke_reason IS NULL)",
+            name="task_image_build_projections_terminal_check",
+        ),
+        CheckConstraint(
+            "challenge_issued_at < challenge_expires_at AND created_at <= updated_at "
+            "AND (proof_id IS NULL OR "
+            "(bootstrap_issued_at < bootstrap_expires_at "
+            "AND bootstrap_issued_at < attestation_expires_at)) "
+            "AND (exchange_id IS NULL OR session_issued_at < session_expires_at)",
+            name="task_image_build_projections_time_check",
+        ),
+        Index(
+            "task_image_build_projections_active_session_idx",
+            "session_expires_at",
+            "grant_id",
+            postgresql_where=text("state = 'exchanged'"),
+        ),
+        Index(
+            "task_image_build_projections_attestation_expiry_idx",
+            "attestation_expires_at",
+            "grant_id",
+            postgresql_where=text("state IN ('projected','exchanged')"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    principal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    principal_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    node_name: Mapped[str] = mapped_column(String(253), nullable=False)
+    node_boot_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    slurm_cluster_id: Mapped[str] = mapped_column(Text, nullable=False)
+    slurm_job_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    supervisor_pid: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    supervisor_uid: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    supervisor_gid: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    supervisor_executable_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    cgroup_path: Mapped[str] = mapped_column(Text, nullable=False)
+    cgroup_inode: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    challenge_nonce: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    challenge_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    challenge_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    challenge_issued_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    challenge_expires_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    proof_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    proof_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    proof_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(
+        LargeBinary(32), nullable=True
+    )
+    bootstrap_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bootstrap_issued_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    bootstrap_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    exchange_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    exchange_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    exchange_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
+    session_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    session_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    session_issued_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    session_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    attestation_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    attestation_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attestation_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    event_sequence: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    revoke_reason: Mapped[str | None] = mapped_column(String(128))
+    expired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class TaskImageBuildProjectionEvent(Base):
+    """Append-only transition and bounded exact-replay evidence."""
+
+    __tablename__ = "task_image_build_projection_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["grant_id"],
+            ["task_image_build_projections.grant_id"],
+            name="task_image_build_projection_events_projection_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "event_sequence",
+            name="task_image_build_projection_events_sequence_uidx",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "event_type",
+            "event_key",
+            name="task_image_build_projection_events_type_key_uidx",
+        ),
+        CheckConstraint(
+            "event_sequence > 0",
+            name="task_image_build_projection_events_sequence_check",
+        ),
+        CheckConstraint(
+            "event_type IN ('challenged','challenge_replayed','projected',"
+            "'projection_replayed','exchanged','exchange_replayed','attested',"
+            "'attestation_replayed','revoked','expired')",
+            name="task_image_build_projection_events_type_check",
+        ),
+        CheckConstraint(
+            "event_key ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$' "
+            "AND jsonb_typeof(payload_json) = 'object'",
+            name="task_image_build_projection_events_key_check",
+        ),
+        Index(
+            "task_image_build_projection_events_created_idx",
+            "grant_id",
+            "created_at",
+            "event_sequence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskImageBuildContainmentAttestation(Base):
+    """Append-only containment liveness evidence for one projection."""
+
+    __tablename__ = "task_image_build_containment_attestations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["grant_id"],
+            ["task_image_build_projections.grant_id"],
+            name="task_image_build_containment_attestations_projection_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "generation",
+            name="task_image_build_containment_attestations_generation_uidx",
+        ),
+        CheckConstraint(
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND generation > 0",
+            name="task_image_build_containment_attestations_generation_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(attestation_json) = 'object' "
+            "AND attestation_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND attestation_sha256 <> repeat('0', 64)",
+            name="task_image_build_containment_attestations_digest_check",
+        ),
+        CheckConstraint(
+            "issued_at < expires_at",
+            name="task_image_build_containment_attestations_time_check",
+        ),
+        Index(
+            "task_image_build_containment_attestations_expiry_idx",
+            "expires_at",
+            "grant_id",
+            "generation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    attestation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    attestation_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
 
