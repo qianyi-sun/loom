@@ -587,7 +587,14 @@ async def test_projection_exact_replay_is_bounded_and_returns_same_secret(
     [
         "wrong_challenge",
         "expired_challenge",
+        "changed_request_id",
+        "changed_request_digest",
+        "changed_node",
+        "changed_node_boot",
+        "changed_cluster",
+        "changed_job",
         "changed_cgroup",
+        "changed_cgroup_path",
         "wrong_policy",
         "wrong_resource",
     ],
@@ -604,8 +611,36 @@ async def test_projection_rejects_invalid_proof_before_creating_a_secret(
         proof = _proof(challenge_nonce=uuid4())
     elif drift == "expired_challenge":
         now = NOW + timedelta(seconds=64)
+    elif drift == "changed_request_id":
+        proof = _proof(request_id=uuid4())
+    elif drift == "changed_request_digest":
+        proof = _proof(request_sha256="a" * 64)
+    elif drift == "changed_node":
+        proof = _proof(node_name="trt-gb10-2")
+    elif drift == "changed_node_boot":
+        proof = _proof(node_boot_id=uuid4())
+    elif drift == "changed_cluster":
+        proof = _proof(slurm_cluster_id="oldlab")
+    elif drift == "changed_job":
+        proof = _proof(slurm_job_id="54321")
     elif drift == "changed_cgroup":
-        proof = proof.model_copy(update={"cgroup_inode": 987655})
+        proof = _proof(
+            cgroup_inode=987655,
+            attachment=_attachment(cgroup_inode=987655),
+        )
+    elif drift == "changed_cgroup_path":
+        changed_cgroup = (
+            "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
+        )
+        changed_root = f"{changed_cgroup}/loom-builder"
+        proof = _proof(
+            cgroup_path=changed_cgroup,
+            attachment=_attachment(
+                containment_root=changed_root,
+                trusted_service_cgroup=f"{changed_root}/trusted-service",
+                build_egress_cgroup=f"{changed_root}/build-egress",
+            ),
+        )
     elif drift == "wrong_policy":
         proof = _proof(attachment=_attachment(containment_policy_sha256="a" * 64))
     elif drift == "wrong_resource":
@@ -1205,8 +1240,14 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
     [
         "changed_generation",
         "skipped_generation",
+        "principal_scope",
+        "principal_node",
+        "node_name",
         "node_boot_id",
+        "cluster",
+        "job_id",
         "cgroup_inode",
+        "cgroup_path",
         "link_ids",
         "program_ids",
         "map_ids",
@@ -1243,10 +1284,52 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
         elif drift == "skipped_generation":
             candidate = _attestation(proof, generation=3)
             expected = TaskImageProjectionConflictError
+        elif drift == "principal_scope":
+            principal = _principal(scopes=("task-image:project",))
+        elif drift == "principal_node":
+            principal = _principal(node_name="trt-gb10-2")
+        elif drift == "node_name":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                node_name="trt-gb10-2",
+            )
         elif drift == "node_boot_id":
             candidate = _attestation(proof, generation=2, node_boot_id=uuid4())
+        elif drift == "cluster":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                slurm_cluster_id="oldlab",
+            )
+        elif drift == "job_id":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                slurm_job_id="54321",
+            )
         elif drift == "cgroup_inode":
-            candidate = candidate.model_copy(update={"cgroup_inode": 987655})
+            candidate = _attestation(
+                proof,
+                generation=2,
+                cgroup_inode=987655,
+                attachment=_attachment(cgroup_inode=987655),
+            )
+        elif drift == "cgroup_path":
+            changed_cgroup = (
+                "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_54321/step_batch"
+            )
+            changed_root = f"{changed_cgroup}/loom-builder"
+            candidate = _attestation(
+                proof,
+                generation=2,
+                cgroup_path=changed_cgroup,
+                attachment=_attachment(
+                    containment_root=changed_root,
+                    trusted_service_cgroup=f"{changed_root}/trusted-service",
+                    build_egress_cgroup=f"{changed_root}/build-egress",
+                ),
+            )
         elif drift == "link_ids":
             candidate = _attestation(
                 proof,
