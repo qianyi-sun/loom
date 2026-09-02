@@ -1531,7 +1531,7 @@ async def finalize_committed_service_execution(
         raise ServiceExecutionConflict("execution lease not found")
     if (
         lease.desired_state != "finalize"
-        or lease.observed_state != "finalizing"
+        or lease.observed_state not in {"finalizing", "failed"}
         or lease.output_commit_state != "committed"
     ):
         return False

@@ -1,4 +1,7 @@
 mock_provider "nebius" {}
+mock_provider "nebius" {
+  alias = "no_default_labels"
+}
 
 variables {
   tenant_id        = "tenant-e00test"
@@ -32,6 +35,9 @@ variables {
   execution_min_nodes              = 0
   execution_max_nodes              = 1
   evidence_bucket_name             = "loom-nebius-test-evidence"
+  deployment_access_public_pool_id = "vpcpool-e00test"
+  deployment_access_ssh_public_key = "ssh-ed25519 dGVzdA== terraform-test"
+  deployment_access_image_id       = "computeimage-e00test"
   capacity_observer_public_key_pem = <<-EOT
     -----BEGIN PUBLIC KEY-----
     dGVzdA==
@@ -41,6 +47,10 @@ variables {
 
 run "development_private_payg_plan" {
   command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
 
   assert {
     condition = toset([
@@ -85,6 +95,10 @@ run "development_private_payg_plan" {
 
 run "public_control_plane_is_cidr_bounded" {
   command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
 
   variables {
     public_control_plane_cidrs = ["203.0.113.9/32"]
@@ -98,6 +112,10 @@ run "public_control_plane_is_cidr_bounded" {
 
 run "shared_cluster_rejects_missing_environment_binding" {
   command = plan
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
 
   variables {
     environment_bindings = {

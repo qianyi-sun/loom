@@ -4,6 +4,8 @@ spec:
       containers:
         - name: control-plane
           env:
+            - name: LOOM_ENV
+              value: development
             - name: LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON
               valueFrom:
                 secretKeyRef:

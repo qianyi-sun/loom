@@ -1,6 +1,11 @@
 module "execution_target" {
   source = "../modules/execution-target"
 
+  providers = {
+    nebius                   = nebius
+    nebius.no_default_labels = nebius.no_default_labels
+  }
+
   tenant_id                        = var.tenant_id
   project_id                       = var.project_id
   target_id                        = var.target.target_id
@@ -23,4 +28,9 @@ module "execution_target" {
   evidence_bucket_name             = var.evidence_bucket_name
   evidence_bucket_max_bytes        = var.evidence_bucket_max_bytes
   capacity_observer_public_key_pem = var.capacity_observer_public_key_pem
+  deployment_access_public_pool_id = var.deployment_access_public_pool_id
+  deployment_access_ssh_public_key = var.deployment_access_ssh_public_key
+  deployment_access_image_id       = var.deployment_access_image_id
+  deployment_access_preset         = var.deployment_access_preset
+  deployment_access_disk_gib       = var.deployment_access_disk_gib
 }

@@ -1806,6 +1806,23 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "npm run test:e2e" in web_script
 
 
+def test_nebius_iac_validates_aliased_provider_through_module_tests() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    steps = workflow["jobs"]["nebius-iac"]["steps"]
+    script = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Validate pinned Nebius module and stack"
+    )
+
+    module_command = (
+        "terraform -chdir=deploy/terraform/nebius/modules/execution-target"
+    )
+    assert f"{module_command} test" in script
+    assert f"{module_command} validate" not in script
+    assert "terraform -chdir=deploy/terraform/nebius/stack validate" in script
+
+
 def test_python_test_shards_are_complete_and_non_overlapping() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     jobs = workflow["jobs"]
