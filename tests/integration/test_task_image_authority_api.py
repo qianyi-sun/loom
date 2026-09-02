@@ -577,6 +577,41 @@ async def test_streamed_body_limit_cannot_be_bypassed_without_content_length() -
     assert sent[1]["body"] == b'{"detail":"task-image authority request too large"}'
 
 
+async def test_streamed_body_is_replayed_as_one_bounded_message() -> None:
+    received_downstream: list[dict[str, object]] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope
+        received_downstream.append(await receive())
+        received_downstream.append(await receive())
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = api.RequestBodyLimitMiddleware(downstream, maximum_bytes=4)
+    chunks = [
+        {"type": "http.request", "body": b"a", "more_body": True},
+        {"type": "http.request", "body": b"bc", "more_body": True},
+        {"type": "http.request", "body": b"d", "more_body": False},
+    ]
+
+    async def receive() -> dict[str, object]:
+        return chunks.pop(0)
+
+    async def send(message: dict[str, object]) -> None:
+        del message
+
+    await middleware(
+        {"type": "http", "headers": [], "path": "/v1/projections/x/challenge"},
+        receive,
+        send,
+    )
+
+    assert received_downstream == [
+        {"type": "http.request", "body": b"abcd", "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+
 async def test_concurrency_limiter_rejects_work_instead_of_queueing_unboundedly() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()

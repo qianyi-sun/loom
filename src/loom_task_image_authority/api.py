@@ -95,34 +95,42 @@ class RequestBodyLimitMiddleware:
                 )
                 return
 
-        received = 0
-        messages: list[dict[str, Any]] = []
+        body = bytearray()
+        disconnected = False
         while True:
             message = cast(dict[str, Any], await receive())
-            messages.append(message)
             if message["type"] == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.maximum_bytes:
+                chunk = cast(bytes, message.get("body", b""))
+                if len(body) + len(chunk) > self.maximum_bytes:
                     await self._reject(
                         send,
                         status.HTTP_413_CONTENT_TOO_LARGE,
                         "task-image authority request too large",
                     )
                     return
+                body.extend(chunk)
                 if not message.get("more_body", False):
                     break
             elif message["type"] == "http.disconnect":
+                disconnected = True
+                break
+            else:
+                disconnected = True
                 break
 
-        index = 0
+        replayed = False
+        bounded_body = bytes(body)
 
         async def replay_receive() -> dict[str, Any]:
-            nonlocal index
-            if index >= len(messages):
+            nonlocal replayed
+            if disconnected or replayed:
                 return {"type": "http.disconnect"}
-            message = messages[index]
-            index += 1
-            return message
+            replayed = True
+            return {
+                "type": "http.request",
+                "body": bounded_body,
+                "more_body": False,
+            }
 
         await self.app(scope, replay_receive, send)
 
