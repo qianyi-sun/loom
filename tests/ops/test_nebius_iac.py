@@ -165,4 +165,6 @@ def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
     assert migration < gateway_rollout
     assert 'command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]' in gateway
     assert "automountServiceAccountToken: false" in gateway
-    assert "--for=condition=complete job/loom-schema-migrate" in gateway
+    assert "name: LOOM_DB_URL" in gateway
+    assert "Complete=True" in gateway
+    assert "Failed=True" in gateway

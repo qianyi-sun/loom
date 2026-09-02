@@ -273,7 +273,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
           env:
-            - name: LOOM_SVC_DB_URL
+            - name: LOOM_DB_URL
               valueFrom:
                 secretKeyRef:
                   name: loom-secrets
@@ -286,8 +286,22 @@ spec:
               cpu: "1"
               memory: 512Mi
 MIGRATION
-if ! kubectl --kubeconfig "$remote_stage/kubeconfig" wait \
-  -n loom --for=condition=complete job/loom-schema-migrate --timeout=300s; then
+migration_deadline=$((SECONDS + 300))
+migration_complete=false
+while ((SECONDS < migration_deadline)); do
+  migration_status=$(kubectl --kubeconfig "$remote_stage/kubeconfig" get job \
+    -n loom loom-schema-migrate \
+    -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}')
+  if grep -qx 'Complete=True' <<<"$migration_status"; then
+    migration_complete=true
+    break
+  fi
+  if grep -qx 'Failed=True' <<<"$migration_status"; then
+    break
+  fi
+  sleep 2
+done
+if [[ $migration_complete != true ]]; then
   kubectl --kubeconfig "$remote_stage/kubeconfig" logs \
     -n loom job/loom-schema-migrate --all-containers=true >&2 || true
   exit 1
