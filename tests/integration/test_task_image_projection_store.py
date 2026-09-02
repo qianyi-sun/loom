@@ -37,9 +37,11 @@ from loom_task_image_authority.contracts import (
     TaskImageAttachmentProofV1,
     TaskImageBootstrapExchangeV1,
     TaskImageBuildGrantAuthorityV1,
+    TaskImageBuildSessionV1,
     TaskImageContainmentAttachmentV1,
     TaskImageContainmentAttestationV1,
     TaskImageGuardPrincipalV1,
+    TaskImageProjectionChallengeV1,
     TaskImageProjectionRequestV1,
     canonical_authority_sha256,
     canonical_public_binding_sha256,
@@ -356,6 +358,233 @@ async def test_challenge_is_durable_exactly_replayable_and_conflict_bound(
             )
         assert row.state == "challenged"
         assert row.event_sequence == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("principal_id", "gb10-attacker"),
+        ("supervisor_pid", 42101),
+        ("supervisor_uid", 994),
+        ("supervisor_gid", 981),
+        ("supervisor_executable_sha256", "a" * 64),
+    ],
+)
+async def test_projection_rejects_stored_identity_scalar_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+    field: str,
+    changed_value: object,
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        setattr(row, field, changed_value)
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match=(
+                r"task-image (guard principal is not authorized"
+                "|projection request changed)"
+            ),
+        ):
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+            )
+        assert secrets.put_count == 0
+
+
+async def test_projection_rejects_stored_request_document_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        row.request_json = {**row.request_json, "supervisor_pid": 42101}
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image projection request changed",
+        ):
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+            )
+        assert secrets.put_count == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("challenge_issued_at", NOW + timedelta(seconds=3)),
+        ("challenge_expires_at", NOW + timedelta(seconds=63)),
+    ],
+)
+async def test_projection_rejects_stored_challenge_scalar_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+    field: str,
+    changed_value: object,
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        setattr(row, field, changed_value)
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image projection challenge changed",
+        ):
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+            )
+        assert secrets.put_count == 0
+
+
+async def test_projection_rejects_rehashed_challenge_authority_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        changed = TaskImageProjectionChallengeV1.model_validate_json(
+            json.dumps(
+                {**row.challenge_json, "containment_policy_sha256": "a" * 64}
+            )
+        )
+        row.challenge_json = changed.model_dump(mode="json", exclude_none=False)
+        row.challenge_sha256 = canonical_authority_sha256(changed)
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image projection challenge changed",
+        ):
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+            )
+        assert secrets.put_count == 0
+
+
+async def test_projection_rejects_rehashed_challenge_before_request_observation(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        changed = TaskImageProjectionChallengeV1.model_validate_json(
+            json.dumps(
+                {
+                    **row.challenge_json,
+                    "issued_at": (NOW + timedelta(seconds=2)).isoformat(),
+                    "expires_at": (NOW + timedelta(seconds=62)).isoformat(),
+                }
+            )
+        )
+        row.challenge_json = changed.model_dump(mode="json", exclude_none=False)
+        row.challenge_sha256 = canonical_authority_sha256(changed)
+        row.challenge_issued_at = changed.issued_at
+        row.challenge_expires_at = changed.expires_at
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image projection challenge changed",
+        ):
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+            )
+        assert secrets.put_count == 0
 
 
 @pytest.mark.parametrize(
@@ -1060,6 +1289,122 @@ async def test_exchange_rejects_changed_attestation_high_water(
         assert secrets.put_count == 1
 
 
+async def test_exchange_rejects_rehashed_stored_proof_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.proof_json is not None
+        changed = TaskImageAttachmentProofV1.model_validate_json(
+            json.dumps(
+                {
+                    **row.proof_json,
+                    "observed_at": (NOW + timedelta(seconds=6)).isoformat(),
+                }
+            )
+        )
+        changed_sha256 = canonical_authority_sha256(changed)
+        row.proof_json = changed.model_dump(mode="json", exclude_none=False)
+        row.proof_sha256 = changed_sha256
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image attachment proof changed",
+        ):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt, proof_sha256=changed_sha256),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        assert secrets.put_count == 1
+
+
+async def test_exchange_rejects_bootstrap_expiry_beyond_initial_attestation(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, proof, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        row.bootstrap_expires_at = proof.attestation_expires_at + timedelta(seconds=1)
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image bootstrap receipt changed",
+        ):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        assert secrets.put_count == 1
+
+
+async def test_exchange_replay_rejects_stored_exchange_document_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        exchange = _exchange(receipt)
+        await exchange_task_image_bootstrap(
+            session,
+            request=exchange,
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.exchange_json is not None
+        row.exchange_json = {
+            **row.exchange_json,
+            "observed_at": "2026-09-02T14:00:08Z",
+        }
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image bootstrap exchange changed",
+        ):
+            await exchange_task_image_bootstrap(
+                session,
+                request=exchange,
+                now=NOW + timedelta(seconds=9),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+            )
+        assert secrets.put_count == 2
+
+
 async def test_secret_bearing_exchange_validation_redacts_raw_tokens(
     projection_session: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1227,6 +1572,48 @@ async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
         await session.flush()
         assert build_session.expires_at > NOW + timedelta(seconds=14)
         with pytest.raises(TaskImageProjectionExpiredError):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                raw_session_token=build_session.session_token,
+                now=NOW + timedelta(seconds=14),
+            )
+
+
+async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestation(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        build_session = await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        changed = TaskImageBuildSessionV1.model_validate(
+            build_session.model_dump(mode="python")
+            | {"expires_at": NOW + timedelta(minutes=5)}
+        )
+        row.session_json = changed.public_binding()
+        row.session_sha256 = canonical_public_binding_sha256(changed)
+        row.session_expires_at = changed.expires_at
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image build session changed",
+        ):
             await authorize_task_image_build_session(
                 session,
                 grant_id=GRANT_ID,

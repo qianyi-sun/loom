@@ -208,6 +208,7 @@ def _require_principal(
     *,
     cluster: str,
     node_name: str,
+    principal_id: str | None = None,
     principal_sha256: str | None = None,
     required_scope: str = _PROJECT_SCOPE,
 ) -> str:
@@ -216,6 +217,7 @@ def _require_principal(
         required_scope not in principal.scopes
         or principal.slurm_cluster_id != cluster
         or principal.node_name != node_name
+        or (principal_id is not None and principal.principal_id != principal_id)
         or (principal_sha256 is not None and digest != principal_sha256)
     ):
         raise TaskImageProjectionAuthorizationError(
@@ -224,19 +226,11 @@ def _require_principal(
     return digest
 
 
-def _require_request_binding(
+def _require_request_grant_binding(
     row: TaskImageBuildGrant,
     authority: TaskImageBuildGrantAuthorityV1,
-    principal: TaskImageGuardPrincipalV1,
     request: TaskImageProjectionRequestV1,
-    *,
-    now: datetime,
-) -> str:
-    principal_sha256 = _require_principal(
-        principal,
-        cluster=row.slurm_cluster_id,
-        node_name=request.node_name,
-    )
+) -> None:
     if (
         request.grant_id != row.id
         or request.slurm_cluster_id != row.slurm_cluster_id
@@ -254,6 +248,22 @@ def _require_request_binding(
         raise TaskImageProjectionAuthorizationError(
             "task-image projection request differs from released grant"
         )
+
+
+def _require_request_binding(
+    row: TaskImageBuildGrant,
+    authority: TaskImageBuildGrantAuthorityV1,
+    principal: TaskImageGuardPrincipalV1,
+    request: TaskImageProjectionRequestV1,
+    *,
+    now: datetime,
+) -> str:
+    principal_sha256 = _require_principal(
+        principal,
+        cluster=row.slurm_cluster_id,
+        node_name=request.node_name,
+    )
+    _require_request_grant_binding(row, authority, request)
     if request.observed_at > now:
         raise TaskImageProjectionAuthorizationError(
             "task-image projection observation is in the future"
@@ -263,6 +273,37 @@ def _require_request_binding(
             "task-image projection observation is stale"
         )
     return principal_sha256
+
+
+def _stored_request(row: TaskImageBuildProjection) -> TaskImageProjectionRequestV1:
+    try:
+        request = TaskImageProjectionRequestV1.model_validate_json(
+            json.dumps(row.request_json)
+        )
+    except ValidationError as exc:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image projection request is invalid"
+        ) from exc
+    if (
+        canonical_authority_sha256(request) != row.request_sha256
+        or request.request_id != row.request_id
+        or request.grant_id != row.grant_id
+        or request.node_name != row.node_name
+        or request.node_boot_id != row.node_boot_id
+        or request.slurm_cluster_id != row.slurm_cluster_id
+        or request.slurm_job_id != row.slurm_job_id
+        or request.supervisor_pid != row.supervisor_pid
+        or request.supervisor_uid != row.supervisor_uid
+        or request.supervisor_gid != row.supervisor_gid
+        or request.supervisor_executable_sha256
+        != row.supervisor_executable_sha256
+        or request.cgroup_path != row.cgroup_path
+        or request.cgroup_inode != row.cgroup_inode
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image projection request changed"
+        )
+    return request
 
 
 def _append_event(
@@ -317,7 +358,11 @@ async def _append_event_once(
         )
 
 
-def _stored_challenge(row: TaskImageBuildProjection) -> TaskImageProjectionChallengeV1:
+def _stored_challenge(
+    row: TaskImageBuildProjection,
+    *,
+    authority: TaskImageBuildGrantAuthorityV1,
+) -> TaskImageProjectionChallengeV1:
     try:
         challenge = TaskImageProjectionChallengeV1.model_validate_json(
             json.dumps(row.challenge_json)
@@ -328,14 +373,34 @@ def _stored_challenge(row: TaskImageBuildProjection) -> TaskImageProjectionChall
         ) from exc
     if (
         canonical_authority_sha256(challenge) != row.challenge_sha256
+        or challenge.grant_id != row.grant_id
         or challenge.challenge_nonce != row.challenge_nonce
         or challenge.request_id != row.request_id
         or challenge.request_sha256 != row.request_sha256
+        or challenge.containment_policy_sha256
+        != authority.containment_policy_sha256
+        or challenge.resource_profile_sha256 != authority.resource_profile_sha256
+        or challenge.issued_at != row.challenge_issued_at
+        or challenge.expires_at != row.challenge_expires_at
     ):
         raise TaskImageProjectionAuthorizationError(
             "stored task-image projection challenge changed"
         )
     return challenge
+
+
+def _require_challenge_request_binding(
+    request: TaskImageProjectionRequestV1,
+    challenge: TaskImageProjectionChallengeV1,
+    authority: TaskImageBuildGrantAuthorityV1,
+) -> None:
+    if (
+        challenge.issued_at < request.observed_at
+        or challenge.expires_at > authority.expires_at
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image projection challenge changed"
+        )
 
 
 def _stored_attestation(
@@ -433,7 +498,16 @@ async def request_task_image_projection(
             raise TaskImageProjectionConflictError(
                 "task-image projection request idempotency conflict"
             )
-        challenge = _stored_challenge(row)
+        stored_request = _stored_request(row)
+        _require_principal(
+            principal,
+            cluster=row.slurm_cluster_id,
+            node_name=row.node_name,
+            principal_id=row.principal_id,
+            principal_sha256=row.principal_sha256,
+        )
+        challenge = _stored_challenge(row, authority=authority)
+        _require_challenge_request_binding(stored_request, challenge, authority)
         if now >= challenge.expires_at:
             raise TaskImageProjectionExpiredError(
                 "task-image projection challenge expired"
@@ -547,10 +621,110 @@ def _require_proof_binding(
         )
 
 
+def _attestation_from_proof(
+    proof: TaskImageAttachmentProofV1,
+) -> TaskImageContainmentAttestationV1:
+    return TaskImageContainmentAttestationV1(
+        attestation_id=proof.proof_id,
+        grant_id=proof.grant_id,
+        generation=proof.attestation_generation,
+        node_name=proof.node_name,
+        node_boot_id=proof.node_boot_id,
+        slurm_cluster_id=proof.slurm_cluster_id,
+        slurm_job_id=proof.slurm_job_id,
+        cgroup_path=proof.cgroup_path,
+        cgroup_inode=proof.cgroup_inode,
+        attachment=proof.attachment,
+        issued_at=proof.observed_at,
+        expires_at=proof.attestation_expires_at,
+    )
+
+
+async def _stored_proof(
+    session: AsyncSession,
+    *,
+    row: TaskImageBuildProjection,
+    authority: TaskImageBuildGrantAuthorityV1,
+    challenge: TaskImageProjectionChallengeV1,
+) -> TaskImageAttachmentProofV1:
+    if row.proof_id is None or row.proof_json is None or row.proof_sha256 is None:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof is incomplete"
+        )
+    try:
+        proof = TaskImageAttachmentProofV1.model_validate_json(
+            json.dumps(row.proof_json)
+        )
+    except ValidationError as exc:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof is invalid"
+        ) from exc
+    if (
+        proof.proof_id != row.proof_id
+        or canonical_authority_sha256(proof) != row.proof_sha256
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof changed"
+        )
+    try:
+        _require_proof_binding(
+            row,
+            authority,
+            challenge,
+            proof,
+            now=proof.observed_at,
+        )
+    except TaskImageProjectionAuthorizationError as exc:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof changed"
+        ) from exc
+    initial_row = await session.scalar(
+        select(TaskImageBuildContainmentAttestation)
+        .where(
+            TaskImageBuildContainmentAttestation.grant_id == row.grant_id,
+            TaskImageBuildContainmentAttestation.generation
+            == proof.attestation_generation,
+        )
+        .with_for_update()
+    )
+    if initial_row is None:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof attestation is unavailable"
+        )
+    initial_attestation = _stored_attestation(initial_row)
+    if initial_attestation != _attestation_from_proof(proof):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image attachment proof changed"
+        )
+    return proof
+
+
+async def _require_stored_projection_chain(
+    session: AsyncSession,
+    *,
+    grant: TaskImageBuildGrant,
+    row: TaskImageBuildProjection,
+    authority: TaskImageBuildGrantAuthorityV1,
+) -> None:
+    request = _stored_request(row)
+    _require_request_grant_binding(grant, authority, request)
+    challenge = _stored_challenge(row, authority=authority)
+    _require_challenge_request_binding(request, challenge, authority)
+    proof = await _stored_proof(
+        session,
+        row=row,
+        authority=authority,
+        challenge=challenge,
+    )
+    _require_projected_receipt_binding(row, authority=authority, proof=proof)
+
+
 async def _replay_projection(
     session: AsyncSession,
     *,
     row: TaskImageBuildProjection,
+    authority: TaskImageBuildGrantAuthorityV1,
+    challenge: TaskImageProjectionChallengeV1,
     proof: TaskImageAttachmentProofV1,
     proof_sha256: str,
     now: datetime,
@@ -560,6 +734,17 @@ async def _replay_projection(
         raise TaskImageProjectionConflictError(
             "task-image attachment proof idempotency conflict"
         )
+    stored_proof = await _stored_proof(
+        session,
+        row=row,
+        authority=authority,
+        challenge=challenge,
+    )
+    _require_projected_receipt_binding(
+        row,
+        authority=authority,
+        proof=stored_proof,
+    )
     if (
         row.bootstrap_secret_ref is None
         or row.bootstrap_token_hash is None
@@ -630,14 +815,20 @@ async def complete_task_image_projection(
         principal,
         cluster=row.slurm_cluster_id,
         node_name=row.node_name,
+        principal_id=row.principal_id,
         principal_sha256=row.principal_sha256,
     )
-    challenge = _stored_challenge(row)
+    stored_request = _stored_request(row)
+    _require_request_grant_binding(grant, authority, stored_request)
+    challenge = _stored_challenge(row, authority=authority)
+    _require_challenge_request_binding(stored_request, challenge, authority)
     proof_sha256 = canonical_authority_sha256(proof)
     if row.state == "projected":
         return await _replay_projection(
             session,
             row=row,
+            authority=authority,
+            challenge=challenge,
             proof=proof,
             proof_sha256=proof_sha256,
             now=now,
@@ -675,20 +866,7 @@ async def complete_task_image_projection(
     if not secret_ref.startswith("loom://task-image-bootstrap/"):
         raise ValueError("task-image bootstrap secret reference has wrong namespace")
 
-    attestation = TaskImageContainmentAttestationV1(
-        attestation_id=proof.proof_id,
-        grant_id=proof.grant_id,
-        generation=proof.attestation_generation,
-        node_name=proof.node_name,
-        node_boot_id=proof.node_boot_id,
-        slurm_cluster_id=proof.slurm_cluster_id,
-        slurm_job_id=proof.slurm_job_id,
-        cgroup_path=proof.cgroup_path,
-        cgroup_inode=proof.cgroup_inode,
-        attachment=proof.attachment,
-        issued_at=proof.observed_at,
-        expires_at=proof.attestation_expires_at,
-    )
+    attestation = _attestation_from_proof(proof)
     attestation_sha256 = canonical_authority_sha256(attestation)
     session.add(
         TaskImageBuildContainmentAttestation(
@@ -745,6 +923,32 @@ def _require_projected_secrets(row: TaskImageBuildProjection) -> None:
         )
 
 
+def _require_projected_receipt_binding(
+    row: TaskImageBuildProjection,
+    *,
+    authority: TaskImageBuildGrantAuthorityV1,
+    proof: TaskImageAttachmentProofV1,
+) -> None:
+    _require_projected_secrets(row)
+    if row.bootstrap_issued_at is None or row.bootstrap_expires_at is None:
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image bootstrap receipt is incomplete"
+        )
+    if (
+        row.bootstrap_issued_at < proof.observed_at
+        or row.bootstrap_expires_at <= row.bootstrap_issued_at
+        or row.bootstrap_expires_at
+        > min(
+            row.bootstrap_issued_at + MAX_ATTESTATION_LIFETIME,
+            proof.attestation_expires_at,
+            authority.expires_at,
+        )
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image bootstrap receipt changed"
+        )
+
+
 def _require_exchange_timing(
     row: TaskImageBuildProjection,
     request: TaskImageBootstrapExchangeV1,
@@ -795,6 +999,8 @@ def _stored_build_session(
         or row.session_sha256 is None
         or row.session_issued_at is None
         or row.session_expires_at is None
+        or row.bootstrap_issued_at is None
+        or row.bootstrap_expires_at is None
     ):
         raise TaskImageProjectionAuthorizationError(
             "stored task-image build session is incomplete"
@@ -839,6 +1045,9 @@ def _stored_build_session(
         or build_session.cpu_arch != authority.cpu_arch
         or build_session.issued_at != row.session_issued_at
         or build_session.expires_at != row.session_expires_at
+        or build_session.issued_at < row.bootstrap_issued_at
+        or build_session.expires_at > row.bootstrap_expires_at
+        or build_session.expires_at > authority.expires_at
     ):
         raise TaskImageProjectionAuthorizationError(
             "stored task-image build session changed"
@@ -864,9 +1073,38 @@ async def _require_session_attestation(
             "stored task-image build session attestation is unavailable"
         )
     attestation = _stored_attestation(stored)
-    if canonical_authority_sha256(attestation) != build_session.attestation_sha256:
+    if (
+        canonical_authority_sha256(attestation) != build_session.attestation_sha256
+        or build_session.issued_at < attestation.issued_at
+        or build_session.expires_at > attestation.expires_at
+    ):
         raise TaskImageProjectionAuthorizationError(
             "stored task-image build session attestation changed"
+        )
+
+
+def _require_stored_exchange(
+    row: TaskImageBuildProjection,
+    *,
+    request: TaskImageBootstrapExchangeV1,
+) -> None:
+    if (
+        row.exchange_id is None
+        or row.exchange_json is None
+        or row.exchange_sha256 is None
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image bootstrap exchange is incomplete"
+        )
+    if (
+        request.public_binding() != row.exchange_json
+        or canonical_public_binding_sha256(request) != row.exchange_sha256
+        or request.exchange_id != row.exchange_id
+        or request.grant_id != row.grant_id
+        or request.proof_sha256 != row.proof_sha256
+    ):
+        raise TaskImageProjectionAuthorizationError(
+            "stored task-image bootstrap exchange changed"
         )
 
 
@@ -884,6 +1122,7 @@ async def _replay_exchange(
         raise TaskImageProjectionConflictError(
             "task-image bootstrap exchange idempotency conflict"
         )
+    _require_stored_exchange(row, request=request)
     if row.session_secret_ref is None or row.session_expires_at is None:
         raise TaskImageProjectionAuthorizationError(
             "stored task-image build session is incomplete"
@@ -928,6 +1167,12 @@ async def exchange_task_image_bootstrap(
         raise TaskImageProjectionAuthorizationError(
             "task-image bootstrap projection is unavailable"
         )
+    await _require_stored_projection_chain(
+        session,
+        grant=grant,
+        row=row,
+        authority=authority,
+    )
     _require_exchange_timing(row, request, now=now)
     _require_bootstrap_token(row, raw_token=request.bootstrap_token)
     current_attestation = await _current_attestation(session, row=row)
@@ -1049,8 +1294,15 @@ async def record_task_image_containment_attestation(
         principal,
         cluster=row.slurm_cluster_id,
         node_name=row.node_name,
+        principal_id=row.principal_id,
         principal_sha256=row.principal_sha256,
         required_scope=_ATTEST_SCOPE,
+    )
+    await _require_stored_projection_chain(
+        session,
+        grant=grant,
+        row=row,
+        authority=authority,
     )
     current = await _current_attestation(session, row=row)
     candidate_sha256 = canonical_authority_sha256(attestation)
@@ -1142,6 +1394,12 @@ async def authorize_task_image_build_session(
         raise TaskImageProjectionAuthorizationError(
             "task-image build session is unavailable"
         )
+    await _require_stored_projection_chain(
+        session,
+        grant=grant,
+        row=row,
+        authority=authority,
+    )
     if (
         row.session_id is None
         or row.session_token_hash is None
