@@ -33,6 +33,13 @@ on:
 permissions:
   contents: read
 
+# A retry request mutates the source workflow run. Serialize requests for the
+# same source run and let an accepted request finish so a later dispatch cannot
+# cancel it after GitHub has begun the rerun operation.
+concurrency:
+  group: classified-ci-retry-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
 jobs:
   retry:
     runs-on: ubuntu-24.04
