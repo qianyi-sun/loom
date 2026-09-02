@@ -103,10 +103,7 @@ def test_0127_requeue_trampoline_is_private_and_reversible(
             assert "BEFORE UPDATE OF state" in trigger
             assert (
                 connection.execute(
-                    text(
-                        "SELECT has_function_privilege"
-                        "('public', :signature, 'EXECUTE')"
-                    ),
+                    text("SELECT has_function_privilege('public', :signature, 'EXECUTE')"),
                     {"signature": signature},
                 ).scalar_one()
                 is False
@@ -115,14 +112,16 @@ def test_0127_requeue_trampoline_is_private_and_reversible(
         command.downgrade(config, "0126")
         with engine.connect() as connection:
             assert (
-                connection.execute(text("SELECT version_num FROM alembic_version"))
-                .scalar_one()
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
                 == "0126"
             )
-            assert connection.execute(
-                text("SELECT to_regprocedure(:signature)"),
-                {"signature": signature},
-            ).scalar_one() is None
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:signature)"),
+                    {"signature": signature},
+                ).scalar_one()
+                is None
+            )
             assert (
                 connection.execute(
                     text(
@@ -134,24 +133,77 @@ def test_0127_requeue_trampoline_is_private_and_reversible(
                 ).scalar_one()
                 == 0
             )
-            assert connection.execute(
-                text(
-                    "SELECT to_regprocedure"
-                    "('public.loom_close_protected_runtime_trial_claim()')"
-                )
-            ).scalar_one() is not None
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT to_regprocedure"
+                        "('public.loom_close_protected_runtime_trial_claim()')"
+                    )
+                ).scalar_one()
+                is not None
+            )
 
         command.upgrade(config, "head")
         with engine.connect() as connection:
             assert (
-                connection.execute(text("SELECT version_num FROM alembic_version"))
-                .scalar_one()
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
                 == "0127"
             )
-            assert connection.execute(
-                text("SELECT to_regprocedure(:signature)"),
-                {"signature": signature},
-            ).scalar_one() is not None
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:signature)"),
+                    {"signature": signature},
+                ).scalar_one()
+                is not None
+            )
+    finally:
+        command.upgrade(config, "head")
+        engine.dispose()
+
+
+def test_0127_refuses_downgrade_while_protected_claim_can_be_requeued(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    trigger_name = "capacity_guard_transform_protected_runtime_trial_requeue"
+    team_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO teams (id, name) VALUES (:id, :name)"),
+                {"id": team_id, "name": f"protected-requeue-downgrade-{team_id}"},
+            )
+            trial_id = _seed_trial(connection, team_id=team_id, state="claimed")
+            _insert_reservation(
+                connection,
+                trial_id=trial_id,
+                team_id=team_id,
+                owner_kind="protected_worker_claim",
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade 0127 while protected claims can be requeued",
+        ):
+            command.downgrade(config, "0126")
+
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+                == "0127"
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM pg_trigger "
+                        "WHERE tgrelid = 'public.trials'::regclass "
+                        "AND tgname = :trigger_name AND NOT tgisinternal"
+                    ),
+                    {"trigger_name": trigger_name},
+                ).scalar_one()
+                == 1
+            )
     finally:
         command.upgrade(config, "head")
         engine.dispose()
@@ -178,6 +230,10 @@ def test_0126_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
                 trial_id=retained_trial_id,
                 team_id=team_id,
                 owner_kind="protected_worker_claim",
+            )
+            connection.execute(
+                text("UPDATE trials SET state = 'failed' WHERE id = :trial_id"),
+                {"trial_id": retained_trial_id},
             )
 
         with engine.connect() as connection:

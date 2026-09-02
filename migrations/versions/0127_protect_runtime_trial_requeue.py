@@ -7,6 +7,7 @@ Create Date: 2026-09-02
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0127"
@@ -82,10 +83,29 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     op.execute(
-        "DROP TRIGGER capacity_guard_transform_protected_runtime_trial_requeue "
-        "ON public.trials"
+        "LOCK TABLE public.trials, public.execution_admission_reservations IN ACCESS EXCLUSIVE MODE"
     )
+    active = bind.execute(
+        sa.text(
+            """
+            SELECT EXISTS (
+              SELECT 1
+                FROM public.trials AS trial
+                JOIN public.execution_admission_reservations AS reservation
+                  ON reservation.trial_id = trial.id
+               WHERE trial.state IN ('claimed', 'running')
+                 AND reservation.execution_role = 'attempt'
+                 AND reservation.owner_kind = 'protected_worker_claim'
+                 AND reservation.state = 'active'
+            )
+            """
+        )
+    ).scalar_one()
+    if active:
+        raise RuntimeError("cannot downgrade 0127 while protected claims can be requeued")
     op.execute(
-        "DROP FUNCTION public.loom_transform_protected_runtime_trial_requeue()"
+        "DROP TRIGGER capacity_guard_transform_protected_runtime_trial_requeue ON public.trials"
     )
+    op.execute("DROP FUNCTION public.loom_transform_protected_runtime_trial_requeue()")
