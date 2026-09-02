@@ -288,11 +288,6 @@ def plan_validations(
         selected[name] = True
         reasons[name].append(reason)
 
-    if event_name == "merge_group":
-        for name in HEAVY_CHECKS:
-            select(name, "merge_group")
-        select("web_checks", "merge_group")
-
     for label in sorted(labels):
         if check := LABEL_TO_CHECK.get(label):
             select(check, f"label:{label}")

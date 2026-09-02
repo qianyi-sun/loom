@@ -634,13 +634,41 @@ def test_every_docker_marked_integration_module_selects_docker() -> None:
         assert plan.integration_docker is True, relative_path
 
 
-def test_merge_group_selects_every_heavy_gate() -> None:
-    plan = plan_validations(changed_paths=[], labels=set(), event_name="merge_group")
-    assert plan.selected_heavy_checks() == {
-        "integration",
-        "integration_docker",
-        "images",
-        "cluster_smoke",
-        "staging_smoke",
-    }
-    assert plan.web_checks is True
+def test_docs_only_merge_group_skips_heavy_lanes() -> None:
+    plan = plan_validations(
+        changed_paths=["docs/merge-queue.md"],
+        labels=set(),
+        event_name="merge_group",
+    )
+
+    assert plan.event_relevant is True
+    assert plan.full_gate is True
+    assert plan.gate_mode == "full"
+    assert plan.docs_only is True
+    assert plan.selected_heavy_checks() == set()
+    assert plan.web_checks is False
+
+
+def test_merge_group_uses_combined_diff_ownership() -> None:
+    plan = plan_validations(
+        changed_paths=["src/loom/config.py"],
+        labels=set(),
+        event_name="merge_group",
+    )
+
+    assert plan.selected_heavy_checks() == {"integration", "images"}
+    assert plan.web_checks is False
+
+
+def test_unowned_merge_group_runtime_path_remains_fail_closed() -> None:
+    path = "unowned-runtime/merge-queue-input.bin"
+    plan = plan_validations(
+        changed_paths=[path],
+        labels=set(),
+        event_name="merge_group",
+    )
+
+    assert plan.unowned_runtime is True
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    expected_reason = f"unowned-runtime-path:{path}"
+    assert all(expected_reason in plan.reasons[check] for check in HEAVY_CHECKS)

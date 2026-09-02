@@ -740,15 +740,18 @@ def test_images_matrix_plan_rejects_malformed_unowned_runtime(
     assert output == ""
 
 
-def test_images_merge_groups_select_a_nonempty_matrix() -> None:
+def test_images_merge_groups_use_combined_diff_matrix_selection() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     plan_script = "\n".join(
         step.get("run", "") for step in workflow["jobs"]["plan"]["steps"] if "run" in step
     )
 
     assert '"$EVENT_NAME" == "workflow_dispatch"' in plan_script
-    assert '"$EVENT_NAME" == "merge_group"' in plan_script
+    assert '"$EVENT_NAME" == "merge_group"' not in plan_script
+    assert '"$UNOWNED_RUNTIME" == "true"' in plan_script
+    assert '"$REQUIRED" == "true"' in plan_script
     assert "--force-all" in plan_script
+    assert "--fallback-all" in plan_script
 
 
 def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
