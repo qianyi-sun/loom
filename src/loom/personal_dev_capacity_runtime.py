@@ -69,9 +69,14 @@ _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
 )
 _STAGING_WORKER_RUNTIME_FUNCTIONS = (
+    "current_protected_runtime_registration()",
+    "submit_protected_runtime_trial_projection"
+    "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text,jsonb,bytea,text)",
+    "publish_protected_runtime_trial_readiness(uuid,uuid,uuid)",
     "register_staging_public_worker(text,jsonb)",
     "assert_staging_worker_session(uuid,text)",
     "claim_staging_assigned_trial(uuid,text,jsonb)",
+    "retry_staging_claimed_trial(uuid,text,jsonb)",
 )
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"

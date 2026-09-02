@@ -130,6 +130,47 @@ async def test_capacity_role_convergence_provisions_isolated_runtime_role(
 
 
 @pytest.mark.asyncio
+async def test_executor_surface_convergence_preserves_exact_protected_runtime_functions(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    def value(key: str) -> str:
+        result = capacity_guard_database[key]
+        assert isinstance(result, str)
+        return result
+
+    runtime = value("runtime_role")
+    database = PsycopgPersonalDevCapacityDatabase(value("admin_url"))
+    await database._converge_executor_surface(
+        migrator_url=value("migrator_url"),
+        owner=value("owner_role"),
+        executor=value("executor_role"),
+        observer=value("observer_role"),
+        runtime=runtime,
+    )
+
+    expected = {
+        "assert_staging_worker_session",
+        "claim_staging_assigned_trial",
+        "current_protected_runtime_registration",
+        "publish_protected_runtime_trial_readiness",
+        "register_staging_public_worker",
+        "retry_staging_claimed_trial",
+        "submit_protected_runtime_trial_projection",
+    }
+    async with await psycopg.AsyncConnection.connect(
+        value("admin_url").replace("postgresql+psycopg://", "postgresql://", 1)
+    ) as connection:
+        functions = await connection.execute(
+            "SELECT routine.proname FROM pg_proc AS routine "
+            "JOIN pg_namespace AS namespace ON namespace.oid = routine.pronamespace "
+            "WHERE namespace.nspname = 'loom_capacity_guard' "
+            "AND has_function_privilege(%s, routine.oid, 'EXECUTE')",
+            (runtime,),
+        )
+        assert {row[0] for row in await functions.fetchall()} == expected
+
+
+@pytest.mark.asyncio
 async def test_capacity_role_convergence_seals_migrator_when_cancelled(
     postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
