@@ -164,6 +164,7 @@ tar -C "$repo_root" -czf "$local_stage/runtime.tar.gz" \
   deploy/k8s/nebius-gateway-development-patch.yaml \
   deploy/k8s/nebius-control-plane-development-patch.yaml \
   deploy/k8s/nebius-service-development-patch.yaml \
+  deploy/k8s/nebius-development-capacity-policy.json \
   deploy/k8s/nebius-execution-actuator.yaml \
   deploy/k8s/nebius-capacity-collector.yaml \
   deploy/k8s/network-policies.yaml

@@ -143,6 +143,40 @@ fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
+capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
+[[ -s $capacity_policy ]] || {
+  echo "Nebius development capacity policy is missing" >&2
+  exit 1
+}
+
+read -r capacity_policy_target capacity_policy_request < <(
+  python3 - "$capacity_policy" <<'PY'
+import base64
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if document.get("schema_version") != "loom.nebius-development-capacity.v1":
+    raise SystemExit("Nebius development capacity policy schema is invalid")
+target_id = document.get("target_id")
+policy = document.get("policy")
+if target_id != "nebius-eu-north1-development" or not isinstance(policy, dict):
+    raise SystemExit("Nebius development capacity policy target is invalid")
+if (
+    document.get("provider_required_quota_vcpu_millis") != 512_000
+    or document.get("accepted_concurrency") != 200
+    or document.get("task_cpu_millis") != 2_000
+    or policy.get("max_nodes") != 10
+    or policy.get("node_cpu_millis") != 48_000
+):
+    raise SystemExit("Nebius development capacity policy does not cover 200 two-vCPU tasks")
+encoded = base64.b64encode(
+    json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).decode("ascii")
+print(target_id, encoded)
+PY
+)
 
 if ! credential_mode=$(stat -c '%a' "$nebius_credentials" 2>/dev/null); then
   credential_mode=$(stat -f '%Lp' "$nebius_credentials")
@@ -290,6 +324,52 @@ kubectl patch deployment -n loom loom-control-plane --type=merge \
   --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/image-admission-keyring-sha256\":\"$image_admission_keyring_sha256\"}}}}}" \
   >/dev/null
 kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
+
+# Capacity policy is repository-owned and converged on every deployment. The
+# admin token remains inside the control-plane Pod and is never copied to the
+# gateway or operator host.
+kubectl exec -n loom deploy/loom-control-plane -- python -c '
+import base64
+import json
+import sys
+import tomllib
+import urllib.parse
+import urllib.request
+
+target_id = sys.argv[1]
+request_body = base64.b64decode(sys.argv[2], validate=True)
+expected = json.loads(request_body)
+with open("/var/run/loom/admin/secrets.toml", "rb") as handle:
+    admin_token = tomllib.load(handle)["admin"]["token"]
+request = urllib.request.Request(
+    "http://127.0.0.1:8080/admin/execution-capacity-policies/"
+    + urllib.parse.quote(target_id, safe=""),
+    data=request_body,
+    headers={
+        "Authorization": f"Bearer {admin_token}",
+        "Content-Type": "application/json",
+    },
+    method="PUT",
+)
+with urllib.request.urlopen(request, timeout=15) as response:
+    observed = json.load(response)
+for name, value in expected.items():
+    if observed.get(name) != value:
+        raise SystemExit(f"capacity policy readback mismatch for {name}")
+print(
+    json.dumps(
+        {
+            "target_id": observed["target_id"],
+            "enabled": observed["enabled"],
+            "max_nodes": observed["max_nodes"],
+            "max_vcpu_millis": observed["max_vcpu_millis"],
+            "version": observed["version"],
+        },
+        sort_keys=True,
+    )
+)
+' "$capacity_policy_target" "$capacity_policy_request"
+
 kubectl patch deployment -n loom loom-service --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
 kubectl patch deployment -n loom loom-service --type=merge \

@@ -23,12 +23,12 @@ Before each mutable operation, record all of the following in the owning issue:
 4. budget/alert status, cleanup deadline, destroy owner, and residual-cost list;
 5. explicit owner approval for that exact operation and cost envelope.
 
-The 2026-08-27 read-only development preflight found zero Kubernetes clusters,
-200 non-GPU vCPUs of quota, and no configured billing budget. The console's
-bounded two-node design estimate was about USD 0.14/hour or USD 102.20 per
-730-hour month at its maximum. This historical observation is **not** a future
-price quote or authorization. Refresh it immediately before apply. No live
-resource was created during that preflight.
+The 2026-09-02 live development readback found a 200 non-GPU-vCPU quota. The
+accepted 200-concurrency target requires 512 vCPUs and 16 VMs in
+`eu-north1`; both quota changes must be accepted before the full-capacity run.
+Quota is an admission ceiling, not a reservation or proof of regional stock.
+Refresh price and quota immediately before apply and retain the provider request
+IDs with the owning issue.
 
 ## Authentication and state prerequisites
 
@@ -47,9 +47,13 @@ nebius profile create \
 nebius profile list
 ```
 
-Do not print or commit the profile configuration. Automation must use a
-dedicated service account with reviewed least privilege and an authorized-key
-profile, never a copied human token.
+Do not print or commit the profile configuration. Automation uses the dedicated
+`loom-development-eu-north1-terraform-automation` service account and an
+authorized-key profile without `expires_at`, never a copied human token. This
+identity is not attached to a VM. The current monolithic state manages tenant
+IAM groups, so its reviewed bootstrap membership must be able to read and
+update those groups; splitting IAM into a separate state is required before
+that tenant-level permission can be narrowed.
 
 The recurring capacity observer uses a Terraform-managed authorized public key
 with no `expires_at`. Generate the key pair once in a protected directory, put
@@ -58,13 +62,14 @@ Nebius credential JSON through the runtime bootstrap below. The SDK exchanges
 that key for short-lived access tokens and refreshes them automatically. Do not
 substitute a copied human access token or a static registry token.
 
-The cluster needs a pre-existing versioned state bucket with object access
-limited to its operators and CI identity. Bootstrap that bucket in a separately
-approved operation, enable access logging and retention appropriate to state,
-and record its resource ID. Never put access keys in `.tfbackend` files; supply
-short-lived or profile-backed S3 credentials through the approved secret
-channel. Reuse the existing development remote-state key so convergence cannot
-fork the live cluster into a new state, and confirm `use_lockfile = true`.
+The cluster uses a pre-existing versioned state bucket and the separate
+`loom-development-eu-north1-terraform-state` service account. Its active S3
+access key has no `expires_at`; the AWS-like key ID and secret live only in the
+`loom-nebius-terraform-state` macOS Keychain item. The checked-in wrapper reads
+that item into the Terraform process environment and rejects ambient AWS
+credentials. Never put access keys in `.tfbackend` files. Reuse the existing
+development remote-state key so convergence cannot fork the live cluster into
+a new state, and confirm `use_lockfile = true`.
 
 ## Read-only preflight and saved plan
 
@@ -81,16 +86,21 @@ terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 Copy the sole shared-cluster input and its existing backend anchor to a protected
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
-reviewing the canonical topology contract.
+reviewing the canonical topology contract. The committed target is `0..10`
+regular `48vcpu-192gb` execution nodes with 64 Pods per node. Its 480-vCPU
+execution envelope gives every node room for twenty 2-vCPU tasks plus 8 vCPUs
+of node/platform overhead; the separate 512-vCPU provider request retains 32
+vCPUs for the fixed gateway and system node. Any unrelated non-GPU VM must fit
+inside that remainder or be stopped before a 200-task acceptance run.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
 export LOOM_NB_INPUT=/secure/path/$LOOM_NB_TARGET.tfvars.json
 export LOOM_NB_BACKEND=/secure/path/$LOOM_NB_TARGET.s3.tfbackend
 export LOOM_NB_PLAN=/secure/path/$LOOM_NB_TARGET.tfplan
-terraform -chdir=deploy/terraform/nebius/stack init -reconfigure -backend-config="$LOOM_NB_BACKEND"
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack init -reconfigure -backend-config="$LOOM_NB_BACKEND"
 terraform -chdir=deploy/terraform/nebius/stack validate
-terraform -chdir=deploy/terraform/nebius/stack plan -var-file="$LOOM_NB_INPUT" -out="$LOOM_NB_PLAN"
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack plan -var-file="$LOOM_NB_INPUT" -out="$LOOM_NB_PLAN"
 terraform -chdir=deploy/terraform/nebius/stack show -json "$LOOM_NB_PLAN" > "$LOOM_NB_PLAN.json"
 shasum -a 256 "$LOOM_NB_PLAN" "$LOOM_NB_PLAN.json"
 ```
@@ -107,9 +117,9 @@ retaining it as evidence.
 Apply only the reviewed plan hash:
 
 ```bash
-terraform -chdir=deploy/terraform/nebius/stack apply "$LOOM_NB_PLAN"
-terraform -chdir=deploy/terraform/nebius/stack output -json > /secure/path/$LOOM_NB_TARGET.outputs.json
-terraform -chdir=deploy/terraform/nebius/stack plan -detailed-exitcode -var-file="$LOOM_NB_INPUT"
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack apply "$LOOM_NB_PLAN"
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack output -json > /secure/path/$LOOM_NB_TARGET.outputs.json
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack plan -detailed-exitcode -var-file="$LOOM_NB_INPUT"
 ```
 
 The second plan must exit `0`; exit `2` is drift and blocks acceptance. Redact
@@ -136,7 +146,7 @@ Managed Kubernetes cluster, so the identity uses the minimum supported project
 cannot receive Loom trials.
 
 The gateway stays running so the private control plane remains recoverably
-reachable. User execution still scales independently from zero to one and back
+reachable. User execution still scales independently from zero to nine and back
 to zero. Do not substitute a date-named VM, temporary public endpoint, unrelated
 user VM, or ad hoc tunnel. For an approved restricted public endpoint, use
 `--external`. Always write a private mode-0600 kubeconfig outside the repository:
@@ -155,7 +165,9 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 
 Run live acceptance in this order; stop and clean up at the first failed gate.
 
-1. Apply only `development-eu-north1` with execution bounds `0..1`.
+1. Apply only `development-eu-north1` with execution bounds `0..10`, the pinned
+   `48vcpu-192gb` shape, and 64 Pods per node. Before apply, read back at least
+   512 non-GPU vCPUs and 16 VM slots in `eu-north1`.
 2. Prove Terraform convergence and cloud-side Ready/readback.
 3. Create only the development binding namespace with its canonical topology
    labels and install only its environment-local identities/policies.
@@ -301,13 +313,16 @@ accepted Batch rather than from mutable deployment configuration.
 
 The operation is idempotent. It applies the development-only Control Plane
 patch that enables the `nebius-cpu` scheduler and loads its image-admission
-keyring from the existing Secret, reuses the existing single-scope Loom
-collector token, applies the active actuator and one-minute collector, and
-waits for both rollouts plus a scheduled collector Job. The provider-neutral
-base manifest stays disabled. The operation does not create a user Job or
-change the node-group target count. Subsequent users only upload/submit through
-Loom; the persisted scheduler, lease/outbox, actuator, and managed `0..1`
-autoscaler complete the connection automatically.
+keyring from the existing Secret, converges the repository-owned 200-concurrency
+capacity policy through the authenticated admin API, reuses the existing
+single-scope Loom collector token, applies the active actuator and one-minute
+collector, and waits for both rollouts plus a scheduled collector Job. The
+admin token never leaves the Control Plane Pod. The provider-neutral base
+manifest stays disabled. The operation does not create a user Job or change the
+node-group target count. Subsequent users only upload/submit through Loom; the
+persisted scheduler, lease/outbox, actuator, and managed `0..10` autoscaler
+complete the connection automatically and return execution nodes to zero after
+demand drains.
 
 Kubernetes rotates the actuator's projected ServiceAccount token. Nebius
 refreshes access tokens from the non-expiring authorized key. Node-group image
@@ -340,9 +355,11 @@ evidence-writers group only through a reviewed target-local bootstrap change.
 
 ## Upgrade, scaling, and incidents
 
-- A cluster/node upgrade affects all three bindings. Disable new placement,
-  preserve `max_surge=1` and `max_unavailable=0`, and record active-workload
-  retry/drain evidence before restoring each environment.
+- A cluster/node upgrade affects all three bindings. Disable new placement.
+  The execution group deliberately uses `max_surge=0` and
+  `max_unavailable=1` so a rolling replacement cannot exceed the 512-vCPU
+  quota; record active-workload retry/drain evidence before restoring each
+  environment. The fixed system group retains its independent surge policy.
 - Change only the shared cluster variable file per plan. Quota exhaustion must leave
   work queued and observable; never increase limits or swap to reserved/GPU
   capacity silently.

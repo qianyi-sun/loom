@@ -1,5 +1,5 @@
 {
-  "nebius_profile": "loom-development-eu-north1",
+  "nebius_profile": "loom-development-eu-north1-terraform-automation",
   "tenant_id": "tenant-REPLACE",
   "project_id": "project-REPLACE-DEVELOPMENT-EU-NORTH1",
   "evidence_bucket_name": "loom-nebius-development-eu-north1-REPLACE",
@@ -39,9 +39,10 @@
     "public_control_plane_cidrs": [],
     "system_node_count": 1,
     "execution_min_nodes": 0,
-    "execution_max_nodes": 1,
+    "execution_max_nodes": 10,
+    "execution_max_pods": 64,
     "system_preset": "2vcpu-8gb",
-    "execution_preset": "2vcpu-8gb",
+    "execution_preset": "48vcpu-192gb",
     "system_disk_gib": 64,
     "execution_disk_gib": 64
   }

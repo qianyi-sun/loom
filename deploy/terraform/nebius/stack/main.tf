@@ -21,6 +21,7 @@ module "execution_target" {
   system_node_count                = var.target.system_node_count
   execution_min_nodes              = var.target.execution_min_nodes
   execution_max_nodes              = var.target.execution_max_nodes
+  execution_max_pods               = var.target.execution_max_pods
   system_preset                    = var.target.system_preset
   execution_preset                 = var.target.execution_preset
   system_disk_gib                  = var.target.system_disk_gib

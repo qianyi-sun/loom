@@ -1,0 +1,24 @@
+{
+  "schema_version": "loom.nebius-development-capacity.v1",
+  "target_id": "nebius-eu-north1-development",
+  "provider_required_quota_nodes": 16,
+  "provider_required_quota_vcpu_millis": 512000,
+  "accepted_concurrency": 200,
+  "task_cpu_millis": 2000,
+  "policy": {
+    "enabled": true,
+    "max_nodes": 10,
+    "max_vcpu_millis": 480000,
+    "max_memory_mib": 1966080,
+    "max_storage_mib": 655360,
+    "node_cpu_millis": 48000,
+    "node_memory_mib": 196608,
+    "node_storage_mib": 65536,
+    "max_pending_jobs": 200,
+    "max_unschedulable_jobs": 200,
+    "max_image_pull_backoff_jobs": 0,
+    "max_create_per_minute": 200,
+    "observation_max_age_seconds": 300,
+    "reason": "Owner-approved 200-concurrency Nebius target: ten 48-vCPU execution nodes, scale-to-zero baseline, and a 512-vCPU provider quota."
+  }
+}

@@ -9,6 +9,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NEBIUS_ROOT = REPO_ROOT / "deploy" / "terraform" / "nebius"
 TOPOLOGY_PATH = REPO_ROOT / "config" / "service-execution-topology.json"
+CAPACITY_POLICY_PATH = REPO_ROOT / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
 
 
 class ContractError(RuntimeError):
@@ -132,6 +133,11 @@ def check_nebius_iac(
     )
     for name in ("nebius_profile", "project_id", "evidence_bucket_name"):
         _require(bool(str(document.get(name, ""))), f"{path}: {name} is required")
+    _require(
+        document.get("nebius_profile")
+        == "loom-development-eu-north1-terraform-automation",
+        f"{path}: Terraform must use the non-expiring service-account profile",
+    )
     for name in (
         "deployment_access_public_pool_id",
         "deployment_access_ssh_public_key",
@@ -147,6 +153,79 @@ def check_nebius_iac(
     _require(
         int(target.get("execution_min_nodes", -1)) == 0,
         f"{path}: shared execution baseline must scale to zero",
+    )
+
+    capacity_path = repo_root / "deploy" / "k8s" / CAPACITY_POLICY_PATH.name
+    capacity = _load_json(capacity_path)
+    _require(
+        capacity.get("schema_version") == "loom.nebius-development-capacity.v1",
+        f"{capacity_path}: unsupported capacity policy schema",
+    )
+    _require(
+        capacity.get("target_id") == target.get("target_id"),
+        f"{capacity_path}: target_id must match the Terraform target",
+    )
+    _require(
+        int(capacity.get("provider_required_quota_vcpu_millis", 0)) == 512_000,
+        f"{capacity_path}: provider vCPU quota target must be 512 vCPU",
+    )
+    _require(
+        int(capacity.get("provider_required_quota_nodes", 0)) == 16,
+        f"{capacity_path}: provider VM quota target must preserve replacement headroom",
+    )
+    _require(
+        int(capacity.get("accepted_concurrency", 0)) == 200
+        and int(capacity.get("task_cpu_millis", 0)) == 2_000,
+        f"{capacity_path}: acceptance must cover 200 concurrent 2-vCPU tasks",
+    )
+    policy = capacity.get("policy")
+    if not isinstance(policy, dict):
+        raise ContractError(f"{capacity_path}: policy must be an object")
+    preset_match = re.fullmatch(
+        r"(?P<cpu>[1-9][0-9]*)vcpu-(?P<memory>[1-9][0-9]*)gb",
+        str(target.get("execution_preset", "")),
+    )
+    _require(preset_match is not None, f"{path}: execution_preset must be explicit")
+    assert preset_match is not None
+    node_cpu_millis = int(preset_match.group("cpu")) * 1_000
+    node_memory_mib = int(preset_match.group("memory")) * 1_024
+    max_nodes = int(target.get("execution_max_nodes", 0))
+    _require(
+        max_nodes == 10 and int(target.get("execution_max_pods", 0)) == 64,
+        f"{path}: 200-concurrency target requires 10 nodes and 64 Pods per node",
+    )
+    _require(
+        policy.get("enabled") is True
+        and int(policy.get("max_nodes", 0)) == max_nodes
+        and int(policy.get("node_cpu_millis", 0)) == node_cpu_millis
+        and int(policy.get("node_memory_mib", 0)) == node_memory_mib,
+        f"{capacity_path}: policy node shape must match Terraform",
+    )
+    _require(
+        int(policy.get("max_vcpu_millis", 0)) == max_nodes * node_cpu_millis
+        and int(policy.get("max_memory_mib", 0)) == max_nodes * node_memory_mib
+        and int(policy.get("max_storage_mib", 0))
+        == max_nodes * int(policy.get("node_storage_mib", 0)),
+        f"{capacity_path}: policy maxima must equal the complete execution pool",
+    )
+    requested_cpu = int(capacity["accepted_concurrency"]) * int(capacity["task_cpu_millis"])
+    _require(
+        int(policy["max_vcpu_millis"]) - requested_cpu >= 80_000,
+        f"{capacity_path}: execution pool must preserve at least 80 vCPU for node overhead",
+    )
+    _require(
+        int(capacity["provider_required_quota_vcpu_millis"])
+        - int(policy["max_vcpu_millis"])
+        >= 32_000,
+        f"{capacity_path}: provider quota must preserve infrastructure headroom",
+    )
+    _require(
+        int(policy.get("max_pending_jobs", 0)) >= int(capacity["accepted_concurrency"])
+        and int(policy.get("max_unschedulable_jobs", 0))
+        >= int(capacity["accepted_concurrency"])
+        and int(policy.get("max_create_per_minute", 0))
+        >= int(capacity["accepted_concurrency"]),
+        f"{capacity_path}: admission limits must permit the acceptance batch",
     )
 
     backend_paths = sorted((root / "backends").glob("*.s3.tfbackend.example"))
@@ -173,6 +252,19 @@ def check_nebius_iac(
             re.search(r"(?i)(access_key|secret_key|token)\s*=", text) is None,
             f"{path}: credentials may not be stored in backend files",
         )
+
+    state_wrapper = repo_root / "scripts" / "ops" / "with_nebius_terraform_state_credentials.sh"
+    _require(state_wrapper.is_file(), f"{state_wrapper}: persistent state credential wrapper is required")
+    state_wrapper_text = state_wrapper.read_text(encoding="utf-8")
+    _require(
+        "loom-nebius-terraform-state" in state_wrapper_text
+        and "security_bin find-generic-password" in state_wrapper_text,
+        f"{state_wrapper}: state credentials must come from the protected Keychain item",
+    )
+    _require(
+        "refusing ambient AWS credentials" in state_wrapper_text,
+        f"{state_wrapper}: ambient state credentials must be rejected",
+    )
 
     versions = (root / "modules" / "execution-target" / "versions.tf").read_text(encoding="utf-8")
     stack_versions = (root / "stack" / "versions.tf").read_text(encoding="utf-8")

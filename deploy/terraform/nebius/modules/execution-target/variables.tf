@@ -166,6 +166,17 @@ variable "execution_max_nodes" {
   }
 }
 
+variable "execution_max_pods" {
+  description = "Maximum Pods per execution node, including platform DaemonSets."
+  type        = number
+  default     = 64
+
+  validation {
+    condition     = var.execution_max_pods >= 16 && var.execution_max_pods <= 110
+    error_message = "execution_max_pods must be between 16 and 110."
+  }
+}
+
 variable "system_preset" {
   description = "Pinned regular CPU preset for system nodes."
   type        = string
