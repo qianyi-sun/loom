@@ -1941,6 +1941,8 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
     assert set(integration_shards[0]).isdisjoint(integration_shards[1])
     assert set().union(*map(set, integration_shards)) == set(integration_paths)
     assert {
+        "tests/integration/test_cp_step_tokens.py",
+        "tests/integration/test_executable_global_capacity_bridge.py",
         "tests/integration/test_capacity_manager_migrate.py",
         "tests/integration/test_migration_task_set_materialization_jobs.py",
     } <= set(integration_shards[1])
