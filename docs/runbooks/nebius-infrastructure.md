@@ -125,9 +125,21 @@ identity input to #1552's collector, alert, and accounting layer. Account-side
 budget enforcement is separately configurable, while telemetry and cost
 readback remain acceptance evidence; audit logs alone are not a substitute.
 
-For a private control plane, run `kubectl` from an approved VM in the same
-region and subnet. For an approved restricted public endpoint, use `--external`.
-Always write a private mode-0600 kubeconfig outside the repository:
+For a private control plane, use the Terraform-managed `deployment_access`
+gateway. Its fixed public allocation, subnet, boot disk, SSH operator key, and
+resource-scoped instance service account are part of the same remote state as
+the cluster. The VM identity is obtained from instance metadata, so normal
+deployment does not depend on a human browser session, copied access token, or
+expiring authorized key. Nebius does not support an access permit scoped to a
+Managed Kubernetes cluster, so the identity uses the minimum supported project
+`editor` permit plus an explicit registry permit; it is not a task worker and
+cannot receive Loom trials.
+
+The gateway stays running so the private control plane remains recoverably
+reachable. User execution still scales independently from zero to one and back
+to zero. Do not substitute a date-named VM, temporary public endpoint, unrelated
+user VM, or ad hoc tunnel. For an approved restricted public endpoint, use
+`--external`. Always write a private mode-0600 kubeconfig outside the repository:
 
 ```bash
 export LOOM_NB_CLUSTER=mk8scluster-REPLACE
@@ -177,6 +189,29 @@ scripts/ops/apply_nebius_development_runtime.sh \
   --kubeconfig /secure/path/development-eu-north1.kubeconfig \
   --nebius-credentials /secure/path/capacity-observer-credentials.json
 ```
+
+From outside the Nebius VPC, run the same convergence through the managed
+gateway. Pin the gateway host key once after Terraform creates or replaces the
+VM, verify the fingerprint against the apply evidence, and retain that
+`known_hosts` file with the operator SSH key:
+
+```bash
+scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
+  --gateway "$(terraform -chdir=deploy/terraform/nebius/stack output -json deployment_access | jq -r .public_address | cut -d/ -f1)" \
+  --ssh-key /secure/path/deployment-access-ed25519 \
+  --known-hosts /secure/path/deployment-access-known-hosts \
+  --cluster-id mk8scluster-REPLACE \
+  --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
+  --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST
+```
+
+The helper accepts only digest-pinned platform images, transfers only the
+reviewed runtime manifests plus the capacity observer credential into a
+mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
+attached identity, rolls out Control Plane then Service, applies the idempotent
+runtime, and deletes the remote and local staging directories. No human Nebius
+token is copied to the gateway.
 
 The operation is idempotent. It applies the development-only Control Plane
 patch that enables the `nebius-cpu` scheduler and loads its image-admission
