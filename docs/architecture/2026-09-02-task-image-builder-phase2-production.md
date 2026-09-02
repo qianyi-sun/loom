@@ -368,11 +368,15 @@ before its successor starts.
    attachment-proof, exchange, session, and attestation contracts; add locked
    durable state transitions with encrypted exact-replay receipts. No HTTP
    route, daemon, secret provisioning, or provider activation is included.
-2. **Phase 2B — authority service and node guard release.** Add the dedicated
-   mTLS service, node principal registry, bounded APIs, root-owned guard, Unix
+2. **Phase 2B — authority service and node guard release.** Deliver this as two
+   protected, inert sub-increments so the network authority and root/kernel
+   authority are reviewed independently. **Phase 2B1** adds the dedicated mTLS
+   service, node principal registry, bounded guard-mediated APIs, and disabled
+   deployment composition. **Phase 2B2** adds the root-owned guard, Unix
    peer/pidfd/cgroup verification, pinned BPF policy/ledger, sealed-memfd
-   transfer, systemd/install/conformance artifacts, and disabled deployment
-   composition.
+   transfer, and systemd/install/conformance artifacts. The node guard is the
+   only mTLS client and mediates bootstrap exchange; no client private key or
+   node bearer enters the allocation.
 3. **Phase 2C — allocation supervisor and rootless executor.** Add session-bound
    claim/heartbeat, release validation, quota-backed storage, RootlessKit and
    BuildKit startup, native component builds, typed cleanup, and no-cache
