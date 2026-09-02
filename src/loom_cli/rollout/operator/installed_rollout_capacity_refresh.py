@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Protocol, cast
 
 import yaml  # type: ignore[import-untyped]
@@ -27,6 +28,7 @@ from .lifecycle_capacity_job import (
     build_rollout_capacity_job_plan,
 )
 from .policy import sanitized_child_environment
+from .protected_apply_recovery import find_advanced_epoch_attempt
 from .readonly_database_client import probe_installed_readonly_database_baseline
 from .staging_mutation_guard import (
     MutationGuardEvidence,
@@ -395,14 +397,34 @@ def _verify_database_capacity(
 def _require_guard(
     plan: FinalGatePlan,
     guard: MutationGuardEvidence,
+    *,
+    state_root: Path,
+    service_uid: int,
 ) -> None:
+    try:
+        recovery_attempt = find_advanced_epoch_attempt(
+            state_root,
+            request_id=plan.request_id,
+            through_attempt=plan.attempt_number - 1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=service_uid,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise InstalledRolloutCapacityRefreshError(
+            "rollout guard identity drifted"
+        ) from exc
+    expected_mutation_epoch = plan.starting_mutation_epoch + int(
+        recovery_attempt is not None
+    )
     if (
         plan.environment != "staging"
         or plan.namespace != "loom-staging"
         or guard.request_id != plan.request_id
         or guard.candidate_sha != plan.candidate_sha
         or guard.candidate_tree != plan.candidate_tree
-        or guard.mutation_epoch != plan.starting_mutation_epoch
+        or guard.mutation_epoch != expected_mutation_epoch
         or guard.state != "ready"
     ):
         raise InstalledRolloutCapacityRefreshError("rollout guard identity drifted")
@@ -431,7 +453,12 @@ def build_installed_rollout_capacity_job_plan(
 ) -> LifecycleCapacityJobPlan:
     """Reconstruct one Job only from the final plan's immutable artifacts."""
 
-    _require_guard(final_plan, guard)
+    _require_guard(
+        final_plan,
+        guard,
+        state_root=config.state_root,
+        service_uid=service_uid,
+    )
     try:
         publication = PreflightArtifactStore(
             config.state_root,
@@ -556,7 +583,12 @@ class InstalledRolloutCapacityRefresh:
 
     def __call__(self, final_plan: FinalGatePlan) -> str:
         guard = self.read_guard(final_plan)
-        _require_guard(final_plan, guard)
+        _require_guard(
+            final_plan,
+            guard,
+            state_root=self.config.state_root,
+            service_uid=self.service_uid,
+        )
         plan = self.build_job_plan(final_plan, guard)
         if (
             plan.candidate_sha != final_plan.candidate_sha
@@ -660,7 +692,12 @@ class InstalledRolloutCapacityRefresh:
         database = self.read_database()
         _verify_database_capacity(database, capacity, mutation_epoch=plan.mutation_epoch)
         final_guard = self.read_guard(final_plan)
-        _require_guard(final_plan, final_guard)
+        _require_guard(
+            final_plan,
+            final_guard,
+            state_root=self.config.state_root,
+            service_uid=self.service_uid,
+        )
         if final_guard != guard:
             raise InstalledRolloutCapacityRefreshError("rollout guard identity drifted")
         evidence = {

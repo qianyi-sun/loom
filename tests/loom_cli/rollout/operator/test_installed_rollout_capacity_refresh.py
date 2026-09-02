@@ -35,13 +35,17 @@ _UID = "12345678-1234-1234-1234-123456789abc"
 _NOW = datetime(2026, 7, 20, 0, 0, 1, tzinfo=UTC)
 
 
-def _guard(*, state: str = "ready") -> MutationGuardEvidence:
+def _guard(
+    *,
+    state: str = "ready",
+    mutation_epoch: int = 8,
+) -> MutationGuardEvidence:
     return MutationGuardEvidence.build(
         request_id="req-1111111111111111",
         candidate_sha=_SHA,
         candidate_tree=_TREE,
         generation="1" * 32,
-        mutation_epoch=8,
+        mutation_epoch=mutation_epoch,
         guard_pid=1234,
         database_backend_pid=4321,
         deadline_unix_seconds=2_000_000_000,
@@ -57,6 +61,7 @@ def _final_plan() -> SimpleNamespace:
         attempt_number=2,
         candidate_sha=_SHA,
         candidate_tree=_TREE,
+        attestation_digest="3" * 64,
         starting_mutation_epoch=8,
         plan_digest="f" * 64,
         environment="staging",
@@ -299,6 +304,67 @@ def test_refresh_applies_waits_and_verifies_fresh_database_publication(tmp_path:
     assert ("wait", _job_plan().job_name) in commands.calls
 
 
+def test_refresh_accepts_advanced_guard_with_exact_recovery_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_calls: list[dict[str, object]] = []
+
+    def find_recovery(state_root: Path, **bindings: object) -> int:
+        recovery_calls.append({"state_root": state_root, **bindings})
+        return 1
+
+    monkeypatch.setattr(
+        refresh_module,
+        "find_advanced_epoch_attempt",
+        find_recovery,
+        raising=False,
+    )
+    advanced_guard = _guard(mutation_epoch=9)
+    service, commands = _service(
+        tmp_path,
+        guards=[advanced_guard, advanced_guard],
+    )
+
+    digest = service(_final_plan())  # type: ignore[arg-type]
+
+    assert len(digest) == 64
+    assert commands.applies == 1
+    assert recovery_calls == [
+        {
+            "state_root": service.config.state_root,
+            "request_id": "req-1111111111111111",
+            "through_attempt": 1,
+            "candidate_sha": _SHA,
+            "attestation_digest": "3" * 64,
+            "starting_mutation_epoch": 8,
+            "service_uid": 1000,
+        }
+    ] * 2
+
+
+def test_refresh_rejects_unproven_advanced_guard_before_job_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        refresh_module,
+        "find_advanced_epoch_attempt",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    advanced_guard = _guard(mutation_epoch=9)
+    service, commands = _service(
+        tmp_path,
+        guards=[advanced_guard, advanced_guard],
+    )
+
+    with pytest.raises(InstalledRolloutCapacityRefreshError, match="guard identity drifted"):
+        service(_final_plan())  # type: ignore[arg-type]
+
+    assert commands.applies == 0
+
+
 def test_refresh_recovers_exact_existing_same_attempt_job_without_reapplying(
     tmp_path: Path,
 ) -> None:
@@ -479,9 +545,16 @@ def test_refresh_requires_same_guard_to_remain_ready_after_publication(tmp_path:
         service(_final_plan())  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("guard_epoch", "recovery_attempt"),
+    [(8, None), (9, 1)],
+    ids=("original-epoch", "advanced-epoch-recovery"),
+)
 def test_installed_job_plan_reads_exact_final_artifacts_and_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    guard_epoch: int,
+    recovery_attempt: int | None,
 ) -> None:
     rendered = render_manifests(
         ClusterConfig(
@@ -523,6 +596,12 @@ def test_installed_job_plan_reads_exact_final_artifacts_and_guard(
         lambda *_args, **_kwargs: artifact_store,
         raising=False,
     )
+    monkeypatch.setattr(
+        refresh_module,
+        "find_advanced_epoch_attempt",
+        lambda *_args, **_kwargs: recovery_attempt,
+        raising=False,
+    )
     final_plan = SimpleNamespace(
         **vars(_final_plan()),
         artifact_bundle_digest="c" * 64,
@@ -536,7 +615,7 @@ def test_installed_job_plan_reads_exact_final_artifacts_and_guard(
         config=_config(tmp_path),
         service_uid=os.geteuid(),
         final_plan=final_plan,  # type: ignore[arg-type]
-        guard=_guard(),
+        guard=_guard(mutation_epoch=guard_epoch),
         expected_buckets=("trajectories", "artifacts"),
         expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
         capacity_source="filesystem",
