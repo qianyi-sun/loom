@@ -153,3 +153,16 @@ def test_gateway_runtime_apply_carries_and_converges_capacity_policy() -> None:
     assert 'open("/var/run/loom/admin/secrets.toml", "rb")' in inner
     assert '"max_nodes": observed["max_nodes"]' in inner
     assert "deploy/k8s/nebius-development-capacity-policy.json" in gateway
+
+
+def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
+    gateway = (
+        REPO_ROOT / "scripts" / "ops" / "apply_nebius_development_runtime_via_gateway.sh"
+    ).read_text(encoding="utf-8")
+
+    migration = gateway.index("name: loom-schema-migrate")
+    gateway_rollout = gateway.index('deployment/loom-llm-gateway "gateway=$gateway_image"')
+    assert migration < gateway_rollout
+    assert 'command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]' in gateway
+    assert "automountServiceAccountToken: false" in gateway
+    assert "--for=condition=complete job/loom-schema-migrate" in gateway

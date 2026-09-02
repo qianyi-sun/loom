@@ -241,6 +241,58 @@ kubectl --kubeconfig "$remote_stage/kubeconfig" create secret generic \
   --dry-run=client -o yaml \
   | kubectl --kubeconfig "$remote_stage/kubeconfig" apply -f - >/dev/null
 
+# Schema migration is part of runtime convergence.  Run it from the exact
+# digest-pinned service image before any API Deployment is rolled so startup
+# schema guards cannot strand a rollout between database revisions.  The Job
+# receives only the service database URL, has no Kubernetes API token, and is
+# recreated on every apply so repeated deployment remains idempotent.
+kubectl --kubeconfig "$remote_stage/kubeconfig" delete job \
+  -n loom loom-schema-migrate --ignore-not-found --wait=true >/dev/null
+cat <<MIGRATION | kubectl --kubeconfig "$remote_stage/kubeconfig" apply -f - >/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loom-schema-migrate
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-schema-migrate
+    app.kubernetes.io/managed-by: loom-nebius-runtime-deployer
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loom-schema-migrate
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: $service_image
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
+          env:
+            - name: LOOM_SVC_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-db-url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+MIGRATION
+if ! kubectl --kubeconfig "$remote_stage/kubeconfig" wait \
+  -n loom --for=condition=complete job/loom-schema-migrate --timeout=300s; then
+  kubectl --kubeconfig "$remote_stage/kubeconfig" logs \
+    -n loom job/loom-schema-migrate --all-containers=true >&2 || true
+  exit 1
+fi
+
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-llm-gateway "gateway=$gateway_image"
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
