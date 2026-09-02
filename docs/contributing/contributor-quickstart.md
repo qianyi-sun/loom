@@ -155,10 +155,15 @@ and renders and audits both the staging and production cluster profiles. These
 checks are credential-free candidate evidence; real Yibu-backed tasks and live
 environment readiness remain staging promotion gates rather than PR jobs.
 
-`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
-root-test shards, and sibling-package tests run in parallel jobs, then it combines their
-coverage artifacts, applies the 70% fast-tier gate, and writes the default
-fast-tier coverage summary. CI restores only uv's package/download cache and
+For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
+ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
+parallel jobs, then it combines their coverage artifacts, applies the 70%
+fast-tier gate, and writes the default fast-tier coverage summary.
+`repository-checks` enforces every selected result after the independent lanes
+finish. Docs-only PRs skip the no-input `fast-checks` job and let
+`repository-checks` validate that skipped result directly, avoiding a no-op
+runner queue hop while preserving the same stable required context. CI restores
+only uv's package/download cache and
 never restores `.venv` or `.mypy_cache`; PR and merge-group runs cannot save
 cache entries. Every job creates a clean environment with `uv sync --locked`,
 then uses `uv run --no-sync` so a test command cannot silently resolve a new
@@ -343,8 +348,10 @@ trusted post-merge/release workflow rather than the required PR context.
 
 - **Fast tier:** gated at **70 %** via
   `coverage report --fail-under=70` in CI. Drops below fail
-  `repository-checks` for everyone. The same job writes the default fast-tier
-  coverage summary to the GitHub Actions step summary.
+  `fast-checks`, which makes the final `repository-checks` gate fail for
+  non-document changes. `fast-checks` also writes the default fast-tier
+  coverage summary to the GitHub Actions step summary; docs-only PRs skip it
+  because they produce no coverage inputs.
 - **Combined fast + integration:** measured and posted to the GitHub Actions
   step summary only on PRs labelled `ci:integration` or
   `ci:coverage-summary`. It is reported but is not a required threshold.
@@ -353,8 +360,9 @@ trusted post-merge/release workflow rather than the required PR context.
 To reproduce the protected fast coverage gate locally, run the equivalent
 serial form of the two pytest coverage steps, then run the threshold check.
 CI runs these pytest commands in parallel and combines their coverage data in
-the final `repository-checks` job; local serial runs need `--cov-append` on the
-second command:
+`fast-checks` while independent integration lanes are still running. The final
+`repository-checks` job validates the selected result instead of recomputing
+coverage. Local serial runs need `--cov-append` on the second command:
 
 ```bash
 rm -f .coverage coverage.xml
