@@ -263,6 +263,7 @@ spec:
   template:
     metadata:
       labels:
+        app: loom-migration
         app.kubernetes.io/name: loom-schema-migrate
     spec:
       automountServiceAccountToken: false
