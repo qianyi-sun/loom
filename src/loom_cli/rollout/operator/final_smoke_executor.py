@@ -143,23 +143,16 @@ class FinalSmokeExecutor:
                 accepted=frozenset({200}),
             )
 
-            batch_name = self._batch_name(plan)
-            query = urllib.parse.urlencode(
-                {
-                    "team_id": self.authority.team_id,
-                    "q": batch_name,
-                    "limit": "20",
-                }
-            )
-            existing = self._expect_json(
+            batch_id, batch_name = self._existing_batch(
                 evidence,
-                "existing",
                 token,
-                "GET",
-                f"/api/v1/batches?{query}",
+                contract,
+                plan,
             )
-            batch_id = contract.existing_batch_id(existing, batch_name=batch_name)
             if batch_id is not None:
+                # The exact batch is protected work already owned by this
+                # request's single claimed epoch; recovery does not claim a
+                # second epoch or submit replacement demand.
                 mutated = True
             if batch_id is None:
                 # Admission evidence expires after five minutes while the
@@ -206,7 +199,17 @@ class FinalSmokeExecutor:
                 nonrecoverable = contract.nonrecoverable_failure(batch)
                 if nonrecoverable is not None:
                     raise FinalSmokeError("smoke-batch-nonrecoverable")
-                if batch.get("state") in {"finished", "failed", "cancelled"}:
+                state = batch.get("state")
+                if state not in {"failed", "cancelled"} and (
+                    contract.validate_admitted_batch(
+                        batch,
+                        batch_id=batch_id,
+                        batch_name=batch_name,
+                    )
+                    is not None
+                ):
+                    raise FinalSmokeError("smoke-batch-identity-invalid")
+                if state in {"finished", "failed", "cancelled"}:
                     terminal = batch
                     break
                 self.sleep(self.poll_interval_seconds)
@@ -298,6 +301,41 @@ class FinalSmokeExecutor:
     @staticmethod
     def _batch_name(plan: FinalGatePlan) -> str:
         return f"rollout-{plan.request_id.removeprefix('req-')}-{plan.attempt_number}"
+
+    def _existing_batch(
+        self,
+        evidence: dict[str, str],
+        token: str,
+        contract: AdminSmokeContract,
+        plan: FinalGatePlan,
+    ) -> tuple[str | None, str]:
+        current_name = self._batch_name(plan)
+        # A validated resume changes only the attempt suffix.  Reconcile the
+        # newest exact batch before admitting any new Slurm-backed demand.
+        for attempt_number in range(plan.attempt_number, 0, -1):
+            batch_name = (
+                current_name
+                if attempt_number == plan.attempt_number
+                else f"rollout-{plan.request_id.removeprefix('req-')}-{attempt_number}"
+            )
+            query = urllib.parse.urlencode(
+                {
+                    "team_id": self.authority.team_id,
+                    "q": batch_name,
+                    "limit": "20",
+                }
+            )
+            existing = self._expect_json(
+                evidence,
+                "existing" if attempt_number == plan.attempt_number else f"prior-{attempt_number}",
+                token,
+                "GET",
+                f"/api/v1/batches?{query}",
+            )
+            batch_id = contract.existing_batch_id(existing, batch_name=batch_name)
+            if batch_id is not None:
+                return batch_id, batch_name
+        return None, current_name
 
     @staticmethod
     def _result(

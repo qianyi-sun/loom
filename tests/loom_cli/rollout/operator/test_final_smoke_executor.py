@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -149,6 +150,197 @@ def test_final_smoke_recovers_exact_batch_without_duplicate_submit(tmp_path: Pat
     assert all(method != "POST" for method, _path in calls)
 
 
+def test_final_smoke_resume_reuses_terminal_prior_attempt_without_duplicate_submit(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    refreshes: list[int] = []
+    prior_name = "rollout-1111111111111111-1"
+    current_name = "rollout-1111111111111111-2"
+    prior = _terminal("batch-prior", prior_name)
+
+    def request(method, path, _token, _payload, _headers):
+        calls.append((method, path))
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            value = {"items": [prior] if query["q"] == [prior_name] else []}
+        elif path == "/api/v1/admin/batches/on-behalf":
+            value = {"id": "batch-current"}
+        elif path == "/api/v1/batches/batch-prior":
+            value = prior
+        elif path == "/api/v1/batches/batch-current":
+            value = _terminal("batch-current", current_name)
+        else:  # pragma: no cover - exact route assertion
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    plan, executor = _executor(tmp_path, request=request)
+    plan = replace(plan, attempt_number=2)
+    executor = replace(
+        executor,
+        refresh_capacity=lambda _plan: refreshes.append(1) or "c" * 64,
+    )
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    assert result.protected_mutation
+    assert result.observed_epoch == plan.starting_mutation_epoch + 1
+    assert refreshes == []
+    assert ("GET", "/api/v1/batches/batch-prior") in calls
+    assert all(method != "POST" for method, _path in calls)
+
+
+def test_final_smoke_resume_fails_closed_on_prior_attempt_identity_drift(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    prior_name = "rollout-1111111111111111-1"
+    prior = _terminal("batch-prior", prior_name)
+    prior["required_worker_pools"] = []
+
+    def request(method, path, _token, _payload, _headers):
+        calls.append((method, path))
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            value = {"items": [prior] if query["q"] == [prior_name] else []}
+        elif path == "/api/v1/batches/batch-prior":
+            value = prior
+        else:  # pragma: no cover - identity drift must stop before submit
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    plan, executor = _executor(tmp_path, request=request)
+    plan = replace(plan, attempt_number=2)
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.blockers == {"smoke": "smoke-batch-identity-invalid"}
+    assert result.protected_mutation
+    assert all(method != "POST" for method, _path in calls)
+
+
+def test_final_smoke_resume_boundedly_waits_for_nonterminal_prior_attempt(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    sleeps: list[float] = []
+    prior_name = "rollout-1111111111111111-1"
+    pending = _terminal("batch-prior", prior_name)
+    pending.update({"state": "pending", "result_status": None, "trial_summary": {}})
+    terminal = _terminal("batch-prior", prior_name)
+    polls = 0
+
+    def request(method, path, _token, _payload, _headers):
+        nonlocal polls
+        calls.append((method, path))
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            value = {"items": [pending] if query["q"] == [prior_name] else []}
+        elif path == "/api/v1/batches/batch-prior":
+            polls += 1
+            value = pending if polls == 1 else terminal
+        else:  # pragma: no cover - prior wait must not submit
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    plan, executor = _executor(tmp_path, request=request)
+    plan = replace(plan, attempt_number=2)
+    ticks = iter((0.0, 0.0, 1.0))
+    executor = replace(
+        executor,
+        monotonic=lambda: next(ticks),
+        sleep=sleeps.append,
+        terminal_timeout_seconds=10.0,
+    )
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    assert polls == 2
+    assert sleeps == [executor.poll_interval_seconds]
+    assert all(method != "POST" for method, _path in calls)
+
+
+def test_final_smoke_resume_fails_on_newest_terminal_prior_attempt(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    queried_names: list[str] = []
+    newest_name = "rollout-1111111111111111-2"
+    older_name = "rollout-1111111111111111-1"
+    failed = _terminal("batch-newest", newest_name)
+    failed.update(
+        {
+            "state": "failed",
+            "result_status": "all_failed",
+            "failure_reason": "trial_failed",
+            "fanout_errors": [],
+        }
+    )
+    older = _terminal("batch-older", older_name)
+
+    def request(method, path, _token, _payload, _headers):
+        calls.append((method, path))
+        if path == "/api/v1/health":
+            value = {"status": "ok"}
+        elif path == "/api/v1/auth/whoami":
+            value = {"credential_type": "admin_bearer_token"}
+        elif path == "/api/v1/benchmarks":
+            value = {"items": [{"id": "benchmark"}]}
+        elif path.startswith("/api/v1/tasks/"):
+            value = {"id": "loom-smoke/gb10-oracle-hello-world"}
+        elif path.startswith("/api/v1/batches?"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+            batch_name = query["q"][0]
+            queried_names.append(batch_name)
+            value = (
+                {"items": [failed]}
+                if batch_name == newest_name
+                else {"items": [older]}
+                if batch_name == older_name
+                else {"items": []}
+            )
+        elif path == "/api/v1/batches/batch-newest":
+            value = failed
+        else:  # pragma: no cover - newest terminal failure must stop recovery
+            raise AssertionError(path)
+        return 200, json.dumps(value).encode()
+
+    plan, executor = _executor(tmp_path, request=request)
+    plan = replace(plan, attempt_number=3)
+
+    result = executor("final.smoke", CheckOperation.APPLY, plan)
+
+    assert result.blockers == {"smoke": "smoke-terminal-invalid"}
+    assert queried_names == ["rollout-1111111111111111-3", newest_name]
+    assert all(method != "POST" for method, _path in calls)
+
+
 def test_final_smoke_rejects_nonrecoverable_worker_pool_failure(tmp_path: Path) -> None:
     batch = _terminal("batch-1", "rollout-1111111111111111-1")
     batch.update(
@@ -230,9 +422,7 @@ def test_final_smoke_refreshes_capacity_immediately_before_new_submission(
     try:
         executor = replace(
             executor,
-            refresh_capacity=lambda _plan: (
-                events.append("capacity-refresh") or "c" * 64
-            ),
+            refresh_capacity=lambda _plan: events.append("capacity-refresh") or "c" * 64,
         )
     except TypeError:
         pytest.fail("final smoke has no protected capacity refresh boundary")
