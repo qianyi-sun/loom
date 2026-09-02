@@ -1,7 +1,7 @@
 """Route protected trial requeues through the capacity guard.
 
-Revision ID: 0127
-Revises: 0126
+Revision ID: 0128
+Revises: 0127
 Create Date: 2026-09-02
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0127"
-down_revision: str | None = "0126"
+revision: str = "0128"
+down_revision: str | None = "0127"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -104,7 +104,7 @@ def downgrade() -> None:
         )
     ).scalar_one()
     if active:
-        raise RuntimeError("cannot downgrade 0127 while protected claims can be requeued")
+        raise RuntimeError("cannot downgrade 0128 while protected claims can be requeued")
     op.execute(
         "DROP TRIGGER capacity_guard_transform_protected_runtime_trial_requeue ON public.trials"
     )
