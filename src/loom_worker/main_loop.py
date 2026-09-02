@@ -740,6 +740,17 @@ async def _register_worker_with_retry(
         "max_concurrent": max(1, settings.max_concurrent),
         "pool_name": settings.pool_name,
     }
+    slurm_job_id = str(getattr(settings, "slurm_job_id", "") or "").strip()
+    if slurm_job_id:
+        slurm_provenance = {
+            "sandbox_identity": str(getattr(settings, "sandbox_identity", "") or "").strip(),
+            "candidate_sha": str(getattr(settings, "candidate_sha", "") or "").strip(),
+            "slurm_job_id": slurm_job_id,
+            "compose_project": str(getattr(settings, "compose_project", "") or "").strip(),
+        }
+        if not all(slurm_provenance.values()):
+            raise ValueError("Slurm registration provenance fields must be supplied together")
+        register_kwargs.update(slurm_provenance)
     if pipeline_enabled:
         register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
         registration = (

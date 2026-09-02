@@ -18,6 +18,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Worker
+from loom_control_plane.slurm_worker_jobs import active_exact_slurm_worker_exists
 
 _SECRET_KEY_PARTS = (
     "TOKEN",
@@ -187,9 +188,18 @@ def node_status_to_dict(
     *,
     worker: Worker | None = None,
     now: datetime | None = None,
+    excluded_worker_ids: set[UUID] | None = None,
 ) -> dict[str, object]:
     now = now or datetime.now(UTC)
-    worker_id = row.worker_id
+    worker_id = (
+        None
+        if (
+            row.worker_id is not None
+            and excluded_worker_ids is not None
+            and row.worker_id in excluded_worker_ids
+        )
+        else row.worker_id
+    )
     worker_status = None
     worker_last_seen_at = None
     worker_fresh = False
@@ -374,13 +384,15 @@ async def _reconcile_worker_registry_for_host_intents(
     if not inactive_hosts:
         return {"draining": 0, "drained": 0}
 
+    conditions: list[Any] = [
+        Worker.pool_name == pool_name,
+        Worker.hostname.in_(tuple(inactive_hosts)),
+        ~active_exact_slurm_worker_exists(),
+    ]
     workers = (
         (
             await session.execute(
-                select(Worker).where(
-                    Worker.pool_name == pool_name,
-                    Worker.hostname.in_(tuple(inactive_hosts)),
-                ),
+                select(Worker).where(*conditions),
             )
         )
         .scalars()
@@ -501,10 +513,12 @@ async def _reconcile_worker_drain_state_for_host_intent(
     ``worker_id``.  Recovery is allowed only after the agent positively
     reports active/applied, and only for drains owned by this lifecycle.
     """
-    stmt = select(Worker).where(
+    conditions: list[Any] = [
         Worker.pool_name == row.pool_name,
         Worker.hostname == row.hostname,
-    )
+        ~active_exact_slurm_worker_exists(),
+    ]
+    stmt = select(Worker).where(*conditions)
     workers = (await session.execute(stmt)).scalars().all()
     desired_intent = row.desired_intent
     for worker in workers:
@@ -589,14 +603,20 @@ async def fetch_lifecycle_status(
         .all()
     )
     now = datetime.now(UTC)
-    worker_by_id, workers_by_node, worker_rows = await _fetch_matching_workers(
+    pool_names = {
+        *(row.pool_name for row in desired_rows),
+        *(row.pool_name for row in node_rows),
+        *([pool_name] if pool_name else []),
+    }
+    (
+        worker_by_id,
+        workers_by_node,
+        worker_rows,
+        excluded_worker_ids,
+    ) = await _fetch_matching_workers(
         session,
         node_rows=node_rows,
-        pool_names={
-            *(row.pool_name for row in desired_rows),
-            *(row.pool_name for row in node_rows),
-            *([pool_name] if pool_name else []),
-        },
+        pool_names=pool_names,
     )
     selected_workers = [
         _worker_for_node(
@@ -615,6 +635,7 @@ async def fetch_lifecycle_status(
                 row,
                 worker=worker,
                 now=now,
+                excluded_worker_ids=excluded_worker_ids,
             )
             for row, worker in zip(node_rows, selected_workers, strict=True)
         ],
@@ -635,6 +656,7 @@ async def _fetch_matching_workers(
     dict[UUID, Worker],
     dict[tuple[str, str], list[Worker]],
     list[Worker],
+    set[UUID],
 ]:
     conditions: list[Any] = []
     if pool_names:
@@ -643,23 +665,33 @@ async def _fetch_matching_workers(
         if row.worker_id is not None:
             conditions.append(Worker.id == row.worker_id)
     if not conditions:
-        return {}, {}, []
-    worker_rows = (
+        return {}, {}, [], set()
+    worker_rows_with_ownership = (
         (
             await session.execute(
-                select(Worker).where(or_(*conditions)),
+                select(
+                    Worker,
+                    active_exact_slurm_worker_exists().label("slurm_owned"),
+                ).where(or_(*conditions)),
             )
         )
-        .scalars()
         .all()
     )
+    excluded_worker_ids = {
+        worker.id for worker, slurm_owned in worker_rows_with_ownership if slurm_owned
+    }
+    worker_rows = [
+        worker
+        for worker, slurm_owned in worker_rows_with_ownership
+        if not slurm_owned
+    ]
     worker_by_id = {row.id: row for row in worker_rows}
     workers_by_node: dict[tuple[str, str], list[Worker]] = defaultdict(list)
     for worker_row in worker_rows:
         workers_by_node[(worker_row.hostname, worker_row.pool_name)].append(
             worker_row,
         )
-    return worker_by_id, dict(workers_by_node), list(worker_rows)
+    return worker_by_id, dict(workers_by_node), worker_rows, excluded_worker_ids
 
 
 def _unlinked_worker_to_dict(worker: Worker, *, now: datetime) -> dict[str, object]:

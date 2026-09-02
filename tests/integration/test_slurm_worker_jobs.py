@@ -198,6 +198,15 @@ def test_reconcile_updates_state_associates_worker_and_status_omits_secrets(
         )
         assert created.status_code == 201, created.text
 
+        engine = create_engine(postgres_url)
+        try:
+            with sessionmaker(engine)() as s:
+                job = s.execute(select(SlurmWorkerJob)).scalar_one()
+                job.worker_id = worker_id
+                s.commit()
+        finally:
+            engine.dispose()
+
         reconciled = client.post(
             "/admin/slurm-worker-jobs/reconcile",
             headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
@@ -232,6 +241,95 @@ def test_reconcile_updates_state_associates_worker_and_status_omits_secrets(
     assert body["jobs"][0]["job_id"] == "200"
     assert body["jobs"][0]["state"] == "running"
     assert body["jobs"][0]["worker_id"] == str(worker_id)
+
+
+def test_reconcile_cannot_create_or_replace_slurm_worker_link(
+    app,
+    postgres_url: str,
+) -> None:
+    first_worker_id = uuid4()
+    second_worker_id = uuid4()
+    now = datetime.now(UTC)
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            s.add_all([
+                Worker(
+                    id=first_worker_id,
+                    hostname="oldlab-1",
+                    version="0.1",
+                    capabilities=[],
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                ),
+                Worker(
+                    id=second_worker_id,
+                    hostname="oldlab-2",
+                    version="0.1",
+                    capabilities=[],
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                ),
+            ])
+            s.commit()
+    finally:
+        engine.dispose()
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/admin/slurm-worker-jobs",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json=_record_payload(job_id="201"),
+        )
+        assert created.status_code == 201, created.text
+        reconciled = client.post(
+            "/admin/slurm-worker-jobs/reconcile",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "stale_after_seconds": 300,
+                "observations": [{
+                    "job_id": "201",
+                    "slurm_state": "RUNNING",
+                    "worker_id": str(first_worker_id),
+                }],
+            },
+        )
+        assert reconciled.status_code == 200, reconciled.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            job = s.execute(select(SlurmWorkerJob)).scalar_one()
+            assert job.worker_id is None
+            job.worker_id = first_worker_id
+            s.commit()
+    finally:
+        engine.dispose()
+
+    with TestClient(app) as client:
+        reconciled = client.post(
+            "/admin/slurm-worker-jobs/reconcile",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "stale_after_seconds": 300,
+                "observations": [{
+                    "job_id": "201",
+                    "slurm_state": "RUNNING",
+                    "worker_id": str(second_worker_id),
+                }],
+            },
+        )
+        assert reconciled.status_code == 200, reconciled.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as s:
+            job = s.execute(select(SlurmWorkerJob)).scalar_one()
+            assert job.worker_id == first_worker_id
+    finally:
+        engine.dispose()
 
 
 def test_reconcile_marks_missing_active_jobs_stale(

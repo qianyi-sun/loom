@@ -23,6 +23,7 @@ from loom.db.schema import (
     DataLifecycleGcItem,
     DataLifecycleGcRun,
     DataLifecycleObject,
+    SlurmWorkerJob,
     Task,
     Team,
     TeamQuota,
@@ -76,6 +77,7 @@ async def cp_setup(
     sync_engine = create_engine(postgres_url)
     session_local = sessionmaker(sync_engine)
     with session_local() as s:
+        s.execute(delete(SlurmWorkerJob))
         s.execute(delete(ArtifactLineageEdge))
         s.execute(delete(Artifact))
         s.execute(delete(Trial))
@@ -101,6 +103,7 @@ async def cp_setup(
     finally:
         await async_engine.dispose()
         with session_local() as s:
+            s.execute(delete(SlurmWorkerJob))
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
             s.execute(delete(Trial))
@@ -134,6 +137,146 @@ async def test_register_returns_worker_id(cp_setup):  # type: ignore[no-untyped-
         assert info["heartbeat_interval_sec"] > 0
     finally:
         await http.aclose()
+
+
+def _seed_slurm_worker_job(
+    postgres_url: str,
+    *,
+    candidate_sha: str = "a" * 40,
+    nodelist: str = "trt-gb10-1",
+    pool_name: str = "gb10",
+    requested_concurrency: int = 6,
+    state: str = "pending",
+    worker_id: UUID | None = None,
+) -> None:
+    now = datetime.now(UTC)
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.add(
+                SlurmWorkerJob(
+                    slurm_cluster_id="gb10",
+                    environment="production",
+                    sandbox_identity="production",
+                    pool_name=pool_name,
+                    nodelist=nodelist,
+                    requested_concurrency=requested_concurrency,
+                    candidate_sha=candidate_sha,
+                    job_id="40740",
+                    compose_project="loom-production-aaaaaaaaaaaa-40740",
+                    state=state,
+                    slurm_state="PENDING",
+                    submitted_at=now,
+                    updated_at=now,
+                    worker_id=worker_id,
+                ),
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def _slurm_registration_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "hostname": "trt-gb10-1",
+        "version": "v",
+        "capabilities": _CAPS,
+        "max_concurrent": 6,
+        "pool_name": "gb10",
+        "sandbox_identity": "production",
+        "candidate_sha": "a" * 40,
+        "slurm_job_id": "40740",
+        "compose_project": "loom-production-aaaaaaaaaaaa-40740",
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def test_register_links_exact_active_slurm_worker_job(cp_setup, postgres_url):  # type: ignore[no-untyped-def]
+    app, raw = cp_setup
+    _seed_slurm_worker_job(postgres_url)
+    cp, http = await _client(app, raw)
+    try:
+        info = await cp.register(**_slurm_registration_payload())  # type: ignore[arg-type]
+    finally:
+        await http.aclose()
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            job = session.execute(select(SlurmWorkerJob)).scalar_one()
+            assert job.worker_id == UUID(info["worker_id"])
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("payload_overrides", "job_overrides", "expected_status"),
+    [
+        ({"compose_project": None}, {}, 400),
+        ({"candidate_sha": "b" * 40}, {}, 409),
+        ({"hostname": "trt-gb10-2"}, {}, 409),
+        ({"pool_name": "oldlab"}, {}, 409),
+        ({"max_concurrent": 5}, {}, 409),
+        ({}, {"state": "completed"}, 409),
+        ({}, {"worker_id": uuid4()}, 409),
+    ],
+)
+async def test_register_rejects_invalid_slurm_provenance_without_creating_worker(
+    cp_setup,
+    postgres_url: str,
+    payload_overrides: dict[str, object],
+    job_overrides: dict[str, object],
+    expected_status: int,
+) -> None:  # type: ignore[no-untyped-def]
+    app, raw = cp_setup
+    linked_worker_id = job_overrides.get("worker_id")
+    if linked_worker_id is not None:
+        now = datetime.now(UTC)
+        engine = create_engine(postgres_url)
+        try:
+            with sessionmaker(engine)() as session:
+                session.add(Worker(
+                    id=linked_worker_id,
+                    hostname="existing",
+                    version="v",
+                    capabilities=[],
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                ))
+                session.commit()
+        finally:
+            engine.dispose()
+    _seed_slurm_worker_job(
+        postgres_url,
+        **{key: value for key, value in job_overrides.items() if key != "worker_id"},
+        worker_id=linked_worker_id,
+    )
+    _cp, http = await _client(app, raw)
+    try:
+        before_worker_ids: list[UUID]
+        engine = create_engine(postgres_url)
+        try:
+            with sessionmaker(engine)() as session:
+                before_worker_ids = list(session.execute(select(Worker.id)).scalars())
+        finally:
+            engine.dispose()
+        response = await http.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {raw}"},
+            json=_slurm_registration_payload(**payload_overrides),
+        )
+        assert response.status_code == expected_status, response.text
+    finally:
+        await http.aclose()
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            assert list(session.execute(select(Worker.id)).scalars()) == before_worker_ids
+    finally:
+        engine.dispose()
 
 
 async def test_claim_returns_none_when_empty(cp_setup):  # type: ignore[no-untyped-def]
