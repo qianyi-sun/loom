@@ -18,6 +18,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Worker
+from loom_control_plane.slurm_worker_jobs import fetch_active_exact_slurm_worker_ids
 
 _SECRET_KEY_PARTS = (
     "TOKEN",
@@ -187,9 +188,18 @@ def node_status_to_dict(
     *,
     worker: Worker | None = None,
     now: datetime | None = None,
+    excluded_worker_ids: set[UUID] | None = None,
 ) -> dict[str, object]:
     now = now or datetime.now(UTC)
-    worker_id = row.worker_id
+    worker_id = (
+        None
+        if (
+            row.worker_id is not None
+            and excluded_worker_ids is not None
+            and row.worker_id in excluded_worker_ids
+        )
+        else row.worker_id
+    )
     worker_status = None
     worker_last_seen_at = None
     worker_fresh = False
@@ -374,13 +384,20 @@ async def _reconcile_worker_registry_for_host_intents(
     if not inactive_hosts:
         return {"draining": 0, "drained": 0}
 
+    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
+        session,
+        pool_names={pool_name},
+    )
+    conditions: list[Any] = [
+        Worker.pool_name == pool_name,
+        Worker.hostname.in_(tuple(inactive_hosts)),
+    ]
+    if excluded_worker_ids:
+        conditions.append(Worker.id.not_in(excluded_worker_ids))
     workers = (
         (
             await session.execute(
-                select(Worker).where(
-                    Worker.pool_name == pool_name,
-                    Worker.hostname.in_(tuple(inactive_hosts)),
-                ),
+                select(Worker).where(*conditions),
             )
         )
         .scalars()
@@ -501,10 +518,17 @@ async def _reconcile_worker_drain_state_for_host_intent(
     ``worker_id``.  Recovery is allowed only after the agent positively
     reports active/applied, and only for drains owned by this lifecycle.
     """
-    stmt = select(Worker).where(
+    conditions: list[Any] = [
         Worker.pool_name == row.pool_name,
         Worker.hostname == row.hostname,
+    ]
+    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
+        session,
+        pool_names={row.pool_name},
     )
+    if excluded_worker_ids:
+        conditions.append(Worker.id.not_in(excluded_worker_ids))
+    stmt = select(Worker).where(*conditions)
     workers = (await session.execute(stmt)).scalars().all()
     desired_intent = row.desired_intent
     for worker in workers:
@@ -589,14 +613,20 @@ async def fetch_lifecycle_status(
         .all()
     )
     now = datetime.now(UTC)
+    pool_names = {
+        *(row.pool_name for row in desired_rows),
+        *(row.pool_name for row in node_rows),
+        *([pool_name] if pool_name else []),
+    }
+    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
+        session,
+        pool_names=pool_names,
+    )
     worker_by_id, workers_by_node, worker_rows = await _fetch_matching_workers(
         session,
         node_rows=node_rows,
-        pool_names={
-            *(row.pool_name for row in desired_rows),
-            *(row.pool_name for row in node_rows),
-            *([pool_name] if pool_name else []),
-        },
+        pool_names=pool_names,
+        excluded_worker_ids=excluded_worker_ids,
     )
     selected_workers = [
         _worker_for_node(
@@ -615,6 +645,7 @@ async def fetch_lifecycle_status(
                 row,
                 worker=worker,
                 now=now,
+                excluded_worker_ids=excluded_worker_ids,
             )
             for row, worker in zip(node_rows, selected_workers, strict=True)
         ],
@@ -631,6 +662,7 @@ async def _fetch_matching_workers(
     *,
     node_rows: Sequence[GB10WorkerNodeStatus],
     pool_names: set[str],
+    excluded_worker_ids: set[UUID],
 ) -> tuple[
     dict[UUID, Worker],
     dict[tuple[str, str], list[Worker]],
@@ -644,10 +676,13 @@ async def _fetch_matching_workers(
             conditions.append(Worker.id == row.worker_id)
     if not conditions:
         return {}, {}, []
+    stmt = select(Worker).where(or_(*conditions))
+    if excluded_worker_ids:
+        stmt = stmt.where(Worker.id.not_in(excluded_worker_ids))
     worker_rows = (
         (
             await session.execute(
-                select(Worker).where(or_(*conditions)),
+                stmt,
             )
         )
         .scalars()

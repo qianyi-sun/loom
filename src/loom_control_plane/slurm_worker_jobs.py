@@ -121,6 +121,41 @@ async def lock_slurm_worker_job_for_registration(
     return job
 
 
+async def fetch_active_exact_slurm_worker_ids(
+    session: AsyncSession,
+    *,
+    pool_names: set[str],
+) -> set[UUID]:
+    """Return workers owned by active, internally consistent Slurm jobs."""
+    if not pool_names:
+        return set()
+    rows = (
+        await session.execute(
+            select(SlurmWorkerJob, Worker)
+            .join(Worker, SlurmWorkerJob.worker_id == Worker.id)
+            .where(
+                SlurmWorkerJob.state.in_(ACTIVE_STATES),
+                SlurmWorkerJob.pool_name.in_(sorted(pool_names)),
+            ),
+        )
+    ).all()
+    return {
+        worker.id
+        for job, worker in rows
+        if (
+            job.job_id
+            and job.sandbox_identity
+            and job.candidate_sha
+            and job.compose_project
+            and job.environment == job.sandbox_identity
+            and job.slurm_cluster_id == slurm_cluster_for_pool(job.pool_name)
+            and worker.pool_name == job.pool_name
+            and worker.hostname == job.nodelist
+            and worker.max_concurrent == job.requested_concurrency
+        )
+    }
+
+
 @dataclass(frozen=True)
 class SlurmWorkerJobObservation:
     job_id: str

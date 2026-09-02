@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
+    SlurmWorkerJob,
     Token,
     Worker,
 )
@@ -61,6 +62,7 @@ def clean_gb10_lifecycle(postgres_url: str) -> Iterator[None]:
     with session_factory() as s:
         s.execute(delete(GB10WorkerNodeStatus))
         s.execute(delete(GB10WorkerPoolDesiredState))
+        s.execute(delete(SlurmWorkerJob))
         s.execute(delete(Worker))
         s.execute(delete(Token))
         s.commit()
@@ -70,6 +72,7 @@ def clean_gb10_lifecycle(postgres_url: str) -> Iterator[None]:
         with session_factory() as s:
             s.execute(delete(GB10WorkerNodeStatus))
             s.execute(delete(GB10WorkerPoolDesiredState))
+            s.execute(delete(SlurmWorkerJob))
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.commit()
@@ -514,6 +517,200 @@ def _fetch_worker(postgres_url: str, worker_id: str) -> dict[str, str | None]:
         }
     engine.dispose()
     return out
+
+
+def _seed_slurm_worker_job(
+    postgres_url: str,
+    *,
+    worker_id: str,
+    hostname: str,
+    pool_name: str = "gb10",
+    max_concurrent: int = 10,
+    state: str = "running",
+    job_id: str | None = "12345",
+    sandbox_identity: str | None = "production",
+    candidate_sha: str | None = "a" * 40,
+    compose_project: str | None = "loom-gb10-worker",
+    slurm_cluster_id: str = "gb10",
+    environment: str = "production",
+    job_pool_name: str | None = None,
+    nodelist: str | None = None,
+    requested_concurrency: int | None = None,
+) -> None:
+    """Link a worker to production-shaped Slurm metadata for lifecycle tests."""
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as s:
+        s.add(
+            SlurmWorkerJob(
+                worker_id=worker_id,
+                state=state,
+                job_id=job_id,
+                sandbox_identity=sandbox_identity,
+                candidate_sha=candidate_sha,
+                compose_project=compose_project,
+                slurm_cluster_id=slurm_cluster_id,
+                environment=environment,
+                pool_name=job_pool_name or pool_name,
+                nodelist=nodelist or hostname,
+                requested_concurrency=(
+                    max_concurrent
+                    if requested_concurrency is None
+                    else requested_concurrency
+                ),
+            ),
+        )
+        s.commit()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("intent", ["stopped", "draining"])
+def test_active_exact_slurm_worker_is_not_drained_by_host_intent(
+    app,
+    postgres_url: str,
+    intent: str,
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=worker_id,
+        hostname="trt-gb10-15",
+    )
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/admin/gb10-worker-pools/production/gb10/desired-state",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "image_tag": "staging-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "staging-6b76a48",
+                "host_intents": {"trt-gb10-15": intent},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert _fetch_worker(postgres_url, worker_id)["drain_state"] == "active"
+
+
+def test_active_exact_slurm_worker_is_not_drained_by_stopped_node_report(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=worker_id,
+        hostname="trt-gb10-15",
+    )
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+
+    with TestClient(app) as client:
+        assert (
+            client.put(
+                "/admin/gb10-worker-pools/production/gb10/desired-state",
+                headers=headers,
+                json={
+                    "image_tag": "staging-6b76a48",
+                    "max_concurrent": 10,
+                    "env_config_version": "staging-6b76a48",
+                    "host_intents": {"trt-gb10-15": "stopped"},
+                },
+            ).status_code
+            == 200
+        )
+        response = client.post(
+            "/admin/gb10-worker-pools/production/gb10/nodes/trt-gb10-15/report",
+            headers=headers,
+            json={
+                "current_intent": "stopped",
+                "apply_state": "applied",
+                "worker_id": worker_id,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert _fetch_worker(postgres_url, worker_id)["drain_state"] == "active"
+
+
+def test_active_exact_slurm_worker_is_absent_from_lifecycle_status(
+    app,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=worker_id,
+        hostname="trt-gb10-15",
+    )
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/admin/gb10-worker-pools/production/gb10/nodes/trt-gb10-15/report",
+                headers=headers,
+                json={"worker_id": worker_id, "apply_state": "applied"},
+            ).status_code
+            == 200
+        )
+        status = client.get("/admin/gb10-worker-pools/status", headers=headers)
+
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["nodes"][0]["worker_id"] is None
+    assert body["unlinked_workers"] == []
+
+
+@pytest.mark.parametrize(
+    ("case", "job_kwargs"),
+    [
+        ("terminal state", {"state": "completed"}),
+        ("missing candidate", {"candidate_sha": None}),
+        ("wrong cluster", {"slurm_cluster_id": "oldlab"}),
+        ("environment sandbox mismatch", {"environment": "staging"}),
+        ("wrong hostname", {"nodelist": "trt-gb10-16"}),
+        (
+            "wrong pool",
+            {"job_pool_name": "other-gb10"},
+        ),
+        ("wrong concurrency", {"requested_concurrency": 9}),
+    ],
+)
+def test_nonexempt_slurm_worker_is_drained_and_listed_as_unlinked(
+    app,
+    postgres_url: str,
+    case: str,
+    job_kwargs: dict[str, object],
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=worker_id,
+        hostname="trt-gb10-15",
+        **job_kwargs,
+    )
+    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/admin/gb10-worker-pools/production/gb10/desired-state",
+            headers=headers,
+            json={
+                "image_tag": "staging-6b76a48",
+                "max_concurrent": 10,
+                "env_config_version": "staging-6b76a48",
+                "host_intents": {"trt-gb10-15": "stopped"},
+            },
+        )
+        status = client.get("/admin/gb10-worker-pools/status", headers=headers)
+
+    assert response.status_code == 200, case
+    assert status.status_code == 200, status.text
+    assert _fetch_worker(postgres_url, worker_id)["drain_state"] == "drained", case
+    assert str(worker_id) in {
+        row["worker_id"] for row in status.json()["unlinked_workers"]
+    }, case
 
 
 def test_stopped_host_intent_forces_worker_drain_regardless_of_apply_result(
