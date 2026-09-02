@@ -112,8 +112,6 @@ spec:
           value: '{}'
         - name: LOOM_SVC_LOG_LEVEL
           value: info
-        - name: LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON
-          value: '{}'
         - name: LOOM_SVC_MINIO_ACCESS_KEY
           valueFrom:
             secretKeyRef:
@@ -288,6 +286,8 @@ spec:
           value: '300'
         - name: LOOM_SVC_PUBLIC_BASE_URL
           value: https://loom.example.com
+        - name: LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON
+          value: '{}'
         - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC
           value: '3600'
         - name: LOOM_SVC_STALE_RUNNING_TRIAL_GRACE_SEC
