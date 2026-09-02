@@ -16,6 +16,7 @@ from loom_control_plane.task_image_build_environment import (
     SlurmBuildInventoryV1,
     SlurmBuildJobObservationV1,
 )
+from loom_task_image_authority.contracts import canonical_authority_sha256
 
 
 class TaskImageBuildGrantConflictError(RuntimeError):
@@ -198,15 +199,43 @@ def _append_event(
 
 
 def _stored_grant(row: TaskImageBuildGrant) -> SlurmBuildGrantV1:
-    return SlurmBuildGrantV1.model_validate(
+    grant = SlurmBuildGrantV1.model_validate(
         {
             "schema": "loom.task-image-build-grant/v1",
             "grant_id": row.id,
             "request": row.request_spec,
             "request_sha256": row.request_sha256,
+            "authority": row.authority_spec,
+            "authority_sha256": row.authority_sha256,
             "comment": row.slurm_comment,
         }
     )
+    request = grant.request
+    authority = grant.authority
+    if (
+        row.environment != authority.environment
+        or row.provider != "slurm-rootless-v1"
+        or row.slurm_cluster_id != request.slurm_cluster_id
+        or row.cpu_arch != request.cpu_arch
+        or row.submitting_identity != request.submitting_identity
+        or row.slurm_account != request.account
+        or row.slurm_partition != request.partition
+        or row.slurm_qos != request.qos
+        or row.request_sha256 != authority.slurm_request_sha256
+        or row.authority_sha256 != canonical_authority_sha256(authority)
+        or row.grant_expires_at != authority.expires_at
+    ):
+        raise ValueError("stored task-image build grant authority changed")
+    return grant
+
+
+def _require_live_grant(row: TaskImageBuildGrant, *, now: datetime) -> SlurmBuildGrantV1:
+    grant = _stored_grant(row)
+    if now >= grant.authority.expires_at:
+        raise TaskImageBuildGrantConflictError(
+            f"task-image build grant {row.id} authority expired"
+        )
+    return grant
 
 
 async def issue_task_image_build_grant(
@@ -218,8 +247,16 @@ async def issue_task_image_build_grant(
     now: datetime,
 ) -> TaskImageBuildGrant:
     """Persist a new grant and its first journal record atomically."""
+    grant = SlurmBuildGrantV1.model_validate(grant.model_dump(mode="python"))
     if ambiguity_settle_seconds <= 0:
         raise ValueError("ambiguity settle duration must be positive")
+    authority = grant.authority
+    if authority.environment != environment:
+        raise ValueError("task-image build grant environment differs from authority")
+    if now < authority.issued_at:
+        raise ValueError("task-image build grant authority is not yet issued")
+    if now >= authority.expires_at:
+        raise ValueError("task-image build grant authority expired")
     request = grant.request
     row = TaskImageBuildGrant(
         id=grant.grant_id,
@@ -234,6 +271,9 @@ async def issue_task_image_build_grant(
         slurm_qos=request.qos,
         request_spec=request.model_dump(mode="json"),
         request_sha256=grant.request_sha256,
+        authority_spec=authority.model_dump(mode="json", exclude_none=False),
+        authority_sha256=grant.authority_sha256,
+        grant_expires_at=authority.expires_at,
         slurm_comment=grant.comment,
         ambiguity_settle_seconds=ambiguity_settle_seconds,
         ambiguity_settle_until=None,
@@ -261,6 +301,7 @@ async def begin_task_image_build_submission(
 ) -> TaskImageBuildGrant:
     """Consume the grant's only external submission invocation authority."""
     row = await _locked_grant(session, grant_id=grant_id)
+    _require_live_grant(row, now=now)
     if row.state != "issued":
         raise TaskImageBuildGrantConflictError(
             f"task-image build grant {grant_id} was already invoked"
@@ -307,6 +348,7 @@ async def reconcile_task_image_build_submission(
 ) -> TaskImageBuildInventoryDecision:
     """Journal the safe consequence of authoritative submission inventory."""
     row = await _locked_grant(session, grant_id=grant_id)
+    grant = _require_live_grant(row, now=now)
     if row.state not in {"submitting", "revoked"}:
         raise TaskImageBuildGrantConflictError(
             f"task-image build grant {grant_id} is not awaiting reconciliation"
@@ -328,7 +370,7 @@ async def reconcile_task_image_build_submission(
         )
     else:
         decision = classify_task_image_build_inventory(
-            _stored_grant(row),
+            grant,
             inventory,
             invocation_started_at=row.invocation_started_at,
             ambiguity_settle_until=row.ambiguity_settle_until,
@@ -395,6 +437,7 @@ async def record_task_image_build_release(
 ) -> TaskImageBuildGrant:
     """Record release only after the exact held Slurm job is durably bound."""
     row = await _locked_grant(session, grant_id=grant_id)
+    _require_live_grant(row, now=now)
     if row.state != "bound" or row.slurm_job_id != job_id:
         raise TaskImageBuildGrantConflictError(
             f"task-image build grant {grant_id} is not bound to Slurm job {job_id}"

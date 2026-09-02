@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -14,11 +14,17 @@ from loom_control_plane.task_image_build_environment import (
     SlurmBuildEnvironmentProvider,
     SlurmBuildInventoryV1,
     SlurmBuildRequestIdentityV1,
+    canonical_request_sha256,
     issue_slurm_build_grant,
     render_rootless_builder_sbatch_request,
 )
+from loom_task_image_authority.contracts import (
+    TaskImageBuildGrantAuthorityV1,
+    canonical_authority_sha256,
+)
 
 _GRANT_ID = UUID("11111111-1111-1111-1111-111111111111")
+_NOW = datetime(2026, 9, 2, 14, 0, tzinfo=UTC)
 
 
 def _resources() -> RootlessBuildResourceRequestV1:
@@ -51,9 +57,40 @@ def _policy(*, enabled: bool = False, blockers: tuple[str, ...] = ("guard_missin
     )
 
 
+def _authority(
+    policy: SlurmBuildEnvironmentPolicyV1,
+    **changes: object,
+) -> TaskImageBuildGrantAuthorityV1:
+    values: dict[str, object] = {
+        "purpose": "production",
+        "shadow_campaign_id": None,
+        "environment": "staging",
+        "pool_id": "staging-gb10-task-image",
+        "slurm_cluster_id": policy.slurm_cluster_id,
+        "cpu_arch": policy.cpu_arch,
+        "slurm_request_sha256": canonical_request_sha256(policy.request_identity()),
+        "builder_release_sha256": "2" * 64,
+        "build_policy_sha256": "3" * 64,
+        "containment_policy_sha256": "4" * 64,
+        "resource_profile_sha256": "5" * 64,
+        "issued_at": _NOW,
+        "expires_at": _NOW + timedelta(hours=2),
+    }
+    values.update(changes)
+    return TaskImageBuildGrantAuthorityV1.model_validate(values)
+
+
+def _grant(policy: SlurmBuildEnvironmentPolicyV1):
+    return issue_slurm_build_grant(
+        policy,
+        grant_id=_GRANT_ID,
+        authority=_authority(policy),
+    )
+
+
 def test_held_request_is_ordinary_allocation_without_host_runtime_authority() -> None:
     policy = _policy()
-    grant = issue_slurm_build_grant(policy, grant_id=_GRANT_ID)
+    grant = _grant(policy)
 
     request = render_rootless_builder_sbatch_request(policy, grant)
 
@@ -120,7 +157,7 @@ def test_contracts_reject_unknown_fields_and_digest_or_comment_drift() -> None:
         RootlessBuildResourceRequestV1.model_validate(resources)
 
     policy = _policy()
-    grant = issue_slurm_build_grant(policy, grant_id=_GRANT_ID)
+    grant = _grant(policy)
     bad_digest = grant.model_dump()
     bad_digest["request_sha256"] = "f" * 64
     with pytest.raises(ValidationError, match="digest"):
@@ -132,8 +169,54 @@ def test_contracts_reject_unknown_fields_and_digest_or_comment_drift() -> None:
         type(grant).model_validate(bad_comment)
 
 
+def test_grant_rejects_changed_or_mismatched_authority() -> None:
+    policy = _policy()
+    authority = _authority(policy)
+    grant = issue_slurm_build_grant(
+        policy,
+        grant_id=_GRANT_ID,
+        authority=authority,
+    )
+    assert grant.authority == authority
+    assert grant.authority_sha256 == canonical_authority_sha256(authority)
+
+    with pytest.raises(ValueError, match="cluster"):
+        issue_slurm_build_grant(
+            policy,
+            grant_id=_GRANT_ID,
+            authority=_authority(
+                policy,
+                slurm_cluster_id="oldlab",
+                cpu_arch="x86_64",
+            ),
+        )
+    with pytest.raises(ValueError, match="architecture"):
+        issue_slurm_build_grant(
+            policy,
+            grant_id=_GRANT_ID,
+            authority=authority.model_copy(update={"cpu_arch": "x86_64"}),
+        )
+    with pytest.raises(ValueError, match="request digest"):
+        issue_slurm_build_grant(
+            policy,
+            grant_id=_GRANT_ID,
+            authority=_authority(policy, slurm_request_sha256="6" * 64),
+        )
+
+    changed_digest = grant.model_dump()
+    changed_digest["authority_sha256"] = "f" * 64
+    with pytest.raises(ValidationError, match="authority digest"):
+        type(grant).model_validate(changed_digest)
+
+    changed_authority = grant.model_dump()
+    changed_authority["authority"]["pool_id"] = "staging-gb10-other"
+    with pytest.raises(ValidationError, match="authority digest"):
+        type(grant).model_validate(changed_authority)
+
+
 def test_request_identity_rejects_forbidden_legacy_and_credential_fields() -> None:
-    identity = issue_slurm_build_grant(_policy(), grant_id=_GRANT_ID).request.model_dump()
+    policy = _policy()
+    identity = _grant(policy).request.model_dump()
     for forbidden in (
         "reservation",
         "allowed_nodes",
@@ -185,7 +268,7 @@ async def test_disabled_or_blocked_provider_fails_before_runner_submission(
 ) -> None:
     runner = _RecordingRunner()
     provider = SlurmBuildEnvironmentProvider(policy=policy, runner=runner)
-    grant = issue_slurm_build_grant(policy, grant_id=_GRANT_ID)
+    grant = _grant(policy)
 
     with pytest.raises(BuildEnvironmentDisabledError):
         await provider.submit_once(grant)
@@ -198,7 +281,7 @@ async def test_enabled_unblocked_provider_submits_exact_rendered_request_once() 
     policy = _policy(enabled=True, blockers=())
     runner = _RecordingRunner()
     provider = SlurmBuildEnvironmentProvider(policy=policy, runner=runner)
-    grant = issue_slurm_build_grant(policy, grant_id=_GRANT_ID)
+    grant = _grant(policy)
 
     assert await provider.submit_once(grant) == "12345"
     assert runner.submissions == [render_rootless_builder_sbatch_request(policy, grant)]
