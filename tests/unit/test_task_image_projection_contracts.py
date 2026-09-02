@@ -18,6 +18,7 @@ from loom_task_image_authority.contracts import (
     TaskImageProjectionChallengeV1,
     TaskImageProjectionReceiptV1,
     TaskImageProjectionRequestV1,
+    TaskImageProjectionRevocationV1,
     canonical_authority_bytes,
     canonical_authority_sha256,
     new_bootstrap_token,
@@ -325,6 +326,52 @@ def test_attestation_requires_same_attachment_and_forward_generation() -> None:
         TaskImageContainmentAttestationV1.model_validate(
             {**attestation.model_dump(), "cgroup_inode": 987655}
         )
+
+
+def test_projection_revocation_is_strict_bounded_and_canonical() -> None:
+    revocation = TaskImageProjectionRevocationV1(
+        grant_id=GRANT_ID,
+        reason="guard_attestation_lost",
+        observed_at=NOW + timedelta(seconds=9),
+    )
+
+    assert revocation.model_dump(mode="json") == {
+        "schema_version": 1,
+        "grant_id": str(GRANT_ID),
+        "reason": "guard_attestation_lost",
+        "observed_at": "2026-09-02T14:00:09Z",
+    }
+    assert canonical_authority_bytes(revocation) == (
+        b'{"grant_id":"11111111-1111-1111-1111-111111111111",'
+        b'"observed_at":"2026-09-02T14:00:09Z","reason":"guard_attestation_lost",'
+        b'"schema_version":1}'
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"grant_id": UUID(int=0)},
+        {"reason": ""},
+        {"reason": "Operator_revoked"},
+        {"reason": "operator-revoked"},
+        {"reason": "a" + "b" * 64},
+        {"observed_at": NOW.replace(tzinfo=None)},
+        {"unknown": True},
+    ],
+)
+def test_projection_revocation_rejects_ambiguous_fields(
+    changes: dict[str, object],
+) -> None:
+    values: dict[str, object] = {
+        "grant_id": GRANT_ID,
+        "reason": "guard_attestation_lost",
+        "observed_at": NOW + timedelta(seconds=9),
+    }
+    values.update(changes)
+
+    with pytest.raises(ValidationError):
+        TaskImageProjectionRevocationV1.model_validate(values)
 
 
 def test_secret_responses_expose_only_hashed_public_bindings() -> None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,6 +35,7 @@ from loom_task_image_authority.contracts import (
     TaskImageProjectionChallengeV1,
     TaskImageProjectionReceiptV1,
     TaskImageProjectionRequestV1,
+    TaskImageProjectionRevocationV1,
     canonical_authority_sha256,
     canonical_public_binding_sha256,
 )
@@ -44,7 +44,6 @@ _SUPERVISOR_UID = 993
 _SUPERVISOR_GID = 980
 _PROJECT_SCOPE = "task-image:project"
 _ATTEST_SCOPE = "task-image:attest"
-_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
 class TaskImageProjectionConflictError(RuntimeError):
@@ -124,6 +123,19 @@ def _validated_exchange(
     except ValidationError:
         raise TaskImageProjectionAuthorizationError(
             "task-image bootstrap exchange is invalid"
+        ) from None
+
+
+def _validated_revocation(
+    request: TaskImageProjectionRevocationV1,
+) -> TaskImageProjectionRevocationV1:
+    try:
+        return TaskImageProjectionRevocationV1.model_validate(
+            request.model_dump(mode="python")
+        )
+    except ValidationError:
+        raise TaskImageProjectionAuthorizationError(
+            "task-image projection revocation is invalid"
         ) from None
 
 
@@ -1155,6 +1167,7 @@ async def _replay_exchange(
 async def exchange_task_image_bootstrap(
     session: AsyncSession,
     *,
+    principal: TaskImageGuardPrincipalV1,
     request: TaskImageBootstrapExchangeV1,
     now: datetime,
     secret_store: SecretStore,
@@ -1162,6 +1175,7 @@ async def exchange_task_image_bootstrap(
 ) -> TaskImageBuildSessionV1:
     """Consume one semantic bootstrap and issue one encrypted build session."""
 
+    principal = _validated_principal(principal)
     request = _validated_exchange(request)
     grant = await _locked_grant(session, grant_id=request.grant_id)
     authority = _grant_authority(grant, now=now)
@@ -1171,6 +1185,13 @@ async def exchange_task_image_bootstrap(
         raise TaskImageProjectionAuthorizationError(
             "task-image bootstrap projection is unavailable"
         )
+    _require_principal(
+        principal,
+        cluster=row.slurm_cluster_id,
+        node_name=row.node_name,
+        principal_id=row.principal_id,
+        principal_sha256=row.principal_sha256,
+    )
     await _require_stored_projection_chain(
         session,
         grant=grant,
@@ -1465,23 +1486,43 @@ async def authorize_task_image_build_session(
 async def revoke_task_image_projection(
     session: AsyncSession,
     *,
-    grant_id: UUID,
-    reason: str,
+    principal: TaskImageGuardPrincipalV1,
+    request: TaskImageProjectionRevocationV1,
     now: datetime,
 ) -> None:
     """Permanently revoke one projection while preserving all evidence."""
 
-    if _REASON_RE.fullmatch(reason) is None:
-        raise ValueError("task-image projection revocation reason is invalid")
-    grant = await _locked_grant(session, grant_id=grant_id)
-    _grant_authority(grant, now=now, require_live=False)
+    principal = _validated_principal(principal)
+    request = _validated_revocation(request)
+    grant = await _locked_grant(session, grant_id=request.grant_id)
+    authority = _grant_authority(grant, now=now)
+    _require_released_grant(grant)
     row = await _locked_projection(session, grant_id=grant.id)
     if row is None:
         raise TaskImageProjectionAuthorizationError(
             "task-image projection is unavailable"
         )
+    _require_principal(
+        principal,
+        cluster=row.slurm_cluster_id,
+        node_name=row.node_name,
+        principal_id=row.principal_id,
+        principal_sha256=row.principal_sha256,
+    )
+    if request.observed_at > now:
+        raise TaskImageProjectionAuthorizationError(
+            "task-image projection revocation observation is in the future"
+        )
+    if now >= request.observed_at + MAX_CHALLENGE_LIFETIME:
+        raise TaskImageProjectionExpiredError(
+            "task-image projection revocation observation is stale"
+        )
+    if now >= min(_revocation_deadlines(row, authority)):
+        raise TaskImageProjectionExpiredError(
+            "task-image projection revocation authority expired"
+        )
     if row.state == "revoked":
-        if row.revoke_reason != reason:
+        if row.revoke_reason != request.reason:
             raise TaskImageProjectionConflictError(
                 "task-image projection revocation reason changed"
             )
@@ -1490,16 +1531,41 @@ async def revoke_task_image_projection(
         raise TaskImageProjectionConflictError("task-image projection is expired")
     row.state = "revoked"
     row.revoked_at = now
-    row.revoke_reason = reason
+    row.revoke_reason = request.reason
     _append_event(
         session,
         row=row,
         event_type="revoked",
         event_key="revocation",
-        payload={"reason": reason},
+        payload={
+            "reason": request.reason,
+            "request_sha256": canonical_authority_sha256(request),
+        },
         now=now,
     )
     await session.flush()
+
+
+def _revocation_deadlines(
+    row: TaskImageBuildProjection,
+    authority: TaskImageBuildGrantAuthorityV1,
+) -> tuple[datetime, ...]:
+    deadlines = [authority.expires_at]
+    if row.session_expires_at is not None:
+        if row.attestation_expires_at is None:
+            raise TaskImageProjectionAuthorizationError(
+                "task-image session revocation deadline is incomplete"
+            )
+        deadlines.extend((row.session_expires_at, row.attestation_expires_at))
+    elif row.bootstrap_expires_at is not None:
+        if row.attestation_expires_at is None:
+            raise TaskImageProjectionAuthorizationError(
+                "task-image bootstrap revocation deadline is incomplete"
+            )
+        deadlines.extend((row.bootstrap_expires_at, row.attestation_expires_at))
+    else:
+        deadlines.append(row.challenge_expires_at)
+    return tuple(deadlines)
 
 
 def _projection_deadlines(
