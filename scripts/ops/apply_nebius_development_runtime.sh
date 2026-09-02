@@ -2,13 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] --service-execution-runtime-profile PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH" >&2
   exit 2
 }
 
 kubeconfig=
 nebius_credentials=
 model_provider_api_key_file=
+image_admission_keyring=
 service_execution_runtime_profile=
 while (($#)); do
   case "$1" in
@@ -27,6 +28,11 @@ while (($#)); do
       model_provider_api_key_file=$2
       shift 2
       ;;
+    --image-admission-keyring)
+      (($# >= 2)) || usage
+      image_admission_keyring=$2
+      shift 2
+      ;;
     --service-execution-runtime-profile)
       (($# >= 2)) || usage
       service_execution_runtime_profile=$2
@@ -40,6 +46,9 @@ done
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
 [[ -n "$service_execution_runtime_profile" && -s "$service_execution_runtime_profile" ]] || usage
 if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
+if [[ -n $image_admission_keyring && ! -s $image_admission_keyring ]]; then
   usage
 fi
 
@@ -96,6 +105,42 @@ if not isinstance(rows, list) or {
     raise SystemExit("service execution runtime profile image coverage is invalid")
 PY
 
+if [[ -n $image_admission_keyring ]]; then
+  python3 - "$image_admission_keyring" <<'PY'
+import base64
+import json
+import re
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+keys = payload.get("keys") if isinstance(payload, dict) else None
+if payload.get("schema_version") != 1 or not isinstance(keys, list) or not keys:
+    raise SystemExit("image admission keyring is invalid")
+seen_ids = set()
+seen_keys = set()
+for row in keys:
+    if not isinstance(row, dict) or set(row) != {"signing_key_id", "public_key_base64"}:
+        raise SystemExit("image admission keyring entry is invalid")
+    key_id = row["signing_key_id"]
+    encoded = row["public_key_base64"]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError):
+        raise SystemExit("image admission public key is invalid") from None
+    if (
+        not isinstance(key_id, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key_id) is None
+        or len(raw) != 32
+        or key_id in seen_ids
+        or raw in seen_keys
+    ):
+        raise SystemExit("image admission key binding is invalid")
+    seen_ids.add(key_id)
+    seen_keys.add(raw)
+PY
+fi
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
 
@@ -112,6 +157,15 @@ if [[ -n $model_provider_api_key_file ]]; then
   fi
   if ((10#$provider_key_mode % 100 != 0)); then
     echo "Model provider API key file must not be group/world accessible" >&2
+    exit 1
+  fi
+fi
+if [[ -n $image_admission_keyring ]]; then
+  if ! keyring_mode=$(stat -c '%a' "$image_admission_keyring" 2>/dev/null); then
+    keyring_mode=$(stat -f '%Lp' "$image_admission_keyring")
+  fi
+  if ((10#$keyring_mode % 100 != 0)); then
+    echo "Image admission keyring must not be group/world accessible" >&2
     exit 1
   fi
 fi
@@ -160,6 +214,30 @@ import sys
 print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )
+if [[ -n $image_admission_keyring ]]; then
+  image_admission_keyring_sha256=$(python3 - "$image_admission_keyring" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  )
+else
+  kubectl get secret -n loom loom-image-admission >/dev/null
+  image_admission_keyring_sha256=$(kubectl get secret -n loom loom-image-admission -o json | python3 -c '
+import base64
+import hashlib
+import json
+import sys
+
+payload = json.load(sys.stdin)
+encoded = payload.get("data", {}).get("keyring-json")
+if not isinstance(encoded, str):
+    raise SystemExit("existing image-admission Secret is missing keyring-json")
+print(hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest())
+')
+fi
 profile_task_image=$(python3 - "$service_execution_runtime_profile" <<'PY'
 import json
 from pathlib import Path
@@ -187,6 +265,13 @@ if [[ -n $normalized_provider_key ]]; then
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 fi
 
+if [[ -n $image_admission_keyring ]]; then
+  kubectl create secret generic loom-image-admission \
+    -n loom \
+    --from-file=keyring-json="$image_admission_keyring" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+
 kubectl create secret generic loom-service-execution-runtime-profile \
   -n loom \
   --from-file=profile-json="$service_execution_runtime_profile" \
@@ -201,6 +286,9 @@ kubectl rollout status -n loom deployment/loom-llm-gateway --timeout=180s
 
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null
+kubectl patch deployment -n loom loom-control-plane --type=merge \
+  --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/image-admission-keyring-sha256\":\"$image_admission_keyring_sha256\"}}}}}" \
+  >/dev/null
 kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
 kubectl patch deployment -n loom loom-service --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null

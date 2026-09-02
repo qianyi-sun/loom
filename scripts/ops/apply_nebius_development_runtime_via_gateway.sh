@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -12,6 +12,7 @@ known_hosts=
 cluster_id=
 nebius_credentials=
 model_provider_api_key_file=
+image_admission_keyring=
 service_execution_runtime_profile=
 gateway_image=
 control_plane_image=
@@ -47,6 +48,11 @@ while (($#)); do
     --model-provider-api-key-file)
       (($# >= 2)) || usage
       model_provider_api_key_file=$2
+      shift 2
+      ;;
+    --image-admission-keyring)
+      (($# >= 2)) || usage
+      image_admission_keyring=$2
       shift 2
       ;;
     --service-execution-runtime-profile)
@@ -86,6 +92,9 @@ done
 [[ $execution_runtime_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
 if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
+if [[ -n $image_admission_keyring && ! -s $image_admission_keyring ]]; then
   usage
 fi
 [[ -s $service_execution_runtime_profile ]] || usage
@@ -134,6 +143,15 @@ if [[ -n $model_provider_api_key_file ]]; then
     exit 1
   fi
 fi
+if [[ -n $image_admission_keyring ]]; then
+  if ! keyring_mode=$(stat -c '%a' "$image_admission_keyring" 2>/dev/null); then
+    keyring_mode=$(stat -f '%Lp' "$image_admission_keyring")
+  fi
+  if ((10#$keyring_mode % 100 != 0)); then
+    echo "Image admission keyring must not be group/world accessible" >&2
+    exit 1
+  fi
+fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 local_stage=$(mktemp -d)
@@ -172,11 +190,17 @@ if [[ -n $model_provider_api_key_file ]]; then
   stage_files+=("$model_provider_api_key_file")
   provider_key_name=$(basename "$model_provider_api_key_file")
 fi
+keyring_name=-
+if [[ -n $image_admission_keyring ]]; then
+  stage_files+=("$image_admission_keyring")
+  keyring_name=$(basename "$image_admission_keyring")
+fi
 scp "${ssh_options[@]}" "${stage_files[@]}" "codex@$gateway:$remote_stage/"
 
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
   "$provider_key_name" \
+  "$keyring_name" \
   "$(basename "$service_execution_runtime_profile")" \
   "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
@@ -184,15 +208,19 @@ remote_stage=$1
 cluster_id=$2
 credential_name=$3
 provider_key_name=$4
-runtime_profile_name=$5
-gateway_image=$6
-control_plane_image=$7
-service_image=$8
+keyring_name=$5
+runtime_profile_name=$6
+gateway_image=$7
+control_plane_image=$8
+service_image=$9
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
 if [[ $provider_key_name != - ]]; then
   chmod 600 "$remote_stage/$provider_key_name"
+fi
+if [[ $keyring_name != - ]]; then
+  chmod 600 "$remote_stage/$keyring_name"
 fi
 chmod 600 "$remote_stage/$runtime_profile_name"
 tar -C "$remote_stage" -xzf "$remote_stage/runtime.tar.gz"
@@ -232,6 +260,9 @@ apply_args=(
 )
 if [[ $provider_key_name != - ]]; then
   apply_args+=(--model-provider-api-key-file "$remote_stage/$provider_key_name")
+fi
+if [[ $keyring_name != - ]]; then
+  apply_args+=(--image-admission-keyring "$remote_stage/$keyring_name")
 fi
 "$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" "${apply_args[@]}"
 REMOTE

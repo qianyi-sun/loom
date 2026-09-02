@@ -219,12 +219,33 @@ scripts/ops/mirror_nebius_release_via_gateway.py \
   --execution-runtime-image ghcr.io/qianyi-sun/loom-execution-runtime@sha256:DIGEST \
   --output /secure/path/nebius-release-mirror.json
 
+scripts/ops/collect_nebius_runtime_evidence_via_gateway.py \
+  --gateway GATEWAY_IP \
+  --ssh-key /secure/path/deployment-access-ed25519 \
+  --known-hosts /secure/path/deployment-access-known-hosts \
+  --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
+  --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
+  --output-dir /secure/path/runtime-admission-evidence
+
+uv run python scripts/ops/prepare_nebius_runtime_profile.py \
+  --candidate-sha MERGED_DEV_SHA \
+  --mirror-record /secure/path/nebius-release-mirror.json \
+  --evidence-summary /secure/path/runtime-admission-evidence/summary.json \
+  --service-release-record /secure/path/service-amd64.json \
+  --execution-runtime-release-record /secure/path/execution-runtime-amd64.json \
+  --signing-key /secure/path/image-admission-signing-key.pem \
+  --signing-key-id nebius-development-YYYY-MM \
+  --output-profile /secure/path/service-execution-runtime-profile.json \
+  --output-keyring /secure/path/image-admission-keyring.json \
+  --output-policy /secure/path/image-admission-policy.json
+
 scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --gateway "$(terraform -chdir=deploy/terraform/nebius/stack output -json deployment_access | jq -r .public_address | cut -d/ -f1)" \
   --ssh-key /secure/path/deployment-access-ed25519 \
   --known-hosts /secure/path/deployment-access-known-hosts \
   --cluster-id mk8scluster-REPLACE \
   --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --image-admission-keyring /secure/path/image-admission-keyring.json \
   --gateway-image cr.eu-north1.nebius.cloud/REGISTRY/loom-llm-gateway@sha256:DIGEST \
   --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
   --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
@@ -241,6 +262,16 @@ owner-only local result. It needs no human Nebius session, registry password,
 sudo access, or persistent credential-helper installation. Repeating it for
 the same merged candidate is idempotent.
 
+The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
+gateway, authenticates to Nebius Registry with the VM service account, rejects
+CRITICAL findings, and atomically retains owner-only CycloneDX SBOMs, complete
+vulnerability reports, and the exact execution-runtime binary digest. The
+profile helper binds those results to the mirrored images and protected amd64
+release records, then signs the immutable profile with a persistent Ed25519
+key. Add `--create-signing-key` only for the first bootstrap; later releases
+reuse the same owner-only key. Admission metadata does not expire at runtime;
+removing or replacing the public key is the explicit revocation mechanism.
+
 The helper accepts only digest-pinned platform images, transfers only the
 reviewed runtime manifests plus the capacity observer credential into a
 mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
@@ -253,6 +284,11 @@ Secret and hashes its current value into the Gateway rollout annotation
 without exposing it. Pass `--model-provider-api-key-file` only for an explicit
 provider-key bootstrap or rotation; that file must be owner-only and is removed
 from the gateway staging directory after apply.
+
+Likewise, omit `--image-admission-keyring` during ordinary convergence to reuse
+the existing public key Secret. Pass it only for the first bootstrap or an
+explicit signing-key rotation. Its content digest is stamped onto the Control
+Plane pod template so an authorized rotation always rolls the verifier.
 
 The runtime profile is a protected non-secret deployment input whose images
 must exactly match the images being rolled out. The helper validates its schema,

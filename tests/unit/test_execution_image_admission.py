@@ -89,6 +89,15 @@ def test_image_admission_matches_release_severity_policy_and_ignores_evidence_ag
         keyring=IMAGE_ADMISSION_KEYRING,
         now=now,
     )
+    unrated = signed_image_admission_bundle(
+        (_TASK, _RUNTIME), now=now, severity="unknown"
+    )
+    verify_execution_image_admission(
+        unrated,
+        required_image_refs=(_TASK, _RUNTIME),
+        keyring=IMAGE_ADMISSION_KEYRING,
+        now=now,
+    )
     critical = signed_image_admission_bundle(
         (_TASK, _RUNTIME), now=now, severity="critical"
     )
