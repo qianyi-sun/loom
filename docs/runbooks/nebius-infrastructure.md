@@ -198,7 +198,6 @@ development execution runtime once:
 scripts/ops/apply_nebius_development_runtime.sh \
   --kubeconfig /secure/path/development-eu-north1.kubeconfig \
   --nebius-credentials /secure/path/capacity-observer-credentials.json \
-  --model-provider-api-key-file /secure/path/model-provider-api-key \
   --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
 ```
 
@@ -226,7 +225,6 @@ scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --known-hosts /secure/path/deployment-access-known-hosts \
   --cluster-id mk8scluster-REPLACE \
   --nebius-credentials /secure/path/capacity-observer-credentials.json \
-  --model-provider-api-key-file /secure/path/model-provider-api-key \
   --gateway-image cr.eu-north1.nebius.cloud/REGISTRY/loom-llm-gateway@sha256:DIGEST \
   --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
   --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
@@ -249,6 +247,12 @@ mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
 attached identity, rolls out Control Plane then Service, applies the idempotent
 runtime, and deletes the remote and local staging directories. No human Nebius
 token is copied to the gateway.
+
+Normal convergence preserves the existing `loom-nebius-model-provider`
+Secret and hashes its current value into the Gateway rollout annotation
+without exposing it. Pass `--model-provider-api-key-file` only for an explicit
+provider-key bootstrap or rotation; that file must be owner-only and is removed
+from the gateway staging directory after apply.
 
 The runtime profile is a protected non-secret deployment input whose images
 must exactly match the images being rolled out. The helper validates its schema,

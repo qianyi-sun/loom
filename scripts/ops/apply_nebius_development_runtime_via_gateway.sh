@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -85,7 +85,9 @@ done
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $execution_runtime_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
-[[ -s $model_provider_api_key_file ]] || usage
+if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
 [[ -s $service_execution_runtime_profile ]] || usage
 
 python3 - "$nebius_credentials" <<'PY'
@@ -123,12 +125,14 @@ if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
 fi
-if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
-  provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
-fi
-if ((10#$provider_key_mode % 100 != 0)); then
-  echo "Model provider API key file must not be group/world accessible" >&2
-  exit 1
+if [[ -n $model_provider_api_key_file ]]; then
+  if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
+    provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+  fi
+  if ((10#$provider_key_mode % 100 != 0)); then
+    echo "Model provider API key file must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -158,16 +162,21 @@ ssh_options=(
 # quoted remote path rather than accepting a remote-shell expression.
 # shellcheck disable=SC2029
 ssh "${ssh_options[@]}" "codex@$gateway" "install -d -m 700 '$remote_stage'"
-scp "${ssh_options[@]}" \
-  "$local_stage/runtime.tar.gz" \
-  "$nebius_credentials" \
-  "$model_provider_api_key_file" \
-  "$service_execution_runtime_profile" \
-  "codex@$gateway:$remote_stage/"
+stage_files=(
+  "$local_stage/runtime.tar.gz"
+  "$nebius_credentials"
+  "$service_execution_runtime_profile"
+)
+provider_key_name=-
+if [[ -n $model_provider_api_key_file ]]; then
+  stage_files+=("$model_provider_api_key_file")
+  provider_key_name=$(basename "$model_provider_api_key_file")
+fi
+scp "${ssh_options[@]}" "${stage_files[@]}" "codex@$gateway:$remote_stage/"
 
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
-  "$(basename "$model_provider_api_key_file")" \
+  "$provider_key_name" \
   "$(basename "$service_execution_runtime_profile")" \
   "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
@@ -182,7 +191,9 @@ service_image=$8
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
-chmod 600 "$remote_stage/$provider_key_name"
+if [[ $provider_key_name != - ]]; then
+  chmod 600 "$remote_stage/$provider_key_name"
+fi
 chmod 600 "$remote_stage/$runtime_profile_name"
 tar -C "$remote_stage" -xzf "$remote_stage/runtime.tar.gz"
 nebius mk8s cluster get-credentials \
@@ -214,9 +225,13 @@ kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-service --timeout=300s
 
-"$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" \
-  --kubeconfig "$remote_stage/kubeconfig" \
-  --nebius-credentials "$remote_stage/$credential_name" \
-  --model-provider-api-key-file "$remote_stage/$provider_key_name" \
+apply_args=(
+  --kubeconfig "$remote_stage/kubeconfig"
+  --nebius-credentials "$remote_stage/$credential_name"
   --service-execution-runtime-profile "$remote_stage/$runtime_profile_name"
+)
+if [[ $provider_key_name != - ]]; then
+  apply_args+=(--model-provider-api-key-file "$remote_stage/$provider_key_name")
+fi
+"$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" "${apply_args[@]}"
 REMOTE

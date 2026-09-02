@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] --service-execution-runtime-profile PATH" >&2
   exit 2
 }
 
@@ -38,8 +38,10 @@ done
 
 [[ -n "$kubeconfig" && -f "$kubeconfig" ]] || usage
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
-[[ -n "$model_provider_api_key_file" && -s "$model_provider_api_key_file" ]] || usage
 [[ -n "$service_execution_runtime_profile" && -s "$service_execution_runtime_profile" ]] || usage
+if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
 
 python3 - "$nebius_credentials" <<'PY'
 import json
@@ -104,33 +106,52 @@ if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
 fi
-if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
-  provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
-fi
-if ((10#$provider_key_mode % 100 != 0)); then
-  echo "Model provider API key file must not be group/world accessible" >&2
-  exit 1
+if [[ -n $model_provider_api_key_file ]]; then
+  if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
+    provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+  fi
+  if ((10#$provider_key_mode % 100 != 0)); then
+    echo "Model provider API key file must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
 
-normalized_provider_key=$(mktemp)
+normalized_provider_key=
 token_file=
 # shellcheck disable=SC2329  # invoked by the EXIT trap below
 cleanup() {
-  rm -f "$normalized_provider_key"
+  [[ -z $normalized_provider_key ]] || rm -f "$normalized_provider_key"
   [[ -z "$token_file" ]] || rm -f "$token_file"
 }
 trap cleanup EXIT
-chmod 600 "$normalized_provider_key"
-python3 "$repo_root/scripts/ops/normalize_secret_file.py" \
-  "$model_provider_api_key_file" "$normalized_provider_key"
-provider_key_sha256=$(python3 - "$normalized_provider_key" <<'PY'
+if [[ -n $model_provider_api_key_file ]]; then
+  normalized_provider_key=$(mktemp)
+  chmod 600 "$normalized_provider_key"
+  python3 "$repo_root/scripts/ops/normalize_secret_file.py" \
+    "$model_provider_api_key_file" "$normalized_provider_key"
+  provider_key_sha256=$(python3 - "$normalized_provider_key" <<'PY'
 from hashlib import sha256
 from pathlib import Path
 import sys
 
 print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
-)
+  )
+else
+  kubectl get secret -n loom loom-nebius-model-provider >/dev/null
+  provider_key_sha256=$(kubectl get secret -n loom loom-nebius-model-provider -o json | python3 -c '
+import base64
+import hashlib
+import json
+import sys
+
+payload = json.load(sys.stdin)
+encoded = payload.get("data", {}).get("api-key")
+if not isinstance(encoded, str):
+    raise SystemExit("existing model-provider Secret is missing api-key")
+print(hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest())
+')
+fi
 runtime_profile_sha256=$(python3 - "$service_execution_runtime_profile" <<'PY'
 from hashlib import sha256
 from pathlib import Path
@@ -159,10 +180,12 @@ if [[ $deployed_service_image != "$profile_task_image" ]]; then
   exit 1
 fi
 
-kubectl create secret generic loom-nebius-model-provider \
-  -n loom \
-  --from-file=api-key="$normalized_provider_key" \
-  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if [[ -n $normalized_provider_key ]]; then
+  kubectl create secret generic loom-nebius-model-provider \
+    -n loom \
+    --from-file=api-key="$normalized_provider_key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
 
 kubectl create secret generic loom-service-execution-runtime-profile \
   -n loom \
