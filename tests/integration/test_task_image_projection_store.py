@@ -1625,7 +1625,6 @@ async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestat
 @pytest.mark.parametrize(
     "drift",
     [
-        "changed_generation",
         "skipped_generation",
         "principal_scope",
         "principal_node",
@@ -1661,14 +1660,7 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
         )
         candidate = _attestation(proof, generation=2)
         expected: type[Exception] = TaskImageProjectionAuthorizationError
-        if drift == "changed_generation":
-            candidate = _attestation(
-                proof,
-                generation=1,
-                expires_at=proof.attestation_expires_at - timedelta(seconds=1),
-            )
-            expected = TaskImageProjectionConflictError
-        elif drift == "skipped_generation":
+        if drift == "skipped_generation":
             candidate = _attestation(proof, generation=3)
             expected = TaskImageProjectionConflictError
         elif drift == "principal_scope":
@@ -1762,6 +1754,69 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
         )
         assert row is not None
         assert row.attestation_generation == 1
+
+
+async def test_attestation_equivocation_durably_revokes_projection(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    rejected_at = NOW + timedelta(seconds=13)
+    async with projection_session() as session:
+        _grant_value, principal, proof, _receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        changed_generation = _attestation(
+            proof,
+            generation=1,
+            expires_at=proof.attestation_expires_at - timedelta(seconds=1),
+        )
+
+        with pytest.raises(
+            TaskImageProjectionConflictError,
+            match="containment attestation equivocated",
+        ):
+            await record_task_image_containment_attestation(
+                session,
+                principal=principal,
+                attestation=changed_generation,
+                now=rejected_at,
+            )
+        await session.commit()
+
+    async with projection_session() as session:
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.state == "revoked"
+        assert row.revoked_at == rejected_at
+        assert row.revoke_reason == "attestation_equivocation"
+        attestations = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildContainmentAttestation).where(
+                        TaskImageBuildContainmentAttestation.grant_id == GRANT_ID
+                    )
+                )
+            ).all()
+        )
+        assert [item.generation for item in attestations] == [1]
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID,
+                        TaskImageBuildProjectionEvent.event_type == "revoked",
+                    )
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        assert events[0].event_key == "revocation"
+        assert events[0].payload_json == {"reason": "attestation_equivocation"}
 
 
 async def test_revocation_is_exact_irreversible_and_blocks_session_and_attestation(

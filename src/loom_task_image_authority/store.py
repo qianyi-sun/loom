@@ -1308,6 +1308,18 @@ async def record_task_image_containment_attestation(
     candidate_sha256 = canonical_authority_sha256(attestation)
     if attestation.generation == current.generation:
         if candidate_sha256 != row.attestation_sha256:
+            row.state = "revoked"
+            row.revoked_at = now
+            row.revoke_reason = "attestation_equivocation"
+            _append_event(
+                session,
+                row=row,
+                event_type="revoked",
+                event_key="revocation",
+                payload={"reason": "attestation_equivocation"},
+                now=now,
+            )
+            await session.flush()
             raise TaskImageProjectionConflictError(
                 "task-image containment attestation equivocated"
             )
