@@ -59,9 +59,9 @@ class _PrincipalDocument(_StrictModel):
     @field_validator("scopes")
     @classmethod
     def _canonical_scopes(cls, value: tuple[GuardScope, ...]) -> tuple[GuardScope, ...]:
-        if len(value) != len(set(value)):
+        if len(value) != len(set(value)) or value != tuple(sorted(value)):
             raise ValueError("invalid principal scope")
-        return tuple(sorted(value))
+        return value
 
     @model_validator(mode="after")
     def _cluster_node_binding(self) -> _PrincipalDocument:

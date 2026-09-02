@@ -113,6 +113,12 @@ def test_verifier_rejects_every_invalid_bearer_indistinguishably(
             "invalid principal scope",
         ),
         (
+            lambda value: value["principals"][0].__setitem__(
+                "scopes", ["task-image:project", "task-image:attest"]
+            ),
+            "invalid principal scope",
+        ),
+        (
             lambda value: value["principals"][0].__setitem__("node_name", "trt-eai-oldlab-3"),
             "cluster and node disagree",
         ),
