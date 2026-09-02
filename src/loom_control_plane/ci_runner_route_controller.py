@@ -48,7 +48,7 @@ GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20
-MAX_GITHUB_REQUESTS_PER_RECONCILE = 35
+MAX_GITHUB_REQUESTS_PER_RECONCILE = 29
 MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
 ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS = 3
 PUBLISHER_RETRY_SECONDS = 15
@@ -349,7 +349,14 @@ class GitHubRouteAPI:
             # during a PR burst. The page itself remains a bounded, useful
             # snapshot: processing a partial snapshot is fail-safe because a
             # missed request stays hosted and is rediscovered next cycle.
-            return cast(list[dict[str, object]], runs)
+            validated_runs = cast(list[dict[str, object]], runs)
+            for run in validated_runs:
+                run_id = _exact_int(run.get("id"), "workflow_run.id")
+                cached = self._workflow_run_cache.get(run_id)
+                if cached is not None and cached != run:
+                    raise RouteControllerError("active workflow run snapshot is inconsistent")
+                self._workflow_run_cache[run_id] = run
+            return validated_runs
         raise RouteControllerError(
             "GitHub active workflow inventory remained malformed after bounded retries"
         )
@@ -1048,6 +1055,10 @@ class CiRunnerRouteController:
         seen = 0
         outcomes = {"published": 0, "replayed": 0, "pending": 0, "abandoned": 0}
         processed: set[str] = set()
+        known_run_attempts = {
+            (decision.workflow_id, decision.workflow_run_id, decision.run_attempt)
+            for decision in self.broker.route_decisions()
+        }
         errors: list[str] = []
         abandoned_releases = 0
 
@@ -1060,7 +1071,7 @@ class CiRunnerRouteController:
             except (LeaseBrokerError, RouteControllerError) as exc:
                 errors.append(f"decision {decision.decision_id}: {exc}")
 
-        for artifact, run in self._active_route_artifacts():
+        for artifact, run in self._active_route_artifacts(known_run_attempts=known_run_attempts):
             seen += 1
             try:
                 artifact_id = _exact_int(artifact.get("id"), "artifact.id")
@@ -1126,7 +1137,7 @@ class CiRunnerRouteController:
         )
 
     def _active_route_artifacts(
-        self,
+        self, *, known_run_attempts: set[tuple[int, int, int]]
     ) -> list[tuple[Mapping[str, object], Mapping[str, object]]]:
         discovered: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
         for workflow_name, contract in sorted(WORKFLOW_CLASS_CONTRACTS.items()):
@@ -1147,6 +1158,8 @@ class CiRunnerRouteController:
                     raise RouteControllerError(
                         f"active {workflow_name} run is outside the route contract"
                     )
+                if (workflow_id, run_id, attempt) in known_run_attempts:
+                    continue
                 artifact = self.api.route_artifact(
                     workflow_id=workflow_id,
                     workflow_run_id=run_id,
