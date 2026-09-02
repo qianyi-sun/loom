@@ -227,7 +227,7 @@ scripts/ops/collect_nebius_runtime_evidence_via_gateway.py \
   --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
   --output-dir /secure/path/runtime-admission-evidence
 
-uv run python scripts/ops/prepare_nebius_runtime_profile.py \
+uv run --no-sync python scripts/ops/prepare_nebius_runtime_profile.py \
   --candidate-sha MERGED_DEV_SHA \
   --mirror-record /secure/path/nebius-release-mirror.json \
   --evidence-summary /secure/path/runtime-admission-evidence/summary.json \
