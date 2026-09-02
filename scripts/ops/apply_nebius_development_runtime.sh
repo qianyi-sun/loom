@@ -2,13 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH --model-provider-api-key-file PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH" >&2
   exit 2
 }
 
 kubeconfig=
 nebius_credentials=
 model_provider_api_key_file=
+service_execution_runtime_profile=
 while (($#)); do
   case "$1" in
     --kubeconfig)
@@ -26,6 +27,11 @@ while (($#)); do
       model_provider_api_key_file=$2
       shift 2
       ;;
+    --service-execution-runtime-profile)
+      (($# >= 2)) || usage
+      service_execution_runtime_profile=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
@@ -33,6 +39,7 @@ done
 [[ -n "$kubeconfig" && -f "$kubeconfig" ]] || usage
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
 [[ -n "$model_provider_api_key_file" && -s "$model_provider_api_key_file" ]] || usage
+[[ -n "$service_execution_runtime_profile" && -s "$service_execution_runtime_profile" ]] || usage
 
 python3 - "$nebius_credentials" <<'PY'
 import json
@@ -48,6 +55,43 @@ if not required <= subject.keys() or subject.get("alg") != "RS256":
     raise SystemExit("Nebius credentials must be a complete RS256 service-account document")
 if subject.get("iss") != subject.get("sub"):
     raise SystemExit("Nebius credential issuer and subject must match")
+PY
+
+python3 - "$service_execution_runtime_profile" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+required = {
+    "schema_version", "logical_pool_id", "candidate_sha", "execution_class_id",
+    "task_image_ref", "runtime_image_ref", "runtime_binary_sha256", "image_admission",
+}
+if not isinstance(payload, dict) or not required <= payload.keys():
+    raise SystemExit("service execution runtime profile is incomplete")
+digest_image = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+sha256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+if (
+    payload["schema_version"] != "loom.service-execution-runtime-profile.v1"
+    or payload["logical_pool_id"] != "nebius-cpu"
+    or payload["execution_class_id"] != "linux-amd64-cpu-pod-v1"
+    or not re.fullmatch(r"[0-9a-f]{40}", str(payload["candidate_sha"]))
+    or not digest_image.fullmatch(str(payload["task_image_ref"]))
+    or not digest_image.fullmatch(str(payload["runtime_image_ref"]))
+    or not sha256.fullmatch(str(payload["runtime_binary_sha256"]))
+):
+    raise SystemExit("service execution runtime profile schema is invalid")
+admission = payload["image_admission"]
+if not isinstance(admission, dict) or admission.get("schema_version") != "loom.execution-image-admission.v1":
+    raise SystemExit("service execution runtime profile admission is invalid")
+rows = admission.get("admissions")
+if not isinstance(rows, list) or {
+    row.get("statement", {}).get("image_ref")
+    for row in rows
+    if isinstance(row, dict) and isinstance(row.get("statement"), dict)
+} != {payload["task_image_ref"], payload["runtime_image_ref"]}:
+    raise SystemExit("service execution runtime profile image coverage is invalid")
 PY
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -70,6 +114,7 @@ fi
 
 normalized_provider_key=$(mktemp)
 token_file=
+# shellcheck disable=SC2329  # invoked by the EXIT trap below
 cleanup() {
   rm -f "$normalized_provider_key"
   [[ -z "$token_file" ]] || rm -f "$token_file"
@@ -86,15 +131,42 @@ import sys
 print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )
+runtime_profile_sha256=$(python3 - "$service_execution_runtime_profile" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)
+profile_task_image=$(python3 - "$service_execution_runtime_profile" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["task_image_ref"])
+PY
+)
 
 kubectl get namespace loom >/dev/null
 kubectl get secret -n loom loom-admin-secret >/dev/null
 kubectl get secret -n loom loom-image-admission >/dev/null
 kubectl get secret -n loom-nebius-development loom-execution-actuator-db >/dev/null
+deployed_service_image=$(kubectl get deployment -n loom loom-service \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="service")].image}')
+if [[ $deployed_service_image != "$profile_task_image" ]]; then
+  echo "Runtime profile task image does not match the deployed Loom service image" >&2
+  exit 1
+fi
 
 kubectl create secret generic loom-nebius-model-provider \
   -n loom \
   --from-file=api-key="$normalized_provider_key" \
+  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+kubectl create secret generic loom-service-execution-runtime-profile \
+  -n loom \
+  --from-file=profile-json="$service_execution_runtime_profile" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 kubectl patch deployment -n loom loom-llm-gateway --type=strategic \
@@ -109,6 +181,9 @@ kubectl patch deployment -n loom loom-control-plane --type=strategic \
 kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
 kubectl patch deployment -n loom loom-service --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
+kubectl patch deployment -n loom loom-service --type=merge \
+  --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/service-execution-runtime-profile-sha256\":\"$runtime_profile_sha256\"}}}}}" \
+  >/dev/null
 kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
 kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-execution-actuator.yaml" >/dev/null

@@ -1,4 +1,5 @@
 import hashlib
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
+    Batch,
     Benchmark,
     DataLifecycleAuthority,
     Task,
@@ -21,8 +23,10 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
     User,
 )
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 
 @pytest.fixture
@@ -154,6 +158,128 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         assert "submitted_at" in body
 
 
+def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    team_id, raw = seed_team
+    task_id = "automatic-nebius-submit"
+    batch_id = uuid4()
+    task_image = "registry.example/task@sha256:" + "a" * 64
+    runtime_image = "registry.example/runtime@sha256:" + "b" * 64
+    profile = ServiceExecutionRuntimeProfileV1(
+        candidate_sha="1" * 40,
+        execution_class_id="linux-amd64-cpu-pod-v1",
+        task_image_ref=task_image,
+        runtime_image_ref=runtime_image,
+        runtime_binary_sha256="sha256:" + "e" * 64,
+        image_admission=signed_image_admission_bundle((task_image, runtime_image)),
+    )
+    profile_json = json.dumps(
+        profile.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    try:
+        with sessions() as session:
+            session.add(
+                Task(
+                    id=task_id,
+                    checksum="c" * 64,
+                    source="s3://artifacts/task-inputs/task/",
+                    source_provenance={
+                        "service_execution_input": {
+                            "schema_version": "loom.service-execution-input.v1",
+                            "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                            "manifest_sha256": "sha256:" + "d" * 64,
+                            "file_count": 3,
+                            "total_bytes": 4096,
+                        }
+                    },
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {
+                            "os": "linux",
+                            "cpu_arch": "x86_64",
+                            "gpu_vendor": "none",
+                            "docker_image": task_image,
+                            "cpus": 1,
+                            "memory_mb": 1024,
+                            "storage_mb": 2048,
+                            "baseline_network_policy": {"kind": "gateway-only"},
+                            "network_policies_supported": ["gateway-only"],
+                        },
+                        "agent": {"name": "direct-completion"},
+                        "verifier": {
+                            "name": "script",
+                            "args": {"script_path": "verifier/check.sh"},
+                        },
+                        "steps": [
+                            {
+                                "name": "main",
+                                "instruction_file": "instruction.md",
+                                "artifacts": ["answer.txt"],
+                            }
+                        ],
+                    },
+                )
+            )
+            session.add(
+                Batch(
+                    id=batch_id,
+                    team_id=team_id,
+                    name="automatic Nebius submit",
+                    task_filter={},
+                    trial_config={},
+                    backend="nebius",
+                    service_execution_runtime_profile=profile.model_dump(mode="json"),
+                    state="submitted",
+                    created_by_token_prefix="test",
+                    expected_trial_count=1,
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            app.state.settings = app.state.settings.model_copy(
+                update={"service_execution_runtime_profile_json": profile_json}
+            )
+            response = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "task_id": task_id,
+                    "batch_id": str(batch_id),
+                    "config": {
+                        "agent_name": "direct-completion",
+                        "agent_model": {
+                            "provider": "openai",
+                            "name": "gpt-5",
+                            "source": "api",
+                        },
+                    },
+                },
+            )
+
+        assert response.status_code == 201, response.text
+        with sessions() as session:
+            trial = session.get(Trial, UUID(response.json()["trial_id"]))
+            assert trial is not None
+            assert trial.requires_caps["backend"] == "nebius"
+            assert trial.requires_caps["worker_pool"] == "nebius-cpu"
+    finally:
+        with sessions() as session:
+            session.execute(delete(Trial).where(Trial.batch_id == batch_id))
+            session.execute(delete(Batch).where(Batch.id == batch_id))
+            session.execute(delete(Task).where(Task.id == task_id))
+            session.commit()
+        engine.dispose()
+
+
 def test_submit_enqueues_and_links_each_required_task_image(
     app,
     seed_team,
@@ -241,8 +367,7 @@ def test_idempotent_resubmission_repairs_missing_task_image_links(
                 select(TaskImageMaterialization.cpu_arch)
                 .join(
                     TrialTaskImageMaterialization,
-                    TrialTaskImageMaterialization.materialization_id
-                    == TaskImageMaterialization.id,
+                    TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
                 )
                 .where(TrialTaskImageMaterialization.trial_id == trial_id)
                 .order_by(TaskImageMaterialization.cpu_arch)

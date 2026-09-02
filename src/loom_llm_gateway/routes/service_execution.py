@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.responses import Response, StreamingResponse
 
 from loom.db.schema import ServiceExecutionLease
 from loom.pipeline.artifact_commit import ArtifactCommitError
@@ -18,6 +20,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionTokenRequestV1,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
+    resolve_service_execution_input,
 )
 
 router = APIRouter(prefix="/internal/service-execution", tags=["service-execution"])
@@ -74,7 +77,7 @@ async def _authorize(
     request: Request,
     identity: ServiceExecutionPeerV1,
     *,
-    purpose: Literal["token", "output"] = "output",
+    purpose: Literal["token", "input", "output"] = "output",
 ) -> ServiceExecutionLease:
     async with request.app.state.session_factory() as session:
         try:
@@ -119,6 +122,82 @@ async def issue_service_execution_token(
         "expires_at": expires_at.isoformat(),
         "step_jwt_id": str(step_jwt_id),
     }
+
+
+@router.get("/inputs/manifest")
+async def get_service_execution_input_manifest(
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    role: RoleHeader,
+) -> Response:
+    identity = _peer(lease_id, generation, role)
+    lease = await _authorize(request, identity, purpose="input")
+    async with request.app.state.session_factory() as session:
+        try:
+            resolved = await resolve_service_execution_input(
+                session,
+                lease=lease,
+                store=request.app.state.artifact_store,
+                artifacts_bucket=request.app.state.settings.artifacts_bucket,
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+    return Response(
+        content=resolved.manifest_body,
+        media_type="application/json",
+        headers={
+            "X-Loom-Content-SHA256": "sha256:"
+            + hashlib.sha256(resolved.manifest_body).hexdigest()
+        },
+    )
+
+
+@router.get("/inputs/files/{file_index}")
+async def get_service_execution_input_file(
+    file_index: int,
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    role: RoleHeader,
+) -> StreamingResponse:
+    identity = _peer(lease_id, generation, role)
+    lease = await _authorize(request, identity, purpose="input")
+    async with request.app.state.session_factory() as session:
+        try:
+            resolved = await resolve_service_execution_input(
+                session,
+                lease=lease,
+                store=request.app.state.artifact_store,
+                artifacts_bucket=request.app.state.settings.artifacts_bucket,
+            )
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+    if file_index < 0 or file_index >= len(resolved.manifest.files):
+        raise HTTPException(status_code=404, detail="task_input_file_not_found")
+    item = resolved.manifest.files[file_index]
+    key = resolved.prefix + item.relative_path
+    try:
+        facts = await request.app.state.artifact_store.stat_object(
+            bucket=resolved.bucket,
+            key=key,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="task_input_object_unavailable") from exc
+    if facts.content_length != item.size_bytes:
+        raise HTTPException(status_code=409, detail="task_input_object_drift")
+    return StreamingResponse(
+        request.app.state.artifact_store.stream_object(
+            bucket=resolved.bucket,
+            key=key,
+            chunk_size=1024 * 1024,
+        ),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(item.size_bytes),
+            "X-Loom-Content-SHA256": item.sha256,
+        },
+    )
 
 
 @router.post("/outputs/prepare", status_code=201)

@@ -62,6 +62,13 @@ type sidecar struct {
 	DependsOn      []string          `json:"depends_on"`
 }
 
+type taskInput struct {
+	SchemaVersion  string `json:"schema_version"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	FileCount      int    `json:"file_count"`
+	TotalBytes     int64  `json:"total_bytes"`
+}
+
 type imageAdmissionStatement struct {
 	SchemaVersion                string    `json:"schema_version"`
 	ImageRef                     string    `json:"image_ref"`
@@ -112,6 +119,7 @@ type plan struct {
 	Sidecars              []sidecar               `json:"sidecars"`
 	MaxLogBytesPerStream  int64                   `json:"max_log_bytes_per_stream"`
 	MaxArtifactBytes      int64                   `json:"max_artifact_bytes"`
+	TaskInput             *taskInput              `json:"task_input"`
 	RuntimeContractSHA256 string                  `json:"-"`
 }
 
@@ -179,6 +187,12 @@ func (p plan) validate() error {
 	if p.MaxLogBytesPerStream <= 0 || p.MaxLogBytesPerStream > 100*1024*1024 ||
 		p.MaxArtifactBytes <= 0 || p.MaxArtifactBytes > 10*1024*1024*1024 {
 		return fmt.Errorf("invalid output bounds")
+	}
+	if p.TaskInput != nil && (p.TaskInput.SchemaVersion != "loom.runtime-task-input.v1" ||
+		!sha256Value.MatchString(p.TaskInput.ManifestSHA256) || p.TaskInput.FileCount <= 0 ||
+		p.TaskInput.FileCount > 10_000 || p.TaskInput.TotalBytes < 0 ||
+		p.TaskInput.TotalBytes > 10*1024*1024*1024) {
+		return fmt.Errorf("invalid task input binding")
 	}
 	if len(p.Setup) > 32 || len(p.Sidecars) > 32 {
 		return fmt.Errorf("runtime plan exceeds phase or sidecar bounds")
@@ -261,9 +275,13 @@ func (bundle executionImageAdmission) validate(requiredImages []string, now time
 		if err != nil || len(signature) != 64 {
 			return fmt.Errorf("invalid image admission signature encoding")
 		}
+		// ExpiresAt records the scanner/policy decision's evidence horizon.  It
+		// is not an online credential and must not turn an already published,
+		// digest-pinned runtime profile into a human-renewed availability gate.
+		// Issuance must still be well formed and must not come from the future.
 		if statement.IssuedAt.IsZero() || statement.ExpiresAt.IsZero() ||
 			!statement.ExpiresAt.After(statement.IssuedAt) ||
-			statement.IssuedAt.After(now.Add(5*time.Minute)) || !statement.ExpiresAt.After(now) {
+			statement.IssuedAt.After(now.Add(5*time.Minute)) {
 			return fmt.Errorf("invalid image admission lifetime")
 		}
 		actual[statement.ImageRef] = true

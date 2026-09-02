@@ -112,6 +112,8 @@ spec:
           value: '{}'
         - name: LOOM_SVC_LOG_LEVEL
           value: info
+        - name: LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON
+          value: '{}'
         - name: LOOM_SVC_MINIO_ACCESS_KEY
           valueFrom:
             secretKeyRef:

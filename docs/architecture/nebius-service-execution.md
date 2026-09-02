@@ -110,21 +110,37 @@ The accepted service pool identities and adapter boundaries are:
 | `gb10` | Existing worker claim | Exact capability match plus a fresh compatible worker observation, or bounded configured autoscaler headroom explicitly recorded as such. |
 | `nebius-cpu` | Kubernetes Job lease | Compatible execution class, healthy target, accepted runtime/image evidence, and separately proven target capacity. |
 
-Converted tasks opt into normal Kubernetes scheduling with an immutable
-`service_execution` binding in `TaskConfig`. The binding selects the logical
-pool and carries a validated runtime template. It deliberately omits the task
-revision digest because that digest covers the complete task directory; after
-materialization the scheduler binds the published `Task.checksum` into the
-final runtime plan. Trial submission derives the required pool from that task
-binding, so ordinary users do not select a physical target.
+Every uploaded TaskSet receives an immutable, canonical input manifest and
+task revision before fan-out. For the deliberately narrow ordinary CPU task
+shape, the scheduler compiles an immutable runtime plan from a persisted
+deployment profile when a Batch is submitted with `backend=nebius`. The
+profile fixes the logical pool, execution class, digest-pinned task and runtime
+images, and accepted image-admission records; it is not user input. The target
+is selected later from the healthy binding in the Batch's environment. The
+accepted profile is frozen on the Batch, so a later deployment-profile rollout
+cannot reinterpret Trials that are already queued.
+The final plan also binds the published `Task.checksum`, input-manifest digest,
+trial configuration, and declared artifacts. Existing explicitly bound task
+revisions remain readable for migration and operator tests, but ordinary users
+do not select a physical target or hand-author a binding.
+
+Automatic compilation is fail-closed and intentionally not a general Docker
+converter. It accepts one Linux x86 CPU task with explicit positive CPU, RAM,
+ephemeral-storage and timeout bounds; `/workspace`; one safe instruction; a
+direct-completion/LiteLLM API agent; one safe script verifier; and safe relative
+artifact paths. It rejects GPU, multi-step, custom identity, sidecar, skill,
+MCP, environment-variable, custom DNS/host/tmpfs, health-check, capability,
+extended-runtime, mutable-image, or host-specialized shapes. Supporting one of
+those shapes requires a reviewed materializer change, not an implicit default.
 
 When the environment scheduler is enabled, it fairly selects one queued,
 converted Trial, requires a fresh healthy target in the bound environment,
 and records a `preexisting_assignment` routing decision before creating the
 lease. The later provisioning boundary still requires fresh executable target
-capacity before a Kubernetes create. Tasks without the explicit binding retain
-the legacy worker path. An explicit admin target binding remains audited and is
-not the normal workflow.
+capacity before a Kubernetes create. A Batch submitted with `backend=docker`
+retains the legacy worker path regardless of whether the task could compile for
+Nebius. An explicit admin target binding remains audited and is not the normal
+workflow.
 
 `Trial.execution_route_generation` advances while the Trial is queued. The
 selected pool, adapter, target/class when applicable, reason, candidate
@@ -624,11 +640,12 @@ Hybrid Nebius plus OLDLAB/GB10 operation is an accepted terminal state. Adapter
 specific fields have an owner and telemetry, but their existence is not a
 deprecation or retirement schedule.
 
-The explicit backend is a routing fence, not a preference. A task revision may
-carry a durable `service_execution` binding so that it is compatible with
-Nebius, but that binding never diverts a Batch submitted with `backend=docker`.
-Likewise, `backend=nebius` rejects task revisions that are not bound to
-`nebius-cpu`; it never falls back to GB10 or OLDLAB.
+The explicit backend is a routing fence, not a preference. `backend=docker`
+admits only the GB10/OLDLAB worker adapter, even when a task revision already
+carries a compatible service-execution binding. `backend=nebius` admits only
+the `nebius-cpu` lease adapter: it uses a valid legacy binding or compiles the
+exact supported ordinary task shape from the persisted runtime profile, and
+otherwise rejects the Batch. Neither direction falls back across the fence.
 
 ## Migration and authority gates
 
@@ -645,8 +662,9 @@ The accepted repository and rollout boundaries are:
    merge authority.
 6. Provision isolated staging, run bounded canaries, and record target health,
    node-backed capacity, Pod outcomes, artifact hashes, cleanup, and cost.
-7. Provision and accept both production regions before any production route
-   can use them.
+7. Accept the approved production binding on the shared baseline cluster before
+   production can use it. A second cluster, region, or automatic regional
+   failover is outside this architecture unless separately required.
 8. Change pool weights, enable a Nebius route, or independently drain one pool
    only through protected rollout authority with explicit candidate, route,
    health, capacity, rollback, and operator approval evidence.
@@ -680,7 +698,8 @@ traffic routing, or retirement.
 - #1540: durable execution state and provider-neutral lease schema; implemented
   and held traffic-disabled in this change.
 - #1549: namespace-scoped Kubernetes Job actuator and observed-state
-  reconciliation; implemented and held at zero replicas in this change.
+  reconciliation; the persistent system-node actuator remains available while
+  user execution nodes scale independently to zero.
 - #1543: Nebius projects, networking, clusters, registries, node groups, and
   regional infrastructure.
 - #1551: proportionate Kubernetes execution security baseline.

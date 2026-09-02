@@ -127,6 +127,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             store=artifact_store,
             bucket=settings.artifacts_bucket,
         )
+        app.state.artifact_store = artifact_store
         app.state.service_execution_output_service = ServiceExecutionOutputRouteService(
             service=ArtifactCommitService(
                 store=artifact_store,

@@ -52,6 +52,7 @@ from loom.execution_runtime_contract import (
     ProcessPhaseV1,
 )
 from loom.pipeline.keys import canonical_digest
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service import agent_catalog
 from loom_service.app import create_app
@@ -131,6 +132,49 @@ def _service_execution_task_config(task_id: str) -> dict[str, object]:
         },
         "steps": [{"name": "main"}],
     }
+
+
+def _automatic_service_execution_task_config(task_id: str) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"id": task_id, "name": task_id},
+        "environment": {
+            "os": "linux",
+            "cpu_arch": "x86_64",
+            "gpu_vendor": "none",
+            "docker_image": "registry.example/task@sha256:" + "a" * 64,
+            "cpus": 1,
+            "memory_mb": 1024,
+            "storage_mb": 2048,
+            "baseline_network_policy": {"kind": "gateway-only"},
+            "network_policies_supported": ["gateway-only"],
+        },
+        "agent": {"name": "direct-completion"},
+        "verifier": {
+            "name": "script",
+            "args": {"script_path": "verifier/check.sh"},
+        },
+        "steps": [
+            {
+                "name": "main",
+                "instruction_file": "instruction.md",
+                "artifacts": ["answer.txt"],
+            }
+        ],
+    }
+
+
+def _service_execution_runtime_profile() -> ServiceExecutionRuntimeProfileV1:
+    task_image = "registry.example/task@sha256:" + "a" * 64
+    runtime_image = "registry.example/runtime@sha256:" + "b" * 64
+    return ServiceExecutionRuntimeProfileV1(
+        candidate_sha="1" * 40,
+        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        task_image_ref=task_image,
+        runtime_image_ref=runtime_image,
+        runtime_binary_sha256="sha256:" + "4" * 64,
+        image_admission=signed_image_admission_bundle((task_image, runtime_image)),
+    )
 
 
 def _script_verifier_task_config(task_id: str) -> dict[str, object]:
@@ -1930,8 +1974,7 @@ async def test_post_batch_rejects_agent_without_service_runtime(
     monkeypatch.setattr(
         agent_catalog,
         "list_agents",
-        lambda **_kwargs: [e for e in base_agents if e.name != "opencode"]
-        + [opencode],
+        lambda **_kwargs: [e for e in base_agents if e.name != "opencode"] + [opencode],
     )
     app, raw, _team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
@@ -2313,9 +2356,7 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
             )
 
         assert catalog.status_code == 200, catalog.text
-        nebius = next(
-            item for item in catalog.json()["items"] if item["name"] == "nebius"
-        )
+        nebius = next(item for item in catalog.json()["items"] if item["name"] == "nebius")
         assert nebius == {
             "name": "nebius",
             "description": "Nebius Kubernetes execution pool; scales from zero.",
@@ -2388,6 +2429,150 @@ async def test_post_accepts_explicit_nebius_backend_without_legacy_worker(
         sync_engine.dispose()
 
 
+@pytest.mark.parametrize("use_combinations", [False, True])
+async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    use_combinations: bool,
+) -> None:
+    app, raw, _team_id = camp_setup
+    suffix = "combinations" if use_combinations else "single"
+    task_id = f"local/automatic-nebius-{suffix}"
+    target_id = f"nebius-automatic-backend-{suffix}"
+    now = datetime.now(UTC)
+    profile = _service_execution_runtime_profile()
+    app.state.settings = app.state.settings.model_copy(
+        update={
+            "service_execution_runtime_profile_json": json.dumps(
+                profile.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        }
+    )
+    execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.add(
+            ServiceExecutionClass(
+                id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                schema_version=NEBIUS_CPU_EXECUTION_CLASS_V1.schema_version,
+                spec_json=execution_class_spec,
+                spec_sha256=canonical_digest(execution_class_spec),
+                enabled=True,
+            )
+        )
+        s.add(
+            ServiceExecutionTarget(
+                id=target_id,
+                logical_pool_id="nebius-cpu",
+                execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                schema_version="loom.execution-target.v1",
+                spec_json={"health_stale_after_seconds": 60},
+                spec_sha256="sha256:" + "e" * 64,
+                environment="development",
+                provider="nebius",
+                region="eu-north1",
+                failure_domain="eu-north1-a",
+                data_residency="eu",
+                desired_state="active",
+                observed_state="ready",
+                health_status="healthy",
+                health_observed_at=now,
+            )
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="c" * 64,
+                config=_automatic_service_execution_task_config(task_id),
+                source="s3://artifacts/task-inputs/task/",
+                source_provenance={
+                    "service_execution_input": {
+                        "schema_version": "loom.service-execution-input.v1",
+                        "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                        "manifest_sha256": "sha256:" + "d" * 64,
+                        "file_count": 3,
+                        "total_bytes": 4096,
+                    }
+                },
+                license="MIT",
+            )
+        )
+        s.commit()
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            payload: dict[str, object] = {
+                "name": f"automatic-nebius-{suffix}",
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": [task_id],
+                },
+                "trial_config": {},
+                "backend": "nebius",
+                "budget_policy": "none",
+            }
+            model = {
+                "provider": "openai",
+                "name": "gpt-5",
+                "source": "api",
+            }
+            if use_combinations:
+                payload["combinations"] = [
+                    {
+                        "agent_name": "direct-completion",
+                        "agent_model": model,
+                        "n_per_task": 1,
+                    }
+                ]
+            else:
+                payload["trial_config"] = {
+                    "agent_name": "direct-completion",
+                    "agent_model": model,
+                }
+            response = await ac.post(
+                "/api/v1/batches",
+                headers={"Authorization": f"Bearer {raw}"},
+                json=payload,
+            )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["backend"] == "nebius"
+        assert response.json()["expected_trial_count"] == 1
+        with sl() as s:
+            batch = s.get(Batch, UUID(response.json()["batch_id"]))
+            assert batch is not None
+            assert batch.service_execution_runtime_profile == profile.model_dump(mode="json")
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+            detail = await ac.get(
+                f"/api/v1/batches/{response.json()['batch_id']}",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["service_execution_runtime_profile"] == {
+            "candidate_sha": profile.candidate_sha,
+            "sha256": canonical_digest(profile.model_dump(mode="json")),
+        }
+    finally:
+        with sl() as s:
+            s.execute(
+                delete(ServiceExecutionTarget).where(
+                    ServiceExecutionTarget.id == target_id,
+                )
+            )
+            s.execute(
+                delete(ServiceExecutionClass).where(
+                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                )
+            )
+            s.commit()
+        sync_engine.dispose()
+
+
 async def test_post_nebius_rejects_task_without_nebius_binding(
     camp_setup: tuple[FastAPI, str, UUID],
 ) -> None:
@@ -2415,6 +2600,12 @@ async def test_post_nebius_rejects_task_without_nebius_binding(
         "backend": "nebius",
         "logical_pool_id": "nebius-cpu",
         "task_ids": ["local/mit-0"],
+        "rejection_reasons": {
+            "local/mit-0": [
+                "automatic_trial_config_invalid",
+                "runtime_profile_unavailable",
+            ]
+        },
     }
 
 
@@ -2521,9 +2712,7 @@ async def test_post_admits_docker_when_healthy_pool_can_scale_from_zero(
                 },
             )
         assert catalog.status_code == 200, catalog.text
-        docker = next(
-            item for item in catalog.json()["items"] if item["name"] == "docker"
-        )
+        docker = next(item for item in catalog.json()["items"] if item["name"] == "docker")
         assert docker == {
             "name": "docker",
             "description": "Docker execution on the GB10 or OLDLAB worker pools.",

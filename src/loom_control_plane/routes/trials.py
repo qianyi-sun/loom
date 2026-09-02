@@ -28,6 +28,10 @@ from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.request_params import coerce_request_params
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_materialization import (
+    ServiceExecutionRuntimeProfileV1,
+    automatic_service_execution_rejections,
+)
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
@@ -42,6 +46,7 @@ def _resolve_required_worker_pool_for_backend(
     batch_backend: str,
     requested_pool: str | None,
     task_service_pool: str | None,
+    automatic_compatible: bool = False,
 ) -> str | None:
     """Map an explicit user backend to exactly one execution mechanism."""
 
@@ -55,7 +60,7 @@ def _resolve_required_worker_pool_for_backend(
                 ),
             )
         return requested_pool
-    if task_service_pool != NEBIUS_LOGICAL_POOL_ID:
+    if task_service_pool != NEBIUS_LOGICAL_POOL_ID and not automatic_compatible:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -63,7 +68,8 @@ def _resolve_required_worker_pool_for_backend(
                 "nebius-cpu service-execution pool"
             ),
         )
-    if requested_pool is not None and requested_pool != task_service_pool:
+    resolved_pool = task_service_pool or NEBIUS_LOGICAL_POOL_ID
+    if requested_pool is not None and requested_pool != resolved_pool:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -71,7 +77,7 @@ def _resolve_required_worker_pool_for_backend(
                 "service-execution binding"
             ),
         )
-    return task_service_pool
+    return resolved_pool
 
 
 async def _ensure_trial_task_image_links(
@@ -145,6 +151,7 @@ async def submit_trial(
     batch_submitter_user_id: UUID | None = None
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None
+    batch_runtime_profile: dict[str, Any] | None = None
     if batch_id is not None:
         async with request.app.state.session_factory() as session:
             batch_row = (
@@ -155,6 +162,7 @@ async def submit_trial(
                         Batch.submitted_by_user_id,
                         Batch.usage_attributed_user_id,
                         Batch.usage_attributed_actor,
+                        Batch.service_execution_runtime_profile,
                     ).where(Batch.id == batch_id),
                 )
             ).first()
@@ -168,6 +176,7 @@ async def submit_trial(
         batch_submitter_user_id = batch_row.submitted_by_user_id
         batch_usage_user_id = batch_row.usage_attributed_user_id
         batch_usage_actor = batch_row.usage_attributed_actor
+        batch_runtime_profile = batch_row.service_execution_runtime_profile
 
     if ctx.team_id is not None:
         if "submit" not in ctx.scopes:
@@ -300,6 +309,22 @@ async def submit_trial(
         requires_caps_json["terminus2_model_switch"] = True
     required_worker_pool = _required_worker_pool(payload)
     task_service_execution = task_config.service_execution
+    automatic_compatible = False
+    if task_service_execution is None and batch_backend == NEBIUS_BACKEND:
+        profile = (
+            ServiceExecutionRuntimeProfileV1.model_validate(batch_runtime_profile)
+            if batch_runtime_profile is not None
+            else None
+        )
+        automatic_compatible = (
+            profile is not None
+            and task_config.environment.docker_image == profile.task_image_ref
+            and not automatic_service_execution_rejections(
+                task_config,
+                trial_config,
+                source_provenance=dict(task_row.source_provenance or {}),
+            )
+        )
     required_worker_pool = _resolve_required_worker_pool_for_backend(
         batch_backend=batch_backend,
         requested_pool=required_worker_pool,
@@ -308,6 +333,7 @@ async def submit_trial(
             if task_service_execution is not None
             else None
         ),
+        automatic_compatible=automatic_compatible,
     )
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool

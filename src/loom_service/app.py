@@ -47,6 +47,7 @@ from loom.personal_dev_native_builder_protocol import (
     load_personal_dev_native_builder_verifier,
 )
 from loom.security.secret_store import assert_existing_secrets_decryptable
+from loom.service_execution_materialization import load_service_execution_runtime_profile
 from loom.startup_retry import retry_startup_dependency
 from loom.system_identities import assert_pipeline_controller_identity
 from loom.taskset.transform_sandbox import TransformSandboxConfig
@@ -293,6 +294,9 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     workload_contract = _validated_v1_workload_contract(settings)
+    # Fail deployment health immediately rather than discovering a malformed
+    # automatic-execution profile on the first user Batch.
+    load_service_execution_runtime_profile(settings.service_execution_runtime_profile_json)
     validate_personal_dev_native_builder_settings(settings)
     if settings.pipeline_stage1_smoke_signature_max_age_sec <= 0:
         raise RuntimeError("Pipeline Stage 1 smoke signature max age must be positive")
