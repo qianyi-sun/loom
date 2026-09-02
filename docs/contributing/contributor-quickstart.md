@@ -348,8 +348,10 @@ trusted post-merge/release workflow rather than the required PR context.
 
 - **Fast tier:** gated at **70 %** via
   `coverage report --fail-under=70` in CI. Drops below fail
-  `repository-checks` for everyone. The same job writes the default fast-tier
-  coverage summary to the GitHub Actions step summary.
+  `fast-checks`, which makes the final `repository-checks` gate fail for
+  non-document changes. `fast-checks` also writes the default fast-tier
+  coverage summary to the GitHub Actions step summary; docs-only PRs skip it
+  because they produce no coverage inputs.
 - **Combined fast + integration:** measured and posted to the GitHub Actions
   step summary only on PRs labelled `ci:integration` or
   `ci:coverage-summary`. It is reported but is not a required threshold.
@@ -358,8 +360,9 @@ trusted post-merge/release workflow rather than the required PR context.
 To reproduce the protected fast coverage gate locally, run the equivalent
 serial form of the two pytest coverage steps, then run the threshold check.
 CI runs these pytest commands in parallel and combines their coverage data in
-the final `repository-checks` job; local serial runs need `--cov-append` on the
-second command:
+`fast-checks` while independent integration lanes are still running. The final
+`repository-checks` job validates the selected result instead of recomputing
+coverage. Local serial runs need `--cov-append` on the second command:
 
 ```bash
 rm -f .coverage coverage.xml
