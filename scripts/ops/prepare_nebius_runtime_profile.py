@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ _COMPONENTS = (
     ("service", "service", "loom-service"),
     ("execution_runtime", "execution-runtime", "loom-execution-runtime"),
 )
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _object(value: object, *, label: str) -> dict[str, object]:
@@ -100,6 +102,22 @@ def _private_key(path: Path, *, create: bool) -> Ed25519PrivateKey:
     if not isinstance(loaded, Ed25519PrivateKey):
         raise ValueError("signing key must be Ed25519")
     return loaded
+
+
+def _candidate_issued_at(candidate_sha: str) -> datetime:
+    completed = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "show", "-s", "--format=%cI", candidate_sha],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        issued_at = datetime.fromisoformat(completed.stdout.strip()).astimezone(UTC)
+    except ValueError as exc:
+        raise ValueError("candidate commit timestamp is invalid") from exc
+    if issued_at > datetime.now(UTC):
+        raise ValueError("candidate commit timestamp is in the future")
+    return issued_at
 
 
 def _release_binding(
@@ -223,7 +241,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     policy_bytes = _canonical_json(policy)
     policy_sha256 = "sha256:" + hashlib.sha256(policy_bytes).hexdigest()
     private_key = _private_key(args.signing_key, create=args.create_signing_key)
-    issued_at = datetime.now(UTC)
+    issued_at = _candidate_issued_at(args.candidate_sha)
     expires_at = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
     admissions: list[SignedImageAdmissionV1] = []
     for key_name, _, _ in _COMPONENTS:
@@ -318,7 +336,7 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     try:
         result = prepare(_parser().parse_args())
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
         raise SystemExit(f"error: {exc}") from exc
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

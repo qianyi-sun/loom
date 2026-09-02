@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,15 @@ from loom.service_execution_materialization import ServiceExecutionRuntimeProfil
 SHA = "7" * 40
 REGISTRY = "cr.eu-north1.nebius.cloud/e00example"
 DIGESTS = {"service": "1" * 64, "execution_runtime": "2" * 64}
+
+
+@pytest.fixture(autouse=True)
+def _fixed_candidate_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        prepare,
+        "_candidate_issued_at",
+        lambda _: datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -130,6 +140,7 @@ def test_prepare_creates_reusable_key_and_verified_profile(tmp_path: Path) -> No
     args.create_signing_key = False
     repeated = prepare.prepare(args)
     assert repeated["public_key_sha256"] == result["public_key_sha256"]
+    assert repeated["profile_sha256"] == result["profile_sha256"]
 
 
 def test_prepare_refuses_to_replace_signing_key(tmp_path: Path) -> None:
