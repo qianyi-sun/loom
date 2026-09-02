@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -35,6 +37,88 @@ _SECRET_KEY_PARTS = (
 
 def slurm_cluster_for_pool(pool_name: str) -> str:
     return "gb10" if pool_name == "gb10" or pool_name.endswith("-gb10") else "oldlab"
+
+
+_CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
+_SLURM_REGISTRATION_FIELDS = (
+    "sandbox_identity",
+    "candidate_sha",
+    "slurm_job_id",
+    "compose_project",
+)
+
+
+class SlurmWorkerRegistrationError(ValueError):
+    """Raised when Slurm worker registration provenance cannot be trusted."""
+
+
+@dataclass(frozen=True)
+class SlurmWorkerRegistrationProvenance:
+    sandbox_identity: str
+    candidate_sha: str
+    slurm_job_id: str
+    compose_project: str
+
+
+def parse_slurm_worker_registration_provenance(
+    payload: Mapping[str, Any],
+) -> SlurmWorkerRegistrationProvenance | None:
+    """Return normalized Slurm registration provenance, if the complete group exists."""
+    raw_values = tuple(payload.get(field) for field in _SLURM_REGISTRATION_FIELDS)
+    if any(value is not None for value in raw_values) != all(value is not None for value in raw_values):
+        raise SlurmWorkerRegistrationError("Slurm registration provenance is incomplete")
+    if all(value is None for value in raw_values):
+        return None
+    if not all(isinstance(value, str) for value in raw_values):
+        raise SlurmWorkerRegistrationError("Slurm registration provenance is malformed")
+    sandbox_identity, candidate_sha, slurm_job_id, compose_project = (
+        str(value).strip() for value in raw_values
+    )
+    if not all((sandbox_identity, candidate_sha, slurm_job_id, compose_project)):
+        raise SlurmWorkerRegistrationError("Slurm registration provenance is malformed")
+    if _CANDIDATE_SHA_RE.fullmatch(candidate_sha) is None:
+        raise SlurmWorkerRegistrationError("Slurm registration provenance is malformed")
+    if _SLURM_JOB_ID_RE.fullmatch(slurm_job_id) is None:
+        raise SlurmWorkerRegistrationError("Slurm registration provenance is malformed")
+    return SlurmWorkerRegistrationProvenance(
+        sandbox_identity=sandbox_identity,
+        candidate_sha=candidate_sha,
+        slurm_job_id=slurm_job_id,
+        compose_project=compose_project,
+    )
+
+
+async def lock_slurm_worker_job_for_registration(
+    session: AsyncSession,
+    *,
+    provenance: SlurmWorkerRegistrationProvenance,
+    hostname: str,
+    pool_name: str,
+    max_concurrent: int,
+) -> SlurmWorkerJob:
+    """Lock the one active, unlinked Slurm job that owns this registration."""
+    job = (
+        await session.execute(
+            select(SlurmWorkerJob)
+            .where(
+                SlurmWorkerJob.slurm_cluster_id == slurm_cluster_for_pool(pool_name),
+                SlurmWorkerJob.environment == provenance.sandbox_identity,
+                SlurmWorkerJob.sandbox_identity == provenance.sandbox_identity,
+                SlurmWorkerJob.pool_name == pool_name,
+                SlurmWorkerJob.nodelist == hostname,
+                SlurmWorkerJob.requested_concurrency == max_concurrent,
+                SlurmWorkerJob.candidate_sha == provenance.candidate_sha,
+                SlurmWorkerJob.job_id == provenance.slurm_job_id,
+                SlurmWorkerJob.compose_project == provenance.compose_project,
+                SlurmWorkerJob.state.in_(ACTIVE_STATES),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if job is None or job.worker_id is not None:
+        raise SlurmWorkerRegistrationError("Slurm worker registration conflict")
+    return job
 
 
 @dataclass(frozen=True)
@@ -413,8 +497,19 @@ async def reconcile_slurm_worker_jobs(
         if obs.nodelist is not None:
             job.nodelist = obs.nodelist
         job.pending_reason = obs.pending_reason
-        if obs.worker_id is not None:
-            job.worker_id = obs.worker_id
+        if (
+            obs.worker_id is not None
+            and job.worker_id is not None
+            and job.worker_id != obs.worker_id
+        ):
+            logger.warning(
+                "slurm_worker_observation_link_conflict",
+                extra={
+                    "job_id": obs.job_id,
+                    "registered_worker_id": str(job.worker_id),
+                    "observed_worker_id": str(obs.worker_id),
+                },
+            )
         if state == "running" and job.started_at is None:
             job.started_at = now
         if state in TERMINAL_STATES and job.finished_at is None:

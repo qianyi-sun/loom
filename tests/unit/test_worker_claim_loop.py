@@ -27,6 +27,16 @@ class _RegistrationSettings:
     hostname = "worker-host"
     max_concurrent = 3
     pool_name = "oldlab"
+    sandbox_identity = "production"
+    candidate_sha = "a" * 40
+    slurm_job_id = "40740"
+    compose_project = "loom-production-aaaaaaaaaaaa-40740"
+
+
+class _LegacyRegistrationSettings:
+    hostname = "worker-host"
+    max_concurrent = 3
+    pool_name = "oldlab"
 
 
 class _ObjectStoreSettings:
@@ -234,7 +244,7 @@ async def test_register_worker_with_retry_retries_control_plane_dns_failure() ->
 
     info = await ml._register_worker_with_retry(  # type: ignore[attr-defined]
         cp_client=_FakeCPClient(),
-        settings=_RegistrationSettings(),
+        settings=_LegacyRegistrationSettings(),
         retry_config=StartupRetryConfig(
             max_attempts=4,
             base_backoff_sec=0.1,
@@ -273,7 +283,7 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
     try:
         await ml._register_worker_with_retry(  # type: ignore[attr-defined]
             cp_client=_FakeCPClient(),
-            settings=_RegistrationSettings(),
+            settings=_LegacyRegistrationSettings(),
             retry_config=StartupRetryConfig(
                 max_attempts=4,
                 base_backoff_sec=0.1,
@@ -313,11 +323,64 @@ async def test_pipeline_registration_advertises_both_work_kinds(monkeypatch) -> 
     )
     await ml._register_worker_with_retry(  # type: ignore[attr-defined]
         cp_client=_FakeCPClient(),
-        settings=_RegistrationSettings(),
+        settings=_LegacyRegistrationSettings(),
         pipeline_enabled=True,
     )
 
     assert recorded["supported_work_kinds"] == ["trial", "execution_attempt"]
+
+
+async def test_register_worker_with_retry_passes_complete_slurm_provenance() -> None:
+    registered = False
+
+    class _FakeCPClient:
+        async def register(self, **kwargs: object) -> dict[str, object]:
+            nonlocal registered
+            registered = True
+            assert kwargs == {
+                "hostname": "worker-host",
+                "version": "0.0.1",
+                "capabilities": ml._DEFAULT_CAPS,  # type: ignore[attr-defined]
+                "max_concurrent": 3,
+                "pool_name": "oldlab",
+                "sandbox_identity": "production",
+                "candidate_sha": "a" * 40,
+                "slurm_job_id": "40740",
+                "compose_project": "loom-production-aaaaaaaaaaaa-40740",
+            }
+            return {"worker_id": str(uuid4())}
+
+    await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+        cp_client=_FakeCPClient(),
+        settings=_RegistrationSettings(),
+    )
+
+    assert registered
+
+
+async def test_register_worker_with_retry_rejects_partial_slurm_provenance() -> None:
+    class _PartialRegistrationSettings:
+        hostname = "worker-host"
+        max_concurrent = 3
+        pool_name = "oldlab"
+        sandbox_identity = "production"
+        candidate_sha = "a" * 40
+        slurm_job_id = "40740"
+        compose_project = ""
+
+    class _FakeCPClient:
+        async def register(self, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("registration must not be attempted")
+
+    try:
+        await ml._register_worker_with_retry(  # type: ignore[attr-defined]
+            cp_client=_FakeCPClient(),
+            settings=_PartialRegistrationSettings(),
+        )
+    except ValueError as exc:
+        assert str(exc) == "Slurm registration provenance fields must be supplied together"
+    else:  # pragma: no cover - defensive clarity
+        raise AssertionError("expected ValueError")
 
 
 def test_worker_orphan_cleanup_retries_transient_control_plane_lookup(

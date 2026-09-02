@@ -174,6 +174,10 @@ class HttpControlPlaneClient:
         input_cache_ready_bytes: int | None = None,
         capability_snapshot: Mapping[str, Any] | None = None,
         slurm_gpu_allocation_evidence: Mapping[str, Any] | None = None,
+        sandbox_identity: str | None = None,
+        candidate_sha: str | None = None,
+        slurm_job_id: str | None = None,
+        compose_project: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "hostname": hostname,
@@ -192,6 +196,21 @@ class HttpControlPlaneClient:
             payload["capability_snapshot"] = dict(capability_snapshot)
         if slurm_gpu_allocation_evidence is not None:
             payload["slurm_gpu_allocation_evidence"] = dict(slurm_gpu_allocation_evidence)
+        slurm_provenance = (
+            sandbox_identity,
+            candidate_sha,
+            slurm_job_id,
+            compose_project,
+        )
+        if any(value is not None for value in slurm_provenance):
+            if any(value is None for value in slurm_provenance):
+                raise ValueError("Slurm registration provenance fields must be supplied together")
+            payload.update(
+                sandbox_identity=sandbox_identity,
+                candidate_sha=candidate_sha,
+                slurm_job_id=slurm_job_id,
+                compose_project=compose_project,
+            )
         cache_values = (
             input_cache_capacity_bytes,
             input_cache_reserved_bytes,
