@@ -232,7 +232,13 @@ async def resolve_task_image(
                     pull_timeout_sec=registry_pull_timeout_sec,
                     docker_api_timeout_sec=docker_api_timeout_sec,
                 )
-        except (TimeoutError, ImageNotFound, NotFound, APIError) as exc:
+        except TimeoutError as exc:
+            raise TaskImageBuildTimeoutError(
+                f"pulling materialized task image {registry_image!r} exceeded "
+                f"{registry_pull_timeout_sec:g}s; execution is fenced to the "
+                "recorded registry digest"
+            ) from exc
+        except (ImageNotFound, NotFound, APIError) as exc:
             raise TaskImageBuildError(
                 f"materialized task image {registry_image!r} is unavailable; "
                 "execution is fenced to the recorded registry digest"

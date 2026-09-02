@@ -420,6 +420,16 @@ class _BlockingFailingBundleCPClient(_FakeCPClient):
         )
 
 
+def test_materialized_task_image_pull_timeout_is_classified_as_task_image_timeout() -> None:
+    detail = (
+        "pulling materialized task image "
+        "'registry.example/loom-task@sha256:" + "a" * 64 + "' exceeded 1800s; "
+        "execution is fenced to the recorded registry digest"
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+
+
 class _FakeSettings:
     trajectory_cache_dir = Path("/tmp/loom-test-cleanup-cache")
     gateway_url = "http://gw:9100"
@@ -668,6 +678,8 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
 
     settings = _FakeSettings()
     settings.trial_cache_registry_repo = "registry.example/wrong-derived-tag"
+    settings.trial_cache_registry_pull_timeout_sec = 15.0
+    settings.trial_cache_base_image_pull_timeout_sec = 1800.0
     cp = _FakeCPClient()
     pool = RunnerPool(max_concurrent=1)
     captured: dict[str, object] = {}
@@ -761,6 +773,7 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
     resolve_kwargs = captured["resolve_kwargs"]
     assert resolve_kwargs["registry_image"] == main_ref
     assert resolve_kwargs["task_checksum"] == "2" * 64
+    assert resolve_kwargs["registry_pull_timeout_sec"] == 1800.0
     assert captured["task_config"].task.id == "frozen/task"
     sidecar_runtime = captured["sidecar_runtime_factory"]()
     assert sidecar_runtime.registry_images == {

@@ -12,6 +12,7 @@ from loom.driver.task_image import (
     RUNTIME_ARM64_FALLBACK_BASES,
     TERMINUS_2_FULL_IMAGE,
     TaskImageBuildError,
+    TaskImageBuildTimeoutError,
     dockerfile_uses_runtime_arm64_fallback_base,
     resolve_task_image,
     task_image_tag,
@@ -220,6 +221,39 @@ async def test_resolve_task_image_pulls_exact_materialized_digest(
     assert fake_images.pull_calls == [immutable_ref]
     assert fake_images.build_calls == []
     assert fake_client.closed is True
+
+
+async def test_resolve_task_image_reports_exact_materialized_digest_pull_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    immutable_ref = "registry.example/loom-task@sha256:" + "a" * 64
+
+    monkeypatch.setattr(task_image, "_task_image_locally_cached", lambda **_kwargs: False)
+
+    async def timeout_pull(**_kwargs: object) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr(task_image, "_pull_exact_registry_image", timeout_pull)
+
+    with pytest.raises(TaskImageBuildTimeoutError) as exc:
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+            registry_image=immutable_ref,
+            registry_pull_timeout_sec=1800.0,
+            build_if_missing=False,
+        )
+
+    assert str(exc.value) == (
+        f"pulling materialized task image {immutable_ref!r} exceeded 1800s; "
+        "execution is fenced to the recorded registry digest"
+    )
 
 
 async def test_resolve_task_image_prewarms_terminus_2_base_on_arm64_linux(

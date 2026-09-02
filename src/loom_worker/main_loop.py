@@ -1263,6 +1263,16 @@ async def _spawn_trial(
                     source_provenance=provenance,
                 )
             validate_task_dir_compatibility(task_dir)
+            # Optional shared-cache pulls may fall back to a local build after
+            # a short timeout. A materialization grant is different: its
+            # immutable digest is the only executable image, so give that base
+            # image the existing long pull window instead of failing closed
+            # after the short cache-probe window.
+            registry_pull_timeout_sec = (
+                getattr(settings, "trial_cache_base_image_pull_timeout_sec", 1800.0)
+                if task_image_materialization is not None
+                else getattr(settings, "trial_cache_registry_pull_timeout_sec", 15.0)
+            )
             # #275: serialize concurrent task-image builds so a burst of
             # trials cannot fan out unbounded apt-get / dpkg / build
             # containers on a shared host Docker daemon (e.g. OLDLAB).
@@ -1283,9 +1293,7 @@ async def _spawn_trial(
                     if task_image_materialization is not None
                     else None
                 ),
-                registry_pull_timeout_sec=getattr(
-                    settings, "trial_cache_registry_pull_timeout_sec", 15.0
-                ),
+                registry_pull_timeout_sec=registry_pull_timeout_sec,
                 cpu_arch=_host_cpu_arch(),
                 build_if_missing=False,
             )
@@ -1816,6 +1824,8 @@ def _classify_setup_failure(detail: str) -> FailureReason:
     if "TASK_COMPAT_" in detail:
         return FailureReason.TASK_COMPATIBILITY
     if "building Docker image" in detail and " from " in detail and " exceeded " in detail:
+        return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+    if "pulling materialized task image" in detail and " exceeded " in detail:
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
     lowered = detail.lower()
     if "failed to build layered image" in lowered and (
