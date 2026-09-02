@@ -132,6 +132,15 @@ scopes. Possession of only a certificate or only a bearer token grants nothing.
 The certificate private key and bearer file are root-owned and never cross the
 Unix socket.
 
+The inert example registry at
+`deploy/task-image-builder/authority-principals-v1.example.json` demonstrates
+the on-disk digest format using the public, non-secret bearer strings
+`example-only-oldlab-node-bearer-do-not-use` and
+`example-only-gb10-node-bearer-do-not-use`. The JSON deliberately contains only
+their SHA-256 digests, never these raw example strings. Production activation
+must provision independently generated node credentials through the later
+credential ceremony; neither example value is usable production authority.
+
 The guard is implemented as an isolated CPython program installed from the
 verified Loom host release and started with `/usr/bin/python3 -I -B`. Its local
 protocol is bounded and uses only fixed system calls and precompiled,
