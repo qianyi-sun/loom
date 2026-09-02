@@ -39,7 +39,7 @@
     "public_control_plane_cidrs": [],
     "system_node_count": 1,
     "execution_min_nodes": 0,
-    "execution_max_nodes": 10,
+    "execution_max_nodes": 4,
     "execution_max_pods": 64,
     "system_preset": "2vcpu-8gb",
     "execution_preset": "48vcpu-192gb",

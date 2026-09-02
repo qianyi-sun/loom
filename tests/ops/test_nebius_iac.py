@@ -96,7 +96,7 @@ def test_execution_nodes_remain_private_with_public_deployment_gateway(tmp_path:
     marker = 'resource "nebius_mk8s_v1_node_group" "execution"'
     text = text.replace(
         marker,
-        f'{marker}\n# drift\npublic_ip_address = {{}}',
+        f"{marker}\n# drift\npublic_ip_address = {{}}",
         1,
     )
     module_path.write_text(text, encoding="utf-8")
@@ -105,14 +105,25 @@ def test_execution_nodes_remain_private_with_public_deployment_gateway(tmp_path:
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
-def test_capacity_policy_rejects_less_than_200_two_vcpu_tasks(tmp_path: Path) -> None:
+def test_capacity_policy_rejects_less_than_80_two_vcpu_tasks(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = repo_root / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["accepted_concurrency"] = 199
+    document["accepted_concurrency"] = 79
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(ContractError, match="200 concurrent 2-vCPU tasks"):
+    with pytest.raises(ContractError, match="80 concurrent 2-vCPU tasks"):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
+def test_capacity_policy_rejects_lost_200_task_target(tmp_path: Path) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    path = repo_root / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["target_concurrency"] = 199
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="retain 200-task capacity"):
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
@@ -135,7 +146,9 @@ def test_gateway_runtime_apply_carries_and_converges_capacity_policy() -> None:
         REPO_ROOT / "scripts" / "ops" / "apply_nebius_development_runtime_via_gateway.sh"
     ).read_text(encoding="utf-8")
 
-    assert 'capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"' in inner
+    assert (
+        'capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"' in inner
+    )
     assert "/admin/execution-capacity-policies/" in inner
     assert 'open("/var/run/loom/admin/secrets.toml", "rb")' in inner
     assert '"max_nodes": observed["max_nodes"]' in inner

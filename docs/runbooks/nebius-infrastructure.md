@@ -86,12 +86,13 @@ terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 Copy the sole shared-cluster input and its existing backend anchor to a protected
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
-reviewing the canonical topology contract. The committed target is `0..10`
-regular `48vcpu-192gb` execution nodes with 64 Pods per node. Its 480-vCPU
-execution envelope gives every node room for twenty 2-vCPU tasks plus 8 vCPUs
-of node/platform overhead; the separate 512-vCPU provider request retains 32
-vCPUs for the fixed gateway and system node. Any unrelated non-GPU VM must fit
-inside that remainder or be stopped before a 200-task acceptance run.
+reviewing the canonical topology contract. While the 512-vCPU request is
+pending, the committed active target is `0..4` regular `48vcpu-192gb` execution
+nodes with 64 Pods per node. Its 192-vCPU execution envelope supports eighty
+2-vCPU tasks while preserving 8 vCPUs and 32 GiB per node for platform
+overhead. The requested target remains `0..10` and 200 concurrent tasks; move
+the committed active target only after the provider quota readback reaches 512
+non-GPU vCPUs and 16 VM slots.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -146,7 +147,7 @@ Managed Kubernetes cluster, so the identity uses the minimum supported project
 cannot receive Loom trials.
 
 The gateway stays running so the private control plane remains recoverably
-reachable. User execution still scales independently from zero to nine and back
+reachable. User execution still scales independently from zero to four and back
 to zero. Do not substitute a date-named VM, temporary public endpoint, unrelated
 user VM, or ad hoc tunnel. For an approved restricted public endpoint, use
 `--external`. Always write a private mode-0600 kubeconfig outside the repository:
@@ -165,9 +166,11 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 
 Run live acceptance in this order; stop and clean up at the first failed gate.
 
-1. Apply only `development-eu-north1` with execution bounds `0..10`, the pinned
-   `48vcpu-192gb` shape, and 64 Pods per node. Before apply, read back at least
-   512 non-GPU vCPUs and 16 VM slots in `eu-north1`.
+1. Apply only `development-eu-north1` with the committed execution bounds, the
+   pinned `48vcpu-192gb` shape, and 64 Pods per node. The current-quota profile
+   is `0..4` and requires readback of at least 200 non-GPU vCPUs and 12 VM
+   slots. The requested 200-task profile is `0..10` and may be committed only
+   after readback reaches 512 non-GPU vCPUs and 16 VM slots.
 2. Prove Terraform convergence and cloud-side Ready/readback.
 3. Create only the development binding namespace with its canonical topology
    labels and install only its environment-local identities/policies.
@@ -182,8 +185,11 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    readback; then verify Job cleanup and execution-node scale-down to zero.
    A manually created Pod or manually patched Task binding is not evidence for
    this gate.
-7. Run staged true-overlap acceptance at 1, 20, 50, 100, 150, then 200 active
-   execution units. At every stage prove the persisted concurrency seats,
+7. Run staged true-overlap acceptance up to the capacity declared by
+   `accepted_concurrency`; for the current quota use 1, 20, 50, then 80 active
+   execution units. After the quota-backed target changes to 200, use 1, 20,
+   50, 100, 150, then 200 active execution units. At every stage prove the
+   persisted concurrency seats,
    simultaneous non-terminal Jobs/Pods, node-backed capacity, successful
    results, artifact digests, released seats, no orphan Jobs, and return to zero
    execution nodes. Merely submitting 200 queued tasks does not pass. Stop,

@@ -134,8 +134,7 @@ def check_nebius_iac(
     for name in ("nebius_profile", "project_id", "evidence_bucket_name"):
         _require(bool(str(document.get(name, ""))), f"{path}: {name} is required")
     _require(
-        document.get("nebius_profile")
-        == "loom-development-eu-north1-terraform-automation",
+        document.get("nebius_profile") == "loom-development-eu-north1-terraform-automation",
         f"{path}: Terraform must use the non-expiring service-account profile",
     )
     for name in (
@@ -174,9 +173,19 @@ def check_nebius_iac(
         f"{capacity_path}: provider VM quota target must preserve replacement headroom",
     )
     _require(
-        int(capacity.get("accepted_concurrency", 0)) == 200
+        int(capacity.get("provider_current_quota_vcpu_millis", 0)) == 200_000
+        and int(capacity.get("provider_current_quota_nodes", 0)) == 12,
+        f"{capacity_path}: current provider quota snapshot must be explicit",
+    )
+    _require(
+        int(capacity.get("target_concurrency", 0)) == 200
+        and int(capacity.get("target_execution_max_nodes", 0)) == 10,
+        f"{capacity_path}: requested target must retain 200-task capacity",
+    )
+    _require(
+        int(capacity.get("accepted_concurrency", 0)) == 80
         and int(capacity.get("task_cpu_millis", 0)) == 2_000,
-        f"{capacity_path}: acceptance must cover 200 concurrent 2-vCPU tasks",
+        f"{capacity_path}: current-quota acceptance must cover 80 concurrent 2-vCPU tasks",
     )
     policy = capacity.get("policy")
     if not isinstance(policy, dict):
@@ -191,8 +200,8 @@ def check_nebius_iac(
     node_memory_mib = int(preset_match.group("memory")) * 1_024
     max_nodes = int(target.get("execution_max_nodes", 0))
     _require(
-        max_nodes == 10 and int(target.get("execution_max_pods", 0)) == 64,
-        f"{path}: 200-concurrency target requires 10 nodes and 64 Pods per node",
+        max_nodes == 4 and int(target.get("execution_max_pods", 0)) == 64,
+        f"{path}: current quota requires 4 nodes and 64 Pods per node",
     )
     _require(
         policy.get("enabled") is True
@@ -210,21 +219,24 @@ def check_nebius_iac(
     )
     requested_cpu = int(capacity["accepted_concurrency"]) * int(capacity["task_cpu_millis"])
     _require(
-        int(policy["max_vcpu_millis"]) - requested_cpu >= 80_000,
-        f"{capacity_path}: execution pool must preserve at least 80 vCPU for node overhead",
+        int(policy["max_vcpu_millis"]) - requested_cpu >= 32_000,
+        f"{capacity_path}: execution pool must preserve at least 8 vCPU per node for overhead",
+    )
+    _require(
+        int(capacity["provider_current_quota_vcpu_millis"]) - int(policy["max_vcpu_millis"])
+        >= 4_000,
+        f"{capacity_path}: current provider quota must preserve fixed infrastructure headroom",
     )
     _require(
         int(capacity["provider_required_quota_vcpu_millis"])
-        - int(policy["max_vcpu_millis"])
+        - int(capacity["target_execution_max_nodes"]) * node_cpu_millis
         >= 32_000,
-        f"{capacity_path}: provider quota must preserve infrastructure headroom",
+        f"{capacity_path}: requested provider quota must preserve target infrastructure headroom",
     )
     _require(
         int(policy.get("max_pending_jobs", 0)) >= int(capacity["accepted_concurrency"])
-        and int(policy.get("max_unschedulable_jobs", 0))
-        >= int(capacity["accepted_concurrency"])
-        and int(policy.get("max_create_per_minute", 0))
-        >= int(capacity["accepted_concurrency"]),
+        and int(policy.get("max_unschedulable_jobs", 0)) >= int(capacity["accepted_concurrency"])
+        and int(policy.get("max_create_per_minute", 0)) >= int(capacity["accepted_concurrency"]),
         f"{capacity_path}: admission limits must permit the acceptance batch",
     )
 
@@ -254,7 +266,9 @@ def check_nebius_iac(
         )
 
     state_wrapper = repo_root / "scripts" / "ops" / "with_nebius_terraform_state_credentials.sh"
-    _require(state_wrapper.is_file(), f"{state_wrapper}: persistent state credential wrapper is required")
+    _require(
+        state_wrapper.is_file(), f"{state_wrapper}: persistent state credential wrapper is required"
+    )
     state_wrapper_text = state_wrapper.read_text(encoding="utf-8")
     _require(
         "loom-nebius-terraform-state" in state_wrapper_text
@@ -276,13 +290,11 @@ def check_nebius_iac(
             'required_version = "= 1.16.0"' in text, f"{path}: Terraform must be pinned to 1.16.0"
         )
         _require(
-            re.search(r'^\s*source\s*=\s*"nebius/nebius"\s*$', text, re.MULTILINE)
-            is not None,
+            re.search(r'^\s*source\s*=\s*"nebius/nebius"\s*$', text, re.MULTILINE) is not None,
             f"{path}: provider source must be nebius/nebius",
         )
         _require(
-            re.search(r'^\s*version\s*=\s*"= 0.6.46"\s*$', text, re.MULTILINE)
-            is not None,
+            re.search(r'^\s*version\s*=\s*"= 0.6.46"\s*$', text, re.MULTILINE) is not None,
             f"{path}: Nebius provider must be pinned to 0.6.46",
         )
         _require(
@@ -291,12 +303,10 @@ def check_nebius_iac(
         )
 
     module = (root / "modules" / "execution-target" / "main.tf").read_text(encoding="utf-8")
-    system_node_group = module.split(
-        'resource "nebius_mk8s_v1_node_group" "system"', 1
-    )[1].split('resource "nebius_mk8s_v1_node_group" "execution"', 1)[0]
-    execution_node_group = module.split(
+    system_node_group = module.split('resource "nebius_mk8s_v1_node_group" "system"', 1)[1].split(
         'resource "nebius_mk8s_v1_node_group" "execution"', 1
-    )[1]
+    )[0]
+    execution_node_group = module.split('resource "nebius_mk8s_v1_node_group" "execution"', 1)[1]
     _require(
         "public_ip_address" not in system_node_group
         and "public_ip_address" not in execution_node_group,
