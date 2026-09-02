@@ -382,6 +382,20 @@ async def test_authentication_scope_and_store_failures_use_bounded_responses(
         assert response.json() == {"detail": "invalid task-image authority credentials"}
         assert "wrong-private-bearer" not in response.text
 
+    duplicate = authority_api.client.put(
+        path,
+        headers=[
+            ("Authorization", f"Bearer {_BEARER}"),
+            ("Authorization", "Bearer duplicate-private-bearer"),
+        ],
+        json=payload,
+    )
+    assert duplicate.status_code == 401
+    assert duplicate.json() == {
+        "detail": "invalid task-image authority credentials"
+    }
+    assert "duplicate-private-bearer" not in duplicate.text
+
     unauthenticated_malformed = authority_api.client.put(
         path,
         headers={"content-type": "application/json"},

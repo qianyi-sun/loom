@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -376,9 +376,12 @@ def create_app(
 
     def principal(
         request: Request,
-        authorization: str | None = Header(default=None),
     ) -> TaskImageGuardPrincipalV1:
         ready(request)
+        authorization_values = request.headers.getlist("authorization")
+        authorization = (
+            authorization_values[0] if len(authorization_values) == 1 else None
+        )
         try:
             return resolved_verifier.verify_bearer(authorization)
         except TaskImageAuthorityAuthorizationError:
