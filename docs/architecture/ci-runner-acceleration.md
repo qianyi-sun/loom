@@ -69,11 +69,15 @@ prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
 the pool is draining, or health cannot be proven. Only a route request first
 observed within 90 seconds of its GitHub artifact creation may consume oldlab
-capacity. The controller discovers requests from the bounded inventories of the
-four active routed workflows and then performs an exact artifact-name lookup
-for each run. It does not walk repository-wide artifact history or rely on a
-global artifact cursor, so unrelated artifact bursts and one failed delivery
-cannot block newer workflows.
+capacity. The controller discovers requests from bounded repository-wide
+`queued` and `in_progress` run snapshots, filters them to the four exact
+routed workflow IDs, and then performs an exact artifact-name lookup for each
+run. Including `queued` is required because GitHub can keep the aggregate run
+queued while its route job is already executing. If either repository-wide
+snapshot exceeds 100 runs, discovery falls back to the same two bounded
+inventories for each exact routed workflow. It does not walk repository-wide
+artifact history or rely on a global artifact cursor, so unrelated artifact
+bursts and one failed delivery cannot block newer workflows.
 
 Route reconciliation has its own twenty-three-second systemd timer and state-only
 service. It is not a second `ExecStart` behind runner-pool reconciliation and
@@ -188,9 +192,9 @@ controller records the core `limit`, `remaining`, and `reset` response headers
 in the existing SQLite metadata after every request. A new oneshot process
 therefore inherits the previous process's budget and stops before the final 250
 requests until the recorded reset time; it never turns a local restart into a
-rate-limit bypass. A no-work pass performs five GitHub read requests (the
-trusted branch plus four bounded workflow inventories), keeping steady-state
-use no more than 785 requests per hour. Active-run snapshots are reused by release
+rate-limit bypass. A no-work pass performs three GitHub read requests (the
+trusted branch plus two bounded run-state inventories), keeping steady-state
+use no more than 471 requests per hour. Active-run snapshots are reused by release
 reconciliation, and persisted route decisions suppress repeated artifact
 lookup, download, and CheckRun validation while the same workflow remains
 active. Repeated run, job, workflow-blob, and CheckRun reads
