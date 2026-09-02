@@ -190,7 +190,7 @@ func TestPlanValidationMatchesBoundedWorkspaceAndSidecarContract(t *testing.T) {
 	}
 }
 
-func TestPlanValidationRejectsImageAdmissionDriftAndExpiry(t *testing.T) {
+func TestPlanValidationRejectsImageAdmissionDriftButNotMetadataExpiry(t *testing.T) {
 	base := func() plan {
 		return testPlan("/workspace", phase{
 			Role: "agent", Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 1,
@@ -208,8 +208,15 @@ func TestPlanValidationRejectsImageAdmissionDriftAndExpiry(t *testing.T) {
 	}
 	p = base()
 	p.ImageAdmission.Admissions[0].Statement.ExpiresAt = time.Now().Add(-time.Minute)
+	p.ImageAdmission.Admissions[0].Statement.IssuedAt = time.Now().Add(-2 * time.Hour)
+	if err := p.validate(); err != nil {
+		t.Fatalf("metadata expiry became a runtime renewal gate: %v", err)
+	}
+	p = base()
+	p.ImageAdmission.Admissions[0].Statement.IssuedAt = time.Now().Add(10 * time.Minute)
+	p.ImageAdmission.Admissions[0].Statement.ExpiresAt = time.Now().Add(time.Hour)
 	if err := p.validate(); err == nil || !strings.Contains(err.Error(), "lifetime") {
-		t.Fatalf("expired image admission accepted: %v", err)
+		t.Fatalf("future-issued admission accepted: %v", err)
 	}
 	p = base()
 	p.ImageAdmission.Admissions[0].SignatureBase64 = "not-base64"

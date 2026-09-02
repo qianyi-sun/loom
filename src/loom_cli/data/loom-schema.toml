@@ -73,6 +73,12 @@ python_type = "str"
 default     = "nebius-cpu"
 description = "Logical pool selected by the service-execution scheduler. Tasks must carry the same immutable pool binding."
 
+[service_config.service_execution_runtime_profile_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = '{}'
+description = "Versioned deployment-owned profile used to compile compatible ordinary TaskSets into immutable Nebius runtime plans. Empty disables automatic compilation while retaining explicitly bound legacy tasks."
+
 [service_config.service_execution_scheduler_interval_sec]
 used_by     = ["control-plane"]
 python_type = "float"

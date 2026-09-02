@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -21,6 +23,7 @@ from loom.db.schema import (
     ArtifactUploadSession,
     ServiceExecutionLease,
     ServiceExecutionTarget,
+    Task,
     Trial,
 )
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1, ExecutionRuntimeResultV1
@@ -32,6 +35,12 @@ from loom.pipeline.artifact_commit import (
     UploadFilePlanV1,
 )
 from loom.pipeline.keys import canonical_digest
+from loom.service_execution_materialization import (
+    MAX_INPUT_MANIFEST_BYTES,
+    ServiceExecutionInputManifestV1,
+    service_execution_input_binding,
+)
+from loom.trajectory.storage import ObjectStore
 from loom_control_plane.service_execution import record_committed_runtime_result
 
 _MAX_FILES = 133
@@ -99,6 +108,83 @@ class ServiceExecutionFileCompleteV1(ServiceExecutionPeerV1):
         return values
 
 
+@dataclass(frozen=True)
+class ResolvedServiceExecutionInput:
+    manifest: ServiceExecutionInputManifestV1
+    manifest_body: bytes
+    bucket: str
+    prefix: str
+
+
+def _s3_location(value: str) -> tuple[str, str]:
+    if not value.startswith("s3://"):
+        raise ServiceExecutionBrokerError("task_input_source_invalid")
+    bucket, separator, key = value.removeprefix("s3://").partition("/")
+    if not separator or not bucket or not key:
+        raise ServiceExecutionBrokerError("task_input_source_invalid")
+    return bucket, key
+
+
+async def resolve_service_execution_input(
+    session: AsyncSession,
+    *,
+    lease: ServiceExecutionLease,
+    store: ObjectStore,
+    artifacts_bucket: str,
+) -> ResolvedServiceExecutionInput:
+    plan = _runtime_plan(lease)
+    if plan.task_input is None:
+        raise ServiceExecutionBrokerError("task_input_unavailable")
+    row = (
+        await session.execute(
+            select(Task)
+            .join(Trial, Trial.task_id == Task.id)
+            .where(Trial.id == lease.trial_id)
+        )
+    ).scalar_one_or_none()
+    if row is None or row.source is None:
+        raise ServiceExecutionBrokerError("task_input_unavailable")
+    try:
+        binding = service_execution_input_binding(row.source_provenance)
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("task_input_identity_invalid") from exc
+    if binding is None:
+        raise ServiceExecutionBrokerError("task_input_unavailable")
+    manifest_bucket, manifest_key = _s3_location(binding.manifest_uri)
+    source_bucket, source_prefix = _s3_location(row.source)
+    if (
+        manifest_bucket != artifacts_bucket
+        or source_bucket != artifacts_bucket
+        or not source_prefix.endswith("/")
+        or binding.manifest_sha256 != plan.task_input.manifest_sha256
+        or binding.file_count != plan.task_input.file_count
+        or binding.total_bytes != plan.task_input.total_bytes
+    ):
+        raise ServiceExecutionBrokerError("task_input_identity_drift")
+    body = await store.get_object(bucket=manifest_bucket, key=manifest_key)
+    if len(body) > MAX_INPUT_MANIFEST_BYTES:
+        raise ServiceExecutionBrokerError("task_input_manifest_too_large")
+    if "sha256:" + hashlib.sha256(body).hexdigest() != binding.manifest_sha256:
+        raise ServiceExecutionBrokerError("task_input_manifest_drift")
+    try:
+        manifest = ServiceExecutionInputManifestV1.model_validate_json(body)
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("task_input_manifest_invalid") from exc
+    if (
+        manifest.canonical_bytes() != body
+        or manifest.task_revision_sha256 != plan.task_revision_sha256
+        or len(manifest.files) != binding.file_count
+        or sum(item.size_bytes for item in manifest.files) != binding.total_bytes
+    ):
+        raise ServiceExecutionBrokerError("task_input_manifest_drift")
+    return ResolvedServiceExecutionInput(
+        manifest=manifest,
+        manifest_body=body,
+        bucket=source_bucket,
+        prefix=source_prefix,
+    )
+
+
 def _runtime_plan(lease: ServiceExecutionLease) -> ExecutionRuntimePlanV1:
     if lease.runtime_contract_json is None or lease.runtime_contract_sha256 is None:
         raise ServiceExecutionBrokerError("runtime_identity_unavailable")
@@ -159,7 +245,7 @@ async def authorize_service_execution_peer(
     identity: ServiceExecutionPeerV1,
     now: datetime | None = None,
     lock: bool = False,
-    purpose: Literal["token", "output"] = "token",
+    purpose: Literal["token", "input", "output"] = "token",
 ) -> ServiceExecutionLease:
     """Bind a direct Gateway peer IP to exactly one current observed Pod."""
 
@@ -185,7 +271,7 @@ async def authorize_service_execution_peer(
     )
     if not resource_identity_matches:
         raise ServiceExecutionBrokerError("execution_generation_fenced")
-    if purpose == "token" and (
+    if purpose in {"token", "input"} and (
         lease.generation != identity.generation
         or lease.revoked_at is not None
         or lease.observed_state not in {"creating", "running", "finalizing"}
@@ -202,7 +288,7 @@ async def authorize_service_execution_peer(
     ):
         raise ServiceExecutionBrokerError("execution_output_window_closed")
     target = await session.get(ServiceExecutionTarget, lease.target_id)
-    if purpose == "token" and (
+    if purpose in {"token", "input"} and (
         target is None
         or target.desired_state != "active"
         or target.observed_state != "ready"

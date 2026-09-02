@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
@@ -45,11 +45,18 @@ from loom.db.schema import (
 )
 from loom.models.batch import Combination
 from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.pipeline.keys import canonical_digest
 from loom.request_params import sanitize_request_extras
 from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import NEBIUS_BACKEND, NEBIUS_LOGICAL_POOL_ID
+from loom.service_execution_materialization import (
+    ServiceExecutionRuntimeProfileV1,
+    automatic_service_execution_rejections,
+    load_service_execution_runtime_profile,
+)
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
@@ -391,7 +398,10 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     *,
     backend: str,
     task_ids: Sequence[str],
-) -> None:
+    trial_config: dict[str, Any],
+    combinations: Sequence[Combination | dict[str, Any]],
+    runtime_profile_json: str,
+) -> ServiceExecutionRuntimeProfileV1 | None:
     """Require fresh execution capacity or a compatible cold-start policy.
 
     A healthy autoscaler policy only authorizes persisting queued demand.  It
@@ -400,20 +410,84 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
     """
     task_rows = (
         await session.execute(
-            select(Task.id, Task.config).where(Task.id.in_(list(task_ids))),
+            select(Task.id, Task.config, Task.source_provenance).where(Task.id.in_(list(task_ids))),
         )
     ).all()
     configs_by_id = {
-        str(task_id): TaskConfig.model_validate(config) for task_id, config in task_rows
+        str(task_id): (TaskConfig.model_validate(config), dict(source_provenance or {}))
+        for task_id, config, source_provenance in task_rows
     }
-    task_configs = tuple(configs_by_id[task_id] for task_id in task_ids if task_id in configs_by_id)
+    task_configs = tuple(
+        configs_by_id[task_id][0] for task_id in task_ids if task_id in configs_by_id
+    )
     if backend == NEBIUS_BACKEND:
+        parsed_trials: tuple[TrialConfig, ...] | None = None
+        parsed_trial_error = False
+        profile = load_service_execution_runtime_profile(runtime_profile_json)
         incompatible_task_ids: list[str] = []
+        rejection_reasons: dict[str, list[str]] = {}
+        automatic_profile_used = False
         for task_id in task_ids:
-            task_config = configs_by_id.get(task_id)
+            task_entry = configs_by_id.get(task_id)
+            task_config = task_entry[0] if task_entry is not None else None
+            provenance = task_entry[1] if task_entry is not None else {}
             binding = task_config.service_execution if task_config is not None else None
-            if binding is None or binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID:
+            reasons: tuple[str, ...] = ()
+            if binding is None and task_config is not None:
+                automatic_profile_used = True
+                if parsed_trials is None:
+                    try:
+                        if combinations:
+                            parsed_trials = tuple(
+                                TrialConfig.model_validate(
+                                    {
+                                        **trial_config,
+                                        "agent_name": combination.agent_name,
+                                        "agent_model": (
+                                            combination.agent_model.model_dump(mode="json")
+                                            if combination.agent_model is not None
+                                            else None
+                                        ),
+                                    }
+                                )
+                                for raw_combination in combinations
+                                for combination in (
+                                    raw_combination
+                                    if isinstance(raw_combination, Combination)
+                                    else Combination.model_validate(raw_combination),
+                                )
+                            )
+                        else:
+                            parsed_trials = (TrialConfig.model_validate(trial_config),)
+                    except ValidationError:
+                        parsed_trials = ()
+                        parsed_trial_error = True
+                if parsed_trial_error:
+                    reasons = ("automatic_trial_config_invalid",)
+                else:
+                    reasons = tuple(
+                        dict.fromkeys(
+                            reason
+                            for parsed_trial in parsed_trials
+                            for reason in automatic_service_execution_rejections(
+                                task_config,
+                                parsed_trial,
+                                source_provenance=provenance,
+                            )
+                        )
+                    )
+                if profile is None:
+                    reasons = (*reasons, "runtime_profile_unavailable")
+                elif task_config.environment.docker_image != profile.task_image_ref:
+                    reasons = (*reasons, "task_image_not_in_runtime_profile")
+            if (
+                task_config is None
+                or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)
+                or reasons
+            ):
                 incompatible_task_ids.append(task_id)
+                if reasons:
+                    rejection_reasons[task_id] = list(dict.fromkeys(reasons))
         if incompatible_task_ids:
             _reject_submission(
                 reason="nebius_task_incompatible",
@@ -423,11 +497,12 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
                     "backend": NEBIUS_BACKEND,
                     "logical_pool_id": NEBIUS_LOGICAL_POOL_ID,
                     "task_ids": incompatible_task_ids,
+                    "rejection_reasons": rejection_reasons,
                 },
             )
         service_pools = await get_service_execution_backend_pools(session)
         if any(pool.pool_name == NEBIUS_LOGICAL_POOL_ID for pool in service_pools):
-            return
+            return profile if automatic_profile_used else None
         _reject_submission(
             reason="nebius_target_unavailable",
             status_code=400,
@@ -439,7 +514,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
 
     active_backends = await get_active_backends(session)
     if backend in active_backends:
-        return
+        return None
     cold_start_pools = await get_cold_start_pools(session)
     compatible_pools = compatible_cold_start_pool_names(
         cold_start_pools,
@@ -447,7 +522,7 @@ async def _reject_if_backend_cannot_execute_or_cold_start(
         task_configs=task_configs,
     )
     if len(task_configs) == len(task_ids) and compatible_pools:
-        return
+        return None
 
     available_str = (
         ", ".join(sorted(active_backends)) if active_backends else "(none — no active workers)"
@@ -786,6 +861,7 @@ def _serialize(
     submitted_by_user: User | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    runtime_profile = b.service_execution_runtime_profile
     out: dict[str, Any] = {
         "id": str(b.id),
         "team_id": str(b.team_id),
@@ -806,6 +882,14 @@ def _serialize(
         "expected_trial_count": b.expected_trial_count,
         "n_per_task": b.n_per_task,
         "backend": b.backend,
+        "service_execution_runtime_profile": (
+            {
+                "candidate_sha": runtime_profile["candidate_sha"],
+                "sha256": canonical_digest(runtime_profile),
+            }
+            if runtime_profile is not None
+            else None
+        ),
         "combinations": b.combinations,
         "required_worker_pools": b.required_worker_pools,
         "visibility": b.visibility,
@@ -1155,10 +1239,13 @@ async def _create_batch_record(
     # A live worker is immediately executable. A fresh compatible pool policy
     # is only cold-start authority, but it must be allowed to observe the queued
     # trials created below; otherwise min_slots=0 can never scale up.
-    await _reject_if_backend_cannot_execute_or_cold_start(
+    service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
         s,
         backend=payload.backend,
         task_ids=valid_task_ids,
+        trial_config=trial_config,
+        combinations=payload.combinations,
+        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
     )
 
     # Reject structurally incompatible agent/task pairs instead of fanning
@@ -1292,6 +1379,11 @@ async def _create_batch_record(
         n_per_task=payload.n_per_task,
         backend=payload.backend,
         combinations=combinations_jsonb,
+        service_execution_runtime_profile=(
+            service_execution_runtime_profile.model_dump(mode="json")
+            if service_execution_runtime_profile is not None
+            else None
+        ),
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,
         provider_model_id=payload.provider_model_id,
@@ -2575,10 +2667,13 @@ async def rerun_failed_batch(
             status_code=400,
             detail=invalid_task_config_detail(invalid_rerun_tasks),
         )
-    await _reject_if_backend_cannot_execute_or_cold_start(
+    service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
         s,
         backend=b.backend,
         task_ids=valid_rerun_task_ids,
+        trial_config=b.trial_config,
+        combinations=b.combinations or [],
+        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
     )
     agent_task_pairs: list[tuple[str, str]] = []
     combinations = list(b.combinations or [])
@@ -2647,6 +2742,11 @@ async def rerun_failed_batch(
         n_per_task=1,
         backend=b.backend,
         combinations=list(b.combinations or []),
+        service_execution_runtime_profile=(
+            service_execution_runtime_profile.model_dump(mode="json")
+            if service_execution_runtime_profile is not None
+            else None
+        ),
         provider_connection_id=b.provider_connection_id,
         provider_model_id=b.provider_model_id,
         rerun_of_batch_id=b.id,

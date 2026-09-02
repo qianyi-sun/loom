@@ -161,15 +161,25 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    labels and install only its environment-local identities/policies.
 4. Run a system-node connectivity pod and record node identity, DNS, HTTPS
    egress, logs, exit code, and deletion.
-5. Run one execution pod with the required toleration and node selector. Record
-   Pending to Running to Succeeded, selected node, image digest, stdout, and
-   artifact upload/readback. Delete the pod and verify no workload remains.
-6. From execution minimum zero, submit one bounded pod, observe the execution
-   group scale to one, complete it, delete it, and observe scale-down to zero.
-7. Create the separately reviewed staging/production bindings without traffic,
+5. Through the normal user API, upload an ordinary supported TaskSet that has
+   no hand-written `service_execution` field, create a `backend=nebius` Batch,
+   and record its automatically frozen input manifest, runtime plan, target,
+   images, Trial and Job identity.
+6. From execution minimum zero, observe that Batch's Job move Pending to
+   Running to Succeeded; verify model/verifier output and immutable artifact
+   readback; then verify Job cleanup and execution-node scale-down to zero.
+   A manually created Pod or manually patched Task binding is not evidence for
+   this gate.
+7. Run staged true-overlap acceptance at 1, 20, 50, 100, 150, then 200 active
+   execution units. At every stage prove the persisted concurrency seats,
+   simultaneous non-terminal Jobs/Pods, node-backed capacity, successful
+   results, artifact digests, released seats, no orphan Jobs, and return to zero
+   execution nodes. Merely submitting 200 queued tasks does not pass. Stop,
+   diagnose, and clean up before advancing after any failed stage.
+8. Create the separately reviewed staging/production bindings without traffic,
    then attempt cross-environment namespace, bucket-prefix, and credential
    access; acceptance requires denial.
-8. Only after development passes, repeat the same gates in staging. Production
+9. Only after development passes, repeat the same gates in staging. Production
    work and traffic require separate approval. A second cluster or region is
    outside baseline scope.
 
@@ -187,7 +197,9 @@ development execution runtime once:
 ```bash
 scripts/ops/apply_nebius_development_runtime.sh \
   --kubeconfig /secure/path/development-eu-north1.kubeconfig \
-  --nebius-credentials /secure/path/capacity-observer-credentials.json
+  --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --model-provider-api-key-file /secure/path/model-provider-api-key \
+  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
 ```
 
 From outside the Nebius VPC, run the same convergence through the managed
@@ -202,8 +214,12 @@ scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --known-hosts /secure/path/deployment-access-known-hosts \
   --cluster-id mk8scluster-REPLACE \
   --nebius-credentials /secure/path/capacity-observer-credentials.json \
+  --model-provider-api-key-file /secure/path/model-provider-api-key \
+  --gateway-image cr.eu-north1.nebius.cloud/REGISTRY/loom-llm-gateway@sha256:DIGEST \
   --control-plane-image cr.eu-north1.nebius.cloud/REGISTRY/loom-control-plane@sha256:DIGEST \
-  --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST
+  --service-image cr.eu-north1.nebius.cloud/REGISTRY/loom-service@sha256:DIGEST \
+  --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
+  --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
 ```
 
 The helper accepts only digest-pinned platform images, transfers only the
@@ -212,6 +228,15 @@ mode-0700 temporary directory, obtains an internal kubeconfig with the VM's
 attached identity, rolls out Control Plane then Service, applies the idempotent
 runtime, and deletes the remote and local staging directories. No human Nebius
 token is copied to the gateway.
+
+The runtime profile is a protected non-secret deployment input whose images
+must exactly match the images being rolled out. The helper validates its schema,
+pool/class identity and image-admission coverage, persists it as a Kubernetes
+Secret before the first Deployment references it, and stamps its content
+digest on the Service pod template. Changing the profile therefore causes an
+ordinary rolling restart of the accepting API instead of leaving it on stale
+configuration. The Control Plane reads the immutable profile snapshot from the
+accepted Batch rather than from mutable deployment configuration.
 
 The operation is idempotent. It applies the development-only Control Plane
 patch that enables the `nebius-cpu` scheduler and loads its image-admission

@@ -52,6 +52,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "harden workload broker identity:", err)
 		os.Exit(2)
 	}
+	if p.TaskInput != nil {
+		inputContext, stopInput := context.WithTimeout(ctx, 10*time.Minute)
+		err = broker.materializeInputs(inputContext, p, filepath.Clean(*workspace))
+		stopInput()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "materialize task input:", err)
+			os.Exit(2)
+		}
+	}
 	proxyURL, stopProxy, err := broker.startProxy(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start workload proxy:", err)
