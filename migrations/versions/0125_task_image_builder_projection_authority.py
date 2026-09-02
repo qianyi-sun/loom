@@ -1,13 +1,13 @@
 """Persist task-image builder projection and containment authority.
 
-Revision ID: 0124
-Revises: 0123
+Revision ID: 0125
+Revises: 0124
 """
 
 from alembic import op
 
-revision = "0124"
-down_revision = "0123"
+revision = "0125"
+down_revision = "0124"
 branch_labels = None
 depends_on = None
 

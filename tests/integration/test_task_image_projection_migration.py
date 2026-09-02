@@ -115,11 +115,11 @@ def _insert_challenged_projection(connection: Connection, *, projection_id: UUID
     )
 
 
-def test_0124_adds_fail_closed_projection_authority_and_round_trips(
+def test_0125_adds_fail_closed_projection_authority_and_round_trips(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
-    command.downgrade(config, "0123")
+    command.downgrade(config, "0124")
     engine = create_engine(isolated_migration_postgres_url)
     try:
         with engine.begin() as connection:
@@ -129,7 +129,7 @@ def test_0124_adds_fail_closed_projection_authority_and_round_trips(
             DBAPIError,
             match="unexpected pre-authority task-image build grants",
         ):
-            command.upgrade(config, "0124")
+            command.upgrade(config, "0125")
 
         with engine.begin() as connection:
             connection.execute(
@@ -137,7 +137,7 @@ def test_0124_adds_fail_closed_projection_authority_and_round_trips(
                 {"id": GRANT_ID},
             )
 
-        command.upgrade(config, "0124")
+        command.upgrade(config, "0125")
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         assert {
@@ -353,7 +353,7 @@ def test_0124_adds_fail_closed_projection_authority_and_round_trips(
                     },
                 )
 
-        command.downgrade(config, "0123")
+        command.downgrade(config, "0124")
         downgraded = inspect(engine)
         assert not {
             "task_image_build_projections",

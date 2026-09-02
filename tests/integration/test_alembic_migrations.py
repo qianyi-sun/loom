@@ -221,7 +221,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == "0124"
+            assert revision == "0125"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
