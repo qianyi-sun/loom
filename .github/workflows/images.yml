@@ -291,7 +291,6 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
           )
           if [[ "$EVENT_NAME" == "workflow_dispatch" && "$TRUSTED_PUBLISH" != "true" || \
-                "$EVENT_NAME" == "merge_group" || \
                 "$UNOWNED_RUNTIME" == "true" ]]; then
             args+=(--force-all)
           elif [[ "$REQUIRED" == "true" ]]; then
