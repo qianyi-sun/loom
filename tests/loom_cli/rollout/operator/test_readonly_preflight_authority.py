@@ -16,6 +16,7 @@ from loom_cli.rollout.operator.readonly_preflight_authority import (
 from loom_cli.rollout.readonly_database_authority import (
     ReadonlyDatabaseEvidence,
     ReadonlyMutationEpochEvidence,
+    ReadonlySmokeAuthorityEvidence,
 )
 from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
@@ -90,6 +91,19 @@ def _mutation_epoch() -> ReadonlyMutationEpochEvidence:
     )
 
 
+def _smoke_authority() -> ReadonlySmokeAuthorityEvidence:
+    return ReadonlySmokeAuthorityEvidence(
+        mutation_epoch=11,
+        team_exists=True,
+        team_active=True,
+        team_submissions_enabled=True,
+        user_exists=True,
+        user_active=True,
+        membership_present=True,
+        evidence_sha256="e" * 64,
+    )
+
+
 def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Path) -> None:
     config = _config(tmp_path)
     cluster, _token = _write_authority(tmp_path)
@@ -142,6 +156,7 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
         service_uid=os.getuid(),
         kubernetes_run=kubernetes,
         database_evidence=_database,
+        smoke_authority_evidence=_smoke_authority,
         mutation_epoch_evidence=_mutation_epoch,
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
@@ -166,6 +181,44 @@ def test_authority_derives_route_and_reuses_exact_readonly_sources(tmp_path: Pat
     assert authority.capabilities().ready
     assert len(calls) == 2
     assert all(str(tmp_path / "readonly-kubeconfig") in argv for argv, _ in calls)
+
+
+def test_bound_baseline_probes_consume_smoke_authority_only_for_auth(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    cluster, _token = _write_authority(tmp_path)
+    object.__setattr__(config, "cluster_config_path", cluster)
+    smoke_calls: list[object] = []
+
+    def smoke_authority() -> ReadonlySmokeAuthorityEvidence:
+        smoke_calls.append(object())
+        return _smoke_authority()
+
+    authority = ReadonlyPreflightAuthority(
+        config=config,
+        service_uid=os.getuid(),
+        kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
+        database_evidence=_database,
+        smoke_authority_evidence=smoke_authority,
+        mutation_epoch_evidence=_mutation_epoch,
+        capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
+        kubeconfig_path=tmp_path / "readonly-kubeconfig",
+    )
+    probes = authority.baseline_probes(11)
+
+    for check_id in (
+        "staging.health",
+        "staging.catalog-task",
+        "staging.storage-db",
+        "staging.network",
+    ):
+        probes[check_id]()
+    assert smoke_calls == []
+
+    assert probes["staging.auth"]().ready
+    assert len(smoke_calls) == 1
 
 
 def test_route_authority_rejects_frontend_api_drift(tmp_path: Path) -> None:
@@ -253,6 +306,7 @@ def test_authority_exposes_no_database_credential_in_evidence(tmp_path: Path) ->
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
         database_evidence=_database,
+        smoke_authority_evidence=_smoke_authority,
         mutation_epoch_evidence=_mutation_epoch,
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
@@ -287,6 +341,16 @@ def test_authority_uses_fresh_live_capacity_before_schema_0070(tmp_path: Path) -
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
         database_evidence=lambda: legacy,
+        smoke_authority_evidence=lambda: ReadonlySmokeAuthorityEvidence(
+            mutation_epoch=0,
+            team_exists=True,
+            team_active=True,
+            team_submissions_enabled=True,
+            user_exists=True,
+            user_active=True,
+            membership_present=True,
+            evidence_sha256="e" * 64,
+        ),
         mutation_epoch_evidence=lambda: ReadonlyMutationEpochEvidence(
             schema_revision="0065",
             mutation_epoch=0,
@@ -326,6 +390,7 @@ def test_baseline_factory_reports_only_storage_when_capacity_is_missing(tmp_path
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(1, ""),
         database_evidence=lambda: database,
+        smoke_authority_evidence=_smoke_authority,
         mutation_epoch_evidence=_mutation_epoch,
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),
@@ -392,6 +457,7 @@ def test_capability_probe_does_not_consume_capacity_or_baseline_evidence(
         service_uid=os.getuid(),
         kubernetes_run=lambda _argv, _stdin: _Result(0, json.dumps(next(payloads))),
         database_evidence=missing_capacity,
+        smoke_authority_evidence=_smoke_authority,
         mutation_epoch_evidence=_mutation_epoch,
         capacity_source=lambda: StagingCapacity(1, 2, 80, 90),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "b" * 64),

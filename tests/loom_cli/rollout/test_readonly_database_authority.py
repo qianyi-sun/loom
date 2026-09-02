@@ -21,9 +21,18 @@ class Query:
         *,
         revision: str = "0065",
         inventory: tuple[Mapping[str, object], ...] = (),
+        smoke: Mapping[str, object] | None = None,
     ) -> None:
         self.revision = revision
         self.inventory = inventory
+        self.smoke = smoke or {
+            "team_exists": True,
+            "team_active": True,
+            "team_submissions_enabled": True,
+            "user_exists": True,
+            "user_active": True,
+            "membership_present": True,
+        }
         self.calls: list[str] = []
 
     def __call__(self, sql: str) -> tuple[Mapping[str, object], ...]:
@@ -75,6 +84,8 @@ class Query:
                     "observed_at_epoch": 1_721_390_400,
                 },
             )
+        if "AS membership_present" in sql:
+            return (self.smoke,)
         raise AssertionError(sql)
 
 
@@ -103,6 +114,90 @@ def test_current_database_requires_exact_epoch_and_capacity() -> None:
     assert evidence.capacity is not None
     assert evidence.capacity["bytes_used"] == 20
     assert len(evidence.evidence_sha256) == 64
+
+
+def test_readonly_role_authority_requires_team_membership_select() -> None:
+    query = Query(revision="0070")
+
+    probe_readonly_mutation_epoch(query)
+
+    authority_sql = next(sql for sql in query.calls if "pg_catalog.pg_roles" in sql)
+    assert "has_table_privilege(current_user, 'public.team_memberships', 'SELECT')" in authority_sql
+
+
+def test_smoke_authority_proves_exact_active_team_membership() -> None:
+    query = Query(revision="0070")
+
+    evidence = readonly_database_authority.probe_readonly_smoke_authority(
+        query,
+        represented_username="Devansh",
+        team_id="bbce1c49-8d6b-429c-a338-de37a6b533b7",
+    )
+
+    assert evidence.ready
+    assert evidence.mutation_epoch == 9
+    assert len(evidence.evidence_sha256) == 64
+    smoke_sql = next(sql for sql in query.calls if "AS membership_present" in sql)
+    assert "username_normalized = 'devansh'" in smoke_sql
+    assert "'bbce1c49-8d6b-429c-a338-de37a6b533b7'::uuid" in smoke_sql
+
+
+def test_smoke_authority_accepts_admin_contract_boundary_username() -> None:
+    evidence = readonly_database_authority.probe_readonly_smoke_authority(
+        Query(revision="0070"),
+        represented_username="x",
+        team_id="bbce1c49-8d6b-429c-a338-de37a6b533b7",
+    )
+
+    assert evidence.ready
+
+
+def test_smoke_authority_blocks_missing_membership() -> None:
+    query = Query(
+        revision="0070",
+        smoke={
+            "team_exists": True,
+            "team_active": True,
+            "team_submissions_enabled": True,
+            "user_exists": True,
+            "user_active": True,
+            "membership_present": False,
+        },
+    )
+
+    evidence = readonly_database_authority.probe_readonly_smoke_authority(
+        query,
+        represented_username="devansh",
+        team_id="84e667cb-eb14-40ff-906f-d3d0c451c181",
+    )
+
+    assert not evidence.ready
+    assert evidence.membership_present is False
+
+
+@pytest.mark.parametrize(
+    ("represented_username", "team_id"),
+    (
+        ("devansh' OR TRUE --", "bbce1c49-8d6b-429c-a338-de37a6b533b7"),
+        (" devansh ", "bbce1c49-8d6b-429c-a338-de37a6b533b7"),
+        ("devansh", "not-a-uuid"),
+        ("devansh", "11111111-1111-1111-8111-111111111111"),
+    ),
+)
+def test_smoke_authority_rejects_unsafe_binding(
+    represented_username: str,
+    team_id: str,
+) -> None:
+    query = Query(revision="0070")
+
+    with pytest.raises(ValueError, match="smoke authority binding is invalid"):
+        readonly_database_authority.probe_readonly_smoke_authority(
+            query,
+            represented_username=represented_username,
+            team_id=team_id,
+        )
+
+    assert query.calls == []
 
 
 def test_capacity_query_floors_fractional_seconds_for_exact_identity() -> None:

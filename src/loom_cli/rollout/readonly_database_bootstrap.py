@@ -24,6 +24,7 @@ _TABLES = (
     "staging_lifecycle_capacity",
     "staging_mutation_epochs",
     "tasks",
+    "team_memberships",
     "teams",
     "trial_events",
     "trials",

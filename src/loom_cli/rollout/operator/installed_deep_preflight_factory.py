@@ -95,6 +95,7 @@ from .readonly_database_client import (
     InstalledReadonlyMutationEpochSource,
     open_readonly_database_query,
     probe_installed_readonly_database_baseline,
+    probe_installed_readonly_smoke_authority,
 )
 from .readonly_preflight_authority import JsonRunner, ReadonlyPreflightAuthority
 from .resume_runtime_upgrade import AdmittedResumeRuntimeUpgrade
@@ -643,6 +644,11 @@ def build_installed_deep_preflight_composition(
         service_uid=service_uid,
         kubernetes_run=cast(JsonRunner, commands.readonly_json),
         database_evidence=database_evidence,
+        smoke_authority_evidence=lambda: probe_installed_readonly_smoke_authority(
+            service_uid=service_uid,
+            represented_username=config.smoke_on_behalf_username,
+            team_id=config.smoke_on_behalf_team_id,
+        ),
         mutation_epoch_evidence=mutation_epoch_evidence,
         capacity_source=capacity_source,
         object_store_probe=lambda: probe_installed_readonly_object_store_health(

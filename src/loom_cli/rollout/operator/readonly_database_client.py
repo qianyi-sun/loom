@@ -23,9 +23,11 @@ from loom_cli.rollout.readonly_database_authority import (
     DatabaseQuery,
     ReadonlyDatabaseEvidence,
     ReadonlyMutationEpochEvidence,
+    ReadonlySmokeAuthorityEvidence,
     probe_readonly_database,
     probe_readonly_database_baseline,
     probe_readonly_mutation_epoch,
+    probe_readonly_smoke_authority,
 )
 from loom_cli.rollout.readonly_database_bootstrap import ReadonlyDatabaseCredential
 
@@ -437,6 +439,25 @@ def probe_installed_readonly_database_baseline(
         return probe_readonly_database_baseline(query)
 
 
+def probe_installed_readonly_smoke_authority(
+    *,
+    service_uid: int,
+    represented_username: str,
+    team_id: str,
+    query_context: Callable[..., AbstractContextManager[DatabaseQuery]] = (
+        open_readonly_database_query
+    ),
+) -> ReadonlySmokeAuthorityEvidence:
+    """Read one configured on-behalf binding through the fixed readonly role."""
+
+    with query_context(service_uid=service_uid) as query:
+        return probe_readonly_smoke_authority(
+            query,
+            represented_username=represented_username,
+            team_id=team_id,
+        )
+
+
 def probe_installed_readonly_mutation_epoch(
     *,
     service_uid: int,
@@ -534,4 +555,5 @@ __all__ = [
     "probe_installed_readonly_database",
     "probe_installed_readonly_database_baseline",
     "probe_installed_readonly_mutation_epoch",
+    "probe_installed_readonly_smoke_authority",
 ]

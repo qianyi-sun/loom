@@ -101,12 +101,9 @@ def test_installed_composition_binds_rendered_images_and_rebuilds_supervisor_art
 ) -> None:
     config = _config(tmp_path)
     authority_source = (
-        Path(__file__).resolve().parents[4]
-        / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
+        Path(__file__).resolve().parents[4] / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
     ).read_text(encoding="utf-8")
-    authority_path = (
-        config.runner_repo / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
-    )
+    authority_path = config.runner_repo / "deploy/k8s/external-slurm-autoscaler-authority.yaml"
     authority_path.parent.mkdir(parents=True)
     authority_path.write_text(authority_source, encoding="utf-8")
     installed_config = replace(
@@ -272,10 +269,22 @@ spec:
         "ReadonlyLifecycleInventoryProvider",
         lambda *_args, **_kwargs: SimpleNamespace(),
     )
+
+    def readonly_authority(*_args: object, **kwargs: object) -> SimpleNamespace:
+        captured["readonly_authority"] = kwargs
+        return readonly
+
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "ReadonlyPreflightAuthority",
-        lambda *_args, **_kwargs: readonly,
+        readonly_authority,
+    )
+    smoke_evidence = SimpleNamespace()
+    smoke_probe_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "probe_installed_readonly_smoke_authority",
+        lambda **kwargs: smoke_probe_calls.append(kwargs) or smoke_evidence,
     )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
@@ -361,6 +370,16 @@ spec:
     assert captured["composition"]["manifest_image_names"] == frozenset(  # type: ignore[index]
         expected_manifest_images
     )
+    smoke_source = captured["readonly_authority"]["smoke_authority_evidence"]  # type: ignore[index]
+    assert callable(smoke_source)
+    assert smoke_source() is smoke_evidence
+    assert smoke_probe_calls == [
+        {
+            "service_uid": 995,
+            "represented_username": config.smoke_on_behalf_username,
+            "team_id": config.smoke_on_behalf_team_id,
+        }
+    ]
     manifest_factory = captured["composition"]["render_manifest_factory"]  # type: ignore[index]
     manifest_post_image_pin = captured["composition"]["manifest_post_image_pin"]  # type: ignore[index]
     assert callable(manifest_factory)
@@ -373,6 +392,7 @@ spec:
         name: f"sha256:{hashlib.sha256((name + '-registry').encode()).hexdigest()}"
         for name, _path in ALL_BUILD_IMAGES
     }
+
     def render_artifact():
         return ManifestRenderSession(
             manifest_factory(candidate),  # type: ignore[arg-type]
