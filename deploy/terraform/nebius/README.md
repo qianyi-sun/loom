@@ -17,7 +17,9 @@ public key are part of this state. The public key omits `expires_at`; its privat
 credential is supplied only to the Kubernetes runtime Secret and is never
 committed or printed. Nebius SDK access tokens remain short-lived and refresh
 automatically from that stable key, so a human CLI/browser login is not a
-runtime dependency.
+runtime dependency. Infrastructure convergence likewise uses a dedicated
+non-expiring service-account profile for the Nebius provider and a separate
+non-expiring Object Storage key held in macOS Keychain for the S3 backend.
 
 ## Layout
 
@@ -68,8 +70,8 @@ After the runbook gates are satisfied, prepare the one shared state anchor:
 ```bash
 cp deploy/terraform/nebius/targets/development-eu-north1.tfvars.json.example /secure/path/development-eu-north1.tfvars.json
 cp deploy/terraform/nebius/backends/development-eu-north1.s3.tfbackend.example /secure/path/development-eu-north1.s3.tfbackend
-terraform -chdir=deploy/terraform/nebius/stack init -reconfigure -backend-config=/secure/path/development-eu-north1.s3.tfbackend
-terraform -chdir=deploy/terraform/nebius/stack plan -var-file=/secure/path/development-eu-north1.tfvars.json -out=/secure/path/development-eu-north1.tfplan
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack init -reconfigure -backend-config=/secure/path/development-eu-north1.s3.tfbackend
+scripts/ops/with_nebius_terraform_state_credentials.sh terraform -chdir=deploy/terraform/nebius/stack plan -var-file=/secure/path/development-eu-north1.tfvars.json -out=/secure/path/development-eu-north1.tfplan
 terraform -chdir=deploy/terraform/nebius/stack show -json /secure/path/development-eu-north1.tfplan > /secure/path/development-eu-north1.plan.json
 ```
 

@@ -562,9 +562,13 @@ The proportionate baseline is documented in
 at one system-node replica, bound to `nebius-eu-north1-development` and an
 immutable registry digest. It creates no execution node itself: ordinary
 persisted Batch/Trial demand creates a Job, and the managed node-group
-autoscaler remains the only authority that changes the `0..1` execution-node
-count. The one-time bootstrap still requires the referenced database and
-credential Secrets; no per-Batch operator action is part of the path.
+autoscaler remains the only authority that changes the `0..10` execution-node
+count. Ten 48-vCPU nodes provide a 480-vCPU target envelope for 200 concurrent
+2-vCPU tasks plus 80 vCPUs of aggregate node overhead. The one-time bootstrap
+still requires the referenced database and credential Secrets; no per-Batch
+operator action is part of the path. Every runtime convergence also applies
+`deploy/k8s/nebius-development-capacity-policy.json`, so the control-plane
+admission envelope cannot depend on a remembered manual API call.
 The disposable k3s conformance test validates the real Kubernetes API seam
 with a suspended Job and makes no Nebius call.
 

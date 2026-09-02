@@ -34,6 +34,7 @@ variables {
   system_node_count                = 1
   execution_min_nodes              = 0
   execution_max_nodes              = 1
+  execution_max_pods               = 64
   evidence_bucket_name             = "loom-nebius-test-evidence"
   deployment_access_public_pool_id = "vpcpool-e00test"
   deployment_access_ssh_public_key = "ssh-ed25519 dGVzdA== terraform-test"
@@ -74,6 +75,16 @@ run "development_private_payg_plan" {
   assert {
     condition     = nebius_mk8s_v1_node_group.execution.autoscaling.min_node_count == 0 && nebius_mk8s_v1_node_group.execution.autoscaling.max_node_count == 1
     error_message = "Development execution autoscaling must remain bounded to 0-1."
+  }
+
+  assert {
+    condition     = nebius_mk8s_v1_node_group.execution.template.max_pods == 64
+    error_message = "Execution Pod density must remain an explicit target input."
+  }
+
+  assert {
+    condition     = nebius_mk8s_v1_node_group.execution.strategy.max_surge.count == 0 && nebius_mk8s_v1_node_group.execution.strategy.max_unavailable.count == 1
+    error_message = "Execution replacement must stay inside the provider vCPU envelope."
   }
 
   assert {
