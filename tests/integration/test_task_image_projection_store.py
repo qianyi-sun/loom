@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import traceback
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -34,18 +35,26 @@ from loom_control_plane.task_image_build_grants import (
 )
 from loom_task_image_authority.contracts import (
     TaskImageAttachmentProofV1,
+    TaskImageBootstrapExchangeV1,
     TaskImageBuildGrantAuthorityV1,
     TaskImageContainmentAttachmentV1,
+    TaskImageContainmentAttestationV1,
     TaskImageGuardPrincipalV1,
     TaskImageProjectionRequestV1,
     canonical_authority_sha256,
+    canonical_public_binding_sha256,
 )
 from loom_task_image_authority.store import (
     TaskImageProjectionAuthorizationError,
     TaskImageProjectionConflictError,
     TaskImageProjectionExpiredError,
+    authorize_task_image_build_session,
     complete_task_image_projection,
+    exchange_task_image_bootstrap,
+    expire_task_image_projection,
+    record_task_image_containment_attestation,
     request_task_image_projection,
+    revoke_task_image_projection,
 )
 
 NOW = datetime(2026, 9, 2, 14, 0, tzinfo=UTC)
@@ -53,7 +62,9 @@ GRANT_ID = UUID("11111111-1111-1111-1111-111111111111")
 REQUEST_ID = UUID("22222222-2222-2222-2222-222222222222")
 CHALLENGE_NONCE = UUID("33333333-3333-3333-3333-333333333333")
 PROOF_ID = UUID("44444444-4444-4444-4444-444444444444")
+EXCHANGE_ID = UUID("55555555-5555-5555-5555-555555555555")
 NODE_BOOT_ID = UUID("77777777-7777-7777-7777-777777777777")
+ATTESTATION_ID = UUID("88888888-8888-8888-8888-888888888888")
 SUPERVISOR_SHA256 = "6" * 64
 CGROUP_PATH = "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_12345/step_batch"
 
@@ -670,6 +681,769 @@ async def test_secret_store_failure_rolls_projection_back_to_challenged(
         assert row is not None
         assert row.state == "challenged"
         assert row.proof_id is None
+
+
+async def test_secret_bearing_projection_validation_redacts_raw_tokens(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    principal = _principal()
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        invalid_bootstrap = "raw-projection-secret-that-must-not-reach-an-error"
+        with pytest.raises(TaskImageProjectionAuthorizationError) as projection_error:
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=6),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: invalid_bootstrap,
+            )
+        projection_traceback = "".join(
+            traceback.format_exception(
+                projection_error.type,
+                projection_error.value,
+                projection_error.tb,
+            )
+        )
+        assert invalid_bootstrap not in projection_traceback
+        assert secrets.put_count == 0
+
+        receipt = await complete_task_image_projection(
+            session,
+            principal=principal,
+            proof=_proof(),
+            now=NOW + timedelta(seconds=6),
+            secret_store=secrets,
+            bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        row.bootstrap_issued_at = NOW - timedelta(seconds=30)
+        with pytest.raises(TaskImageProjectionAuthorizationError) as replay_error:
+            await complete_task_image_projection(
+                session,
+                principal=principal,
+                proof=_proof(),
+                now=NOW + timedelta(seconds=7),
+                secret_store=secrets,
+                bootstrap_token_factory=lambda: "loom_tibp_" + "B" * 64,
+            )
+        replay_traceback = "".join(
+            traceback.format_exception(
+                replay_error.type,
+                replay_error.value,
+                replay_error.tb,
+            )
+        )
+        assert receipt.bootstrap_token not in replay_traceback
+        assert secrets.put_count == 1
+
+
+async def _project_grant(
+    session: AsyncSession,
+    *,
+    secret_store: _MemorySecretStore,
+):
+    grant = await _release_grant(session)
+    principal = _principal()
+    request = _request()
+    await request_task_image_projection(
+        session,
+        principal=principal,
+        request=request,
+        now=NOW + timedelta(seconds=4),
+        challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+    )
+    proof = _proof()
+    receipt = await complete_task_image_projection(
+        session,
+        principal=principal,
+        proof=proof,
+        now=NOW + timedelta(seconds=6),
+        secret_store=secret_store,
+        bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+    )
+    return grant, principal, proof, receipt
+
+
+def _exchange(receipt, **changes: object) -> TaskImageBootstrapExchangeV1:
+    values: dict[str, object] = {
+        "exchange_id": EXCHANGE_ID,
+        "grant_id": GRANT_ID,
+        "proof_sha256": receipt.proof_sha256,
+        "bootstrap_token": receipt.bootstrap_token,
+        "observed_at": NOW + timedelta(seconds=7),
+    }
+    values.update(changes)
+    return TaskImageBootstrapExchangeV1.model_validate(values)
+
+
+def _attestation(
+    proof: TaskImageAttachmentProofV1,
+    *,
+    generation: int,
+    **changes: object,
+) -> TaskImageContainmentAttestationV1:
+    values: dict[str, object] = {
+        "attestation_id": PROOF_ID if generation == 1 else ATTESTATION_ID,
+        "grant_id": GRANT_ID,
+        "generation": generation,
+        "node_name": proof.node_name,
+        "node_boot_id": proof.node_boot_id,
+        "slurm_cluster_id": proof.slurm_cluster_id,
+        "slurm_job_id": proof.slurm_job_id,
+        "cgroup_path": proof.cgroup_path,
+        "cgroup_inode": proof.cgroup_inode,
+        "attachment": proof.attachment,
+        "issued_at": (
+            proof.observed_at
+            if generation == 1
+            else NOW + timedelta(seconds=10 + generation)
+        ),
+        "expires_at": (
+            proof.attestation_expires_at
+            if generation == 1
+            else NOW + timedelta(seconds=50 + generation)
+        ),
+    }
+    values.update(changes)
+    return TaskImageContainmentAttestationV1.model_validate(values)
+
+
+async def test_exchange_consumes_one_bootstrap_and_exact_replay_is_bounded(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        grant, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        exchange = _exchange(receipt)
+        build_session = await exchange_task_image_bootstrap(
+            session,
+            request=exchange,
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        replay = await exchange_task_image_bootstrap(
+            session,
+            request=exchange,
+            now=NOW + timedelta(seconds=9),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+        )
+        second_replay = await exchange_task_image_bootstrap(
+            session,
+            request=exchange,
+            now=NOW + timedelta(seconds=9),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "D" * 64,
+        )
+
+        assert build_session == replay == second_replay
+        assert build_session.session_id not in {exchange.exchange_id, exchange.grant_id}
+        assert build_session.session_token.startswith("loom_tibs_")
+        assert build_session.expires_at <= min(
+            grant.authority.expires_at,
+            receipt.expires_at,
+            NOW + timedelta(seconds=40),
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.state == "exchanged"
+        assert row.session_token_hash == hashlib.sha256(
+            build_session.session_token.encode("utf-8")
+        ).digest()
+        assert row.session_secret_ref is not None
+        assert row.session_secret_ref.startswith("loom://task-image-session/")
+        assert row.session_json == build_session.public_binding()
+        assert row.session_sha256 == canonical_public_binding_sha256(build_session)
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID
+                    )
+                )
+            ).all()
+        )
+        persisted_json = json.dumps(
+            [
+                row.exchange_json,
+                row.session_json,
+                *(event.payload_json for event in events),
+            ]
+        )
+        assert receipt.bootstrap_token not in persisted_json
+        assert build_session.session_token not in persisted_json
+        assert [event.event_type for event in events].count("exchange_replayed") == 1
+        assert secrets.put_count == 2
+
+        row.session_sha256 = "c" * 64
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image build session changed",
+        ):
+            await exchange_task_image_bootstrap(
+                session,
+                request=exchange,
+                now=NOW + timedelta(seconds=10),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "E" * 64,
+            )
+
+
+async def test_exchange_rejects_wrong_token_changed_body_second_exchange_and_expiry(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        exchange = _exchange(receipt)
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt, bootstrap_token="loom_tibp_" + "Z" * 64),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        assert secrets.put_count == 1
+
+        await exchange_task_image_bootstrap(
+            session,
+            request=exchange,
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        with pytest.raises(TaskImageProjectionConflictError):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt, proof_sha256="c" * 64),
+                now=NOW + timedelta(seconds=9),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+            )
+        with pytest.raises(TaskImageProjectionConflictError):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt, exchange_id=uuid4()),
+                now=NOW + timedelta(seconds=9),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+            )
+        with pytest.raises(TaskImageProjectionExpiredError):
+            await exchange_task_image_bootstrap(
+                session,
+                request=exchange,
+                now=receipt.expires_at,
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+            )
+        assert secrets.put_count == 2
+
+
+async def test_exchange_rejects_a_grant_revoked_after_projection(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        grant_row = await session.get(TaskImageBuildGrant, GRANT_ID)
+        assert grant_row is not None
+        grant_row.state = "revoked"
+        grant_row.released_at = None
+        grant_row.revoked_at = NOW + timedelta(seconds=7)
+        grant_row.revoke_reason = "operator_revoked"
+        await session.flush()
+
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        assert secrets.put_count == 1
+
+
+async def test_exchange_rejects_changed_attestation_high_water(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        row.attestation_sha256 = "a" * 64
+
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="containment attestation high-water changed",
+        ):
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        assert secrets.put_count == 1
+
+
+async def test_secret_bearing_exchange_validation_redacts_raw_tokens(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, _principal_value, _proof_value, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        invalid_bootstrap = "raw-bootstrap-that-must-not-reach-an-error"
+        unchecked_exchange = _exchange(receipt).model_copy(
+            update={"bootstrap_token": invalid_bootstrap}
+        )
+        with pytest.raises(TaskImageProjectionAuthorizationError) as exchange_error:
+            await exchange_task_image_bootstrap(
+                session,
+                request=unchecked_exchange,
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+            )
+        exchange_traceback = "".join(
+            traceback.format_exception(
+                exchange_error.type,
+                exchange_error.value,
+                exchange_error.tb,
+            )
+        )
+        assert invalid_bootstrap not in exchange_traceback
+
+        invalid_session = "raw-session-that-must-not-reach-an-error"
+        with pytest.raises(TaskImageProjectionAuthorizationError) as session_error:
+            await exchange_task_image_bootstrap(
+                session,
+                request=_exchange(receipt),
+                now=NOW + timedelta(seconds=8),
+                secret_store=secrets,
+                session_token_factory=lambda: invalid_session,
+            )
+        session_traceback = "".join(
+            traceback.format_exception(
+                session_error.type,
+                session_error.value,
+                session_error.tb,
+            )
+        )
+        assert invalid_session not in session_traceback
+        assert secrets.put_count == 1
+
+
+async def test_monotonic_attestation_authorizes_only_a_fresh_exact_session(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    principal = _principal()
+    async with projection_session() as session:
+        grant, _principal_value, proof, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        build_session = await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        generation_one = _attestation(proof, generation=1)
+        replay = await record_task_image_containment_attestation(
+            session,
+            principal=principal,
+            attestation=generation_one,
+            now=NOW + timedelta(seconds=9),
+        )
+        second_replay = await record_task_image_containment_attestation(
+            session,
+            principal=principal,
+            attestation=generation_one,
+            now=NOW + timedelta(seconds=9),
+        )
+        assert replay == second_replay == generation_one
+
+        generation_two = _attestation(proof, generation=2)
+        recorded = await record_task_image_containment_attestation(
+            session,
+            principal=principal,
+            attestation=generation_two,
+            now=NOW + timedelta(seconds=13),
+        )
+        assert recorded == generation_two
+
+        replayed_session = await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=14),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "C" * 64,
+        )
+        assert replayed_session == build_session
+
+        authorization = await authorize_task_image_build_session(
+            session,
+            grant_id=GRANT_ID,
+            raw_session_token=build_session.session_token,
+            now=NOW + timedelta(seconds=14),
+        )
+        assert authorization.grant_id == GRANT_ID
+        assert authorization.session_id == build_session.session_id
+        assert authorization.purpose == "production"
+        assert authorization.pool_id == "staging-gb10-task-image"
+        assert authorization.cpu_arch == "arm64"
+        assert authorization.attestation_generation == 2
+        assert authorization.attestation_sha256 == canonical_authority_sha256(
+            generation_two
+        )
+        assert authorization.grant_expires_at == grant.authority.expires_at
+
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        original_session_json = row.session_json
+        original_session_sha256 = row.session_sha256
+        changed_session = build_session.model_copy(
+            update={"pool_id": "attacker-pool"}
+        )
+        row.session_json = changed_session.public_binding()
+        row.session_sha256 = canonical_public_binding_sha256(changed_session)
+        with pytest.raises(
+            TaskImageProjectionAuthorizationError,
+            match="stored task-image build session changed",
+        ):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                raw_session_token=build_session.session_token,
+                now=NOW + timedelta(seconds=14),
+            )
+        row.session_json = original_session_json
+        row.session_sha256 = original_session_sha256
+
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID
+                    )
+                )
+            ).all()
+        )
+        assert [event.event_type for event in events].count("attestation_replayed") == 1
+        assert [event.event_type for event in events].count("attested") == 1
+
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                raw_session_token="loom_tibs_" + "Z" * 64,
+                now=NOW + timedelta(seconds=14),
+            )
+
+        row.attestation_expires_at = NOW + timedelta(seconds=14)
+        await session.flush()
+        assert build_session.expires_at > NOW + timedelta(seconds=14)
+        with pytest.raises(TaskImageProjectionExpiredError):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                raw_session_token=build_session.session_token,
+                now=NOW + timedelta(seconds=14),
+            )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "changed_generation",
+        "skipped_generation",
+        "node_boot_id",
+        "cgroup_inode",
+        "link_ids",
+        "program_ids",
+        "map_ids",
+        "policy_digest",
+        "resource_digest",
+    ],
+)
+async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
+    projection_session: async_sessionmaker[AsyncSession],
+    drift: str,
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, principal, proof, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        candidate = _attestation(proof, generation=2)
+        expected: type[Exception] = TaskImageProjectionAuthorizationError
+        if drift == "changed_generation":
+            candidate = _attestation(
+                proof,
+                generation=1,
+                expires_at=proof.attestation_expires_at - timedelta(seconds=1),
+            )
+            expected = TaskImageProjectionConflictError
+        elif drift == "skipped_generation":
+            candidate = _attestation(proof, generation=3)
+            expected = TaskImageProjectionConflictError
+        elif drift == "node_boot_id":
+            candidate = _attestation(proof, generation=2, node_boot_id=uuid4())
+        elif drift == "cgroup_inode":
+            candidate = candidate.model_copy(update={"cgroup_inode": 987655})
+        elif drift == "link_ids":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                attachment=_attachment(link_ids=(101, 102, 104)),
+            )
+        elif drift == "program_ids":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                attachment=_attachment(program_ids=(201, 202, 204)),
+            )
+        elif drift == "map_ids":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                attachment=_attachment(map_ids=(301, 303)),
+            )
+        elif drift == "policy_digest":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                attachment=_attachment(containment_policy_sha256="a" * 64),
+            )
+        elif drift == "resource_digest":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                attachment=_attachment(resource_limits_sha256="a" * 64),
+            )
+
+        with pytest.raises(expected):
+            await record_task_image_containment_attestation(
+                session,
+                principal=principal,
+                attestation=candidate,
+                now=NOW + timedelta(seconds=13),
+            )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.attestation_generation == 1
+
+
+async def test_revocation_is_exact_irreversible_and_blocks_session_and_attestation(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        _grant_value, principal, proof, receipt = await _project_grant(
+            session,
+            secret_store=secrets,
+        )
+        build_session = await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(receipt),
+            now=NOW + timedelta(seconds=8),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+        await revoke_task_image_projection(
+            session,
+            grant_id=GRANT_ID,
+            reason="guard_attestation_lost",
+            now=NOW + timedelta(seconds=9),
+        )
+        await revoke_task_image_projection(
+            session,
+            grant_id=GRANT_ID,
+            reason="guard_attestation_lost",
+            now=NOW + timedelta(seconds=10),
+        )
+        with pytest.raises(TaskImageProjectionConflictError):
+            await revoke_task_image_projection(
+                session,
+                grant_id=GRANT_ID,
+                reason="operator_revoked",
+                now=NOW + timedelta(seconds=10),
+            )
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await record_task_image_containment_attestation(
+                session,
+                principal=principal,
+                attestation=_attestation(proof, generation=2),
+                now=NOW + timedelta(seconds=13),
+            )
+        with pytest.raises(TaskImageProjectionAuthorizationError):
+            await authorize_task_image_build_session(
+                session,
+                grant_id=GRANT_ID,
+                raw_session_token=build_session.session_token,
+                now=NOW + timedelta(seconds=13),
+            )
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID,
+                        TaskImageBuildProjectionEvent.event_type == "revoked",
+                    )
+                )
+            ).all()
+        )
+        assert len(events) == 1
+
+
+async def test_expiration_requires_the_earliest_deadline_and_is_idempotent(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    async with projection_session() as session:
+        await _project_grant(session, secret_store=secrets)
+        with pytest.raises(TaskImageProjectionConflictError):
+            await expire_task_image_projection(
+                session,
+                grant_id=GRANT_ID,
+                now=NOW + timedelta(seconds=39),
+            )
+        await expire_task_image_projection(
+            session,
+            grant_id=GRANT_ID,
+            now=NOW + timedelta(seconds=40),
+        )
+        await expire_task_image_projection(
+            session,
+            grant_id=GRANT_ID,
+            now=NOW + timedelta(seconds=41),
+        )
+        row = await session.scalar(
+            select(TaskImageBuildProjection).where(
+                TaskImageBuildProjection.grant_id == GRANT_ID
+            )
+        )
+        assert row is not None
+        assert row.state == "expired"
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildProjectionEvent).where(
+                        TaskImageBuildProjectionEvent.grant_id == GRANT_ID,
+                        TaskImageBuildProjectionEvent.event_type == "expired",
+                    )
+                )
+            ).all()
+        )
+        assert len(events) == 1
+
+
+async def test_expiration_ignores_consumed_challenge_deadline(
+    projection_session: async_sessionmaker[AsyncSession],
+) -> None:
+    secrets = _MemorySecretStore()
+    principal = _principal()
+    async with projection_session() as session:
+        await _release_grant(session)
+        await request_task_image_projection(
+            session,
+            principal=principal,
+            request=_request(),
+            now=NOW + timedelta(seconds=4),
+            challenge_nonce_factory=lambda: CHALLENGE_NONCE,
+        )
+        proof = _proof(
+            observed_at=NOW + timedelta(seconds=60),
+            attestation_expires_at=NOW + timedelta(seconds=110),
+        )
+        receipt = await complete_task_image_projection(
+            session,
+            principal=principal,
+            proof=proof,
+            now=NOW + timedelta(seconds=61),
+            secret_store=secrets,
+            bootstrap_token_factory=lambda: "loom_tibp_" + "A" * 64,
+        )
+        await exchange_task_image_bootstrap(
+            session,
+            request=_exchange(
+                receipt,
+                observed_at=NOW + timedelta(seconds=62),
+            ),
+            now=NOW + timedelta(seconds=63),
+            secret_store=secrets,
+            session_token_factory=lambda: "loom_tibs_" + "B" * 64,
+        )
+
+        with pytest.raises(
+            TaskImageProjectionConflictError,
+            match="has not reached an expiry deadline",
+        ):
+            await expire_task_image_projection(
+                session,
+                grant_id=GRANT_ID,
+                now=NOW + timedelta(seconds=65),
+            )
 
 
 def test_memory_secret_store_satisfies_protocol() -> None:

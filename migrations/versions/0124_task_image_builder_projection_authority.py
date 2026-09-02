@@ -72,6 +72,8 @@ def upgrade() -> None:
           session_id UUID,
           session_token_hash BYTEA,
           session_secret_ref TEXT,
+          session_json JSONB,
+          session_sha256 VARCHAR(64),
           session_issued_at TIMESTAMPTZ,
           session_expires_at TIMESTAMPTZ,
           attestation_generation BIGINT,
@@ -149,7 +151,8 @@ def upgrade() -> None:
             (
               (exchange_id IS NULL AND exchange_json IS NULL AND exchange_sha256 IS NULL
                 AND session_id IS NULL AND session_token_hash IS NULL
-                AND session_secret_ref IS NULL AND session_issued_at IS NULL
+                AND session_secret_ref IS NULL AND session_json IS NULL
+                AND session_sha256 IS NULL AND session_issued_at IS NULL
                 AND session_expires_at IS NULL)
               OR
               (exchange_id IS NOT NULL AND exchange_json IS NOT NULL
@@ -161,6 +164,9 @@ def upgrade() -> None:
                 AND octet_length(session_secret_ref) BETWEEN
                   octet_length('loom://task-image-session/') + 1 AND
                   octet_length('loom://task-image-session/') + 512
+                AND jsonb_typeof(session_json) = 'object'
+                AND session_sha256 ~ '^[0-9a-f]{64}$'
+                AND session_sha256 <> repeat('0', 64)
                 AND session_issued_at IS NOT NULL AND session_expires_at IS NOT NULL)
             )
             AND (exchange_id IS NULL OR proof_id IS NOT NULL)

@@ -340,7 +340,7 @@ class TaskImageProjectionReceiptV1(_SecretBearingAuthorityModel):
         )
         return self
 
-    def public_binding(self) -> dict[str, object]:
+    def public_binding(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"bootstrap_token"})
         payload["bootstrap_token_sha256"] = hashlib.sha256(
             self.bootstrap_token.encode("utf-8")
@@ -355,7 +355,7 @@ class TaskImageBootstrapExchangeV1(_SecretBearingAuthorityModel):
     bootstrap_token: Annotated[str, Field(pattern=r"^loom_tibp_[A-Za-z0-9_-]{64,128}$")]
     observed_at: datetime
 
-    def public_binding(self) -> dict[str, object]:
+    def public_binding(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"bootstrap_token"})
         payload["bootstrap_token_sha256"] = hashlib.sha256(
             self.bootstrap_token.encode("utf-8")
@@ -388,7 +388,7 @@ class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
         )
         return self
 
-    def public_binding(self) -> dict[str, object]:
+    def public_binding(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude={"session_token"})
         payload["session_token_sha256"] = hashlib.sha256(
             self.session_token.encode("utf-8")
@@ -443,6 +443,19 @@ def canonical_authority_sha256(model: StrictTaskImageAuthorityModel) -> str:
     return hashlib.sha256(canonical_authority_bytes(model)).hexdigest()
 
 
+def canonical_public_binding_sha256(
+    model: TaskImageProjectionReceiptV1
+    | TaskImageBootstrapExchangeV1
+    | TaskImageBuildSessionV1,
+) -> str:
+    """Hash the canonical nonsecret binding of a secret-bearing contract."""
+
+    payload = rfc8785.dumps(model.public_binding())
+    if len(payload) > MAX_CONTRACT_BYTES:
+        raise ValueError("authority public binding exceeds maximum byte size")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def new_bootstrap_token() -> str:
     return "loom_tibp_" + secrets.token_urlsafe(48)
 
@@ -482,6 +495,7 @@ __all__ = [
     "TaskImageProjectionRequestV1",
     "canonical_authority_bytes",
     "canonical_authority_sha256",
+    "canonical_public_binding_sha256",
     "new_bootstrap_token",
     "new_session_token",
 ]

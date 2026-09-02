@@ -2590,6 +2590,7 @@ class TaskImageBuildProjection(Base):
             "AND ((exchange_id IS NULL AND exchange_json IS NULL "
             "AND exchange_sha256 IS NULL AND session_id IS NULL "
             "AND session_token_hash IS NULL AND session_secret_ref IS NULL "
+            "AND session_json IS NULL AND session_sha256 IS NULL "
             "AND session_issued_at IS NULL AND session_expires_at IS NULL) OR "
             "(exchange_id IS NOT NULL AND exchange_json IS NOT NULL "
             "AND jsonb_typeof(exchange_json) = 'object' "
@@ -2601,6 +2602,9 @@ class TaskImageBuildProjection(Base):
             "AND octet_length(session_secret_ref) BETWEEN "
             "octet_length('loom://task-image-session/') + 1 AND "
             "octet_length('loom://task-image-session/') + 512 "
+            "AND jsonb_typeof(session_json) = 'object' "
+            "AND session_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND session_sha256 <> repeat('0', 64) "
             "AND session_issued_at IS NOT NULL AND session_expires_at IS NOT NULL)) "
             "AND (exchange_id IS NULL OR proof_id IS NOT NULL) "
             "AND ((state = 'challenged' AND proof_id IS NULL AND exchange_id IS NULL) "
@@ -2687,6 +2691,8 @@ class TaskImageBuildProjection(Base):
     session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     session_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary(32), nullable=True)
     session_secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    session_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     session_issued_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
     )

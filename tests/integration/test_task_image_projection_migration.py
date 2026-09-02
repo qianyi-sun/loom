@@ -298,6 +298,18 @@ def test_0124_adds_fail_closed_projection_authority_and_round_trips(
             with engine.begin() as connection:
                 _insert_challenged_projection(connection, projection_id=uuid4())
 
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text("""
+                        UPDATE task_image_build_projections
+                        SET session_json = '{}'::jsonb,
+                            session_sha256 = :digest
+                        WHERE grant_id = :grant_id
+                    """),
+                    {"digest": "d" * 64, "grant_id": GRANT_ID},
+                )
+
         with engine.begin() as connection:
             for generation in (1, 2):
                 connection.execute(
