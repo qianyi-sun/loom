@@ -20,6 +20,13 @@ name: Publish benchmarks to HF Hub
 permissions:
   contents: read
 
+# Each run mutates shared Hugging Face dataset repositories. Keep the matrix
+# parallelism inside one run, but serialize runs and never cancel a publisher
+# after it may have written only part of the selected catalog.
+concurrency:
+  group: publish-benchmarks-hf-hub
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
