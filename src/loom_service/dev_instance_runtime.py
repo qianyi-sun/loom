@@ -173,6 +173,7 @@ def build_personal_dev_preparation_runtime(
     vault = KubectlSecretVault(
         kubectl=kubectl,
         database_admin_url=database_admin_url,
+        protected_worker_runtime=True,
     )
     return PersonalDevPreparationRuntime(
         config=PersonalDevRuntimeConfig(

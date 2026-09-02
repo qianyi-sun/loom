@@ -221,7 +221,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == "0125"
+            assert revision == "0128"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
@@ -2619,6 +2619,62 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
         conn.execute(text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id})
         conn.execute(text("UPDATE trials SET state='claimed' WHERE id=:id"), {"id": trial_id})
     assert in_flight() == 1
+
+
+def test_in_flight_count_trigger_is_safe_under_locked_search_path(
+    postgres_url: str,
+) -> None:
+    """Security-definer callers keep pg_catalog-only name resolution."""
+
+    engine = create_engine(postgres_url)
+    team_id = uuid4()
+    task_id = f"locked-search-path-{uuid4().hex}"
+    trial_id = uuid4()
+    worker_id = uuid4()
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO teams (id, name) VALUES (:id, :name)"),
+            {"id": team_id, "name": f"locked-search-path-{team_id}"},
+        )
+        connection.execute(
+            text("INSERT INTO team_quotas (team_id) VALUES (:team_id)"),
+            {"team_id": team_id},
+        )
+        connection.execute(
+            text("INSERT INTO tasks (id, checksum, config) VALUES (:id, :checksum, '{}'::jsonb)"),
+            {"id": task_id, "checksum": "a" * 64},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO workers (id, hostname, version, capabilities, registered_at, "
+                "last_seen_at, status) VALUES "
+                "(:id, 'locked-search-path', 'test', '[]'::jsonb, :now, :now, 'active')"
+            ),
+            {"id": worker_id, "now": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO trials (id, team_id, task_id, config, requires_caps, state) "
+                "VALUES (:id, :team_id, :task_id, '{}'::jsonb, '{}'::jsonb, 'queued')"
+            ),
+            {"id": trial_id, "team_id": team_id, "task_id": task_id},
+        )
+    with engine.begin() as connection:
+        connection.execute(text("SET LOCAL search_path = pg_catalog"))
+        connection.execute(
+            text(
+                "UPDATE public.trials SET state='claimed', worker_id=:worker_id "
+                "WHERE id=:trial_id"
+            ),
+            {"worker_id": worker_id, "trial_id": trial_id},
+        )
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT in_flight_count FROM team_quotas WHERE team_id=:team_id"),
+            {"team_id": team_id},
+        ).scalar_one() == 1
+    engine.dispose()
 
 
 @pytest.mark.parametrize(

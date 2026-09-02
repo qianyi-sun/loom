@@ -13,6 +13,7 @@ from loom.dev_instance import RequestedPolicy, derive_identity
 from loom.dev_instance_manifest import DevInstanceManifestConfig, PersonalDevManifestBinding
 from loom.dev_instance_runtime import (
     CommandResult,
+    DevInstanceRuntimeError,
     HttpControlPlanePolicyRegistrar,
     KubectlCandidateGenerationProvisioner,
     KubectlClient,
@@ -143,6 +144,47 @@ async def test_kubectl_vault_sends_secrets_only_over_stdin() -> None:
     assert await vault.admin_token(derive_identity("alice"))
 
 
+async def test_protected_vault_precreates_runtime_database_secret_before_deploy() -> None:
+    runner = _Runner()
+    vault = KubectlSecretVault(
+        kubectl=KubectlClient("/usr/local/bin/kubectl", runner=runner),
+        database_admin_url=(
+            "postgresql://admin:fixture-secret@db.internal:5433/postgres?sslmode=require"
+        ),
+        manifest_config=_manifest_config(),
+        protected_worker_runtime=True,
+        runtime_password_factory=lambda: (
+            "runtime-password-marker-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        ),
+    )
+
+    await vault.store(derive_identity("alice-smith"), "b" * 20)
+
+    applied = [
+        document
+        for _argv, stdin in runner.calls
+        if stdin is not None
+        for document in yaml.safe_load_all(stdin)
+        if document
+    ]
+    runtime = next(
+        document
+        for document in applied
+        if document["kind"] == "Secret"
+        and document["metadata"]["name"] == "loom-protected-worker-runtime"
+    )
+    assert runtime["metadata"]["namespace"] == "loom-dev-alice-smith"
+    assert runtime["stringData"] == {
+        "database-url": (
+            "postgresql+psycopg://loom_cap_alice_smith_runtime:"
+            "runtime-password-marker-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@"
+            "db.internal:5433/loom_dev_alice_smith?sslmode=require"
+        )
+    }
+    flattened_argv = " ".join(part for argv, _stdin in runner.calls for part in argv)
+    assert "runtime-password-marker" not in flattened_argv
+
+
 class _ExistingSecretRunner(_Runner):
     async def run(
         self,
@@ -171,6 +213,119 @@ class _ExistingSecretRunner(_Runner):
         )
         data = {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}
         return CommandResult(stdout=json.dumps({"data": data}), stderr="")
+
+
+class _MemorySecretKubectl:
+    def __init__(self, secrets: dict[str, dict[str, bytes]]) -> None:
+        self.secrets = secrets
+        self.applied: list[dict[str, Any]] = []
+
+    async def read_secret_optional(self, namespace: str, name: str):
+        assert namespace == "loom-dev-alice"
+        return self.secrets.get(name)
+
+    async def apply(self, manifest: str) -> None:
+        for document in yaml.safe_load_all(manifest):
+            if not document:
+                continue
+            self.applied.append(document)
+            if document["kind"] != "Secret":
+                continue
+            values = {
+                key: value.encode()
+                for key, value in document.get("stringData", {}).items()
+            }
+            values.update(
+                {
+                    key: base64.b64decode(value)
+                    for key, value in document.get("data", {}).items()
+                }
+            )
+            self.secrets[document["metadata"]["name"]] = values
+
+
+def _existing_application_secrets() -> dict[str, dict[str, bytes]]:
+    return {
+        "loom-secrets": {
+            "cp-db-url": (
+                b"postgresql://loom_dev_alice:bbbbbbbbbbbbbbbbbbbb@db/loom_dev_alice"
+            ),
+            "minio-access-key": b"loomdev-alice",
+            "minio-secret-key": b"object-secret",
+        },
+        "loom-admin-secret": {
+            "secrets.toml": b'[admin]\ntoken = "loom_admin_existing"\n'
+        },
+    }
+
+
+async def test_protected_vault_backfills_runtime_secret_once_without_rotation() -> None:
+    secrets_by_name = _existing_application_secrets()
+    original_application_secrets = {
+        name: dict(value) for name, value in secrets_by_name.items()
+    }
+    kubectl = _MemorySecretKubectl(secrets_by_name)
+    generated: list[str] = []
+
+    def runtime_password() -> str:
+        generated.append("called")
+        return "runtime-password-marker-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    vault = KubectlSecretVault(
+        kubectl=kubectl,  # type: ignore[arg-type]
+        database_admin_url="postgresql://admin:fixture-secret@db/postgres",
+        manifest_config=_manifest_config(),
+        protected_worker_runtime=True,
+        runtime_password_factory=runtime_password,
+    )
+    identity = derive_identity("alice")
+
+    first = await vault.store(identity, "b" * 20)
+    second = await vault.store(identity, "b" * 20)
+
+    assert first == second == "k8s-secret://loom-dev-alice/loom-secrets"
+    assert generated == ["called"]
+    assert [document["metadata"]["name"] for document in kubectl.applied] == [
+        "loom-protected-worker-runtime"
+    ]
+    assert {
+        name: secrets_by_name[name] for name in original_application_secrets
+    } == original_application_secrets
+
+
+@pytest.mark.parametrize(
+    "runtime_url",
+    [
+        "not-a-database-url",
+        (
+            "postgresql+psycopg://loom_cap_alice_runtime:"
+            + "r" * 48
+            + "@other-db/loom_dev_alice"
+        ),
+    ],
+)
+async def test_protected_vault_rejects_invalid_existing_runtime_secret(
+    runtime_url: str,
+) -> None:
+    secrets_by_name = _existing_application_secrets()
+    secrets_by_name["loom-protected-worker-runtime"] = {
+        "database-url": runtime_url.encode()
+    }
+    kubectl = _MemorySecretKubectl(secrets_by_name)
+    vault = KubectlSecretVault(
+        kubectl=kubectl,  # type: ignore[arg-type]
+        database_admin_url="postgresql://admin:fixture-secret@db/postgres",
+        manifest_config=_manifest_config(),
+        protected_worker_runtime=True,
+    )
+
+    with pytest.raises(
+        DevInstanceRuntimeError,
+        match="protected worker runtime credential is invalid",
+    ):
+        await vault.store(derive_identity("alice"), "b" * 20)
+
+    assert kubectl.applied == []
 
 
 async def test_kubectl_vault_treats_absent_namespace_as_absent_secret() -> None:

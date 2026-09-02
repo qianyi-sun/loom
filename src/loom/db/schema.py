@@ -3981,7 +3981,7 @@ class ExecutionAdmissionPolicy(Base):
 
 
 class ExecutionAdmissionReservation(Base):
-    """Durable slot held by a legacy claim or service execution lease."""
+    """Durable slot held by a worker claim or service execution lease."""
 
     __tablename__ = "execution_admission_reservations"
     __table_args__ = (
@@ -3994,7 +3994,9 @@ class ExecutionAdmissionReservation(Base):
             name="execution_admission_reservations_role_check",
         ),
         CheckConstraint(
-            "owner_kind IN ('legacy_worker_claim','service_execution_lease')",
+            "owner_kind IN ("
+            "'legacy_worker_claim','service_execution_lease','protected_worker_claim'"
+            ")",
             name="execution_admission_reservations_owner_kind_check",
         ),
         CheckConstraint(
