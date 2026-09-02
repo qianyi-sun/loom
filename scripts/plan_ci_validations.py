@@ -75,25 +75,40 @@ NEBIUS_IAC_EXACT = {
 NEBIUS_IAC_PREFIXES = ("deploy/terraform/nebius/",)
 
 PROTECTED_STAGING_ROLLOUT_EXACT = {
+    ".github/workflows/deploy-environment.yml",
+    ".github/workflows/release-promotion-gate.yml",
     "deploy/environments/staging.cluster.toml",
     "deploy/environment-state/staging.toml",
     "deploy/worker-pools/gb10/known_hosts",
     "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
     "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
     "deploy/worker-pools/gb10/ssh_config",
+    "scripts/ops/deploy_environment.sh",
+    "scripts/ops/release_gate.py",
+    "scripts/ops/release_identity.py",
+    "scripts/ops/verify_production_release_gate.sh",
     "scripts/ops/verify_staging_rollout_secret_boundary.py",
+    "scripts/validate_environment_isolation.py",
     "src/loom_cli/rollout/steps/s04_gb10_prep.py",
     "src/loom_cli/rollout/steps/s10_env_state.py",
+    "src/loom_cli/rollout_lock.py",
+    "src/loom_cli/rollout_lock_cli.py",
     "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
+    "tests/loom_cli/test_rollout_lock.py",
+    "tests/loom_cli/test_rollout_lock_cli.py",
     "tests/loom_cli/test_cluster_render.py",
     "tests/loom_cli/test_environment_state.py",
+    "tests/ops/test_deploy_environment_release_manifest.py",
+    "tests/ops/test_environment_isolation.py",
+    "tests/ops/test_release_identity.py",
+    "tests/ops/test_release_promotion_gate.py",
 }
 
 PROTECTED_STAGING_ROLLOUT_PREFIXES = (
     "deploy/staging-rollout/",
     "scripts/ops/staging_rollout_",
-    "src/loom_cli/rollout/operator/",
-    "tests/loom_cli/rollout/operator/",
+    "src/loom_cli/rollout/",
+    "tests/loom_cli/rollout/",
     "tests/ops/test_staging_rollout_",
 )
 
