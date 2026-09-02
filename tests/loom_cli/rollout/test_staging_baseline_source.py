@@ -7,7 +7,10 @@ from typing import Any
 import pytest
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
-from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
+from loom_cli.rollout.readonly_database_authority import (
+    ReadonlyDatabaseEvidence,
+    ReadonlySmokeAuthorityEvidence,
+)
 from loom_cli.rollout.staging_baseline_source import (
     BaselineHttpResponse,
     CrossVersionStagingBaselineProbeSource,
@@ -211,10 +214,33 @@ def _database_evidence() -> ReadonlyDatabaseEvidence:
     )
 
 
+def _smoke_authority_evidence(
+    *,
+    team_exists: bool = True,
+    team_active: bool = True,
+    team_submissions_enabled: bool = True,
+    user_exists: bool = True,
+    user_active: bool = True,
+    membership_present: bool = True,
+    mutation_epoch: int = 0,
+) -> ReadonlySmokeAuthorityEvidence:
+    return ReadonlySmokeAuthorityEvidence(
+        mutation_epoch=mutation_epoch,
+        team_exists=team_exists,
+        team_active=team_active,
+        team_submissions_enabled=team_submissions_enabled,
+        user_exists=user_exists,
+        user_active=user_active,
+        membership_present=membership_present,
+        evidence_sha256="f" * 64,
+    )
+
+
 def test_cross_version_baseline_uses_public_health_database_and_object_health() -> None:
     source = CrossVersionStagingBaselineProbeSource(
         route=ROUTE,
         database=_database_evidence(),
+        smoke_authority=_smoke_authority_evidence(),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
         public_http_get=lambda url: (
             BaselineHttpResponse(200, "HTTP/2", {"status": "ok"})
@@ -231,10 +257,80 @@ def test_cross_version_baseline_uses_public_health_database_and_object_health() 
     assert results["staging.auth"].readonly_principal == "loom-rollout-readonly"
 
 
+def test_cross_version_auth_blocks_missing_represented_user_membership() -> None:
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=_database_evidence(),
+        smoke_authority=_smoke_authority_evidence(membership_present=False),
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
+        public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
+        tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
+    )
+
+    result = source.probes()["staging.auth"]()
+
+    assert result.blockers == {"smoke-membership": "represented-user-team-membership-missing"}
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    (
+        (
+            _smoke_authority_evidence(
+                team_exists=False,
+                team_active=False,
+                team_submissions_enabled=False,
+                membership_present=False,
+            ),
+            {"smoke-team": "represented-team-not-found"},
+        ),
+        (
+            _smoke_authority_evidence(team_active=False),
+            {"smoke-team": "represented-team-disabled"},
+        ),
+        (
+            _smoke_authority_evidence(team_submissions_enabled=False),
+            {"smoke-submissions": "represented-team-submissions-paused"},
+        ),
+        (
+            _smoke_authority_evidence(
+                user_exists=False,
+                user_active=False,
+                membership_present=False,
+            ),
+            {"smoke-user": "represented-user-not-found"},
+        ),
+        (
+            _smoke_authority_evidence(user_active=False),
+            {"smoke-user": "represented-user-inactive"},
+        ),
+        (
+            _smoke_authority_evidence(mutation_epoch=1),
+            {"smoke-epoch": "represented-authority-epoch-drift"},
+        ),
+    ),
+)
+def test_cross_version_auth_localizes_each_smoke_authority_blocker(
+    evidence: ReadonlySmokeAuthorityEvidence,
+    expected: dict[str, str],
+) -> None:
+    source = CrossVersionStagingBaselineProbeSource(
+        route=ROUTE,
+        database=_database_evidence(),
+        smoke_authority=evidence,
+        object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
+    )
+
+    result = source.probes()["staging.auth"]()
+
+    assert result.blockers == expected
+
+
 def test_cross_version_baseline_aggregates_public_and_object_blockers() -> None:
     source = CrossVersionStagingBaselineProbeSource(
         route=ROUTE,
         database=_database_evidence(),
+        smoke_authority=_smoke_authority_evidence(),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(False, "e" * 64),
         public_http_get=lambda _url: BaselineHttpResponse(503, "HTTP/1.1", {"status": "not-ok"}),
         tls_probe=lambda _route: (_ for _ in ()).throw(OSError("tls unavailable")),
@@ -266,6 +362,7 @@ def test_cross_version_baseline_localizes_missing_capacity_to_storage() -> None:
     source = CrossVersionStagingBaselineProbeSource(
         route=ROUTE,
         database=database,
+        smoke_authority=_smoke_authority_evidence(mutation_epoch=9),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
         public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
         tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),
@@ -301,6 +398,7 @@ def test_cross_version_baseline_tolerates_missing_capacity_below_capacity_migrat
     source = CrossVersionStagingBaselineProbeSource(
         route=ROUTE,
         database=database,
+        smoke_authority=_smoke_authority_evidence(mutation_epoch=9),
         object_store_probe=lambda: ObjectStoreBaselineEvidence(True, "e" * 64),
         public_http_get=lambda _url: BaselineHttpResponse(200, "HTTP/2", {"status": "ok"}),
         tls_probe=lambda _route: TlsRouteEvidence("b" * 64, "c" * 64, 443),

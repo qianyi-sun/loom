@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,64 @@ def test_client_binds_exact_transport_and_keeps_password_out_of_process(tmp_path
     ]
     assert connection.closed
     assert process.terminated and not process.killed
+
+
+def test_installed_smoke_authority_uses_exact_readonly_snapshot() -> None:
+    calls: list[str] = []
+
+    def query(sql: str) -> tuple[Mapping[str, object], ...]:
+        calls.append(sql)
+        if "pg_catalog.pg_roles" in sql:
+            return (
+                {
+                    "role_name": "loom_rollout_readonly",
+                    "transaction_read_only": "on",
+                    "rolcanlogin": True,
+                    "rolsuper": False,
+                    "rolinherit": False,
+                    "rolcreaterole": False,
+                    "rolcreatedb": False,
+                    "rolreplication": False,
+                    "rolbypassrls": False,
+                    "can_connect": True,
+                    "can_create_temp": False,
+                    "can_create_public": False,
+                    "write_table_privileges": 0,
+                    "can_select_baseline": True,
+                },
+            )
+        if "alembic_version" in sql:
+            return ({"schema_revision": "0070"},)
+        if "staging_mutation_epochs" in sql:
+            return ({"environment": "staging", "namespace": "loom-staging", "epoch": 12},)
+        if "AS membership_present" in sql:
+            return (
+                {
+                    "team_exists": True,
+                    "team_active": True,
+                    "team_submissions_enabled": True,
+                    "user_exists": True,
+                    "user_active": True,
+                    "membership_present": True,
+                },
+            )
+        raise AssertionError(sql)
+
+    @contextmanager
+    def query_context(*, service_uid: int):
+        assert service_uid == os.getuid()
+        yield query
+
+    evidence = readonly_database_client.probe_installed_readonly_smoke_authority(
+        service_uid=os.getuid(),
+        represented_username="devansh",
+        team_id="bbce1c49-8d6b-429c-a338-de37a6b533b7",
+        query_context=query_context,
+    )
+
+    assert evidence.ready
+    assert evidence.mutation_epoch == 12
+    assert any("username_normalized = 'devansh'" in sql for sql in calls)
 
 
 def test_guard_client_uses_one_autocommit_backend_without_a_long_transaction(

@@ -16,6 +16,7 @@ from loom_cli.rollout.readonly_authority_source import probe_readonly_authority
 from loom_cli.rollout.readonly_database_authority import (
     ReadonlyDatabaseEvidence,
     ReadonlyMutationEpochEvidence,
+    ReadonlySmokeAuthorityEvidence,
 )
 from loom_cli.rollout.staging_baseline_readiness import (
     STAGING_BASELINE_CHECK_IDS,
@@ -131,6 +132,7 @@ class ReadonlyPreflightAuthority:
     service_uid: int
     kubernetes_run: JsonRunner
     database_evidence: Callable[[], ReadonlyDatabaseEvidence]
+    smoke_authority_evidence: Callable[[], ReadonlySmokeAuthorityEvidence]
     mutation_epoch_evidence: Callable[[], ReadonlyMutationEpochEvidence]
     capacity_source: Callable[[], StagingCapacity]
     object_store_probe: ObjectStoreProbe
@@ -154,9 +156,7 @@ class ReadonlyPreflightAuthority:
     @property
     def baseline_probe_route(self) -> str:
         """Live route the Tier-2 baseline probes hit (predecessor during a transition)."""
-        return derive_staging_baseline_probe_route(
-            self.config, service_uid=self.service_uid
-        )
+        return derive_staging_baseline_probe_route(self.config, service_uid=self.service_uid)
 
     def mutation_epoch(self) -> int:
         return self.mutation_epoch_evidence().mutation_epoch
@@ -175,6 +175,9 @@ class ReadonlyPreflightAuthority:
             sources = CrossVersionStagingBaselineProbeSource(
                 route=self.baseline_probe_route,
                 database=database,
+                smoke_authority=(
+                    self.smoke_authority_evidence() if check_id == "staging.auth" else None
+                ),
                 object_store_probe=self.object_store_probe,
                 public_http_get=self.public_http_get,
                 tls_probe=self.tls_probe,
