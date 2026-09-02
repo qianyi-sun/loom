@@ -75,7 +75,7 @@ for each run. It does not walk repository-wide artifact history or rely on a
 global artifact cursor, so unrelated artifact bursts and one failed delivery
 cannot block newer workflows.
 
-Route reconciliation has its own thirty-second systemd timer and state-only
+Route reconciliation has its own twenty-three-second systemd timer and state-only
 service. It is not a second `ExecStart` behind runner-pool reconciliation and
 does not share the pool's QEMU, Docker, cache, or 300-second service deadline.
 Pool builds, guest cleanup, GitHub JIT registration, and drain work therefore
@@ -181,8 +181,8 @@ Install and enable `loom-ci-runner-route-controller.service` and
 service and timer. The pool unit must contain only the pool reconcile command;
 the route unit must contain only the route controller. During rollout, fail the
 preflight if either unit contains both commands or if the route timer is not
-active with a thirty-second interval. Each process may make at most 35 GitHub
-core requests, so even a continuously saturated timer is bounded to 4,200
+active with a twenty-three-second interval. Each process may make at most 29 GitHub
+core requests, so even a continuously saturated timer is bounded to 4,553
 requests per hour, below the installation's 5,000-request budget. The
 controller records the core `limit`, `remaining`, and `reset` response headers
 in the existing SQLite metadata after every request. A new oneshot process
@@ -190,9 +190,12 @@ therefore inherits the previous process's budget and stops before the final 250
 requests until the recorded reset time; it never turns a local restart into a
 rate-limit bypass. A no-work pass performs five GitHub read requests (the
 trusted branch plus four bounded workflow inventories), keeping steady-state
-use near 600 requests per hour. Repeated run, job, workflow-blob, and CheckRun
-reads within one reconcile use the first validated snapshot instead of spending
-the installation budget twice. The route freshness window is 90 seconds and
+use no more than 785 requests per hour. Active-run snapshots are reused by release
+reconciliation, and persisted route decisions suppress repeated artifact
+lookup, download, and CheckRun validation while the same workflow remains
+active. Repeated run, job, workflow-blob, and CheckRun reads
+within one reconcile use the first validated snapshot instead of spending the
+installation budget twice. The route freshness window is 90 seconds and
 the workflow-side bounded wait remains 180 seconds, leaving one full timer
 interval for ordinary API, artifact-publication, and service latency. A
 transient malformed or count-inconsistent active-run inventory is re-read at
@@ -229,7 +232,7 @@ Activation is one bounded transition:
 4. Start only the route service once. Require schema-3 readback, the exact
    runtime/App/generation identities, zero generation lag/blob drift, and one
    direct App-owned CheckRun that arrives before the pinned action deadline.
-5. Enable the thirty-second route timer and the existing pool timer. Exercise
+5. Enable the twenty-three-second route timer and the existing pool timer. Exercise
    one fresh normal, image, cluster-smoke, and staging-smoke route; verify the
    actual disposable runner identity and terminal lease release for every
    oldlab job.

@@ -124,6 +124,8 @@ class FakeRouteAPI:
         self.checks: dict[tuple[str, str], list[dict[str, object]]] = {}
         self.created_checks: list[dict[str, object]] = []
         self.dispatches: list[dict[str, object]] = []
+        self.route_artifact_reads = 0
+        self.artifact_downloads = 0
         self.publisher_error = False
         self.jobs: dict[tuple[int, int], list[dict[str, object]]] = {
             (request.workflow_run_id, request.run_attempt): []
@@ -152,6 +154,7 @@ class FakeRouteAPI:
     def route_artifact(
         self, *, workflow_id: int, workflow_run_id: int, run_attempt: int
     ) -> dict[str, object] | None:
+        self.route_artifact_reads += 1
         expected = f"{routes.ARTIFACT_PREFIX}{workflow_id}-{workflow_run_id}-{run_attempt}"
         matches = [
             artifact
@@ -163,6 +166,7 @@ class FakeRouteAPI:
         return matches[0] if matches else None
 
     def download_artifact(self, artifact_id: int) -> bytes:
+        self.artifact_downloads += 1
         return self.archives[artifact_id]
 
     def workflow_run(self, run_id: int) -> dict[str, object]:
@@ -735,7 +739,7 @@ def test_invalid_artifact_time_fails_before_persistent_capacity_mutation(
     assert broker.route_decisions() == ()
 
 
-def test_restart_replays_the_exact_persisted_route_decision(
+def test_restart_skips_rediscovery_of_the_exact_persisted_route_decision(
     tmp_path: Path,
 ) -> None:
     request = _request(job_count=2)
@@ -752,8 +756,11 @@ def test_restart_replays_the_exact_persisted_route_decision(
 
     assert first.routes_published == 1
     assert replay.routes_published == 0
-    assert replay.routes_replayed == 1
+    assert replay.routes_replayed == 0
+    assert replay.requests_seen == 0
     assert len(api.created_checks) == 1
+    assert api.route_artifact_reads == 1
+    assert api.artifact_downloads == 1
 
 
 def test_legacy_actions_app_check_replays_after_direct_publisher_upgrade(
@@ -1028,7 +1035,9 @@ def test_github_active_run_inventory_accepts_bounded_count_race(
 
     monkeypatch.setattr(api, "_request", request)
 
-    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == [{"id": 30_000}]
+    run = {"id": 30_000}
+    assert api.active_workflow_runs(leases.WORKFLOW_CLASS_CONTRACTS["CI"][0]) == [run]
+    assert api.workflow_run(30_000) == run
     assert requests == 1
 
 
@@ -1339,9 +1348,11 @@ def test_route_controller_has_an_independent_high_frequency_systemd_timer() -> N
     assert "LOOM_CI_RUNNER_POOL_CANDIDATE_SHA" not in route_command
     assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
-    assert "OnUnitActiveSec=30s" in timer
-    assert routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * (3600 // 30) == 4200
-    assert 4200 + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
+    assert "OnUnitActiveSec=23s" in timer
+    max_activations_per_hour = (3600 + 22) // 23
+    hourly_request_ceiling = routes.MAX_GITHUB_REQUESTS_PER_RECONCILE * max_activations_per_hour
+    assert hourly_request_ceiling == 4553
+    assert hourly_request_ceiling + routes.GITHUB_RATE_LIMIT_RESERVE < 5000
     assert routes.OLDLAB_REQUEST_MAX_AGE_SECONDS < 180
     assert "Unit=loom-ci-runner-route-controller.service" in timer
     assert "loom-ci-runner-route-controller" not in pool_service
