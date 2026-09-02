@@ -18,7 +18,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import GB10WorkerNodeStatus, GB10WorkerPoolDesiredState, Worker
-from loom_control_plane.slurm_worker_jobs import fetch_active_exact_slurm_worker_ids
+from loom_control_plane.slurm_worker_jobs import active_exact_slurm_worker_exists
 
 _SECRET_KEY_PARTS = (
     "TOKEN",
@@ -384,16 +384,11 @@ async def _reconcile_worker_registry_for_host_intents(
     if not inactive_hosts:
         return {"draining": 0, "drained": 0}
 
-    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
-        session,
-        pool_names={pool_name},
-    )
     conditions: list[Any] = [
         Worker.pool_name == pool_name,
         Worker.hostname.in_(tuple(inactive_hosts)),
+        ~active_exact_slurm_worker_exists(),
     ]
-    if excluded_worker_ids:
-        conditions.append(Worker.id.not_in(excluded_worker_ids))
     workers = (
         (
             await session.execute(
@@ -521,13 +516,8 @@ async def _reconcile_worker_drain_state_for_host_intent(
     conditions: list[Any] = [
         Worker.pool_name == row.pool_name,
         Worker.hostname == row.hostname,
+        ~active_exact_slurm_worker_exists(),
     ]
-    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
-        session,
-        pool_names={row.pool_name},
-    )
-    if excluded_worker_ids:
-        conditions.append(Worker.id.not_in(excluded_worker_ids))
     stmt = select(Worker).where(*conditions)
     workers = (await session.execute(stmt)).scalars().all()
     desired_intent = row.desired_intent
@@ -618,15 +608,15 @@ async def fetch_lifecycle_status(
         *(row.pool_name for row in node_rows),
         *([pool_name] if pool_name else []),
     }
-    excluded_worker_ids = await fetch_active_exact_slurm_worker_ids(
-        session,
-        pool_names=pool_names,
-    )
-    worker_by_id, workers_by_node, worker_rows = await _fetch_matching_workers(
+    (
+        worker_by_id,
+        workers_by_node,
+        worker_rows,
+        excluded_worker_ids,
+    ) = await _fetch_matching_workers(
         session,
         node_rows=node_rows,
         pool_names=pool_names,
-        excluded_worker_ids=excluded_worker_ids,
     )
     selected_workers = [
         _worker_for_node(
@@ -662,11 +652,11 @@ async def _fetch_matching_workers(
     *,
     node_rows: Sequence[GB10WorkerNodeStatus],
     pool_names: set[str],
-    excluded_worker_ids: set[UUID],
 ) -> tuple[
     dict[UUID, Worker],
     dict[tuple[str, str], list[Worker]],
     list[Worker],
+    set[UUID],
 ]:
     conditions: list[Any] = []
     if pool_names:
@@ -675,26 +665,33 @@ async def _fetch_matching_workers(
         if row.worker_id is not None:
             conditions.append(Worker.id == row.worker_id)
     if not conditions:
-        return {}, {}, []
-    stmt = select(Worker).where(or_(*conditions))
-    if excluded_worker_ids:
-        stmt = stmt.where(Worker.id.not_in(excluded_worker_ids))
-    worker_rows = (
+        return {}, {}, [], set()
+    worker_rows_with_ownership = (
         (
             await session.execute(
-                stmt,
+                select(
+                    Worker,
+                    active_exact_slurm_worker_exists().label("slurm_owned"),
+                ).where(or_(*conditions)),
             )
         )
-        .scalars()
         .all()
     )
+    excluded_worker_ids = {
+        worker.id for worker, slurm_owned in worker_rows_with_ownership if slurm_owned
+    }
+    worker_rows = [
+        worker
+        for worker, slurm_owned in worker_rows_with_ownership
+        if not slurm_owned
+    ]
     worker_by_id = {row.id: row for row in worker_rows}
     workers_by_node: dict[tuple[str, str], list[Worker]] = defaultdict(list)
     for worker_row in worker_rows:
         workers_by_node[(worker_row.hostname, worker_row.pool_name)].append(
             worker_row,
         )
-    return worker_by_id, dict(workers_by_node), list(worker_rows)
+    return worker_by_id, dict(workers_by_node), worker_rows, excluded_worker_ids
 
 
 def _unlinked_worker_to_dict(worker: Worker, *, now: datetime) -> dict[str, object]:

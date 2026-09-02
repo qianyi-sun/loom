@@ -10,8 +10,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import SlurmWorkerJob, Worker
 from loom.worker_token import (
@@ -121,6 +123,37 @@ async def lock_slurm_worker_job_for_registration(
     return job
 
 
+def active_exact_slurm_worker_exists() -> ColumnElement[bool]:
+    """Return a predicate for workers owned by active exact Slurm jobs."""
+    job = aliased(SlurmWorkerJob)
+    expected_cluster = case(
+        (
+            or_(job.pool_name == "gb10", job.pool_name.endswith("-gb10")),
+            "gb10",
+        ),
+        else_="oldlab",
+    )
+    return exists(
+        select(1).where(
+            job.worker_id == Worker.id,
+            job.state.in_(ACTIVE_STATES),
+            job.job_id.is_not(None),
+            job.job_id != "",
+            job.sandbox_identity.is_not(None),
+            job.sandbox_identity != "",
+            job.candidate_sha.is_not(None),
+            job.candidate_sha != "",
+            job.compose_project.is_not(None),
+            job.compose_project != "",
+            job.environment == job.sandbox_identity,
+            job.slurm_cluster_id == expected_cluster,
+            Worker.pool_name == job.pool_name,
+            Worker.hostname == job.nodelist,
+            Worker.max_concurrent == job.requested_concurrency,
+        ),
+    )
+
+
 async def fetch_active_exact_slurm_worker_ids(
     session: AsyncSession,
     *,
@@ -129,31 +162,13 @@ async def fetch_active_exact_slurm_worker_ids(
     """Return workers owned by active, internally consistent Slurm jobs."""
     if not pool_names:
         return set()
-    rows = (
-        await session.execute(
-            select(SlurmWorkerJob, Worker)
-            .join(Worker, SlurmWorkerJob.worker_id == Worker.id)
-            .where(
-                SlurmWorkerJob.state.in_(ACTIVE_STATES),
-                SlurmWorkerJob.pool_name.in_(sorted(pool_names)),
-            ),
-        )
-    ).all()
-    return {
-        worker.id
-        for job, worker in rows
-        if (
-            job.job_id
-            and job.sandbox_identity
-            and job.candidate_sha
-            and job.compose_project
-            and job.environment == job.sandbox_identity
-            and job.slurm_cluster_id == slurm_cluster_for_pool(job.pool_name)
-            and worker.pool_name == job.pool_name
-            and worker.hostname == job.nodelist
-            and worker.max_concurrent == job.requested_concurrency
-        )
-    }
+    result = await session.execute(
+        select(Worker.id).where(
+            Worker.pool_name.in_(sorted(pool_names)),
+            active_exact_slurm_worker_exists(),
+        ),
+    )
+    return set(result.scalars().all())
 
 
 @dataclass(frozen=True)

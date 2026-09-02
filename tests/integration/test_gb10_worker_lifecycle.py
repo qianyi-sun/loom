@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -8,8 +8,10 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+import loom_control_plane.gb10_worker_lifecycle as lifecycle
 from loom.db.schema import (
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
@@ -522,7 +524,7 @@ def _fetch_worker(postgres_url: str, worker_id: str) -> dict[str, str | None]:
 def _seed_slurm_worker_job(
     postgres_url: str,
     *,
-    worker_id: str,
+    worker_id: str | None,
     hostname: str,
     pool_name: str = "gb10",
     max_concurrent: int = 10,
@@ -562,6 +564,133 @@ def _seed_slurm_worker_job(
         )
         s.commit()
     engine.dispose()
+
+
+def _selects_workers(statement: object) -> bool:
+    descriptions = getattr(statement, "column_descriptions", ())
+    return (
+        bool(descriptions)
+        and descriptions[0].get("entity") is Worker
+        and descriptions[0].get("expr") is Worker
+    )
+
+
+async def _apply_stopped_intent_at_worker_selection_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+    *,
+    transition: Callable[[async_sessionmaker[AsyncSession]], Awaitable[None]],
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    lifecycle_session = session_factory()
+    original_execute = AsyncSession.execute
+    transitioned = False
+
+    async def execute_at_boundary(
+        session: AsyncSession,
+        statement: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal transitioned
+        if session is lifecycle_session and not transitioned and _selects_workers(statement):
+            transitioned = True
+            await transition(session_factory)
+        return await original_execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", execute_at_boundary)
+    try:
+        async with lifecycle_session:
+            await lifecycle.upsert_desired_state(
+                lifecycle_session,
+                environment="production",
+                pool_name="gb10",
+                image_tag="test-image",
+                max_concurrent=10,
+                env_config_version="test-env",
+                host_intents={"trt-gb10-15": "stopped"},
+            )
+            await lifecycle_session.commit()
+        assert transitioned
+    finally:
+        await engine.dispose()
+
+
+async def test_host_intent_does_not_drain_worker_registered_at_selection_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+) -> None:
+    worker_id = uuid4()
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=None,
+        hostname="trt-gb10-15",
+        job_id="54321",
+    )
+
+    async def register_worker(session_factory: async_sessionmaker[AsyncSession]) -> None:
+        async with session_factory() as session:
+            session.add(
+                Worker(
+                    id=worker_id,
+                    hostname="trt-gb10-15",
+                    version="test",
+                    capabilities=[{"backend": "docker"}],
+                    pool_name="gb10",
+                    max_concurrent=10,
+                    drain_state="active",
+                    registered_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                    status="active",
+                ),
+            )
+            job = (
+                await session.execute(
+                    select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == "54321"),
+                )
+            ).scalar_one()
+            job.worker_id = worker_id
+            await session.commit()
+
+    await _apply_stopped_intent_at_worker_selection_boundary(
+        monkeypatch,
+        postgres_url,
+        transition=register_worker,
+    )
+
+    assert _fetch_worker(postgres_url, str(worker_id))["drain_state"] == "active"
+
+
+async def test_host_intent_drains_worker_when_job_becomes_terminal_at_selection_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+) -> None:
+    worker_id = _seed_worker(postgres_url, hostname="trt-gb10-15")
+    _seed_slurm_worker_job(
+        postgres_url,
+        worker_id=worker_id,
+        hostname="trt-gb10-15",
+        job_id="54322",
+    )
+
+    async def complete_job(session_factory: async_sessionmaker[AsyncSession]) -> None:
+        async with session_factory() as session:
+            job = (
+                await session.execute(
+                    select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == "54322"),
+                )
+            ).scalar_one()
+            job.state = "completed"
+            await session.commit()
+
+    await _apply_stopped_intent_at_worker_selection_boundary(
+        monkeypatch,
+        postgres_url,
+        transition=complete_job,
+    )
+
+    assert _fetch_worker(postgres_url, worker_id)["drain_state"] == "drained"
 
 
 @pytest.mark.parametrize("intent", ["stopped", "draining"])
