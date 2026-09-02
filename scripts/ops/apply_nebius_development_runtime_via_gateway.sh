@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -12,6 +12,7 @@ known_hosts=
 cluster_id=
 nebius_credentials=
 model_provider_api_key_file=
+image_admission_keyring=
 service_execution_runtime_profile=
 gateway_image=
 control_plane_image=
@@ -47,6 +48,11 @@ while (($#)); do
     --model-provider-api-key-file)
       (($# >= 2)) || usage
       model_provider_api_key_file=$2
+      shift 2
+      ;;
+    --image-admission-keyring)
+      (($# >= 2)) || usage
+      image_admission_keyring=$2
       shift 2
       ;;
     --service-execution-runtime-profile)
@@ -85,7 +91,12 @@ done
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $execution_runtime_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
-[[ -s $model_provider_api_key_file ]] || usage
+if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
+if [[ -n $image_admission_keyring && ! -s $image_admission_keyring ]]; then
+  usage
+fi
 [[ -s $service_execution_runtime_profile ]] || usage
 
 python3 - "$nebius_credentials" <<'PY'
@@ -123,12 +134,23 @@ if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
 fi
-if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
-  provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+if [[ -n $model_provider_api_key_file ]]; then
+  if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
+    provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+  fi
+  if ((10#$provider_key_mode % 100 != 0)); then
+    echo "Model provider API key file must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
-if ((10#$provider_key_mode % 100 != 0)); then
-  echo "Model provider API key file must not be group/world accessible" >&2
-  exit 1
+if [[ -n $image_admission_keyring ]]; then
+  if ! keyring_mode=$(stat -c '%a' "$image_admission_keyring" 2>/dev/null); then
+    keyring_mode=$(stat -f '%Lp' "$image_admission_keyring")
+  fi
+  if ((10#$keyring_mode % 100 != 0)); then
+    echo "Image admission keyring must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -142,6 +164,7 @@ tar -C "$repo_root" -czf "$local_stage/runtime.tar.gz" \
   deploy/k8s/nebius-gateway-development-patch.yaml \
   deploy/k8s/nebius-control-plane-development-patch.yaml \
   deploy/k8s/nebius-service-development-patch.yaml \
+  deploy/k8s/nebius-development-capacity-policy.json \
   deploy/k8s/nebius-execution-actuator.yaml \
   deploy/k8s/nebius-capacity-collector.yaml \
   deploy/k8s/network-policies.yaml
@@ -158,16 +181,27 @@ ssh_options=(
 # quoted remote path rather than accepting a remote-shell expression.
 # shellcheck disable=SC2029
 ssh "${ssh_options[@]}" "codex@$gateway" "install -d -m 700 '$remote_stage'"
-scp "${ssh_options[@]}" \
-  "$local_stage/runtime.tar.gz" \
-  "$nebius_credentials" \
-  "$model_provider_api_key_file" \
-  "$service_execution_runtime_profile" \
-  "codex@$gateway:$remote_stage/"
+stage_files=(
+  "$local_stage/runtime.tar.gz"
+  "$nebius_credentials"
+  "$service_execution_runtime_profile"
+)
+provider_key_name=-
+if [[ -n $model_provider_api_key_file ]]; then
+  stage_files+=("$model_provider_api_key_file")
+  provider_key_name=$(basename "$model_provider_api_key_file")
+fi
+keyring_name=-
+if [[ -n $image_admission_keyring ]]; then
+  stage_files+=("$image_admission_keyring")
+  keyring_name=$(basename "$image_admission_keyring")
+fi
+scp "${ssh_options[@]}" "${stage_files[@]}" "codex@$gateway:$remote_stage/"
 
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
-  "$(basename "$model_provider_api_key_file")" \
+  "$provider_key_name" \
+  "$keyring_name" \
   "$(basename "$service_execution_runtime_profile")" \
   "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
@@ -175,14 +209,20 @@ remote_stage=$1
 cluster_id=$2
 credential_name=$3
 provider_key_name=$4
-runtime_profile_name=$5
-gateway_image=$6
-control_plane_image=$7
-service_image=$8
+keyring_name=$5
+runtime_profile_name=$6
+gateway_image=$7
+control_plane_image=$8
+service_image=$9
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
-chmod 600 "$remote_stage/$provider_key_name"
+if [[ $provider_key_name != - ]]; then
+  chmod 600 "$remote_stage/$provider_key_name"
+fi
+if [[ $keyring_name != - ]]; then
+  chmod 600 "$remote_stage/$keyring_name"
+fi
 chmod 600 "$remote_stage/$runtime_profile_name"
 tar -C "$remote_stage" -xzf "$remote_stage/runtime.tar.gz"
 nebius mk8s cluster get-credentials \
@@ -201,22 +241,102 @@ kubectl --kubeconfig "$remote_stage/kubeconfig" create secret generic \
   --dry-run=client -o yaml \
   | kubectl --kubeconfig "$remote_stage/kubeconfig" apply -f - >/dev/null
 
+# Schema migration is part of runtime convergence.  Run it from the exact
+# digest-pinned service image before any API Deployment is rolled so startup
+# schema guards cannot strand a rollout between database revisions.  The Job
+# receives only the service database URL, has no Kubernetes API token, and is
+# recreated on every apply so repeated deployment remains idempotent.
+kubectl --kubeconfig "$remote_stage/kubeconfig" delete job \
+  -n loom loom-schema-migrate --ignore-not-found --wait=true >/dev/null
+cat <<MIGRATION | kubectl --kubeconfig "$remote_stage/kubeconfig" apply -f - >/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loom-schema-migrate
+  namespace: loom
+  labels:
+    app.kubernetes.io/name: loom-schema-migrate
+    app.kubernetes.io/managed-by: loom-nebius-runtime-deployer
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: loom-migration
+        app.kubernetes.io/name: loom-schema-migrate
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: $service_image
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
+          env:
+            - name: LOOM_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: svc-db-url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+MIGRATION
+migration_deadline=$((SECONDS + 300))
+migration_complete=false
+while ((SECONDS < migration_deadline)); do
+  migration_status=$(kubectl --kubeconfig "$remote_stage/kubeconfig" get job \
+    -n loom loom-schema-migrate \
+    -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}')
+  if grep -qx 'Complete=True' <<<"$migration_status"; then
+    migration_complete=true
+    break
+  fi
+  if grep -qx 'Failed=True' <<<"$migration_status"; then
+    break
+  fi
+  sleep 2
+done
+if [[ $migration_complete != true ]]; then
+  kubectl --kubeconfig "$remote_stage/kubeconfig" logs \
+    -n loom job/loom-schema-migrate --all-containers=true >&2 || true
+  exit 1
+fi
+
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-llm-gateway "gateway=$gateway_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-llm-gateway
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-llm-gateway --timeout=300s
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-control-plane "control-plane=$control_plane_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-control-plane
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-control-plane --timeout=300s
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-service "service=$service_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-service
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-service --timeout=300s
 
-"$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" \
-  --kubeconfig "$remote_stage/kubeconfig" \
-  --nebius-credentials "$remote_stage/$credential_name" \
-  --model-provider-api-key-file "$remote_stage/$provider_key_name" \
+apply_args=(
+  --kubeconfig "$remote_stage/kubeconfig"
+  --nebius-credentials "$remote_stage/$credential_name"
   --service-execution-runtime-profile "$remote_stage/$runtime_profile_name"
+)
+if [[ $provider_key_name != - ]]; then
+  apply_args+=(--model-provider-api-key-file "$remote_stage/$provider_key_name")
+fi
+if [[ $keyring_name != - ]]; then
+  apply_args+=(--image-admission-keyring "$remote_stage/$keyring_name")
+fi
+"$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" "${apply_args[@]}"
 REMOTE
