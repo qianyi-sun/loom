@@ -232,6 +232,53 @@ variable "capacity_observer_public_key_pem" {
   }
 }
 
+variable "deployment_access_public_pool_id" {
+  description = "Existing project public IPv4 pool used by the persistent deployment gateway allocation."
+  type        = string
+
+  validation {
+    condition     = startswith(var.deployment_access_public_pool_id, "vpcpool-")
+    error_message = "deployment_access_public_pool_id must be an exact Nebius VPC pool ID."
+  }
+}
+
+variable "deployment_access_ssh_public_key" {
+  description = "OpenSSH public key for the non-root deployment gateway operator."
+  type        = string
+
+  validation {
+    condition     = can(regex("^ssh-ed25519 [A-Za-z0-9+/=]+(?: .*)?$", trimspace(var.deployment_access_ssh_public_key)))
+    error_message = "deployment_access_ssh_public_key must be one OpenSSH Ed25519 public key."
+  }
+}
+
+variable "deployment_access_image_id" {
+  description = "Pinned Nebius Ubuntu image used by the persistent deployment gateway."
+  type        = string
+
+  validation {
+    condition     = startswith(var.deployment_access_image_id, "computeimage-")
+    error_message = "deployment_access_image_id must be an exact Nebius Compute image ID."
+  }
+}
+
+variable "deployment_access_preset" {
+  description = "Pinned regular CPU preset for the deployment gateway."
+  type        = string
+  default     = "2vcpu-8gb"
+}
+
+variable "deployment_access_disk_gib" {
+  description = "Persistent deployment gateway NETWORK_SSD boot disk size."
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.deployment_access_disk_gib >= 40
+    error_message = "The pinned deployment gateway image requires at least 40 GiB."
+  }
+}
+
 variable "labels" {
   description = "Additional non-secret labels applied to every supported Nebius resource."
   type        = map(string)

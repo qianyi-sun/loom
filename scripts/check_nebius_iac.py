@@ -132,6 +132,12 @@ def check_nebius_iac(
     )
     for name in ("nebius_profile", "project_id", "evidence_bucket_name"):
         _require(bool(str(document.get(name, ""))), f"{path}: {name} is required")
+    for name in (
+        "deployment_access_public_pool_id",
+        "deployment_access_ssh_public_key",
+        "deployment_access_image_id",
+    ):
+        _require(bool(str(document.get(name, ""))), f"{path}: {name} is required")
     for name in ("network_cidr", "service_cidr"):
         _require(bool(str(target.get(name, ""))), f"{path}: {name} is required")
     cidrs = target.get("public_control_plane_cidrs")
@@ -178,10 +184,14 @@ def check_nebius_iac(
             'required_version = "= 1.16.0"' in text, f"{path}: Terraform must be pinned to 1.16.0"
         )
         _require(
-            'source  = "nebius/nebius"' in text, f"{path}: provider source must be nebius/nebius"
+            re.search(r'^\s*source\s*=\s*"nebius/nebius"\s*$', text, re.MULTILINE)
+            is not None,
+            f"{path}: provider source must be nebius/nebius",
         )
         _require(
-            'version = "= 0.6.46"' in text, f"{path}: Nebius provider must be pinned to 0.6.46"
+            re.search(r'^\s*version\s*=\s*"= 0.6.46"\s*$', text, re.MULTILINE)
+            is not None,
+            f"{path}: Nebius provider must be pinned to 0.6.46",
         )
         _require(
             path.with_name(".terraform.lock.hcl").is_file(),
@@ -189,12 +199,20 @@ def check_nebius_iac(
         )
 
     module = (root / "modules" / "execution-target" / "main.tf").read_text(encoding="utf-8")
+    system_node_group = module.split(
+        'resource "nebius_mk8s_v1_node_group" "system"', 1
+    )[1].split('resource "nebius_mk8s_v1_node_group" "execution"', 1)[0]
+    execution_node_group = module.split(
+        'resource "nebius_mk8s_v1_node_group" "execution"', 1
+    )[1]
     _require(
-        "public_ip_address" not in module,
-        "execution target must not assign node public IP addresses",
+        "public_ip_address" not in system_node_group
+        and "public_ip_address" not in execution_node_group,
+        "system and execution nodes must not assign public IP addresses",
     )
     _require(
-        module.count('policy = "FORBID"') == 2, "both node groups must forbid capacity reservations"
+        module.count('policy = "FORBID"') == 3,
+        "both node groups and the deployment gateway must forbid capacity reservations",
     )
     _require('key    = "loom.nebius/execution"' in module, "execution node taint is required")
     _require("audit_logs        = {}" in module, "managed control-plane audit logging is required")
@@ -212,6 +230,32 @@ def check_nebius_iac(
     )
     _require(
         'roles    = ["storage.object-editor"]' in module, "evidence writers need object-only access"
+    )
+    _require(
+        'resource "nebius_compute_v1_instance" "deployment_access"' in module,
+        "the private control plane requires a Terraform-managed deployment gateway",
+    )
+    _require(
+        "service_account_id = nebius_iam_v1_service_account.deployment_access.id" in module,
+        "the deployment gateway must use a non-human instance identity",
+    )
+    _require(
+        "public_ip_address = {\n      allocation_id = nebius_vpc_v1_allocation.deployment_access.id"
+        in module,
+        "the deployment gateway must use its persistent allocation",
+    )
+    _require(
+        'role        = "editor"' in module,
+        "the deployment identity needs resource-scoped cluster and registry access",
+    )
+    _require(
+        'resource "nebius_iam_v1_access_permit" "deployment_access_project"' in module
+        and "resource_id = var.project_id" in module,
+        "Nebius Managed Kubernetes deployment access requires the supported project scope",
+    )
+    _require(
+        "provider  = nebius.no_default_labels" in module,
+        "immutable imported IAM relationships need a provider without default labels",
     )
 
 

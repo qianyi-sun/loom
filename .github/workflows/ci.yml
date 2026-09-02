@@ -706,7 +706,8 @@ jobs:
           set -euo pipefail
           terraform fmt -check -recursive deploy/terraform/nebius
           terraform -chdir=deploy/terraform/nebius/modules/execution-target init -backend=false -input=false
-          terraform -chdir=deploy/terraform/nebius/modules/execution-target validate
+          # The reusable module requires an aliased provider configuration;
+          # its mock-backed tests supply both provider instances explicitly.
           terraform -chdir=deploy/terraform/nebius/modules/execution-target test
           terraform -chdir=deploy/terraform/nebius/stack init -backend=false -input=false
           terraform -chdir=deploy/terraform/nebius/stack validate

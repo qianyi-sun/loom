@@ -139,12 +139,19 @@ resource "nebius_iam_v1_group" "capacity_observer" {
 }
 
 resource "nebius_iam_v1_group_membership" "capacity_observer" {
+  provider  = nebius.no_default_labels
   parent_id = nebius_iam_v1_group.capacity_observer.id
   member_id = nebius_iam_v1_service_account.capacity_observer.id
-  labels    = local.common_labels
+
+  # Nebius does not implement Update for group memberships. Provider default
+  # labels are state-only metadata for this imported, already-correct binding.
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 resource "nebius_iam_v1_access_permit" "capacity_observer" {
+  provider  = nebius.no_default_labels
   parent_id = nebius_iam_v1_group.capacity_observer.id
   # Nebius publishes the effective compute quota limits only on the tenant
   # allowance collection. The narrower tenant auditor role cannot list that
@@ -153,22 +160,30 @@ resource "nebius_iam_v1_access_permit" "capacity_observer" {
   # readback in one identity.
   resource_id = var.tenant_id
   role        = "viewer"
-  labels      = local.common_labels
+
+  # Nebius does not implement Update for access permits.
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 resource "nebius_iam_v1_auth_public_key" "capacity_observer" {
-  parent_id   = var.project_id
-  name        = "${local.resource_prefix}-capacity-observer"
-  description = "Non-expiring authorized key for the recurring capacity observer"
+  parent_id = var.project_id
   account = {
     service_account = {
       id = nebius_iam_v1_service_account.capacity_observer.id
     }
   }
-  data   = var.capacity_observer_public_key_pem
-  labels = local.common_labels
+  data = var.capacity_observer_public_key_pem
   # expires_at is deliberately omitted. The SDK exchanges this stable key for
   # short-lived access tokens and refreshes those tokens without an operator.
+
+  # Provider 0.6.46 does not return the key material after import, so comparing
+  # data would replace a live non-expiring credential on every convergence.
+  # Rotation is an explicit two-key operation with old-key failure proof.
+  lifecycle {
+    ignore_changes = [data]
+  }
 }
 
 moved {
@@ -238,6 +253,124 @@ resource "nebius_mk8s_v1_cluster" "target" {
   kube_network = {
     service_cidrs = [var.service_cidr]
   }
+}
+
+# The cluster API remains private. This small, fixed-address gateway is the
+# durable operator/automation ingress into the cluster network; it is not an
+# execution worker and never participates in user task scheduling.
+resource "nebius_vpc_v1_subnet" "deployment_access" {
+  parent_id  = var.project_id
+  name       = "${local.resource_prefix}-deployment-access"
+  network_id = nebius_vpc_v1_network.target.id
+  labels     = local.common_labels
+
+  ipv4_private_pools = {
+    use_network_pools = true
+  }
+  ipv4_public_pools = {
+    use_network_pools = true
+  }
+}
+
+resource "nebius_vpc_v1_allocation" "deployment_access" {
+  parent_id = var.project_id
+  name      = "${local.resource_prefix}-deployment-access"
+  labels    = local.common_labels
+
+  ipv4_public = {
+    pool_id = var.deployment_access_public_pool_id
+    cidr    = "/32"
+  }
+}
+
+resource "nebius_iam_v1_service_account" "deployment_access" {
+  parent_id   = var.project_id
+  name        = "${local.resource_prefix}-deployment-access"
+  description = "Instance identity for persistent Loom deployment access to ${var.target_id}"
+  labels      = local.common_labels
+}
+
+resource "nebius_iam_v1_group" "deployment_access" {
+  parent_id = var.tenant_id
+  name      = "${local.resource_prefix}-deployment-access"
+  labels    = local.common_labels
+}
+
+resource "nebius_iam_v1_group_membership" "deployment_access" {
+  parent_id = nebius_iam_v1_group.deployment_access.id
+  member_id = nebius_iam_v1_service_account.deployment_access.id
+  labels    = local.common_labels
+}
+
+resource "nebius_iam_v1_access_permit" "deployment_access_project" {
+  parent_id = nebius_iam_v1_group.deployment_access.id
+  # Managed Kubernetes does not accept cluster-scoped access permits. Project
+  # editor is the narrowest supported scope that can obtain cluster credentials
+  # and deploy workloads through the private API.
+  resource_id = var.project_id
+  role        = "editor"
+  labels      = local.common_labels
+}
+
+resource "nebius_iam_v1_access_permit" "deployment_access_registry" {
+  parent_id   = nebius_iam_v1_group.deployment_access.id
+  resource_id = nebius_registry_v1_registry.target.id
+  role        = "editor"
+  labels      = local.common_labels
+}
+
+resource "nebius_compute_v1_instance" "deployment_access" {
+  parent_id          = var.project_id
+  name               = "${local.resource_prefix}-deployment-access"
+  hostname           = "loom-nebius-deployment-access"
+  labels             = local.common_labels
+  stopped            = false
+  recovery_policy    = "RECOVER"
+  service_account_id = nebius_iam_v1_service_account.deployment_access.id
+
+  resources = {
+    platform = "cpu-e2"
+    preset   = var.deployment_access_preset
+  }
+  reservation_policy = {
+    policy = "FORBID"
+  }
+  boot_disk = {
+    attach_mode = "READ_WRITE"
+    managed_disk = {
+      name   = "${local.resource_prefix}-deployment-access"
+      labels = local.common_labels
+      spec = {
+        size_gibibytes  = var.deployment_access_disk_gib
+        type            = "NETWORK_SSD"
+        source_image_id = var.deployment_access_image_id
+      }
+    }
+  }
+  network_interfaces = [{
+    name       = "eth0"
+    subnet_id  = nebius_vpc_v1_subnet.deployment_access.id
+    ip_address = {}
+    public_ip_address = {
+      allocation_id = nebius_vpc_v1_allocation.deployment_access.id
+    }
+  }]
+  cloud_init_user_data = <<-CLOUD_INIT
+    #cloud-config
+    users:
+      - name: codex
+        sudo: false
+        shell: /bin/bash
+        ssh_authorized_keys:
+          - ${trimspace(var.deployment_access_ssh_public_key)}
+    ssh_pwauth: false
+    disable_root: true
+  CLOUD_INIT
+
+  depends_on = [
+    nebius_iam_v1_access_permit.deployment_access_project,
+    nebius_iam_v1_access_permit.deployment_access_registry,
+  ]
 }
 
 resource "nebius_mk8s_v1_node_group" "system" {
