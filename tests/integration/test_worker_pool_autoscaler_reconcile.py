@@ -2444,7 +2444,8 @@ async def test_external_slurm_runner_reconcile_refreshes_known_job_state(
 
         assert job.state == "running"
         assert job.slurm_state == "RUNNING"
-        assert job.worker_id == worker_id
+        # Slurm observations alone cannot claim an unlinked worker registration.
+        assert job.worker_id is None
         assert policy.last_actual_slots == 1
         assert policy.last_pending_slots == 0
     finally:

@@ -280,8 +280,9 @@ async def test_controller_reconciles_existing_jobs_before_deciding_capacity(
                 select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
             )).scalars().all()
 
+        # Slurm observations alone cannot claim an unlinked worker registration.
         assert [(row.job_id, row.state, row.worker_id) for row in rows] == [
-            ("601", "running", worker_id),
+            ("601", "running", None),
             ("602", "pending", None),
         ]
     finally:
