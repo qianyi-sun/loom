@@ -809,6 +809,16 @@ cleanup() {
   fi
   cleanup_status=0
   docker compose "${compose_args[@]}" down --remove-orphans || cleanup_status=$?
+  for volume_suffix in remote_worker_trajectories remote_worker_benchmarks; do
+    volume_name="${LOOM_WORKER_COMPOSE_PROJECT}_${volume_suffix}"
+    if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+      volume_status=0
+      docker volume rm "$volume_name" || volume_status=$?
+      if [[ "$cleanup_status" -eq 0 && "$volume_status" -ne 0 ]]; then
+        cleanup_status=$volume_status
+      fi
+    fi
+  done
   if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
     status=$cleanup_status
   fi
