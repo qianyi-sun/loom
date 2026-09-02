@@ -430,6 +430,16 @@ def test_materialized_task_image_pull_timeout_is_classified_as_task_image_timeou
     assert ml._classify_setup_failure(detail) == FailureReason.TASK_IMAGE_BUILD_TIMEOUT
 
 
+def test_materialized_sidecar_image_pull_timeout_is_classified_as_task_image_timeout() -> None:
+    detail = (
+        "pulling materialized sidecar image "
+        "'registry.example/loom-task@sha256:" + "b" * 64 + "' exceeded 1800s; "
+        "execution is fenced to the recorded registry digest"
+    )
+
+    assert ml._classify_setup_failure(detail) == FailureReason.TASK_IMAGE_BUILD_TIMEOUT
+
+
 class _FakeSettings:
     trajectory_cache_dir = Path("/tmp/loom-test-cleanup-cache")
     gateway_url = "http://gw:9100"
@@ -780,6 +790,7 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
         "task": main_ref,
         "sidecar:api": sidecar_ref,
     }
+    assert sidecar_runtime.materialized_image_pull_timeout_sec == 1800.0
 
 
 async def test_task_image_setup_failure_records_diagnostic_message() -> None:

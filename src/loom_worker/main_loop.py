@@ -1458,6 +1458,9 @@ async def _spawn_trial(
                     if task_image_materialization is not None
                     else None
                 ),
+                materialized_image_pull_timeout_sec=getattr(
+                    settings, "trial_cache_base_image_pull_timeout_sec", 1800.0
+                ),
                 pull_only=True,
                 attempt_count=attempt_count,
                 worker_id=worker_id,
@@ -1825,7 +1828,10 @@ def _classify_setup_failure(detail: str) -> FailureReason:
         return FailureReason.TASK_COMPATIBILITY
     if "building Docker image" in detail and " from " in detail and " exceeded " in detail:
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
-    if "pulling materialized task image" in detail and " exceeded " in detail:
+    if (
+        "pulling materialized task image" in detail
+        or "pulling materialized sidecar image" in detail
+    ) and " exceeded " in detail:
         return FailureReason.TASK_IMAGE_BUILD_TIMEOUT
     lowered = detail.lower()
     if "failed to build layered image" in lowered and (
