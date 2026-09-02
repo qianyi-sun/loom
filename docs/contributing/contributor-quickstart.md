@@ -155,10 +155,15 @@ and renders and audits both the staging and production cluster profiles. These
 checks are credential-free candidate evidence; real Yibu-backed tasks and live
 environment readiness remain staging promotion gates rather than PR jobs.
 
-`repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
-root-test shards, and sibling-package tests run in parallel jobs, then it combines their
-coverage artifacts, applies the 70% fast-tier gate, and writes the default
-fast-tier coverage summary. CI restores only uv's package/download cache and
+For non-document changes, `fast-checks` is the fast-tier coverage aggregator:
+ruff/mypy/static checks, two root-test shards, and sibling-package tests run in
+parallel jobs, then it combines their coverage artifacts, applies the 70%
+fast-tier gate, and writes the default fast-tier coverage summary.
+`repository-checks` enforces every selected result after the independent lanes
+finish. Docs-only PRs skip the no-input `fast-checks` job and let
+`repository-checks` validate that skipped result directly, avoiding a no-op
+runner queue hop while preserving the same stable required context. CI restores
+only uv's package/download cache and
 never restores `.venv` or `.mypy_cache`; PR and merge-group runs cannot save
 cache entries. Every job creates a clean environment with `uv sync --locked`,
 then uses `uv run --no-sync` so a test command cannot silently resolve a new

@@ -1645,6 +1645,54 @@ def test_repository_checks_enforces_docs_only_go_result_semantics(
     )
 
 
+@pytest.mark.parametrize(
+    ("docs_only", "fast_result", "accepted"),
+    [
+        ("true", "skipped", True),
+        ("true", "success", True),
+        ("true", "failure", False),
+        ("true", "cancelled", False),
+        ("false", "success", True),
+        ("false", "skipped", False),
+        ("false", "failure", False),
+        ("false", "cancelled", False),
+    ],
+)
+def test_repository_checks_enforces_docs_only_fast_result_semantics(
+    docs_only: str,
+    fast_result: str,
+    accepted: bool,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True,
+        capture_output=True,
+        env={
+            "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
+            "FAST_RESULT": fast_result,
+            "GO_RESULT": "skipped" if docs_only == "true" else "success",
+            "DOCS_ONLY": docs_only,
+            "INTEGRATION_SELECTED": "false",
+            "INTEGRATION_RESULT": "skipped",
+            "DOCKER_SELECTED": "false",
+            "DOCKER_RESULT": "skipped",
+            "COVERAGE_SELECTED": "false",
+            "COVERAGE_RESULT": "skipped",
+            "WEB_SELECTED": "false",
+            "WEB_RESULT": "skipped",
+        },
+        check=False,
+    )
+
+    assert (result.returncode == 0) is accepted, (
+        docs_only,
+        fast_result,
+        result.stderr,
+    )
+
+
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
     contracts = {
         ".github/workflows/images.yml": (
@@ -1721,6 +1769,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         "tests-packages",
     }
     assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
+    assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
     assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan", "ci-route"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan", "ci-route"}
