@@ -91,13 +91,17 @@ concurrency:
   group: >-
     cluster-smoke-${{ github.event.pull_request.number || github.ref }}-${{
       github.event_name == 'pull_request' &&
-      ((github.event.action == 'edited' && github.event.changes.base == null) ||
+      (github.event.pull_request.draft ||
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' && github.event.changes.base == null) ||
        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
         !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
       format('filtered-{0}', github.run_id) || 'authoritative' }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
-        !((github.event.action == 'edited' && github.event.changes.base == null) ||
+        !(github.event.pull_request.draft ||
+          github.event.action == 'converted_to_draft' ||
+          (github.event.action == 'edited' && github.event.changes.base == null) ||
           ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
            !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
 

@@ -822,21 +822,31 @@ def test_public_failures_do_not_retain_sensitive_parser_or_filesystem_causes(
         assert raised.value.__cause__ is None
 
 
-def test_manifest_builder_rejects_an_authority_larger_than_the_real_64_mib_limit() -> None:
-    # Removing build-time canonical-byte validation returns authority with 67,200,000 metadata bytes.
-    metadata = {f"k{index}": "x" * 1680 for index in range(4)}
+def test_manifest_size_limit_is_exactly_64_mib() -> None:
+    assert minio_backup._MAX_MANIFEST_BYTES == 64 * 1024 * 1024
+
+
+def test_manifest_builder_rejects_an_authority_one_byte_over_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     objects = tuple(
         PersonalDevMinioObject(
             bucket="artifacts",
-            key=f"personal-dev/over-limit/{index:05d}",
-            payload_sha256="a" * 64,
+            key=f"personal-dev/over-limit/{index}",
+            payload_sha256=f"{index + 1:064x}",
             size_bytes=0,
             content_type="text/plain",
             cache_control=None,
-            metadata=metadata,
+            metadata={"source": "scaled-boundary-regression"},
         )
-        for index in range(10_000)
+        for index in range(2)
     )
+    accepted = build_personal_dev_minio_manifest(objects)
+    canonical_bytes = accepted.canonical_bytes
+    scaled_limit = len(canonical_bytes) - 1
+    monkeypatch.setattr(minio_backup, "_MAX_MANIFEST_BYTES", scaled_limit)
+
+    assert len(canonical_bytes) == scaled_limit + 1
 
     with pytest.raises(PersonalDevMinioBackupError, match=_ERROR_PATTERN):
         build_personal_dev_minio_manifest(objects)

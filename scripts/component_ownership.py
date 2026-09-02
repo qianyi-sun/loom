@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -51,6 +52,21 @@ class TestSuite:
 
 
 @dataclass(frozen=True)
+class TestShardPin:
+    path: str
+    shard_index: int
+
+
+@dataclass(frozen=True)
+class TestShardPolicy:
+    lane: str
+    shard_count: int
+    strategy: str
+    salt: str | None
+    pins: tuple[TestShardPin, ...]
+
+
+@dataclass(frozen=True)
 class FixtureFile:
     path: str
     content: str | None
@@ -85,6 +101,7 @@ class Manifest:
     attestation_owners: tuple[str, ...]
     components: tuple[Component, ...]
     test_suites: tuple[TestSuite, ...]
+    test_sharding: tuple[TestShardPolicy, ...]
 
     def ci_ignores_path(self, path: str) -> bool:
         normalized = _safe_path(path, context="query path")
@@ -137,6 +154,12 @@ class Manifest:
             for component in self.components
             if component.kind == "release-image" and component.ci_enabled
         )
+
+    def test_shard_policy(self, lane: str) -> TestShardPolicy | None:
+        matches = tuple(policy for policy in self.test_sharding if policy.lane == lane)
+        if len(matches) > 1:
+            raise ManifestError(f"test shard policy has multiple definitions: {lane}")
+        return matches[0] if matches else None
 
 
 @lru_cache(maxsize=512)
@@ -397,6 +420,62 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
     )
 
 
+def _test_shard_pin(raw: dict[str, Any], *, context: str) -> TestShardPin:
+    _reject_unknown_keys(raw, {"path", "shard_index"}, context)
+    path = _safe_path(
+        _required_string(raw, "path", context),
+        context=f"{context}.path",
+    )
+    shard_index = raw.get("shard_index")
+    if type(shard_index) is not int or shard_index < 0:
+        raise ManifestError(f"{context}.shard_index must be a non-negative integer")
+    return TestShardPin(path=path, shard_index=shard_index)
+
+
+def _test_shard_policy(raw: dict[str, Any]) -> TestShardPolicy:
+    context = f"test shard policy {raw.get('lane', '<missing>')!r}"
+    _reject_unknown_keys(raw, {"lane", "shard_count", "strategy", "salt", "pins"}, context)
+    lane = _required_slug(raw, "lane", context)
+    shard_count = raw.get("shard_count")
+    if type(shard_count) is not int or shard_count < 2:
+        raise ManifestError(f"{context}.shard_count must be an integer of at least 2")
+    strategy = _required_string(raw, "strategy", context)
+    if strategy not in {"contiguous", "stable-hash"}:
+        raise ManifestError(f"{context}.strategy must be one of contiguous, stable-hash")
+    salt = raw.get("salt")
+    if strategy == "stable-hash":
+        if not isinstance(salt, str) or not salt:
+            raise ManifestError(f"{context}.salt must be a non-empty string for stable-hash")
+    elif salt is not None:
+        raise ManifestError(f"{context}.salt is only valid for stable-hash")
+    raw_pins = raw.get("pins", [])
+    if not isinstance(raw_pins, list) or not all(isinstance(item, dict) for item in raw_pins):
+        raise ManifestError(f"{context}.pins must be an array of tables")
+    pins = tuple(
+        _test_shard_pin(item, context=f"{context}.pins[{index}]")
+        for index, item in enumerate(raw_pins)
+    )
+    duplicate_paths = sorted(
+        path for path, count in Counter(pin.path for pin in pins).items() if count > 1
+    )
+    if duplicate_paths:
+        raise ManifestError(
+            f"{context}.pins must not contain duplicate paths: {', '.join(duplicate_paths)}"
+        )
+    for pin in pins:
+        if pin.shard_index >= shard_count:
+            raise ManifestError(
+                f"{context} pin shard index must be below {shard_count}: {pin.path}"
+            )
+    return TestShardPolicy(
+        lane=lane,
+        shard_count=shard_count,
+        strategy=strategy,
+        salt=salt,
+        pins=pins,
+    )
+
+
 def _fixture_file(raw: dict[str, Any], *, context: str) -> FixtureFile:
     _reject_unknown_keys(raw, {"path", "content", "size"}, context)
     path = _safe_path(_required_string(raw, "path", context), context=f"{context}.path")
@@ -500,6 +579,7 @@ def load_manifest(path: Path) -> Manifest:
             "attestation_owners",
             "components",
             "test_suites",
+            "test_sharding",
         },
         "manifest",
     )
@@ -508,6 +588,7 @@ def load_manifest(path: Path) -> Manifest:
         raise ManifestError("manifest.schema_version must be the integer 2")
     raw_components = raw.get("components", [])
     raw_test_suites = raw.get("test_suites", [])
+    raw_test_sharding = raw.get("test_sharding", [])
     raw_ci_lanes = raw.get("ci_lanes", [])
     if not isinstance(raw_ci_lanes, list) or not all(
         isinstance(item, str) for item in raw_ci_lanes
@@ -536,6 +617,10 @@ def load_manifest(path: Path) -> Manifest:
         isinstance(item, dict) for item in raw_test_suites
     ):
         raise ManifestError("manifest.test_suites must be an array of tables")
+    if not isinstance(raw_test_sharding, list) or not all(
+        isinstance(item, dict) for item in raw_test_sharding
+    ):
+        raise ManifestError("manifest.test_sharding must be an array of tables")
     raw_execution_policies = raw.get("execution_policies", [])
     if not isinstance(raw_execution_policies, list) or not all(
         isinstance(item, dict) for item in raw_execution_policies
@@ -583,6 +668,13 @@ def load_manifest(path: Path) -> Manifest:
                 f"test suite {suite.id!r} uses undeclared execution policy: "
                 f"{suite.execution_policy}"
             )
+    test_sharding = tuple(_test_shard_policy(item) for item in raw_test_sharding)
+    policy_lanes = Counter(policy.lane for policy in test_sharding)
+    for lane, count in sorted(policy_lanes.items()):
+        if count > 1:
+            raise ManifestError(f"test shard policy has multiple definitions: {lane}")
+        if lane not in ci_lanes:
+            raise ManifestError(f"test shard policy uses undeclared CI lane: {lane}")
     return Manifest(
         schema_version=2,
         ci_lanes=ci_lanes,
@@ -594,6 +686,7 @@ def load_manifest(path: Path) -> Manifest:
         attestation_owners=_slug_registry(raw, "attestation_owners"),
         components=tuple(_component(item) for item in raw_components),
         test_suites=test_suites,
+        test_sharding=test_sharding,
     )
 
 
@@ -666,6 +759,28 @@ def validate_manifest(
     for lane in manifest.ci_lanes:
         if not any(suite.lane == lane for suite in manifest.test_suites):
             errors.append(f"CI lane has no test suite owner: {lane}")
+    for shard_policy in manifest.test_sharding:
+        lane_paths = test_paths_for_lane(
+            manifest,
+            tracked_paths=tracked_paths,
+            lane=shard_policy.lane,
+        )
+        if len(lane_paths) < shard_policy.shard_count:
+            errors.append(
+                f"test shard policy has fewer paths than shards: {shard_policy.lane}: "
+                f"{len(lane_paths)} < {shard_policy.shard_count}"
+            )
+        for pin in shard_policy.pins:
+            if pin.path not in tracked_paths:
+                errors.append(
+                    f"test shard pin path is not tracked: {shard_policy.lane}: {pin.path}"
+                )
+                continue
+            owners = manifest.test_owners_for_path(pin.path)
+            if len(owners) != 1 or owners[0].lane != shard_policy.lane:
+                errors.append(
+                    f"test shard pin crosses CI lane: {shard_policy.lane}: {pin.path}"
+                )
     for policy in manifest.execution_policies:
         if not any(suite.execution_policy == policy.id for suite in manifest.test_suites):
             errors.append(f"execution policy has no test suite owner: {policy.id}")
@@ -1094,6 +1209,8 @@ def shard_paths(
     shard_index: int,
     shard_count: int,
     strategy: str = "round-robin",
+    salt: str | None = None,
+    pins: tuple[TestShardPin, ...] = (),
 ) -> tuple[str, ...]:
     """Partition an ordered manifest-owned path list without a second path authority."""
 
@@ -1101,14 +1218,39 @@ def shard_paths(
         raise ManifestError("shard count must be at least 1")
     if shard_index < 0 or shard_index >= shard_count:
         raise ManifestError(f"shard index must be between 0 and {shard_count - 1}: {shard_index}")
+    if len(set(paths)) != len(paths):
+        raise ManifestError("shard input paths must not contain duplicates")
+    if len({pin.path for pin in pins}) != len(pins):
+        raise ManifestError("test shard pins must not contain duplicate paths")
+    path_set = set(paths)
+    for pin in pins:
+        if pin.path not in path_set:
+            raise ManifestError(f"test shard pin is absent from lane paths: {pin.path}")
+        if pin.shard_index < 0 or pin.shard_index >= shard_count:
+            raise ManifestError(
+                f"test shard pin index must be between 0 and {shard_count - 1}: {pin.path}"
+            )
     if strategy == "round-robin":
-        return paths[shard_index::shard_count]
-    if strategy == "contiguous":
+        assignments = {path: index % shard_count for index, path in enumerate(paths)}
+    elif strategy == "contiguous":
         base_size, larger_shards = divmod(len(paths), shard_count)
-        start = shard_index * base_size + min(shard_index, larger_shards)
-        stop = start + base_size + int(shard_index < larger_shards)
-        return paths[start:stop]
-    raise ManifestError(f"unsupported shard strategy: {strategy}")
+        assignments = {}
+        start = 0
+        for index in range(shard_count):
+            stop = start + base_size + int(index < larger_shards)
+            assignments.update((path, index) for path in paths[start:stop])
+            start = stop
+    elif strategy == "stable-hash":
+        if not salt:
+            raise ManifestError("stable-hash shard strategy requires a non-empty salt")
+        assignments = {
+            path: hashlib.sha256(f"{salt}\0{path}".encode()).digest()[0] % shard_count
+            for path in paths
+        }
+    else:
+        raise ManifestError(f"unsupported shard strategy: {strategy}")
+    assignments.update((pin.path, pin.shard_index) for pin in pins)
+    return tuple(path for path in paths if assignments[path] == shard_index)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1152,8 +1294,8 @@ def _parser() -> argparse.ArgumentParser:
     test_paths.add_argument("--shard-count", type=int, default=1)
     test_paths.add_argument(
         "--shard-strategy",
-        choices=("round-robin", "contiguous"),
-        default="round-robin",
+        choices=("round-robin", "contiguous", "stable-hash"),
+        default=None,
     )
     execution_plan = subparsers.add_parser(
         "execution-plan",
@@ -1256,11 +1398,30 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not paths:
                 raise ManifestError(f"CI lane has no tracked test paths: {args.lane}")
+            policy = manifest.test_shard_policy(args.lane) if args.shard_count > 1 else None
+            if policy is not None and policy.shard_count != args.shard_count:
+                raise ManifestError(
+                    f"test shard count differs from manifest authority: {args.lane}: "
+                    f"{args.shard_count} != {policy.shard_count}"
+                )
+            if (
+                policy is not None
+                and args.shard_strategy is not None
+                and args.shard_strategy != policy.strategy
+            ):
+                raise ManifestError(
+                    f"test shard strategy differs from manifest authority: {args.lane}: "
+                    f"{args.shard_strategy} != {policy.strategy}"
+                )
             paths = shard_paths(
                 paths,
                 shard_index=args.shard_index,
                 shard_count=args.shard_count,
-                strategy=args.shard_strategy,
+                strategy=(
+                    policy.strategy if policy is not None else args.shard_strategy or "round-robin"
+                ),
+                salt=policy.salt if policy is not None else None,
+                pins=policy.pins if policy is not None else (),
             )
             if not paths:
                 raise ManifestError(

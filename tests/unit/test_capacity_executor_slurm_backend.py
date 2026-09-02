@@ -314,6 +314,8 @@ async def test_spooled_verifier_rejects_replaced_launcher_even_when_it_ignores_d
     monkeypatch.setattr("loom_capacity_executor.slurm_backend.os.geteuid", lambda: executor_uid)
 
     cache = Path.home() / ".cache"
+    # A clean runner home does not necessarily have an application cache yet.
+    cache.mkdir(mode=0o700, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="loom-launcher-", dir=cache) as directory:
         authority_directory = Path(directory) / "authority"
         authority_directory.mkdir(mode=0o700)

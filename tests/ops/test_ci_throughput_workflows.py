@@ -1848,12 +1848,17 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         tracked_paths=tracked_paths,
         lane="tests-root",
     )
+    root_policy = manifest.test_shard_policy("tests-root")
+    assert root_policy is not None
     root_shards = [
         set(
             component_ownership.shard_paths(
                 root_paths,
                 shard_index=shard["shard_index"],
                 shard_count=len(root_matrix),
+                strategy=root_policy.strategy,
+                salt=root_policy.salt,
+                pins=root_policy.pins,
             )
         )
         for shard in root_matrix
@@ -1871,24 +1876,34 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         tracked_paths=tracked_paths,
         lane="integration",
     )
+    integration_policy = manifest.test_shard_policy("integration")
+    assert integration_policy is not None
     integration_shards = [
         component_ownership.shard_paths(
             integration_paths,
             shard_index=shard["shard_index"],
             shard_count=len(integration_matrix),
-            strategy="contiguous",
+            strategy=integration_policy.strategy,
+            salt=integration_policy.salt,
+            pins=integration_policy.pins,
         )
         for shard in integration_matrix
     ]
     assert set(integration_shards[0]).isdisjoint(integration_shards[1])
     assert set().union(*map(set, integration_shards)) == set(integration_paths)
-    assert integration_shards[0] + integration_shards[1] == integration_paths
+    assert {
+        "tests/integration/test_capacity_manager_migrate.py",
+        "tests/integration/test_migration_task_set_materialization_jobs.py",
+    } <= set(integration_shards[1])
     auth_path = "tests/integration/test_username_password_auth.py"
     schema_path = "tests/integration/test_username_password_schema.py"
     assert any(auth_path in shard and schema_path in shard for shard in integration_shards)
     assert integration_paths.index(auth_path) < integration_paths.index(schema_path)
     integration_script = "\n".join(step.get("run", "") for step in jobs["integration"]["steps"])
-    assert "--shard-strategy contiguous" in integration_script
+    assert "--shard-strategy" not in integration_script
+
+    root_script = "\n".join(step.get("run", "") for step in jobs["tests-root"]["steps"])
+    assert "--durations=25" in root_script
 
     root_upload = next(
         step
@@ -1941,6 +1956,8 @@ def test_protected_workflows_cancel_only_authoritative_pr_runs() -> None:
         normalized_cancellations.add(cancel)
 
         assert "github.event_name == 'pull_request'" in cancel
+        assert "github.event.pull_request.draft" in cancel
+        assert "github.event.action == 'converted_to_draft'" in cancel
         assert "github.event.action == 'edited'" in cancel
         assert "github.event.changes.base == null" in cancel
         assert "github.event.action == 'labeled'" in cancel
@@ -1959,6 +1976,8 @@ def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
         assert "github.run_id" in group
         assert "filtered-{0}" in group
         assert "authoritative" in group
+        assert "github.event.pull_request.draft" in group
+        assert "github.event.action == 'converted_to_draft'" in group
         assert "github.event.action == 'edited'" in group
         assert "github.event.changes.base == null" in group
         assert f"fromJSON('{CI_SELECTOR_LABELS_JSON}')" in group
