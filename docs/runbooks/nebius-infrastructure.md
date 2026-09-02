@@ -208,6 +208,18 @@ VM, verify the fingerprint against the apply evidence, and retain that
 `known_hosts` file with the operator SSH key:
 
 ```bash
+scripts/ops/mirror_nebius_release_via_gateway.py \
+  --gateway GATEWAY_IP \
+  --ssh-key /secure/path/deployment-access-ed25519 \
+  --known-hosts /secure/path/deployment-access-known-hosts \
+  --candidate-sha MERGED_DEV_SHA \
+  --target-registry cr.eu-north1.nebius.cloud/REGISTRY \
+  --gateway-image ghcr.io/qianyi-sun/loom-llm-gateway@sha256:DIGEST \
+  --control-plane-image ghcr.io/qianyi-sun/loom-control-plane@sha256:DIGEST \
+  --service-image ghcr.io/qianyi-sun/loom-service@sha256:DIGEST \
+  --execution-runtime-image ghcr.io/qianyi-sun/loom-execution-runtime@sha256:DIGEST \
+  --output /secure/path/nebius-release-mirror.json
+
 scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --gateway "$(terraform -chdir=deploy/terraform/nebius/stack output -json deployment_access | jq -r .public_address | cut -d/ -f1)" \
   --ssh-key /secure/path/deployment-access-ed25519 \
@@ -221,6 +233,15 @@ scripts/ops/apply_nebius_development_runtime_via_gateway.sh \
   --execution-runtime-image cr.eu-north1.nebius.cloud/REGISTRY/loom-execution-runtime@sha256:DIGEST \
   --service-execution-runtime-profile /secure/path/service-execution-runtime-profile.json
 ```
+
+The mirror helper accepts only the four expected digest-pinned amd64 release
+images. It downloads a checksum-pinned `crane` binary into a mode-0700 remote
+temporary directory, obtains destination credentials from the gateway VM's
+attached Nebius service account, copies each image under a release-specific
+tag, verifies that the destination digest is unchanged, and writes an
+owner-only local result. It needs no human Nebius session, registry password,
+sudo access, or persistent credential-helper installation. Repeating it for
+the same merged candidate is idempotent.
 
 The helper accepts only digest-pinned platform images, transfers only the
 reviewed runtime manifests plus the capacity observer credential into a
