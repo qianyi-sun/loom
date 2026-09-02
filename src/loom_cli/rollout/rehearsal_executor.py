@@ -743,6 +743,20 @@ class IsolatedRehearsalExecutor:
                 required_pool,
                 "--agent",
                 authority.agent,
+                "--agent-model-json",
+                json.dumps(
+                    (
+                        authority.agent_model.model_dump(
+                            mode="json",
+                            exclude_defaults=True,
+                            exclude_none=True,
+                        )
+                        if authority.agent_model is not None
+                        else None
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             ),
             None,
             timeout=120,

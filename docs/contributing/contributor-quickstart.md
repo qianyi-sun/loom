@@ -147,6 +147,14 @@ report. Runtime Markdown outside that boundary, executable files in `docs/`,
 and unknown non-document paths do not take the fast path; unknown runtime paths
 select all heavy lanes until they gain an explicit owner.
 
+Rollout and production-release authority paths are fail-closed owners: changes
+under `src/loom_cli/rollout/` and their tests, installed staging-rollout assets,
+deployment/release workflows, or release evidence verification select every
+heavy lane. The selected `cluster-smoke-gate` validates environment isolation
+and renders and audits both the staging and production cluster profiles. These
+checks are credential-free candidate evidence; real Yibu-backed tasks and live
+environment readiness remain staging promotion gates rather than PR jobs.
+
 `repository-checks` is the fast-tier aggregator: ruff/mypy/static checks, two
 root-test shards, and sibling-package tests run in parallel jobs, then it combines their
 coverage artifacts, applies the 70% fast-tier gate, and writes the default
