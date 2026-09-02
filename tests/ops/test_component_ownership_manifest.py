@@ -1364,6 +1364,8 @@ def test_manifest_integration_shard_pins_are_exact_and_target_second_shard() -> 
     assert policy is not None
     assert policy.strategy == "contiguous"
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
+        ("tests/integration/test_cp_step_tokens.py", 1),
+        ("tests/integration/test_executable_global_capacity_bridge.py", 1),
         ("tests/integration/test_capacity_manager_migrate.py", 1),
         ("tests/integration/test_migration_task_set_materialization_jobs.py", 1),
     }

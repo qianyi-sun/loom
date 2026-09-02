@@ -75,6 +75,10 @@ lane = "integration"
 shard_count = 2
 strategy = "contiguous"
 pins = [
+  # Five post-change runs still showed a 337s median shard gap. Move the two
+  # measured shard-1 hotspots as whole files; see #1680 and PR #1742 telemetry.
+  { path = "tests/integration/test_cp_step_tokens.py", shard_index = 1 },
+  { path = "tests/integration/test_executable_global_capacity_bridge.py", shard_index = 1 },
   { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
   { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
 ]
