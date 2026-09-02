@@ -604,6 +604,7 @@ async def test_projection_rejects_rehashed_challenge_before_request_observation(
         "supervisor_executable",
         "grant_state",
         "grant_expiry",
+        "pre_release_observation",
         "future_observation",
         "stale_observation",
     ],
@@ -642,6 +643,8 @@ async def test_challenge_rejects_untrusted_or_stale_job_facts_before_state(
         request = _request(supervisor_gid=981)
     elif drift == "supervisor_executable":
         request = _request(supervisor_executable_sha256="a" * 64)
+    elif drift == "pre_release_observation":
+        request = _request(observed_at=NOW + timedelta(seconds=1))
     elif drift == "future_observation":
         request = _request(observed_at=now + timedelta(seconds=1))
     elif drift == "stale_observation":
@@ -1626,6 +1629,7 @@ async def test_session_rejects_rehashed_expiry_beyond_its_bootstrap_and_attestat
     "drift",
     [
         "skipped_generation",
+        "nonmonotonic_observation",
         "principal_scope",
         "principal_node",
         "node_name",
@@ -1663,6 +1667,12 @@ async def test_attestation_rejects_equivocation_skips_or_attachment_drift(
         if drift == "skipped_generation":
             candidate = _attestation(proof, generation=3)
             expected = TaskImageProjectionConflictError
+        elif drift == "nonmonotonic_observation":
+            candidate = _attestation(
+                proof,
+                generation=2,
+                issued_at=proof.observed_at,
+            )
         elif drift == "principal_scope":
             principal = _principal(scopes=("task-image:project",))
         elif drift == "principal_node":

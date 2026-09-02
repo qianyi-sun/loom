@@ -272,6 +272,10 @@ def _require_request_binding(
         raise TaskImageProjectionExpiredError(
             "task-image projection observation is stale"
         )
+    if row.released_at is None or request.observed_at < row.released_at:
+        raise TaskImageProjectionAuthorizationError(
+            "task-image projection observation predates grant release"
+        )
     return principal_sha256
 
 
@@ -1349,7 +1353,7 @@ async def record_task_image_containment_attestation(
         raise TaskImageProjectionExpiredError(
             "task-image containment attestation renewal is stale"
         )
-    if not (current.issued_at <= attestation.issued_at <= now):
+    if not (current.issued_at < attestation.issued_at <= now):
         raise TaskImageProjectionAuthorizationError(
             "task-image containment attestation observation is invalid"
         )
