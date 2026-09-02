@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from docker.errors import APIError, ImageNotFound
 
+from loom.driver.task_image import TaskImageBuildTimeoutError
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.task import (
     AgentDefaults,
@@ -434,6 +435,48 @@ async def test_execution_sidecar_pulls_exact_materialized_digest(
     assert fake_client.images.pull_calls == ["postgres:15", immutable_ref]
     assert fake_client.images.build_calls == []
     assert fake_client.containers.create_calls[1]["image"] == immutable_ref
+
+
+async def test_execution_sidecar_materialized_digest_pull_timeout_is_typed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    immutable_ref = "registry.example/loom-task@sha256:" + "b" * 64
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        cpu_arch="arm64",
+        registry_images={"sidecar:api": immutable_ref},
+        pull_only=True,
+        materialized_image_pull_timeout_sec=1800.0,
+    )
+    runtime._client = fake_client
+    captured_timeouts: list[float] = []
+
+    async def timeout_wait_for(awaitable: Any, *, timeout: float) -> None:
+        captured_timeouts.append(timeout)
+        awaitable.close()
+        raise TimeoutError
+
+    monkeypatch.setattr(task_sidecars.asyncio, "wait_for", timeout_wait_for)
+    sidecar = next(
+        item for item in runtime.task_config.environment.sidecars if item.name == "api"
+    )
+
+    with pytest.raises(TaskImageBuildTimeoutError) as exc:
+        await runtime._resolve_sidecar_image(sidecar)
+
+    assert captured_timeouts == [1800.0]
+    assert str(exc.value) == (
+        f"pulling materialized sidecar image {immutable_ref!r} exceeded 1800s; "
+        "execution is fenced to the recorded registry digest"
+    )
 
 
 async def test_sidecar_runtime_removes_container_when_start_fails_after_create(

@@ -67,7 +67,7 @@ def _insert_reservation(
     return reservation_id
 
 
-def test_0126_requeue_trampoline_is_private_and_reversible(
+def test_0127_requeue_trampoline_is_private_and_reversible(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
@@ -112,12 +112,12 @@ def test_0126_requeue_trampoline_is_private_and_reversible(
                 is False
             )
 
-        command.downgrade(config, "0125")
+        command.downgrade(config, "0126")
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version"))
                 .scalar_one()
-                == "0125"
+                == "0126"
             )
             assert connection.execute(
                 text("SELECT to_regprocedure(:signature)"),
@@ -146,7 +146,7 @@ def test_0126_requeue_trampoline_is_private_and_reversible(
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version"))
                 .scalar_one()
-                == "0126"
+                == "0127"
             )
             assert connection.execute(
                 text("SELECT to_regprocedure(:signature)"),
@@ -157,7 +157,7 @@ def test_0126_requeue_trampoline_is_private_and_reversible(
         engine.dispose()
 
 
-def test_0125_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
+def test_0126_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
@@ -224,11 +224,11 @@ def test_0125_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
             ).scalar_one()
             assert "'protected_worker_claim'" in protected_release
 
-        command.downgrade(config, "0124")
+        command.downgrade(config, "0125")
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0124"
+                == "0125"
             )
             assert (
                 connection.execute(
@@ -298,7 +298,7 @@ def test_0125_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-                == "0126"
+                == "0127"
             )
             assert (
                 connection.execute(
@@ -337,7 +337,7 @@ def test_0125_downgrade_and_reupgrade_preserve_private_terminal_trampoline(
         engine.dispose()
 
 
-def test_0125_keeps_legacy_admission_release_behavior(
+def test_0126_keeps_legacy_admission_release_behavior(
     isolated_migration_postgres_url: str,
 ) -> None:
     engine = create_engine(isolated_migration_postgres_url)
@@ -397,7 +397,7 @@ def test_0125_keeps_legacy_admission_release_behavior(
         engine.dispose()
 
 
-def test_0125_releases_protected_reservation_by_monotonic_attempt_identity(
+def test_0126_releases_protected_reservation_by_monotonic_attempt_identity(
     isolated_migration_postgres_url: str,
 ) -> None:
     engine = create_engine(isolated_migration_postgres_url)

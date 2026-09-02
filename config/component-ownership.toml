@@ -57,6 +57,28 @@ attestation_owners = [
   "runtime-payload-provenance",
 ]
 
+[[test_sharding]]
+lane = "tests-root"
+shard_count = 2
+strategy = "stable-hash"
+# 2026-09-02 collection snapshot: 15,260 tests split 7,630 / 7,630.
+# Keep salt changes measurement-backed because existing path assignments are stable.
+salt = "tests-root-v2-8275"
+pins = [
+  # Pair measured hotspots across shards; see #1680 and PR #1731 telemetry.
+  { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
+  { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
+]
+
+[[test_sharding]]
+lane = "integration"
+shard_count = 2
+strategy = "contiguous"
+pins = [
+  { path = "tests/integration/test_capacity_manager_migrate.py", shard_index = 1 },
+  { path = "tests/integration/test_migration_task_set_materialization_jobs.py", shard_index = 1 },
+]
+
 [[execution_policies]]
 id = "virtual-app-v1"
 language = "python"

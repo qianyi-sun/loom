@@ -80,20 +80,24 @@ on:
         type: boolean
         default: false
 
-# Authoritative PR events supersede older admission runs for that PR. Unrelated
-# metadata events use a unique slot so they cannot evict a running or pending
-# head/base/selector validation.
+# Authoritative PR events supersede older admission runs for that PR. Draft and
+# unrelated metadata events use a unique slot so they cannot evict a running or
+# pending head/base/selector validation when GitHub delivers events out of order.
 concurrency:
   group: >-
     ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{
       github.event_name == 'pull_request' &&
-      ((github.event.action == 'edited' && github.event.changes.base == null) ||
+      (github.event.pull_request.draft ||
+       github.event.action == 'converted_to_draft' ||
+       (github.event.action == 'edited' && github.event.changes.base == null) ||
        ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
         !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) &&
       format('filtered-{0}', github.run_id) || 'authoritative' }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
-        !((github.event.action == 'edited' && github.event.changes.base == null) ||
+        !(github.event.pull_request.draft ||
+          github.event.action == 'converted_to_draft' ||
+          (github.event.action == 'edited' && github.event.changes.base == null) ||
           ((github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
            !contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name))) }}
 
@@ -490,6 +494,7 @@ jobs:
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest "${test_paths[@]}" \
+            --durations=25 \
             --cov=src --cov=packages \
             --cov-report=term --cov-report=xml
 
@@ -1008,7 +1013,6 @@ jobs:
           manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
           uv run --no-sync python scripts/component_ownership.py test-paths --lane integration \
             --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
-            --shard-strategy contiguous \
             > "${manifest_paths_file}"
           mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]

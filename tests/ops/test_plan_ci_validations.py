@@ -484,12 +484,29 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
         "scripts/ops/staging_rollout_shared_work2_export.py",
         "scripts/ops/staging_rollout_shared_work2_export_authority.py",
         "scripts/ops/staging_rollout_shared_repo_consumer.py",
+        "scripts/ops/deploy_environment.sh",
+        "scripts/ops/release_gate.py",
+        "scripts/ops/release_identity.py",
+        "scripts/ops/verify_production_release_gate.sh",
         "scripts/ops/verify_staging_rollout_secret_boundary.py",
+        "scripts/validate_environment_isolation.py",
+        ".github/workflows/deploy-environment.yml",
+        ".github/workflows/release-promotion-gate.yml",
+        "src/loom_cli/rollout/rehearsal_executor.py",
         "src/loom_cli/rollout/operator/broker.py",
         "src/loom_cli/rollout/steps/s04_gb10_prep.py",
         "src/loom_cli/rollout/steps/s10_env_state.py",
+        "src/loom_cli/rollout_lock.py",
+        "src/loom_cli/rollout_lock_cli.py",
+        "tests/loom_cli/rollout/test_rehearsal_executor.py",
         "tests/loom_cli/rollout/operator/test_broker.py",
         "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
+        "tests/loom_cli/test_rollout_lock.py",
+        "tests/loom_cli/test_rollout_lock_cli.py",
+        "tests/ops/test_deploy_environment_release_manifest.py",
+        "tests/ops/test_environment_isolation.py",
+        "tests/ops/test_release_identity.py",
+        "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",
         "tests/loom_cli/test_environment_state.py",
         "tests/ops/test_staging_rollout_host.py",
@@ -509,7 +526,7 @@ def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> N
     assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
-def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> None:
+def test_rollout_module_changes_are_protected_staging_authority() -> None:
     plan = plan_validations(
         changed_paths=["src/loom_cli/rollout/operator_notes.py"],
         labels=set(),
@@ -517,8 +534,8 @@ def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> No
     )
 
     assert plan.unowned_runtime is False
-    assert plan.selected_heavy_checks() == {"integration", "images"}
-    assert all("protected-staging-rollout" not in plan.reasons[check] for check in HEAVY_CHECKS)
+    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
 @pytest.mark.parametrize(

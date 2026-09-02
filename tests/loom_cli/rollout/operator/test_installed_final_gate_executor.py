@@ -385,12 +385,21 @@ def test_staging_smoke_authority_is_shared_and_fixed(tmp_path: Path) -> None:
 
     assert authority.to_record() == {
         "admin_actor": "codex-v1-release-gate",
-        "agent": "oracle",
+        "agent": "direct-completion",
+        "agent_model": {
+            "provider": "yibu",
+            "name": "gpt-4o-mini",
+            "source": "local-server",
+            "local_server": "yibu",
+            "max_output_tokens": 64,
+        },
         "represented_username": "devansh",
         "required_worker_pool": "gb10",
         "task_id": "loom-smoke/gb10-oracle-hello-world",
         "team_id": "11111111-1111-4111-8111-111111111111",
     }
+    assert authority.agent_model is not None
+    assert authority.agent_model.to_gateway_model_string() == "local/yibu/gpt-4o-mini"
 
 
 def test_installed_smoke_dispatch_binds_protected_capacity_refresh(

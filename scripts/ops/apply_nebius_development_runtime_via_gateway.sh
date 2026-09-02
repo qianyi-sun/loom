@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF" >&2
+  echo "usage: $0 --gateway HOST --ssh-key PATH --known-hosts PATH --cluster-id ID --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH --gateway-image DIGEST_REF --control-plane-image DIGEST_REF --service-image DIGEST_REF --execution-runtime-image DIGEST_REF" >&2
   exit 2
 }
 
@@ -12,9 +12,11 @@ known_hosts=
 cluster_id=
 nebius_credentials=
 model_provider_api_key_file=
+service_execution_runtime_profile=
 gateway_image=
 control_plane_image=
 service_image=
+execution_runtime_image=
 while (($#)); do
   case "$1" in
     --gateway)
@@ -47,6 +49,11 @@ while (($#)); do
       model_provider_api_key_file=$2
       shift 2
       ;;
+    --service-execution-runtime-profile)
+      (($# >= 2)) || usage
+      service_execution_runtime_profile=$2
+      shift 2
+      ;;
     --gateway-image)
       (($# >= 2)) || usage
       gateway_image=$2
@@ -62,6 +69,11 @@ while (($#)); do
       service_image=$2
       shift 2
       ;;
+    --execution-runtime-image)
+      (($# >= 2)) || usage
+      execution_runtime_image=$2
+      shift 2
+      ;;
     *) usage ;;
   esac
 done
@@ -71,8 +83,10 @@ done
 [[ $gateway_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $control_plane_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ $service_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
+[[ $execution_runtime_image =~ ^[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]] || usage
 [[ -f $ssh_key && -f $known_hosts && -f $nebius_credentials ]] || usage
 [[ -s $model_provider_api_key_file ]] || usage
+[[ -s $service_execution_runtime_profile ]] || usage
 
 python3 - "$nebius_credentials" <<'PY'
 import json
@@ -88,6 +102,18 @@ if not required <= subject.keys() or subject.get("alg") != "RS256":
     raise SystemExit("Nebius credentials must be a complete RS256 service-account document")
 if subject.get("iss") != subject.get("sub"):
     raise SystemExit("Nebius credential issuer and subject must match")
+PY
+
+python3 - "$service_execution_runtime_profile" "$service_image" "$execution_runtime_image" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if payload.get("task_image_ref") != sys.argv[2]:
+    raise SystemExit("runtime profile task_image_ref must equal --service-image")
+if payload.get("runtime_image_ref") != sys.argv[3]:
+    raise SystemExit("runtime profile runtime_image_ref must equal --execution-runtime-image")
 PY
 
 if ! credential_mode=$(stat -c '%a' "$nebius_credentials" 2>/dev/null); then
@@ -128,29 +154,36 @@ ssh_options=(
   -i "$ssh_key"
 )
 
+# This intentionally expands the locally generated numeric PID into a fixed,
+# quoted remote path rather than accepting a remote-shell expression.
+# shellcheck disable=SC2029
 ssh "${ssh_options[@]}" "codex@$gateway" "install -d -m 700 '$remote_stage'"
 scp "${ssh_options[@]}" \
   "$local_stage/runtime.tar.gz" \
   "$nebius_credentials" \
   "$model_provider_api_key_file" \
+  "$service_execution_runtime_profile" \
   "codex@$gateway:$remote_stage/"
 
 ssh "${ssh_options[@]}" "codex@$gateway" bash -s -- \
   "$remote_stage" "$cluster_id" "$(basename "$nebius_credentials")" \
   "$(basename "$model_provider_api_key_file")" \
+  "$(basename "$service_execution_runtime_profile")" \
   "$gateway_image" "$control_plane_image" "$service_image" <<'REMOTE'
 set -euo pipefail
 remote_stage=$1
 cluster_id=$2
 credential_name=$3
 provider_key_name=$4
-gateway_image=$5
-control_plane_image=$6
-service_image=$7
+runtime_profile_name=$5
+gateway_image=$6
+control_plane_image=$7
+service_image=$8
 trap 'rm -rf "$remote_stage"' EXIT
 
 chmod 600 "$remote_stage/$credential_name"
 chmod 600 "$remote_stage/$provider_key_name"
+chmod 600 "$remote_stage/$runtime_profile_name"
 tar -C "$remote_stage" -xzf "$remote_stage/runtime.tar.gz"
 nebius mk8s cluster get-credentials \
   --id "$cluster_id" \
@@ -158,6 +191,15 @@ nebius mk8s cluster get-credentials \
   --kubeconfig "$remote_stage/kubeconfig" \
   --no-progress
 chmod 600 "$remote_stage/kubeconfig"
+
+# Create the referenced Secret before a first rollout.  The inner idempotent
+# apply validates and replaces the same object, then stamps its digest on both
+# consuming Deployments so future profile changes always roll them.
+kubectl --kubeconfig "$remote_stage/kubeconfig" create secret generic \
+  loom-service-execution-runtime-profile -n loom \
+  --from-file=profile-json="$remote_stage/$runtime_profile_name" \
+  --dry-run=client -o yaml \
+  | kubectl --kubeconfig "$remote_stage/kubeconfig" apply -f - >/dev/null
 
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-llm-gateway "gateway=$gateway_image"
@@ -175,5 +217,6 @@ kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
 "$remote_stage/scripts/ops/apply_nebius_development_runtime.sh" \
   --kubeconfig "$remote_stage/kubeconfig" \
   --nebius-credentials "$remote_stage/$credential_name" \
-  --model-provider-api-key-file "$remote_stage/$provider_key_name"
+  --model-provider-api-key-file "$remote_stage/$provider_key_name" \
+  --service-execution-runtime-profile "$remote_stage/$runtime_profile_name"
 REMOTE

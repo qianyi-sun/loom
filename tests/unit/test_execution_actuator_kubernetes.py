@@ -295,6 +295,12 @@ def test_development_service_patch_persists_backend_environment_identity() -> No
     assert container["name"] == "service"
     env = {entry["name"]: entry for entry in container["env"]}
     assert env["LOOM_ENV"]["value"] == "development"
+    assert env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["valueFrom"] == {
+        "secretKeyRef": {
+            "name": "loom-service-execution-runtime-profile",
+            "key": "profile-json",
+        }
+    }
 
 
 def test_development_gateway_patch_persists_model_provider_identity() -> None:

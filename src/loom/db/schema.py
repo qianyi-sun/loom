@@ -3802,6 +3802,14 @@ class Batch(Base):
         server_default=text("'docker'"),
         default="docker",
     )
+    # Automatic Nebius execution freezes the deployment-owned profile at
+    # Batch acceptance. Queued Trials must never be reinterpreted by a later
+    # control-plane rollout. NULL covers Docker, legacy explicit bindings, and
+    # batches created before automatic materialization existed.
+    service_execution_runtime_profile: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
     # Plan 28 PR-3: multi-(agent, model) combinations. Each entry is
     # `{agent_name, agent_model, n_per_task, label?}`. Empty list ⇒
     # single-combination behaviour (agent + model + n_per_task live

@@ -219,8 +219,13 @@ def test_0123_downgrade_removes_only_native_builder_objects(
     config = _config(isolated_migration_postgres_url)
     engine = create_engine(isolated_migration_postgres_url)
     try:
+        # The shared migration fixture starts at the current head.  Pin this
+        # historical downgrade check to the revision it owns before asserting
+        # the 0123 -> 0122 behavior.
+        command.downgrade(config, "0123")
+
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0126"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0123"
             candidate_columns_before = {
                 column["name"]
                 for column in inspect(connection).get_columns("personal_dev_candidates")

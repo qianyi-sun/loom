@@ -48,9 +48,10 @@ GITHUB_ACTIONS_APP_ID = 15368
 MAX_ARTIFACT_BYTES = 64 * 1024
 MAX_JSON_BYTES = 4 * 1024 * 1024
 GITHUB_REQUEST_TIMEOUT_SECONDS = 20
-MAX_GITHUB_REQUESTS_PER_RECONCILE = 35
-MAX_ACTIVE_RUNS_PER_WORKFLOW = 100
+MAX_GITHUB_REQUESTS_PER_RECONCILE = 29
+MAX_ACTIVE_RUNS_PER_STATUS = 100
 ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS = 3
+ROUTE_DISCOVERY_STATUSES = ("queued", "in_progress")
 PUBLISHER_RETRY_SECONDS = 15
 ROUTE_DECISION_RETENTION_DAYS = 7
 OLDLAB_REQUEST_MAX_AGE_SECONDS = 90
@@ -107,6 +108,10 @@ APP_INSTALLATION_PERMISSIONS = {
 
 class RouteControllerError(RuntimeError):
     """A bounded, secret-free route-controller failure."""
+
+
+class _ActiveRunInventoryOverflowError(RouteControllerError):
+    """Signal that repository-wide discovery must use exact workflow fallback."""
 
 
 class GitHubRateLimitGovernor:
@@ -232,6 +237,9 @@ class GitHubRouteAPI:
         self._token_provider = token_provider or (lambda: cast(str, token))
         self._rate_limit_governor = rate_limit_governor
         self._workflow_run_cache: dict[int, Mapping[str, object]] = {}
+        self._active_workflow_runs_cache: dict[int, tuple[Mapping[str, object], ...]] = {}
+        self._active_inventory_initialized = False
+        self._active_inventory_global_overflow = False
         self._content_blob_cache: dict[tuple[str, str], str] = {}
         self._check_run_cache: dict[tuple[str, str], tuple[Mapping[str, object], ...]] = {}
         self._workflow_jobs_cache: dict[tuple[int, int], tuple[Mapping[str, object], ...]] = {}
@@ -321,11 +329,13 @@ class GitHubRouteAPI:
             raise RouteControllerError("GitHub associated pull inventory is malformed")
         return cast(list[dict[str, object]], payload)
 
-    def active_workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, object]]:
-        path = (
-            f"/actions/workflows/{workflow_id}/runs?status=in_progress&per_page="
-            f"{MAX_ACTIVE_RUNS_PER_WORKFLOW}"
-        )
+    def _active_run_inventory(
+        self, *, status: str, workflow_id: int | None
+    ) -> list[dict[str, object]]:
+        if status not in ROUTE_DISCOVERY_STATUSES:
+            raise RouteControllerError("active workflow status is outside the route contract")
+        scope = "/actions/runs" if workflow_id is None else f"/actions/workflows/{workflow_id}/runs"
+        path = f"{scope}?status={status}&per_page={MAX_ACTIVE_RUNS_PER_STATUS}"
         for _attempt in range(ACTIVE_WORKFLOW_INVENTORY_ATTEMPTS):
             payload = self._request("GET", path)
             runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
@@ -338,11 +348,10 @@ class GitHubRouteAPI:
                 or any(not isinstance(item, dict) for item in runs)
             ):
                 continue
-            if (
-                total_count > MAX_ACTIVE_RUNS_PER_WORKFLOW
-                or len(runs) > MAX_ACTIVE_RUNS_PER_WORKFLOW
-            ):
-                raise RouteControllerError("active workflow inventory exceeds the scan bound")
+            if total_count > MAX_ACTIVE_RUNS_PER_STATUS or len(runs) > MAX_ACTIVE_RUNS_PER_STATUS:
+                raise _ActiveRunInventoryOverflowError(
+                    "active workflow inventory exceeds the scan bound"
+                )
             # GitHub does not guarantee that ``total_count`` and the returned
             # page are captured from the same instant. Runs frequently enter
             # or leave ``in_progress`` between those two reads, especially
@@ -353,6 +362,63 @@ class GitHubRouteAPI:
         raise RouteControllerError(
             "GitHub active workflow inventory remained malformed after bounded retries"
         )
+
+    def _cache_active_runs(
+        self,
+        runs: Sequence[Mapping[str, object]],
+        *,
+        workflow_ids: set[int],
+    ) -> None:
+        selected: dict[int, dict[int, Mapping[str, object]]] = {
+            workflow_id: {} for workflow_id in workflow_ids
+        }
+        for run in runs:
+            run_id = _exact_int(run.get("id"), "workflow_run.id")
+            workflow_id = _exact_int(run.get("workflow_id"), "workflow_run.workflow_id")
+            if workflow_id not in workflow_ids:
+                continue
+            if run.get("status") not in ROUTE_DISCOVERY_STATUSES:
+                raise RouteControllerError("active workflow run status is inconsistent")
+            existing = selected[workflow_id].get(run_id)
+            if existing is not None and any(
+                existing.get(field) != run.get(field)
+                for field in ("id", "run_attempt", "workflow_id", "head_sha")
+            ):
+                raise RouteControllerError("active workflow run snapshot is inconsistent")
+            if existing is None or run.get("status") == "in_progress":
+                selected[workflow_id][run_id] = run
+                self._workflow_run_cache[run_id] = run
+        for workflow_id, by_id in selected.items():
+            self._active_workflow_runs_cache[workflow_id] = tuple(
+                by_id[run_id] for run_id in sorted(by_id)
+            )
+
+    def active_workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, object]]:
+        route_workflow_ids = {contract[0] for contract in WORKFLOW_CLASS_CONTRACTS.values()}
+        if workflow_id not in route_workflow_ids:
+            raise RouteControllerError("workflow run inventory is outside the route contract")
+        if not self._active_inventory_initialized:
+            try:
+                runs = [
+                    run
+                    for status in ROUTE_DISCOVERY_STATUSES
+                    for run in self._active_run_inventory(status=status, workflow_id=None)
+                ]
+                self._cache_active_runs(runs, workflow_ids=route_workflow_ids)
+            except _ActiveRunInventoryOverflowError:
+                self._active_inventory_global_overflow = True
+            self._active_inventory_initialized = True
+        if (
+            self._active_inventory_global_overflow
+            and workflow_id not in self._active_workflow_runs_cache
+        ):
+            runs = [
+                run
+                for status in ROUTE_DISCOVERY_STATUSES
+                for run in self._active_run_inventory(status=status, workflow_id=workflow_id)
+            ]
+            self._cache_active_runs(runs, workflow_ids={workflow_id})
+        return self._active_workflow_runs_cache.get(workflow_id, ())
 
     def route_artifact(
         self, *, workflow_id: int, workflow_run_id: int, run_attempt: int
@@ -1048,6 +1114,10 @@ class CiRunnerRouteController:
         seen = 0
         outcomes = {"published": 0, "replayed": 0, "pending": 0, "abandoned": 0}
         processed: set[str] = set()
+        known_run_attempts = {
+            (decision.workflow_id, decision.workflow_run_id, decision.run_attempt)
+            for decision in self.broker.route_decisions()
+        }
         errors: list[str] = []
         abandoned_releases = 0
 
@@ -1060,7 +1130,7 @@ class CiRunnerRouteController:
             except (LeaseBrokerError, RouteControllerError) as exc:
                 errors.append(f"decision {decision.decision_id}: {exc}")
 
-        for artifact, run in self._active_route_artifacts():
+        for artifact, run in self._active_route_artifacts(known_run_attempts=known_run_attempts):
             seen += 1
             try:
                 artifact_id = _exact_int(artifact.get("id"), "artifact.id")
@@ -1126,7 +1196,7 @@ class CiRunnerRouteController:
         )
 
     def _active_route_artifacts(
-        self,
+        self, *, known_run_attempts: set[tuple[int, int, int]]
     ) -> list[tuple[Mapping[str, object], Mapping[str, object]]]:
         discovered: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
         for workflow_name, contract in sorted(WORKFLOW_CLASS_CONTRACTS.items()):
@@ -1142,11 +1212,13 @@ class CiRunnerRouteController:
                 if (
                     not isinstance(repository, dict)
                     or repository.get("full_name") != EXPECTED_REPOSITORY
-                    or run.get("status") != "in_progress"
+                    or run.get("status") not in ROUTE_DISCOVERY_STATUSES
                 ):
                     raise RouteControllerError(
                         f"active {workflow_name} run is outside the route contract"
                     )
+                if (workflow_id, run_id, attempt) in known_run_attempts:
+                    continue
                 artifact = self.api.route_artifact(
                     workflow_id=workflow_id,
                     workflow_run_id=run_id,

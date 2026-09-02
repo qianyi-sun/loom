@@ -6,3 +6,8 @@ spec:
           env:
             - name: LOOM_ENV
               value: development
+            - name: LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: loom-service-execution-runtime-profile
+                  key: profile-json

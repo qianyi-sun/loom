@@ -634,6 +634,11 @@
     "default": "None",
     "required": false
   },
+  "service_execution_runtime_profile_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
   "signed_url_expiry_sec": {
     "annotation": "<class 'int'>",
     "default": "3600",

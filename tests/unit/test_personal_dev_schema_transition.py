@@ -283,7 +283,7 @@ def _transition_inputs(
         "predecessor_shadow_sha256": predecessor_shadow_sha256,
         "alembic_ini_path": _ROOT / "migrations/alembic.ini",
         "expected_predecessor_head": "0112",
-        "expected_target_head": "0126",
+        "expected_target_head": "0127",
     }
 
 
@@ -328,7 +328,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
     assert plan["namespace"] == "loom-dev"
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0126"
+    assert plan["target"]["schema_head"] == "0127"
     predecessor_documents = list(
         yaml.safe_load_all(inputs["predecessor_shadow_path"].read_text(encoding="utf-8"))
     )
@@ -360,6 +360,7 @@ def test_transition_preparation_binds_backup_graph_and_exact_migration_job(
         "0124",
         "0125",
         "0126",
+        "0127",
     ]
     assert (
         hashlib.sha256(prepared.migration_job_json).hexdigest() == plan["migration"]["job_sha256"]

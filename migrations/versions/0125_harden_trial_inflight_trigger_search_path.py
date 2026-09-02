@@ -1,7 +1,7 @@
 """Harden the trial in-flight trigger for protected callers.
 
-Revision ID: 0124
-Revises: 0123
+Revision ID: 0125
+Revises: 0124
 Create Date: 2026-09-02
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0124"
-down_revision: str | None = "0123"
+revision: str = "0125"
+down_revision: str | None = "0124"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -170,8 +170,10 @@ secrets.
   evidence artifact all identify the same SHA. The four heavy gates remain the
   protected admission authority for changes entering `dev`.
 - Changes to `.github/**`, CI validation-selection policy, and production release
-  verification select full CI. Manual dispatches use distinct `*-manual`
-  check names and cannot satisfy branch protection.
+  verification select full CI. Rollout authority, deployment, and release-gate
+  changes also select every heavy lane; `cluster-smoke-gate` renders and audits
+  both staging and production without credentials. Manual dispatches use
+  distinct `*-manual` check names and cannot satisfy branch protection.
 - Squash merge is the only allowed merge method, keeping `dev` linear
 - Do not add credentials, private endpoints, local environment files, or
   generated run artifacts
