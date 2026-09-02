@@ -1562,9 +1562,27 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
 
     outside_profile = tmp_path / "outside-profile.toml"
     shutil.copy2(profile, outside_profile)
+    outside_profile.chmod(0o600)
+    outside_profile_sha256 = hashlib.sha256(outside_profile.read_bytes()).hexdigest()
     outside_profile_arguments = list(arguments)
     profile_index = outside_profile_arguments.index("--file") + 1
     outside_profile_arguments[profile_index] = str(outside_profile)
+    unbound_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unbound_outside_profile_result.returncode == 2
+    assert unbound_outside_profile_result.stdout == ""
+    assert unbound_outside_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+    outside_profile_arguments.extend(
+        ["--profile-sha256", outside_profile_sha256]
+    )
     outside_profile_result = subprocess.run(
         [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
         cwd=checkout,
@@ -1573,11 +1591,42 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         capture_output=True,
         text=True,
     )
-    assert outside_profile_result.returncode == 2
-    assert outside_profile_result.stdout == ""
-    assert outside_profile_result.stderr == (
+    assert outside_profile_result.returncode == 0, outside_profile_result.stderr
+    assert json.loads(outside_profile_result.stdout)["kind"] == "Job"
+    assert json.loads(outside_profile_result.stderr)["target"]["source_commit"] == source_sha
+
+    outside_profile.chmod(0o644)
+    public_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert public_outside_profile_result.returncode == 2
+    assert public_outside_profile_result.stdout == ""
+    assert public_outside_profile_result.stderr == (
         "error: personal-dev schema transition inputs are invalid\n"
     )
+    outside_profile.chmod(0o600)
+
+    outside_profile.write_bytes(outside_profile.read_bytes() + b"\n")
+    changed_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert changed_outside_profile_result.returncode == 2
+    assert changed_outside_profile_result.stdout == ""
+    assert changed_outside_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+    shutil.copy2(profile, outside_profile)
+    outside_profile.chmod(0o600)
 
     profile.unlink()
     profile.symlink_to(outside_profile)
