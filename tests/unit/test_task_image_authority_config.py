@@ -87,8 +87,12 @@ def test_settings_are_frozen_strict_and_use_only_the_authority_prefix(
         TaskImageAuthoritySettings(**_settings_values(tmp_path), port="8445")
     with pytest.raises(ValidationError):
         TaskImageAuthoritySettings(**_settings_values(tmp_path), unknown=True)
+    assert (
+        TaskImageAuthoritySettings(**_settings_values(tmp_path), host="0.0.0.0").host
+        == "0.0.0.0"
+    )
     with pytest.raises(ValidationError):
-        TaskImageAuthoritySettings(**_settings_values(tmp_path), host="0.0.0.0")
+        TaskImageAuthoritySettings(**_settings_values(tmp_path), host="192.0.2.1")
 
 
 @pytest.mark.parametrize(

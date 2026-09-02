@@ -40,7 +40,7 @@ class TaskImageAuthoritySettings(BaseSettings):
     tls_cert_file: Path
     tls_key_file: Path
     tls_client_ca_file: Path
-    host: Literal["127.0.0.1"] = "127.0.0.1"
+    host: Literal["127.0.0.1", "0.0.0.0"] = "127.0.0.1"
     port: int = Field(default=8445, ge=1, le=65535)
     request_rate_limit_per_second: int = Field(default=64, ge=1, le=10_000)
     request_concurrency_limit: int = Field(default=32, ge=1, le=1024)

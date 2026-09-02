@@ -50,6 +50,10 @@ class TaskImageProjectionConflictError(RuntimeError):
     """An idempotency identity was reused with different canonical input."""
 
 
+class TaskImageProjectionEquivocationError(TaskImageProjectionConflictError):
+    """A conflict that staged a mandatory durable projection quarantine."""
+
+
 class TaskImageProjectionAuthorizationError(RuntimeError):
     """The caller or observed allocation does not match durable authority."""
 
@@ -1345,7 +1349,7 @@ async def record_task_image_containment_attestation(
                 now=now,
             )
             await session.flush()
-            raise TaskImageProjectionConflictError(
+            raise TaskImageProjectionEquivocationError(
                 "task-image containment attestation equivocated"
             )
         if now >= current.expires_at:
@@ -1632,6 +1636,7 @@ __all__ = [
     "TaskImageBuildSessionAuthorization",
     "TaskImageProjectionAuthorizationError",
     "TaskImageProjectionConflictError",
+    "TaskImageProjectionEquivocationError",
     "TaskImageProjectionExpiredError",
     "authorize_task_image_build_session",
     "complete_task_image_projection",
