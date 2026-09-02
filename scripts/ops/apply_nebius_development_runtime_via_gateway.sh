@@ -310,14 +310,20 @@ fi
 
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-llm-gateway "gateway=$gateway_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-llm-gateway
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-llm-gateway --timeout=300s
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-control-plane "control-plane=$control_plane_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-control-plane
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-control-plane --timeout=300s
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom set image \
   deployment/loom-service "service=$service_image"
+kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout restart \
+  deployment/loom-service
 kubectl --kubeconfig "$remote_stage/kubeconfig" -n loom rollout status \
   deployment/loom-service --timeout=300s
 

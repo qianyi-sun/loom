@@ -169,3 +169,4 @@ def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
     assert "name: LOOM_DB_URL" in gateway
     assert "Complete=True" in gateway
     assert "Failed=True" in gateway
+    assert gateway.count("rollout restart") == 3
