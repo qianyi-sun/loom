@@ -265,11 +265,16 @@ func (bundle executionImageAdmission) validate(requiredImages []string, now time
 			!keyID.MatchString(admission.SigningKeyID) {
 			return fmt.Errorf("invalid image admission identity")
 		}
+		if statement.HighestVulnerabilitySeverity == "critical" {
+			return fmt.Errorf("image admission vulnerability policy failed")
+		}
 		if statement.HighestVulnerabilitySeverity != "none" &&
 			statement.HighestVulnerabilitySeverity != "negligible" &&
 			statement.HighestVulnerabilitySeverity != "low" &&
-			statement.HighestVulnerabilitySeverity != "medium" {
-			return fmt.Errorf("image admission vulnerability policy failed")
+			statement.HighestVulnerabilitySeverity != "medium" &&
+			statement.HighestVulnerabilitySeverity != "high" &&
+			statement.HighestVulnerabilitySeverity != "unknown" {
+			return fmt.Errorf("invalid image admission severity")
 		}
 		signature, err := base64.StdEncoding.Strict().DecodeString(admission.SignatureBase64)
 		if err != nil || len(signature) != 64 {

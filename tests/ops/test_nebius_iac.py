@@ -152,7 +152,24 @@ def test_gateway_runtime_apply_carries_and_converges_capacity_policy() -> None:
     assert "/admin/execution-capacity-policies/" in inner
     assert 'open("/var/run/loom/admin/secrets.toml", "rb")' in inner
     assert '"max_nodes": observed["max_nodes"]' in inner
+    assert "/admin/execution-admission-policies/" in inner
+    assert '"max_concurrent": admission_observed["max_concurrent"]' in inner
     assert "deploy/k8s/nebius-development-capacity-policy.json" in gateway
+
+
+def test_gateway_runtime_apply_pins_release_actuator_image() -> None:
+    inner = (REPO_ROOT / "scripts" / "ops" / "apply_nebius_development_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    gateway = (
+        REPO_ROOT / "scripts" / "ops" / "apply_nebius_development_runtime_via_gateway.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "--execution-actuator-image" in gateway
+    assert '--execution-actuator-image "$execution_actuator_image"' in gateway
+    assert "render_execution_actuator_manifest" in inner
+    assert 'lines[matches[0]] = f"          image: {image}{ending}"' in inner
+    assert "render_execution_actuator_manifest | kubectl apply -f -" in inner
 
 
 def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
