@@ -181,6 +181,9 @@ def test_gateway_runtime_apply_pins_release_actuator_image() -> None:
     assert "render_execution_actuator_manifest" in inner
     assert 'lines[matches[0]] = f"          image: {image}{ending}"' in inner
     assert "render_execution_actuator_manifest | kubectl apply -f -" in inner
+    assert "render_capacity_collector_manifest" in inner
+    assert 'content.count(placeholder) != 2' in inner
+    assert "render_capacity_collector_manifest | kubectl apply -f -" in inner
 
 
 def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:

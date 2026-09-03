@@ -85,7 +85,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: prepare-credentials
-              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:69c9c542875be1b55eaa2418643819c606835e94b1d3aaa7f6aa75b61101dd49
+              image: __EXECUTION_ACTUATOR_IMAGE__
               imagePullPolicy: IfNotPresent
               command:
                 - python
@@ -107,7 +107,7 @@ spec:
                   drop: ["ALL"]
           containers:
             - name: collector
-              image: cr.eu-north1.nebius.cloud/e00na1cny1498503v1/loom-execution-actuator@sha256:69c9c542875be1b55eaa2418643819c606835e94b1d3aaa7f6aa75b61101dd49
+              image: __EXECUTION_ACTUATOR_IMAGE__
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "loom_execution_capacity_collector"]
               envFrom:

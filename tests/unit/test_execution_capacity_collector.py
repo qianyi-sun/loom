@@ -165,6 +165,38 @@ async def test_collector_publishes_only_after_complete_provider_and_cluster_capt
 
 
 @pytest.mark.asyncio
+async def test_collector_uses_node_group_as_conservative_provider_usage_floor(
+    tmp_path: Path,
+) -> None:
+    class LaggingProvider(_Provider):
+        async def capture(self, policy: CapacityPolicyBinding) -> ProviderCapacitySnapshot:
+            snapshot = await super().capture(policy)
+            return snapshot.model_copy(
+                update={
+                    "used_nodes": 1,
+                    "used_vcpu_millis": 4_000,
+                    "used_memory_mib": 8_192,
+                    "used_storage_mib": 102_400,
+                    "node_count": 3,
+                }
+            )
+
+    control_plane = _ControlPlane()
+    await collect_capacity_observation(
+        _settings(tmp_path),
+        control_plane=control_plane,
+        provider=LaggingProvider(),
+        kubernetes=_Kubernetes(),
+    )
+
+    observation = control_plane.observations[0]
+    assert observation.provider_used_nodes == 3
+    assert observation.provider_used_vcpu_millis == 12_000
+    assert observation.provider_used_memory_mib == 24_576
+    assert observation.provider_used_storage_mib == 307_200
+
+
+@pytest.mark.asyncio
 async def test_collector_never_publishes_a_partial_snapshot(tmp_path: Path) -> None:
     class FailedProvider:
         async def capture(self, _policy: CapacityPolicyBinding) -> ProviderCapacitySnapshot:
@@ -656,6 +688,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
     assert cron["spec"]["concurrencyPolicy"] == "Forbid"
     pod = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     assert pod["nodeSelector"] == {"loom.nebius/node-role": "system"}
+    assert pod["initContainers"][0]["image"] == "__EXECUTION_ACTUATOR_IMAGE__"
+    assert pod["containers"][0]["image"] == "__EXECUTION_ACTUATOR_IMAGE__"
     assert pod["securityContext"]["runAsUser"] == 65532
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
     assert not {

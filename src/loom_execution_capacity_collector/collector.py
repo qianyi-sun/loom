@@ -56,28 +56,22 @@ async def collect_capacity_observation(
                 node_label_selector=settings.node_label_selector,
             ),
         )
-        if provider_snapshot.node_count > provider_snapshot.used_nodes:
-            raise CapacityCollectionError("provider node usage is below node-group usage")
-        minimum_provider_usage = (
-            (
-                provider_snapshot.used_vcpu_millis,
-                provider_snapshot.node_count * policy.node_cpu_millis,
-                "vCPU",
-            ),
-            (
-                provider_snapshot.used_memory_mib,
-                provider_snapshot.node_count * policy.node_memory_mib,
-                "memory",
-            ),
-            (
-                provider_snapshot.used_storage_mib,
-                provider_snapshot.node_count * policy.node_storage_mib,
-                "storage",
-            ),
+        # Nebius quota usage can lag node-group inventory while autoscaling. Use
+        # the complete node-group snapshot as a conservative floor so the
+        # observation never overstates headroom during that convergence window.
+        provider_used_nodes = max(provider_snapshot.used_nodes, provider_snapshot.node_count)
+        provider_used_vcpu_millis = max(
+            provider_snapshot.used_vcpu_millis,
+            provider_snapshot.node_count * policy.node_cpu_millis,
         )
-        for provider_used, group_used, label in minimum_provider_usage:
-            if provider_used < group_used:
-                raise CapacityCollectionError(f"provider {label} usage is below node-group usage")
+        provider_used_memory_mib = max(
+            provider_snapshot.used_memory_mib,
+            provider_snapshot.node_count * policy.node_memory_mib,
+        )
+        provider_used_storage_mib = max(
+            provider_snapshot.used_storage_mib,
+            provider_snapshot.node_count * policy.node_storage_mib,
+        )
         if provider_snapshot.autoscaler_state == "ready" and (
             kubernetes_snapshot.active_nodes != provider_snapshot.node_count
             or kubernetes_snapshot.ready_nodes != provider_snapshot.ready_node_count
@@ -122,10 +116,10 @@ async def collect_capacity_observation(
             provider_quota_vcpu_millis=provider_snapshot.quota_vcpu_millis,
             provider_quota_memory_mib=provider_snapshot.quota_memory_mib,
             provider_quota_storage_mib=provider_snapshot.quota_storage_mib,
-            provider_used_nodes=provider_snapshot.used_nodes,
-            provider_used_vcpu_millis=provider_snapshot.used_vcpu_millis,
-            provider_used_memory_mib=provider_snapshot.used_memory_mib,
-            provider_used_storage_mib=provider_snapshot.used_storage_mib,
+            provider_used_nodes=provider_used_nodes,
+            provider_used_vcpu_millis=provider_used_vcpu_millis,
+            provider_used_memory_mib=provider_used_memory_mib,
+            provider_used_storage_mib=provider_used_storage_mib,
             active_nodes=active_nodes,
             provisioned_vcpu_millis=provisioned_cpu,
             provisioned_memory_mib=provisioned_memory,
