@@ -363,6 +363,12 @@ class TaskImageBootstrapExchangeV1(_SecretBearingAuthorityModel):
         return payload
 
 
+class TaskImageProjectionRevocationV1(StrictTaskImageAuthorityModel):
+    grant_id: NonzeroUUID
+    reason: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+    observed_at: datetime
+
+
 class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
     grant_id: NonzeroUUID
     session_id: NonzeroUUID
@@ -493,6 +499,7 @@ __all__ = [
     "TaskImageProjectionChallengeV1",
     "TaskImageProjectionReceiptV1",
     "TaskImageProjectionRequestV1",
+    "TaskImageProjectionRevocationV1",
     "canonical_authority_bytes",
     "canonical_authority_sha256",
     "canonical_public_binding_sha256",

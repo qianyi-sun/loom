@@ -110,6 +110,7 @@ ci-coverage = [
 [project.scripts]
 loom = "loom_cli.__main__:main"
 loom-capacity-trusted-launcher = "loom_capacity_executor.trusted_launcher:main"
+loom-task-image-authority = "loom_task_image_authority.__main__:main"
 
 [project.entry-points."loom.family.keys"]
 instance_id_prefix = "loom.family_run.keys:InstanceIdPrefixExtractor"

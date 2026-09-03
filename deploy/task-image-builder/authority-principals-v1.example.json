@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "principals": [
+    {
+      "principal_id": "oldlab-trt-eai-oldlab-3-example",
+      "token_sha256": "5f1a45aeaead74fc075fc3769089b9e1b45983994ae5a4ea79dc25daddc27fe6",
+      "slurm_cluster_id": "oldlab",
+      "node_name": "trt-eai-oldlab-3",
+      "scopes": [
+        "task-image:attest",
+        "task-image:project"
+      ]
+    },
+    {
+      "principal_id": "gb10-trt-gb10-1-example",
+      "token_sha256": "6386d29c42e277c03d76a96c7bf8330f2be8f44a690143dd70de7326d89c48d6",
+      "slurm_cluster_id": "gb10",
+      "node_name": "trt-gb10-1",
+      "scopes": [
+        "task-image:attest",
+        "task-image:project"
+      ]
+    }
+  ]
+}
