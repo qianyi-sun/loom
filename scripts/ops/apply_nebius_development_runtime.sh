@@ -194,12 +194,12 @@ if (
     or document.get("target_execution_max_nodes") != 10
     or document.get("target_execution_preset") != "48vcpu-192gb"
     or document.get("provider_current_quota_vcpu_millis") != 200_000
-    or document.get("accepted_concurrency") != 80
+    or document.get("accepted_concurrency") != 56
     or document.get("task_cpu_millis") != 2_000
-    or policy.get("max_nodes") != 6
-    or policy.get("node_cpu_millis") != 32_000
+    or policy.get("max_nodes") != 8
+    or policy.get("node_cpu_millis") != 16_000
 ):
-    raise SystemExit("Nebius development capacity policy does not cover the current 80-task and target 200-task envelopes")
+    raise SystemExit("Nebius development capacity policy does not cover the current 56-task and target 200-task envelopes")
 encoded = base64.b64encode(
     json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).decode("ascii")
@@ -207,10 +207,10 @@ admission_policies = document.get("admission_policies")
 if (
     not isinstance(admission_policies, list)
     or [(row.get("scope_kind"), row.get("scope_key"), row.get("max_concurrent")) for row in admission_policies]
-    != [("global", "*", 80), ("pool", "nebius-cpu", 80)]
+    != [("global", "*", 56), ("pool", "nebius-cpu", 56)]
     or any(row.get("enabled") is not True for row in admission_policies)
 ):
-    raise SystemExit("Nebius execution admission policies must permit exactly 80 leases")
+    raise SystemExit("Nebius execution admission policies must permit exactly 56 leases")
 admission_encoded = base64.b64encode(
     json.dumps(admission_policies, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).decode("ascii")

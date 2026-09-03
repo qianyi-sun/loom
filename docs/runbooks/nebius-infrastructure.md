@@ -87,14 +87,15 @@ Copy the sole shared-cluster input and its existing backend anchor to a protecte
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
 reviewing the canonical topology contract. While the 512-vCPU request is
-pending, the committed active target is `0..6` regular `32vcpu-128gb` execution
-nodes with 64 Pods per node. Its 192-vCPU execution envelope supports eighty
-2-vCPU tasks while preserving 32 aggregate vCPUs and 128 GiB for platform
-overhead. This smaller node shape avoids depending on scarce 48-vCPU regional
-inventory. The requested target remains `0..10` at `48vcpu-192gb` and 200
-concurrent tasks; move the committed active target only after the provider quota
-readback reaches 512 non-GPU vCPUs and 16 VM slots and the requested shape has
-regional inventory.
+pending, the committed active target is `0..8` regular `16vcpu-64gb` execution
+nodes with 64 Pods per node. Its 128-vCPU execution envelope supports 56
+concurrent 2-vCPU tasks while preserving 2 vCPUs and 8 GiB per node for
+platform overhead. This smaller node shape avoids depending on currently
+unavailable 32- and 48-vCPU regional inventory and consumes at most eight of
+the twelve existing VM slots. The requested target remains `0..10` at
+`48vcpu-192gb` and 200 concurrent tasks; move the committed active target only
+after the provider quota readback reaches 512 non-GPU vCPUs and 16 VM slots and
+the requested shape has regional inventory.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -169,9 +170,9 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 Run live acceptance in this order; stop and clean up at the first failed gate.
 
 1. Apply only `development-eu-north1` with the committed execution bounds, the
-   pinned `32vcpu-128gb` shape, and 64 Pods per node. The current-quota profile
-   is `0..6` and requires readback of at least 200 non-GPU vCPUs and 12 VM
-   slots. The requested 200-task profile is `0..10` at `48vcpu-192gb` and may
+   pinned `16vcpu-64gb` shape, and 64 Pods per node. The current-inventory
+   profile is `0..8` and requires readback of at least 200 non-GPU vCPUs and 12
+   VM slots. The requested 200-task profile is `0..10` at `48vcpu-192gb` and may
    be committed only after readback reaches 512 non-GPU vCPUs, 16 VM slots,
    and regional inventory for that shape.
 2. Prove Terraform convergence and cloud-side Ready/readback.
@@ -189,7 +190,7 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    A manually created Pod or manually patched Task binding is not evidence for
    this gate.
 7. Run staged true-overlap acceptance up to the capacity declared by
-   `accepted_concurrency`; for the current quota use 1, 20, 50, then 80 active
+   `accepted_concurrency`; for the current inventory use 1, 20, 40, then 56 active
    execution units. After the quota-backed target changes to 200, use 1, 20,
    50, 100, 150, then 200 active execution units. At every stage prove the
    persisted concurrency seats,
@@ -288,8 +289,8 @@ the same merged candidate is idempotent.
 
 Every runtime apply also converges the repository-owned execution-capacity and
 execution-admission policies. For the current provider quota, both the global
-and `nebius-cpu` admission ceilings are 80 leases; this must match the 80-job
-pending/create limits and the six-node execution envelope rather than retain a
+and `nebius-cpu` admission ceilings are 56 leases; this must match the 56-job
+pending/create limits and the eight-node execution envelope rather than retain a
 bootstrap single-trial ceiling.
 
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
