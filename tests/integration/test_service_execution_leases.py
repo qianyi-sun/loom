@@ -623,7 +623,7 @@ async def _reserve(
     )
 
 
-async def test_actuator_refreshes_target_health_without_reenabling_operator_state(
+async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(
     postgres_url: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
@@ -642,9 +642,21 @@ async def test_actuator_refreshes_target_health_without_reenabling_operator_stat
             )
             await session.commit()
 
+        kubernetes = _FakeKubernetesJobApi()
+        kubernetes.jobs["foreign-managed-job"] = KubernetesJobObservation(
+            namespace=target.namespace_name,
+            job_name="foreign-managed-job",
+            lease_id=str(uuid4()),
+            resource_generation=1,
+            target_id=target.target_id,
+            execution_unit_key=str(uuid4()),
+            normalized_state=NormalizedJobState.PENDING,
+            job_uid="foreign-uid",
+            resource_version="1",
+        )
         actuator = ExecutionActuator(
             sessions=sessions,
-            kubernetes=_FakeKubernetesJobApi(),
+            kubernetes=kubernetes,
             target=ExecutionTargetRuntime(
                 target_id=target.target_id,
                 namespace=target.namespace_name,
@@ -652,7 +664,7 @@ async def test_actuator_refreshes_target_health_without_reenabling_operator_stat
             controller_id="target-health-refresh-test",
         )
         refreshed_at = now + timedelta(seconds=2)
-        assert await actuator.reconcile_full_once(now=refreshed_at) == 0
+        assert await actuator.reconcile_full_once(now=refreshed_at) == 1
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionTarget, target.target_id)
