@@ -3,7 +3,7 @@
   "release_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "cpu_arch": "arm64",
   "guard": {
-    "socket_path": "/opt/loom-task-image-builder-provider/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/run/guard.sock",
+    "socket_path": "/run/loom-task-image-builder/guard.sock",
     "max_packet_bytes": 4096,
     "ack_timeout_seconds": 5
   },

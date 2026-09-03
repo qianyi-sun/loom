@@ -18,6 +18,8 @@ type GuardClient struct {
 	ackTimeout     time.Duration
 }
 
+var requiredGuardUID = uint32(0)
+
 type AllocationCapabilities struct {
 	Bootstrap          *SecretBuffer
 	JobDirectoryFD     int
@@ -77,6 +79,7 @@ func (c *GuardClient) Project(ctx context.Context, grantID string) (*AllocationC
 		return nil, err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 
 	var response struct {
 		Schema                     string `json:"schema"`
@@ -148,6 +151,7 @@ func (c *GuardClient) Project(ctx context.Context, grantID string) (*AllocationC
 		caps.Close()
 		return nil, err
 	}
+	packet.fd = -1
 	return caps, nil
 }
 
@@ -169,6 +173,7 @@ func (c *GuardClient) Exchange(ctx context.Context, grantID string, exchangeID s
 		return nil, err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 	return c.decodeSessionResponse(packet, rights, grantID)
 }
 
@@ -189,6 +194,7 @@ func (c *GuardClient) Renew(ctx context.Context, grantID string, operationID str
 		return nil, err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 	return c.decodeSessionResponse(packet, rights, grantID)
 }
 
@@ -243,6 +249,7 @@ func (c *GuardClient) Finish(ctx context.Context, grantID string, operationID st
 		return err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 	var response struct {
 		Schema     string `json:"schema"`
 		Operation  string `json:"operation"`
@@ -252,10 +259,14 @@ func (c *GuardClient) Finish(ctx context.Context, grantID string, operationID st
 	if err := decodeStrictJSON(packet.payload, &response); err != nil {
 		return err
 	}
-	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID {
+	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return errors.New("finish response invalid")
 	}
-	return c.sendAck(packet.fd, response.ResponseID, packet.deadline)
+	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+		return err
+	}
+	packet.fd = -1
+	return nil
 }
 
 func (c *GuardClient) decodeSessionResponse(packet *responsePacket, rights []int, grantID string) (*SessionEnvelope, error) {
@@ -287,6 +298,10 @@ func (c *GuardClient) decodeSessionResponse(packet *responsePacket, rights []int
 		buffer.Close()
 		return nil, err
 	}
+	if !isCanonicalNonZeroUUID(response.SessionID) || !isDigest(response.SessionPublicBindingSHA) {
+		session.Secret.Close()
+		return nil, errors.New("session response invalid")
+	}
 	session.SessionPublicBindingSHA256 = response.SessionPublicBindingSHA
 	if session.Generation != response.SessionGeneration || session.SessionID != response.SessionID || session.GrantID != grantID {
 		session.Secret.Close()
@@ -296,6 +311,7 @@ func (c *GuardClient) decodeSessionResponse(packet *responsePacket, rights []int
 		session.Secret.Close()
 		return nil, err
 	}
+	packet.fd = -1
 	return session, nil
 }
 
@@ -303,6 +319,13 @@ type responsePacket struct {
 	fd       int
 	payload  []byte
 	deadline time.Time
+}
+
+func (p *responsePacket) Close() {
+	if p != nil && p.fd >= 0 {
+		syscall.Close(p.fd)
+		p.fd = -1
+	}
 }
 
 func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rights []int) (*responsePacket, []int, error) {
@@ -314,7 +337,7 @@ func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rig
 		syscall.Close(fd)
 		return nil, nil, err
 	}
-	payload, receivedRights, _, flags, err := receiveLocalPacket(fd, c.maxPacketBytes)
+	payload, receivedRights, credentials, flags, err := receiveLocalPacket(fd, c.maxPacketBytes)
 	if err != nil {
 		syscall.Close(fd)
 		return nil, nil, wrapDeadline(ctx, err)
@@ -323,6 +346,11 @@ func (c *GuardClient) roundTrip(ctx context.Context, request map[string]any, rig
 		closeRights(receivedRights)
 		syscall.Close(fd)
 		return nil, nil, errors.New("local packet truncated")
+	}
+	if err := validateGuardPeerCredentials(credentials); err != nil {
+		closeRights(receivedRights)
+		syscall.Close(fd)
+		return nil, nil, err
 	}
 	return &responsePacket{fd: fd, payload: payload, deadline: deadline}, receivedRights, nil
 }
@@ -367,6 +395,12 @@ func (c *GuardClient) sendAck(fd int, responseID string, deadline time.Time) err
 }
 
 func (c *GuardClient) secretOperation(ctx context.Context, request map[string]any, current *SecretBuffer) (*SecretBuffer, bool, error) {
+	grantID, _ := request["grant_id"].(string)
+	operation, _ := request["operation"].(string)
+	operationID, _ := request["operation_id"].(string)
+	materializationID, _ := request["materialization_id"].(string)
+	attemptID, _ := request["attempt_id"].(string)
+	leaseEpoch, _ := request["lease_epoch"].(int)
 	fd, err := current.cloneSealedMemfd("session-operation", maxSecretBytes)
 	if err != nil {
 		return nil, false, err
@@ -377,21 +411,33 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		return nil, false, err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 	var response struct {
-		Schema     string `json:"schema"`
-		Operation  string `json:"operation"`
-		ResponseID string `json:"response_id"`
-		GrantID    string `json:"grant_id"`
-		Available  bool   `json:"available"`
+		Schema            string `json:"schema"`
+		Operation         string `json:"operation"`
+		ResponseID        string `json:"response_id"`
+		GrantID           string `json:"grant_id"`
+		OperationID       string `json:"operation_id"`
+		MaterializationID string `json:"materialization_id"`
+		AttemptID         string `json:"attempt_id"`
+		LeaseEpoch        int    `json:"lease_epoch"`
+		Available         bool   `json:"available"`
 	}
 	if err := decodeStrictJSON(packet.payload, &response); err != nil {
 		return nil, false, err
 	}
-	if response.Schema != localSchema || !isCanonicalNonZeroUUID(response.ResponseID) {
+	if response.Schema != localSchema || response.Operation != operation || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return nil, false, errors.New("secret response invalid")
 	}
+	if materializationID != "" && (response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch) {
+		return nil, false, errors.New("secret response binding invalid")
+	}
 	if len(rights) == 0 && response.Operation == "claim" && !response.Available {
-		return nil, false, c.sendAck(packet.fd, response.ResponseID, packet.deadline)
+		if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+			return nil, false, err
+		}
+		packet.fd = -1
+		return nil, false, nil
 	}
 	if len(rights) != 1 {
 		return nil, false, errors.New("secret response rights invalid")
@@ -405,6 +451,7 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 		buffer.Close()
 		return nil, false, err
 	}
+	packet.fd = -1
 	return buffer, true, nil
 }
 
@@ -431,6 +478,7 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 		return nil, err
 	}
 	defer closeRights(rights)
+	defer packet.Close()
 	if len(rights) != 0 {
 		return nil, errors.New("lease response should not carry rights")
 	}
@@ -438,12 +486,13 @@ func (c *GuardClient) leaseOperation(ctx context.Context, operation string, gran
 	if err := decodeStrictJSON(packet.payload, &response); err != nil {
 		return nil, err
 	}
-	if response.Operation != operation || response.GrantID != grantID || !isCanonicalNonZeroUUID(response.ResponseID) {
+	if response.Operation != operation || response.GrantID != grantID || response.OperationID != operationID || response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return nil, errors.New("lease response invalid")
 	}
 	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
 		return nil, err
 	}
+	packet.fd = -1
 	return &response, nil
 }
 
@@ -534,7 +583,7 @@ func decodeStrictJSON(payload []byte, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
-	return nil
+	return expectJSONEOF(decoder)
 }
 
 func closeRights(rights []int) {
@@ -543,6 +592,16 @@ func closeRights(rights []int) {
 			syscall.Close(descriptor)
 		}
 	}
+}
+
+func validateGuardPeerCredentials(credentials *syscall.Ucred) error {
+	if credentials == nil || credentials.Pid <= 0 {
+		return errors.New("peer credentials missing")
+	}
+	if credentials.Uid != requiredGuardUID {
+		return errors.New("guard peer credentials invalid")
+	}
+	return nil
 }
 
 func validateDirectoryDescriptor(fd int) (*syscall.Stat_t, error) {

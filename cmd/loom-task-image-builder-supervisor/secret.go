@@ -59,18 +59,20 @@ func NewSecretBuffer(fd int, maximum int) (_ *SecretBuffer, err error) {
 		return nil, errors.New("secret payload invalid")
 	}
 	data := make([]byte, int(statValue.Size))
+	if err := syscall.Mlock(data); err != nil {
+		zeroBytes(data)
+		return nil, err
+	}
 	n, err := syscall.Pread(fd, data, 0)
 	if err != nil {
 		zeroBytes(data)
+		_ = syscall.Munlock(data)
 		return nil, err
 	}
 	if n != len(data) {
 		zeroBytes(data)
+		_ = syscall.Munlock(data)
 		return nil, errors.New("secret payload changed")
-	}
-	if err := syscall.Mlock(data); err != nil {
-		zeroBytes(data)
-		return nil, err
 	}
 	return &SecretBuffer{data: data}, nil
 }

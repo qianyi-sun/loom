@@ -101,24 +101,25 @@ func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 		return nil, errors.New("session buffer unavailable")
 	}
 	var session struct {
-		SchemaVersion         int     `json:"schema_version"`
-		GrantID               string  `json:"grant_id"`
-		SessionID             string  `json:"session_id"`
-		Purpose               string  `json:"purpose"`
-		ShadowCampaignID      *string `json:"shadow_campaign_id"`
-		PoolID                string  `json:"pool_id"`
-		CPUArch               string  `json:"cpu_arch"`
-		SessionToken          string  `json:"session_token"`
-		Generation            int     `json:"generation"`
-		AttestationGeneration int     `json:"attestation_generation"`
-		AttestationSHA256     string  `json:"attestation_sha256"`
-		IssuedAt              string  `json:"issued_at"`
-		ExpiresAt             string  `json:"expires_at"`
+		SchemaVersion         int             `json:"schema_version"`
+		GrantID               string          `json:"grant_id"`
+		SessionID             string          `json:"session_id"`
+		Purpose               string          `json:"purpose"`
+		ShadowCampaignID      *string         `json:"shadow_campaign_id"`
+		PoolID                string          `json:"pool_id"`
+		CPUArch               string          `json:"cpu_arch"`
+		SessionToken          json.RawMessage `json:"session_token"`
+		Generation            int             `json:"generation"`
+		AttestationGeneration int             `json:"attestation_generation"`
+		AttestationSHA256     string          `json:"attestation_sha256"`
+		IssuedAt              string          `json:"issued_at"`
+		ExpiresAt             string          `json:"expires_at"`
 	}
 	if err := decodeStrictJSON(buffer.data, &session); err != nil {
 		return nil, err
 	}
-	if session.SchemaVersion != 2 || !isCanonicalNonZeroUUID(session.GrantID) || !isCanonicalNonZeroUUID(session.SessionID) || session.CPUArch != runtime.GOARCH || session.Generation <= 0 || session.AttestationGeneration <= 0 || !isDigest(session.AttestationSHA256) || session.SessionToken == "" {
+	defer zeroBytes(session.SessionToken)
+	if session.SchemaVersion != 2 || !isCanonicalNonZeroUUID(session.GrantID) || !isCanonicalNonZeroUUID(session.SessionID) || session.CPUArch != runtime.GOARCH || session.Generation <= 0 || session.AttestationGeneration <= 0 || !isDigest(session.AttestationSHA256) || !isNonEmptyJSONStringLiteral(session.SessionToken) {
 		return nil, errors.New("session payload invalid")
 	}
 	issuedAt, err := time.Parse(time.RFC3339, session.IssuedAt)
@@ -165,7 +166,6 @@ func newUUID() (string, error) {
 }
 
 func (l *LeaseResponse) UnmarshalJSON(payload []byte) error {
-	type rawLeaseResponse LeaseResponse
 	var wire struct {
 		Schema                    string  `json:"schema"`
 		Operation                 string  `json:"operation"`
@@ -179,8 +179,11 @@ func (l *LeaseResponse) UnmarshalJSON(payload []byte) error {
 		DeterministicFailureCount int     `json:"deterministic_failure_count"`
 		LeaseExpiresAt            *string `json:"lease_expires_at"`
 	}
-	if err := json.Unmarshal(payload, &wire); err != nil {
+	if err := decodeStrictJSON(payload, &wire); err != nil {
 		return err
+	}
+	if wire.Schema != localSchema {
+		return errors.New("lease response schema invalid")
 	}
 	var expiry *time.Time
 	if wire.LeaseExpiresAt != nil {
@@ -190,7 +193,7 @@ func (l *LeaseResponse) UnmarshalJSON(payload []byte) error {
 		}
 		expiry = &value
 	}
-	*l = LeaseResponse(rawLeaseResponse{
+	*l = LeaseResponse{
 		Operation:                 wire.Operation,
 		ResponseID:                wire.ResponseID,
 		GrantID:                   wire.GrantID,
@@ -201,6 +204,10 @@ func (l *LeaseResponse) UnmarshalJSON(payload []byte) error {
 		State:                     wire.State,
 		DeterministicFailureCount: wire.DeterministicFailureCount,
 		LeaseExpiresAt:            expiry,
-	})
+	}
 	return nil
+}
+
+func isNonEmptyJSONStringLiteral(value []byte) bool {
+	return len(value) > 2 && value[0] == '"' && value[len(value)-1] == '"'
 }

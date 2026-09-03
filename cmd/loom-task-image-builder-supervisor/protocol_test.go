@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestProtocolProjectReturnsValidatedCapabilitiesAndAcknowledgesResponse(t *testing.T) {
+	useTestProtocolPolicy(t)
 	socketPath := testSocketPath(t)
 	server := startSeqpacketServer(t, socketPath, func(connFD int) {
 		payload, rights, creds, flags := receiveSeqpacket(t, connFD, 4096)
@@ -68,6 +71,7 @@ func TestProtocolProjectReturnsValidatedCapabilitiesAndAcknowledgesResponse(t *t
 }
 
 func TestProtocolProjectRejectsDescriptorMutationsAndClosesPartialRights(t *testing.T) {
+	useTestProtocolPolicy(t)
 	tests := []struct {
 		name     string
 		response func(*testing.T, int)
@@ -136,8 +140,8 @@ func TestProtocolProjectRejectsDescriptorMutationsAndClosesPartialRights(t *test
 			if err == nil {
 				t.Fatal("Project() succeeded, want error")
 			}
-			server.Close()
 			after := countOpenFileDescriptors(t)
+			server.Close()
 			if after != before {
 				t.Fatalf("fd leak detected: before=%d after=%d", before, after)
 			}
@@ -146,6 +150,7 @@ func TestProtocolProjectRejectsDescriptorMutationsAndClosesPartialRights(t *test
 }
 
 func TestProtocolExchangeSendsSealedSecretDescriptorAndAcknowledgesSessionResponse(t *testing.T) {
+	useTestProtocolPolicy(t)
 	socketPath := testSocketPath(t)
 	server := startSeqpacketServer(t, socketPath, func(connFD int) {
 		payload, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
@@ -190,6 +195,7 @@ func TestProtocolExchangeSendsSealedSecretDescriptorAndAcknowledgesSessionRespon
 }
 
 func TestProtocolUsesAbsoluteDeadlines(t *testing.T) {
+	useTestProtocolPolicy(t)
 	socketPath := testSocketPath(t)
 	server := startSeqpacketServer(t, socketPath, func(connFD int) {
 		defer syscall.Close(connFD)
@@ -212,6 +218,7 @@ func TestProtocolUsesAbsoluteDeadlines(t *testing.T) {
 
 func TestProtocolRejectsTruncatedOrInvalidResponses(t *testing.T) {
 	t.Parallel()
+	useTestProtocolPolicy(t)
 
 	tests := []struct {
 		name    string
@@ -240,6 +247,175 @@ func TestProtocolRejectsTruncatedOrInvalidResponses(t *testing.T) {
 			client := NewGuardClient(socketPath, 4096, 2*time.Second)
 			if _, err := client.Project(context.Background(), "11111111-1111-4111-8111-111111111111"); err == nil {
 				t.Fatal("Project() succeeded, want error")
+			}
+		})
+	}
+}
+
+func TestProtocolRejectsNonRootPeerCredentials(t *testing.T) {
+	useTestProtocolPolicy(t)
+	requiredGuardUID = uint32(os.Geteuid() + 1)
+
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"finishing","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111"}`), nil)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	err := client.Finish(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{"tmp": 1})
+	if err == nil {
+		t.Fatal("Finish() succeeded, want peer credential rejection")
+	}
+}
+
+func TestProtocolRejectsTrailingJSONGarbage(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"finishing","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111"}{}`), nil)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	err := client.Finish(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", map[string]int{"tmp": 1})
+	if err == nil {
+		t.Fatal("Finish() succeeded, want trailing JSON rejection")
+	}
+}
+
+func TestProtocolLeaseResponsesBindRequestIdentity(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+		closeRights(rights)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"start","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333334","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","lease_epoch":7,"state":"active","deterministic_failure_count":0,"lease_expires_at":"2026-09-03T00:10:00Z"}`), nil)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	current := mustSessionEnvelope(t, 1, "sentinel-current")
+	defer current.Secret.Close()
+	if _, err := client.Start(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", 7, current.Secret); err == nil {
+		t.Fatal("Start() succeeded, want request-binding error")
+	}
+}
+
+func TestProtocolSecretResponsesBindRequestIdentity(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+		closeRights(rights)
+		secretFD := createMemfdFixture(t, "bundle", []byte(`{"bundle_token":"sentinel-secret-text"}`), requiredMemfdSeals, true)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"bundle","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333333","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555556","lease_epoch":7,"available":true}`), []int{secretFD})
+		syscall.Close(secretFD)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	current := mustSessionEnvelope(t, 1, "sentinel-current")
+	defer current.Secret.Close()
+	if _, err := client.Bundle(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", 7, current.Secret); err == nil {
+		t.Fatal("Bundle() succeeded, want request-binding error")
+	}
+}
+
+func TestProtocolClosesSocketOnInvalidResponses(t *testing.T) {
+	useTestProtocolPolicy(t)
+	tests := []struct {
+		name    string
+		run     func(*testing.T, *GuardClient) error
+		respond func(*testing.T, int)
+	}{
+		{
+			name: "project invalid",
+			run: func(t *testing.T, client *GuardClient) error {
+				_, err := client.Project(context.Background(), "11111111-1111-4111-8111-111111111111")
+				return err
+			},
+			respond: func(t *testing.T, connFD int) {
+				_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+				sendSeqpacket(t, connFD, []byte(`{"schema":"bad","operation":"projected","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","rights":[]}`), nil)
+			},
+		},
+		{
+			name: "exchange invalid session",
+			run: func(t *testing.T, client *GuardClient) error {
+				bootstrapFD := createMemfdFixture(t, "bootstrap", []byte(`{"schema_version":1,"grant_id":"11111111-1111-4111-8111-111111111111","bootstrap_token":"sentinel-secret-text"}`), requiredMemfdSeals, true)
+				bootstrap, err := NewSecretBuffer(bootstrapFD, 64*1024)
+				if err != nil {
+					t.Fatalf("NewSecretBuffer() error = %v", err)
+				}
+				defer bootstrap.Close()
+				_, err = client.Exchange(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", strings.Repeat("a", 64), bootstrap)
+				return err
+			},
+			respond: func(t *testing.T, connFD int) {
+				_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+				closeRights(rights)
+				sendSeqpacket(t, connFD, []byte(`{"schema":"bad","operation":"session","response_id":"44444444-4444-4444-8444-444444444444","grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","session_generation":2,"session_public_binding_sha256":"`+strings.Repeat("c", 64)+`"}`), nil)
+			},
+		},
+		{
+			name: "claim invalid secret",
+			run: func(t *testing.T, client *GuardClient) error {
+				current := mustSessionEnvelope(t, 1, "sentinel-current")
+				defer current.Secret.Close()
+				_, _, err := client.Claim(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", current.Secret)
+				return err
+			},
+			respond: func(t *testing.T, connFD int) {
+				_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+				closeRights(rights)
+				sendSeqpacket(t, connFD, []byte(`{"schema":"bad","operation":"claim","response_id":"44444444-4444-4444-8444-444444444444","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","available":false}`), nil)
+			},
+		},
+		{
+			name: "lease invalid",
+			run: func(t *testing.T, client *GuardClient) error {
+				current := mustSessionEnvelope(t, 1, "sentinel-current")
+				defer current.Secret.Close()
+				_, err := client.Start(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", 9, current.Secret)
+				return err
+			},
+			respond: func(t *testing.T, connFD int) {
+				_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+				closeRights(rights)
+				sendSeqpacket(t, connFD, []byte(`{"schema":"bad","operation":"start","response_id":"55555555-5555-4555-8555-555555555555","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","materialization_id":"33333333-3333-4333-8333-333333333333","attempt_id":"44444444-4444-4444-8444-444444444444","lease_epoch":9,"state":"active","deterministic_failure_count":0,"lease_expires_at":"2026-09-03T00:10:00Z"}`), nil)
+			},
+		},
+		{
+			name: "finish invalid",
+			run: func(t *testing.T, client *GuardClient) error {
+				return client.Finish(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", map[string]int{"tmp": 1})
+			},
+			respond: func(t *testing.T, connFD int) {
+				_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+				sendSeqpacket(t, connFD, []byte(`{"schema":"bad","operation":"finishing","response_id":"55555555-5555-4555-8555-555555555555","grant_id":"11111111-1111-4111-8111-111111111111"}`), nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			socketPath := testSocketPath(t)
+			server := startSeqpacketServer(t, socketPath, func(connFD int) {
+				tt.respond(t, connFD)
+			})
+			before := countOpenFileDescriptors(t)
+			client := NewGuardClient(socketPath, 4096, 2*time.Second)
+			if err := tt.run(t, client); err == nil {
+				t.Fatal("operation succeeded, want error")
+			}
+			after := countOpenFileDescriptors(t)
+			server.Close()
+			if after != before {
+				t.Fatalf("fd leak detected: before=%d after=%d", before, after)
 			}
 		})
 	}
@@ -373,3 +549,17 @@ func testSocketPath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join("/tmp", fmt.Sprintf("loom-supervisor-%d.sock", time.Now().UnixNano()))
 }
+
+func useTestProtocolPolicy(t *testing.T) {
+	t.Helper()
+
+	protocolPolicyMu.Lock()
+	previousUID := requiredGuardUID
+	requiredGuardUID = uint32(os.Geteuid())
+	t.Cleanup(func() {
+		requiredGuardUID = previousUID
+		protocolPolicyMu.Unlock()
+	})
+}
+
+var protocolPolicyMu sync.Mutex

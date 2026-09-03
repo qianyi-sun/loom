@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -137,10 +138,6 @@ func sanitizeEnvironment(environ []string, quotaRoot string) ([]string, error) {
 	return result, nil
 }
 
-func (c Config) QuotaHomeRoot() string {
-	return filepath.Dir(c.Guard.SocketPath)
-}
-
 func LoadConfig(path string, expectedRelease string) (Config, error) {
 	if !isDigest(expectedRelease) {
 		return Config{}, errors.New("expected release digest invalid")
@@ -159,9 +156,12 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 		return Config{}, err
 	}
 	var disk configDisk
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&disk); err != nil {
+		return Config{}, errors.New("config JSON invalid")
+	}
+	if err := expectJSONEOF(decoder); err != nil {
 		return Config{}, errors.New("config JSON invalid")
 	}
 	if disk.Schema != configSchema {
@@ -200,7 +200,7 @@ func LoadConfig(path string, expectedRelease string) (Config, error) {
 			},
 		},
 	}
-	if err := verifyContentAddressedPath(cfg.Guard.SocketPath, releaseRoot); err != nil {
+	if err := verifyGuardSocketPath(cfg.Guard.SocketPath); err != nil {
 		return Config{}, err
 	}
 	for _, member := range []ExecutableMember{
@@ -284,27 +284,37 @@ func verifyExecutableMember(member ExecutableMember, releaseRoot string) error {
 	if !isDigest(member.SHA256) {
 		return errors.New("member digest invalid")
 	}
-	if err := verifyContentAddressedPath(member.Path, releaseRoot); err != nil {
-		return err
-	}
-	info, err := os.Lstat(member.Path)
+	releaseRootFD, err := openVerifiedDirectory(releaseRoot, releaseDirectoryMode)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	defer syscall.Close(releaseRootFD)
+
+	relativePath, err := releaseRelativePath(member.Path, releaseRoot)
+	if err != nil {
+		return err
+	}
+	memberFD, err := openFileBeneath(releaseRootFD, relativePath)
+	if err != nil {
+		return err
+	}
+
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(memberFD, &statValue); err != nil {
+		syscall.Close(memberFD)
+		return err
+	}
+	mode := os.FileMode(statValue.Mode)
+	if statValue.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		syscall.Close(memberFD)
 		return errors.New("member must be regular file")
 	}
-	identity, err := statIdentity(info)
-	if err != nil {
-		return err
-	}
-	if identity.uid != requiredOwnerUID || info.Mode().Perm() != memberExecutableMode {
+	if statValue.Uid != requiredOwnerUID || mode.Perm() != memberExecutableMode {
+		syscall.Close(memberFD)
 		return errors.New("member ownership or mode invalid")
 	}
-	file, err := os.Open(member.Path)
-	if err != nil {
-		return err
-	}
+
+	file := os.NewFile(uintptr(memberFD), member.Path)
 	defer file.Close()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
@@ -312,6 +322,13 @@ func verifyExecutableMember(member ExecutableMember, releaseRoot string) error {
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != member.SHA256 {
 		return errors.New("member digest mismatch")
+	}
+	return nil
+}
+
+func verifyGuardSocketPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("guard socket path must be absolute and clean")
 	}
 	return nil
 }
@@ -328,12 +345,22 @@ func verifyContentAddressedPath(path string, releaseRoot string) error {
 }
 
 func rejectDuplicateJSONKeys(payload []byte) error {
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	if err := scanJSONValue(decoder); err != nil {
 		return errors.New("config JSON invalid")
 	}
-	if decoder.More() {
+	if err := expectJSONEOF(decoder); err != nil {
 		return errors.New("config JSON invalid")
+	}
+	return nil
+}
+
+func expectJSONEOF(decoder *json.Decoder) error {
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("extra JSON content")
+		}
+		return err
 	}
 	return nil
 }
@@ -393,6 +420,85 @@ func statIdentity(info os.FileInfo) (fileIdentity, error) {
 		uid:  statValue.Uid,
 		mode: info.Mode(),
 	}, nil
+}
+
+func releaseRelativePath(path string, releaseRoot string) (string, error) {
+	if err := verifyContentAddressedPath(path, releaseRoot); err != nil {
+		return "", err
+	}
+	relativePath, err := filepath.Rel(releaseRoot, path)
+	if err != nil {
+		return "", err
+	}
+	if relativePath == "." || relativePath == "" {
+		return "", errors.New("member path invalid")
+	}
+	if strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) || relativePath == ".." {
+		return "", errors.New("member path invalid")
+	}
+	return relativePath, nil
+}
+
+func openVerifiedDirectory(path string, mode os.FileMode) (int, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, err
+	}
+	var statValue syscall.Stat_t
+	if err := syscall.Fstat(fd, &statValue); err != nil {
+		syscall.Close(fd)
+		return -1, err
+	}
+	if statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		syscall.Close(fd)
+		return -1, errors.New("release directory invalid")
+	}
+	if statValue.Uid != requiredOwnerUID || os.FileMode(statValue.Mode).Perm() != mode {
+		syscall.Close(fd)
+		return -1, errors.New("release directory ownership or mode invalid")
+	}
+	return fd, nil
+}
+
+func openFileBeneath(rootFD int, relativePath string) (int, error) {
+	components := strings.Split(relativePath, string(os.PathSeparator))
+	currentFD := rootFD
+	opened := []int{}
+	defer func() {
+		for _, fd := range opened {
+			syscall.Close(fd)
+		}
+	}()
+
+	for index, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return -1, errors.New("member path invalid")
+		}
+		flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
+		if index < len(components)-1 {
+			flags |= syscall.O_DIRECTORY
+		}
+		nextFD, err := syscall.Openat(currentFD, component, flags, 0)
+		if err != nil {
+			return -1, err
+		}
+		if index < len(components)-1 {
+			var statValue syscall.Stat_t
+			if err := syscall.Fstat(nextFD, &statValue); err != nil {
+				syscall.Close(nextFD)
+				return -1, err
+			}
+			if statValue.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+				syscall.Close(nextFD)
+				return -1, errors.New("member path invalid")
+			}
+			opened = append(opened, nextFD)
+			currentFD = nextFD
+			continue
+		}
+		return nextFD, nil
+	}
+	return -1, errors.New("member path invalid")
 }
 
 func isCanonicalNonZeroUUID(value string) bool {

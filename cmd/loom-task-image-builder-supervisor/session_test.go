@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -104,6 +105,31 @@ func TestSessionManagerRenewPropagatesErrorsAndKeepsCurrentSession(t *testing.T)
 	}
 	if manager.Generation() != 3 {
 		t.Fatalf("Generation() = %d, want 3", manager.Generation())
+	}
+}
+
+func TestSessionEnvelopeRejectsTrailingJSONGarbage(t *testing.T) {
+	fd := createMemfdFixture(t, "session-envelope", []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"`+strings.Repeat("a", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}{}`), requiredMemfdSeals, true)
+	buffer, err := NewSecretBuffer(fd, 64*1024)
+	if err != nil {
+		t.Fatalf("NewSecretBuffer() error = %v", err)
+	}
+	defer buffer.Close()
+
+	if _, err := parseSessionEnvelope(buffer); err == nil {
+		t.Fatal("parseSessionEnvelope() succeeded, want trailing-document error")
+	}
+}
+
+func TestLeaseResponseUnmarshalRejectsUnknownFieldsAndWrongSchema(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte(`{"schema":"wrong","operation":"start","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333333","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","lease_epoch":7,"state":"active","deterministic_failure_count":0}`),
+		[]byte(`{"schema":"` + localSchema + `","operation":"start","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333333","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","lease_epoch":7,"state":"active","deterministic_failure_count":0,"unexpected":true}`),
+	} {
+		var response LeaseResponse
+		if err := json.Unmarshal(payload, &response); err == nil {
+			t.Fatalf("json.Unmarshal(%s) succeeded, want error", payload)
+		}
 	}
 }
 

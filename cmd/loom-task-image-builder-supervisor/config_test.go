@@ -161,6 +161,26 @@ func TestConfigRejectsUnknownAndDuplicateFields(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsTrailingJSONGarbage(t *testing.T) {
+	root := t.TempDir()
+	release := strings.Repeat("1", 64)
+	useTestConfigPolicy(t, root)
+	paths := makeReleaseTree(t, root, release)
+	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", configPath, err)
+	}
+	if err := os.WriteFile(configPath, append(payload, []byte("\n{}")...), 0o444); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", configPath, err)
+	}
+
+	if _, err := LoadConfig(configPath, release); err == nil {
+		t.Fatal("LoadConfig() succeeded, want trailing-document error")
+	}
+}
+
 func TestConfigRejectsSymlinkWritableChangedInodeWrongReleaseWrongArchAndNonContentAddressedPaths(t *testing.T) {
 	root := t.TempDir()
 	release := strings.Repeat("c", 64)
@@ -258,6 +278,39 @@ func TestConfigRejectsSymlinkWritableChangedInodeWrongReleaseWrongArchAndNonCont
 	}
 }
 
+func TestConfigAllowsFixedGuardSocketOutsideRelease(t *testing.T) {
+	root := t.TempDir()
+	release := strings.Repeat("2", 64)
+	useTestConfigPolicy(t, root)
+	paths := makeReleaseTree(t, root, release)
+	paths.guardSocket = filepath.Join(root, "var", "run", "loom-task-image-builder", "guard.sock")
+	if err := os.MkdirAll(filepath.Dir(paths.guardSocket), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(paths.guardSocket), err)
+	}
+	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
+
+	cfg, err := LoadConfig(configPath, release)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.Guard.SocketPath != paths.guardSocket {
+		t.Fatalf("Guard.SocketPath = %q, want %q", cfg.Guard.SocketPath, paths.guardSocket)
+	}
+}
+
+func TestConfigRejectsRelativeGuardSocketPath(t *testing.T) {
+	root := t.TempDir()
+	release := strings.Repeat("3", 64)
+	useTestConfigPolicy(t, root)
+	paths := makeReleaseTree(t, root, release)
+	paths.guardSocket = "relative/guard.sock"
+	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
+
+	if _, err := LoadConfig(configPath, release); err == nil {
+		t.Fatal("LoadConfig() succeeded, want guard socket path error")
+	}
+}
+
 func TestConfigRejectsDigestConfusionBetweenManifestAndELFMembers(t *testing.T) {
 	root := t.TempDir()
 	release := strings.Repeat("e", 64)
@@ -274,6 +327,45 @@ func TestConfigRejectsDigestConfusionBetweenManifestAndELFMembers(t *testing.T) 
 
 	if _, err := LoadConfig(configPath, release); err == nil {
 		t.Fatal("LoadConfig() succeeded, want error")
+	}
+}
+
+func TestConfigRejectsExecutableMemberWithIntermediateSymlink(t *testing.T) {
+	root := t.TempDir()
+	release := strings.Repeat("4", 64)
+	useTestConfigPolicy(t, root)
+	paths := makeReleaseTree(t, root, release)
+	releaseRoot := filepath.Join(root, "releases", release)
+	binDir := filepath.Join(releaseRoot, "bin")
+	outsideBin := filepath.Join(root, "outside-bin")
+	if err := os.Mkdir(outsideBin, 0o755); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", outsideBin, err)
+	}
+	outsideRootlesskit := filepath.Join(outsideBin, "rootlesskit")
+	writeExecutableFixture(t, outsideRootlesskit, "#!/bin/sh\necho outside\n")
+	if err := os.Chmod(releaseRoot, 0o755); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", releaseRoot, err)
+	}
+	if err := os.RemoveAll(binDir); err != nil {
+		t.Fatalf("RemoveAll(%q) error = %v", binDir, err)
+	}
+	if err := os.Symlink(outsideBin, binDir); err != nil {
+		t.Fatalf("Symlink(%q, %q) error = %v", outsideBin, binDir, err)
+	}
+	if err := os.Chmod(releaseRoot, 0o555); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", releaseRoot, err)
+	}
+	paths.rootlesskit = filepath.Join(binDir, "rootlesskit")
+	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
+	replaceFileText(
+		t,
+		configPath,
+		`"sha256":"`+sha256FileHex(t, paths.rootlesskit)+`"`,
+		`"sha256":"`+sha256FileHex(t, outsideRootlesskit)+`"`,
+	)
+
+	if _, err := LoadConfig(configPath, release); err == nil {
+		t.Fatal("LoadConfig() succeeded, want intermediate-symlink rejection")
 	}
 }
 
