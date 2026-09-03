@@ -20,6 +20,7 @@ type supervisorProjectClient interface {
 
 var (
 	compiledConfigPath      = "/etc/loom-task-image-builder/supervisor-config.json"
+	compiledGuardSocketPath = "/run/loom-task-image-builder-guard/guard.sock"
 	compiledReleaseSHA256   = ""
 	compiledReleaseBasePath = "/opt/loom-task-image-builder-provider/releases"
 	guardClientFactory      = func(cfg Config) supervisorProjectClient {

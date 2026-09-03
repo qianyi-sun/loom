@@ -3268,8 +3268,14 @@ class GuardService:
             "grant_id": str(grant_id),
         }
         if secret is not None:
+            response["operation_id"] = str(operation_id)
+            if request.operation == "bundle":
+                response["materialization_id"] = str(request.materialization_id)
+                response["attempt_id"] = str(request.attempt_id)
+                response["lease_epoch"] = request.lease_epoch
             response["payload_sha256"] = secret.sha256
         elif request.operation == "claim":
+            response["operation_id"] = str(operation_id)
             response["available"] = False
         elif acknowledgement is not None:
             response.update(

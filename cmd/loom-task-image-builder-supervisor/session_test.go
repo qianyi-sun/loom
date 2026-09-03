@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestSessionManagerWithCurrentLendsSecretOnlyWithinCallback(t *testing.T) {
@@ -121,6 +123,40 @@ func TestSessionEnvelopeRejectsTrailingJSONGarbage(t *testing.T) {
 	}
 }
 
+func TestSessionEnvelopeScannerKeepsTokenSliceInsideLockedBuffer(t *testing.T) {
+	buffer := mustSecretBuffer(t, []byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"`+runtimeSessionArch()+`","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"`+strings.Repeat("a", 64)+`","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`))
+	defer buffer.Close()
+
+	fields, err := parseSessionEnvelopeFields(buffer.data)
+	if err != nil {
+		t.Fatalf("parseSessionEnvelopeFields() error = %v", err)
+	}
+
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(buffer.data)))
+	limit := base + uintptr(len(buffer.data))
+	tokenPtr := reflect.ValueOf(fields.sessionToken).Pointer()
+	if tokenPtr < base || tokenPtr >= limit {
+		t.Fatalf("session token slice ptr %#x outside locked buffer [%#x, %#x)", tokenPtr, base, limit)
+	}
+	if got := string(fields.sessionToken); got != `"sentinel-secret-text"` {
+		t.Fatalf("sessionToken = %q", got)
+	}
+}
+
+func TestSessionEnvelopeRejectsUnknownDuplicateOrMissingFields(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"` + runtimeSessionArch() + `","generation":1,"attestation_generation":1,"attestation_sha256":"` + strings.Repeat("a", 64) + `","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`),
+		[]byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"` + runtimeSessionArch() + `","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"` + strings.Repeat("a", 64) + `","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z"}`),
+		[]byte(`{"schema_version":2,"grant_id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","purpose":"production","shadow_campaign_id":null,"pool_id":"staging-gb10-task-image","cpu_arch":"` + runtimeSessionArch() + `","session_token":"sentinel-secret-text","generation":1,"attestation_generation":1,"attestation_sha256":"` + strings.Repeat("a", 64) + `","issued_at":"2026-09-03T00:00:00Z","expires_at":"2026-09-03T00:10:00Z","extra":true}`),
+	} {
+		buffer := mustSecretBuffer(t, payload)
+		if _, err := parseSessionEnvelope(buffer); err == nil {
+			t.Fatalf("parseSessionEnvelope(%s) succeeded, want error", payload)
+		}
+		buffer.Close()
+	}
+}
+
 func TestLeaseResponseUnmarshalRejectsUnknownFieldsAndWrongSchema(t *testing.T) {
 	for _, payload := range [][]byte{
 		[]byte(`{"schema":"wrong","operation":"start","response_id":"22222222-2222-4222-8222-222222222222","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"33333333-3333-4333-8333-333333333333","materialization_id":"44444444-4444-4444-8444-444444444444","attempt_id":"55555555-5555-4555-8555-555555555555","lease_epoch":7,"state":"active","deterministic_failure_count":0}`),
@@ -131,6 +167,16 @@ func TestLeaseResponseUnmarshalRejectsUnknownFieldsAndWrongSchema(t *testing.T) 
 			t.Fatalf("json.Unmarshal(%s) succeeded, want error", payload)
 		}
 	}
+}
+
+func mustSecretBuffer(t *testing.T, payload []byte) *SecretBuffer {
+	t.Helper()
+	fd := createMemfdFixture(t, "session-envelope", payload, requiredMemfdSeals, true)
+	buffer, err := NewSecretBuffer(fd, 64*1024)
+	if err != nil {
+		t.Fatalf("NewSecretBuffer() error = %v", err)
+	}
+	return buffer
 }
 
 type stubSessionClient struct {

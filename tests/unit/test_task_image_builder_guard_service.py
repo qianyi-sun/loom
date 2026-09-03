@@ -2548,6 +2548,42 @@ def test_lease_operations_require_current_session_and_keep_secret_outputs_sealed
             os.close(descriptor)
             assert b"sentinel-secret" in opaque
             assert b"sentinel-secret" not in response_payload
+            payload_sha256 = hashlib.sha256(opaque).hexdigest()
+            if operation == "claim":
+                assert response == {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "claim",
+                    "response_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(LEASE_OPERATION),
+                    "payload_sha256": payload_sha256,
+                }
+            else:
+                assert response == {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": operation,
+                    "response_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(LEASE_OPERATION),
+                    "materialization_id": str(MATERIALIZATION),
+                    "attempt_id": str(ATTEMPT),
+                    "lease_epoch": 1,
+                    "payload_sha256": payload_sha256,
+                }
+        elif operation == "claim":
+            assert response == {
+                "schema": LOCAL_SCHEMA,
+                "operation": "claim",
+                "response_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                "grant_id": str(GRANT),
+                "operation_id": str(LEASE_OPERATION),
+                "available": False,
+            }
+        else:
+            assert response["operation_id"] == str(LEASE_OPERATION)
+            assert response["materialization_id"] == str(MATERIALIZATION)
+            assert response["attempt_id"] == str(ATTEMPT)
+            assert response["lease_epoch"] == 1
         send_packet(
             client,
             _json(
@@ -2604,7 +2640,13 @@ def test_finish_is_descriptor_free_and_only_persists_cleanup_evidence(
         response_payload, descriptor = receive_request(client, maximum=4096)
         response = json.loads(response_payload)
         assert descriptor is None
-        assert response["operation"] == "finishing"
+        assert response == {
+            "schema": LOCAL_SCHEMA,
+            "operation": "finishing",
+            "response_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "grant_id": str(GRANT),
+            "operation_id": str(LEASE_OPERATION),
+        }
         assert (service.storage.root / str(GRANT)).exists()  # type: ignore[attr-defined]
         assert "storage_cleanup" not in events
         send_packet(

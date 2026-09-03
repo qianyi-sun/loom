@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -100,33 +102,18 @@ func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 	if buffer == nil || buffer.closed {
 		return nil, errors.New("session buffer unavailable")
 	}
-	var session struct {
-		SchemaVersion         int             `json:"schema_version"`
-		GrantID               string          `json:"grant_id"`
-		SessionID             string          `json:"session_id"`
-		Purpose               string          `json:"purpose"`
-		ShadowCampaignID      *string         `json:"shadow_campaign_id"`
-		PoolID                string          `json:"pool_id"`
-		CPUArch               string          `json:"cpu_arch"`
-		SessionToken          json.RawMessage `json:"session_token"`
-		Generation            int             `json:"generation"`
-		AttestationGeneration int             `json:"attestation_generation"`
-		AttestationSHA256     string          `json:"attestation_sha256"`
-		IssuedAt              string          `json:"issued_at"`
-		ExpiresAt             string          `json:"expires_at"`
-	}
-	if err := decodeStrictJSON(buffer.data, &session); err != nil {
-		return nil, err
-	}
-	defer zeroBytes(session.SessionToken)
-	if session.SchemaVersion != 2 || !isCanonicalNonZeroUUID(session.GrantID) || !isCanonicalNonZeroUUID(session.SessionID) || session.CPUArch != runtime.GOARCH || session.Generation <= 0 || session.AttestationGeneration <= 0 || !isDigest(session.AttestationSHA256) || !isNonEmptyJSONStringLiteral(session.SessionToken) {
-		return nil, errors.New("session payload invalid")
-	}
-	issuedAt, err := time.Parse(time.RFC3339, session.IssuedAt)
+	session, err := parseSessionEnvelopeFields(buffer.data)
 	if err != nil {
 		return nil, err
 	}
-	expiresAt, err := time.Parse(time.RFC3339, session.ExpiresAt)
+	if session.schemaVersion != 2 || !isCanonicalNonZeroUUID(session.grantID) || !isCanonicalNonZeroUUID(session.sessionID) || session.cpuArch != runtime.GOARCH || session.generation <= 0 || session.attestationGeneration <= 0 || !isDigest(session.attestationSHA256) || !isNonEmptyJSONStringLiteral(session.sessionToken) {
+		return nil, errors.New("session payload invalid")
+	}
+	issuedAt, err := time.Parse(time.RFC3339, session.issuedAt)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt, err := time.Parse(time.RFC3339, session.expiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +122,11 @@ func parseSessionEnvelope(buffer *SecretBuffer) (*SessionEnvelope, error) {
 	}
 	return &SessionEnvelope{
 		Secret:                buffer,
-		GrantID:               session.GrantID,
-		SessionID:             session.SessionID,
-		Generation:            session.Generation,
-		AttestationGeneration: session.AttestationGeneration,
-		AttestationSHA256:     session.AttestationSHA256,
+		GrantID:               session.grantID,
+		SessionID:             session.sessionID,
+		Generation:            session.generation,
+		AttestationGeneration: session.attestationGeneration,
+		AttestationSHA256:     session.attestationSHA256,
 		IssuedAt:              issuedAt,
 		ExpiresAt:             expiresAt,
 	}, nil
@@ -210,4 +197,330 @@ func (l *LeaseResponse) UnmarshalJSON(payload []byte) error {
 
 func isNonEmptyJSONStringLiteral(value []byte) bool {
 	return len(value) > 2 && value[0] == '"' && value[len(value)-1] == '"'
+}
+
+type sessionEnvelopeFields struct {
+	schemaVersion         int
+	grantID               string
+	sessionID             string
+	purpose               string
+	shadowCampaignID      *string
+	poolID                string
+	cpuArch               string
+	sessionToken          []byte
+	generation            int
+	attestationGeneration int
+	attestationSHA256     string
+	issuedAt              string
+	expiresAt             string
+}
+
+func parseSessionEnvelopeFields(payload []byte) (sessionEnvelopeFields, error) {
+	values, err := scanJSONObjectFields(payload)
+	if err != nil {
+		return sessionEnvelopeFields{}, err
+	}
+	required := []string{
+		"schema_version",
+		"grant_id",
+		"session_id",
+		"purpose",
+		"shadow_campaign_id",
+		"pool_id",
+		"cpu_arch",
+		"session_token",
+		"generation",
+		"attestation_generation",
+		"attestation_sha256",
+		"issued_at",
+		"expires_at",
+	}
+	if len(values) != len(required) {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	for _, key := range required {
+		if _, ok := values[key]; !ok {
+			return sessionEnvelopeFields{}, errors.New("session payload invalid")
+		}
+	}
+
+	schemaVersion, err := decodeJSONInt(values["schema_version"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	grantID, err := decodeJSONString(values["grant_id"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	sessionID, err := decodeJSONString(values["session_id"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	purpose, err := decodeJSONString(values["purpose"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	shadowCampaignID, err := decodeOptionalJSONString(values["shadow_campaign_id"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	poolID, err := decodeJSONString(values["pool_id"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	cpuArch, err := decodeJSONString(values["cpu_arch"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	generation, err := decodeJSONInt(values["generation"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	attestationGeneration, err := decodeJSONInt(values["attestation_generation"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	attestationSHA256, err := decodeJSONString(values["attestation_sha256"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	issuedAt, err := decodeJSONString(values["issued_at"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+	expiresAt, err := decodeJSONString(values["expires_at"])
+	if err != nil {
+		return sessionEnvelopeFields{}, errors.New("session payload invalid")
+	}
+
+	return sessionEnvelopeFields{
+		schemaVersion:         schemaVersion,
+		grantID:               grantID,
+		sessionID:             sessionID,
+		purpose:               purpose,
+		shadowCampaignID:      shadowCampaignID,
+		poolID:                poolID,
+		cpuArch:               cpuArch,
+		sessionToken:          values["session_token"],
+		generation:            generation,
+		attestationGeneration: attestationGeneration,
+		attestationSHA256:     attestationSHA256,
+		issuedAt:              issuedAt,
+		expiresAt:             expiresAt,
+	}, nil
+}
+
+func scanJSONObjectFields(payload []byte) (map[string][]byte, error) {
+	position := skipJSONWhitespace(payload, 0)
+	if position >= len(payload) || payload[position] != '{' {
+		return nil, errors.New("session payload invalid")
+	}
+	position++
+	fields := make(map[string][]byte, 13)
+	for {
+		position = skipJSONWhitespace(payload, position)
+		if position >= len(payload) {
+			return nil, errors.New("session payload invalid")
+		}
+		if payload[position] == '}' {
+			position++
+			break
+		}
+		keyStart := position
+		keyEnd, err := consumeJSONString(payload, keyStart)
+		if err != nil {
+			return nil, errors.New("session payload invalid")
+		}
+		key, err := decodeJSONString(payload[keyStart:keyEnd])
+		if err != nil {
+			return nil, errors.New("session payload invalid")
+		}
+		if _, exists := fields[key]; exists {
+			return nil, errors.New("session payload invalid")
+		}
+		position = skipJSONWhitespace(payload, keyEnd)
+		if position >= len(payload) || payload[position] != ':' {
+			return nil, errors.New("session payload invalid")
+		}
+		position++
+		position = skipJSONWhitespace(payload, position)
+		valueStart := position
+		valueEnd, err := consumeJSONValue(payload, valueStart)
+		if err != nil {
+			return nil, errors.New("session payload invalid")
+		}
+		fields[key] = payload[valueStart:valueEnd]
+		position = skipJSONWhitespace(payload, valueEnd)
+		if position >= len(payload) {
+			return nil, errors.New("session payload invalid")
+		}
+		switch payload[position] {
+		case ',':
+			position++
+		case '}':
+			position++
+			goto done
+		default:
+			return nil, errors.New("session payload invalid")
+		}
+	}
+done:
+	position = skipJSONWhitespace(payload, position)
+	if position != len(payload) {
+		return nil, errors.New("session payload invalid")
+	}
+	return fields, nil
+}
+
+func consumeJSONValue(payload []byte, position int) (int, error) {
+	if position >= len(payload) {
+		return 0, errors.New("json value invalid")
+	}
+	switch payload[position] {
+	case '"':
+		return consumeJSONString(payload, position)
+	case '{':
+		return consumeDelimitedJSON(payload, position, '{', '}')
+	case '[':
+		return consumeDelimitedJSON(payload, position, '[', ']')
+	case 't':
+		return consumeJSONLiteral(payload, position, "true")
+	case 'f':
+		return consumeJSONLiteral(payload, position, "false")
+	case 'n':
+		return consumeJSONLiteral(payload, position, "null")
+	default:
+		return consumeJSONNumber(payload, position)
+	}
+}
+
+func consumeDelimitedJSON(payload []byte, position int, open byte, close byte) (int, error) {
+	depth := 0
+	index := position
+	for index < len(payload) {
+		switch payload[index] {
+		case '"':
+			next, err := consumeJSONString(payload, index)
+			if err != nil {
+				return 0, err
+			}
+			index = next
+			continue
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return index + 1, nil
+			}
+		}
+		index++
+	}
+	return 0, errors.New("json delimiter invalid")
+}
+
+func consumeJSONString(payload []byte, position int) (int, error) {
+	if position >= len(payload) || payload[position] != '"' {
+		return 0, errors.New("json string invalid")
+	}
+	for index := position + 1; index < len(payload); index++ {
+		switch payload[index] {
+		case '\\':
+			index++
+			if index >= len(payload) {
+				return 0, errors.New("json escape invalid")
+			}
+		case '"':
+			return index + 1, nil
+		}
+	}
+	return 0, errors.New("json string invalid")
+}
+
+func consumeJSONLiteral(payload []byte, position int, literal string) (int, error) {
+	if !bytes.HasPrefix(payload[position:], []byte(literal)) {
+		return 0, errors.New("json literal invalid")
+	}
+	return position + len(literal), nil
+}
+
+func consumeJSONNumber(payload []byte, position int) (int, error) {
+	index := position
+	if payload[index] == '-' {
+		index++
+	}
+	if index >= len(payload) {
+		return 0, errors.New("json number invalid")
+	}
+	if payload[index] == '0' {
+		index++
+	} else {
+		if payload[index] < '1' || payload[index] > '9' {
+			return 0, errors.New("json number invalid")
+		}
+		for index < len(payload) && payload[index] >= '0' && payload[index] <= '9' {
+			index++
+		}
+	}
+	if index < len(payload) && payload[index] == '.' {
+		index++
+		if index >= len(payload) || payload[index] < '0' || payload[index] > '9' {
+			return 0, errors.New("json number invalid")
+		}
+		for index < len(payload) && payload[index] >= '0' && payload[index] <= '9' {
+			index++
+		}
+	}
+	if index < len(payload) && (payload[index] == 'e' || payload[index] == 'E') {
+		index++
+		if index < len(payload) && (payload[index] == '+' || payload[index] == '-') {
+			index++
+		}
+		if index >= len(payload) || payload[index] < '0' || payload[index] > '9' {
+			return 0, errors.New("json number invalid")
+		}
+		for index < len(payload) && payload[index] >= '0' && payload[index] <= '9' {
+			index++
+		}
+	}
+	return index, nil
+}
+
+func skipJSONWhitespace(payload []byte, position int) int {
+	for position < len(payload) {
+		switch payload[position] {
+		case ' ', '\t', '\r', '\n':
+			position++
+		default:
+			return position
+		}
+	}
+	return position
+}
+
+func decodeJSONString(payload []byte) (string, error) {
+	var value string
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func decodeOptionalJSONString(payload []byte) (*string, error) {
+	if bytes.Equal(payload, []byte("null")) {
+		return nil, nil
+	}
+	value, err := decodeJSONString(payload)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func decodeJSONInt(payload []byte) (int, error) {
+	value, err := strconv.ParseInt(string(payload), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return int(value), nil
 }

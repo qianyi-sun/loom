@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -321,6 +322,135 @@ func TestProtocolSecretResponsesBindRequestIdentity(t *testing.T) {
 	defer current.Secret.Close()
 	if _, err := client.Bundle(context.Background(), "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555", 7, current.Secret); err == nil {
 		t.Fatal("Bundle() succeeded, want request-binding error")
+	}
+}
+
+func TestProtocolClaimAndBundleAcceptRealGuardSecretResponses(t *testing.T) {
+	useTestProtocolPolicy(t)
+
+	tests := []struct {
+		name      string
+		call      func(*testing.T, *GuardClient, *SecretBuffer) error
+		response  string
+		payload   []byte
+		wantAckID string
+	}{
+		{
+			name: "claim available",
+			call: func(t *testing.T, client *GuardClient, current *SecretBuffer) error {
+				secret, available, err := client.Claim(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", current)
+				if err != nil {
+					return err
+				}
+				defer secret.Close()
+				if !available {
+					t.Fatal("available = false, want true")
+				}
+				return nil
+			},
+			response:  `{"schema":"` + localSchema + `","operation":"claim","response_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","payload_sha256":"%s"}`,
+			payload:   []byte(`{"claim_token":"sentinel-secret-text"}`),
+			wantAckID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		},
+		{
+			name: "claim unavailable",
+			call: func(t *testing.T, client *GuardClient, current *SecretBuffer) error {
+				secret, available, err := client.Claim(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", current)
+				if err != nil {
+					return err
+				}
+				if secret != nil || available {
+					t.Fatalf("got secret=%v available=%v, want nil/false", secret, available)
+				}
+				return nil
+			},
+			response:  `{"schema":"` + localSchema + `","operation":"claim","response_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","available":false}`,
+			wantAckID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		},
+		{
+			name: "bundle",
+			call: func(t *testing.T, client *GuardClient, current *SecretBuffer) error {
+				secret, err := client.Bundle(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", 9, current)
+				if err != nil {
+					return err
+				}
+				defer secret.Close()
+				return nil
+			},
+			response:  `{"schema":"` + localSchema + `","operation":"bundle","response_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","materialization_id":"33333333-3333-4333-8333-333333333333","attempt_id":"44444444-4444-4444-8444-444444444444","lease_epoch":9,"payload_sha256":"%s"}`,
+			payload:   []byte(`{"bundle_token":"sentinel-secret-text"}`),
+			wantAckID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			socketPath := testSocketPath(t)
+			server := startSeqpacketServer(t, socketPath, func(connFD int) {
+				_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+				closeRights(rights)
+				var rightsToSend []int
+				response := tt.response
+				if tt.payload != nil {
+					fd := createMemfdFixture(t, tt.name, tt.payload, requiredMemfdSeals, true)
+					rightsToSend = []int{fd}
+					sum := sha256.Sum256(tt.payload)
+					response = fmt.Sprintf(response, fmt.Sprintf("%x", sum[:]))
+					sendSeqpacket(t, connFD, []byte(response), rightsToSend)
+					syscall.Close(fd)
+				} else {
+					sendSeqpacket(t, connFD, []byte(response), nil)
+				}
+				ackPayload, _, _, _ := receiveSeqpacket(t, connFD, 4096)
+				assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"`+tt.wantAckID+`","schema":"`+localSchema+`"}`)
+			})
+			defer server.Close()
+
+			client := NewGuardClient(socketPath, 4096, 2*time.Second)
+			current := mustSessionEnvelope(t, 1, "sentinel-current")
+			defer current.Secret.Close()
+			if err := tt.call(t, client, current.Secret); err != nil {
+				t.Fatalf("call() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestProtocolSecretResponsesRejectPayloadDigestMismatch(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, rights, _, _ := receiveSeqpacket(t, connFD, 4096)
+		closeRights(rights)
+		fd := createMemfdFixture(t, "bundle", []byte(`{"bundle_token":"sentinel-secret-text"}`), requiredMemfdSeals, true)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"bundle","response_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222","materialization_id":"33333333-3333-4333-8333-333333333333","attempt_id":"44444444-4444-4444-8444-444444444444","lease_epoch":9,"payload_sha256":"`+strings.Repeat("d", 64)+`"}`), []int{fd})
+		syscall.Close(fd)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	current := mustSessionEnvelope(t, 1, "sentinel-current")
+	defer current.Secret.Close()
+	if _, err := client.Bundle(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", 9, current.Secret); err == nil {
+		t.Fatal("Bundle() succeeded, want payload digest error")
+	}
+}
+
+func TestProtocolFinishAcceptsAndBindsRealGuardResponse(t *testing.T) {
+	useTestProtocolPolicy(t)
+	socketPath := testSocketPath(t)
+	server := startSeqpacketServer(t, socketPath, func(connFD int) {
+		_, _, _, _ = receiveSeqpacket(t, connFD, 4096)
+		sendSeqpacket(t, connFD, []byte(`{"schema":"`+localSchema+`","operation":"finishing","response_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","grant_id":"11111111-1111-4111-8111-111111111111","operation_id":"22222222-2222-4222-8222-222222222222"}`), nil)
+		ackPayload, _, _, _ := receiveSeqpacket(t, connFD, 4096)
+		assertExactJSON(t, ackPayload, `{"operation":"ack","response_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","schema":"`+localSchema+`"}`)
+	})
+	defer server.Close()
+
+	client := NewGuardClient(socketPath, 4096, 2*time.Second)
+	if err := client.Finish(context.Background(), "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", map[string]int{"tmp": 1}); err != nil {
+		t.Fatalf("Finish() error = %v", err)
 	}
 }
 

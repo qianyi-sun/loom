@@ -251,15 +251,16 @@ func (c *GuardClient) Finish(ctx context.Context, grantID string, operationID st
 	defer closeRights(rights)
 	defer packet.Close()
 	var response struct {
-		Schema     string `json:"schema"`
-		Operation  string `json:"operation"`
-		ResponseID string `json:"response_id"`
-		GrantID    string `json:"grant_id"`
+		Schema      string `json:"schema"`
+		Operation   string `json:"operation"`
+		ResponseID  string `json:"response_id"`
+		GrantID     string `json:"grant_id"`
+		OperationID string `json:"operation_id"`
 	}
 	if err := decodeStrictJSON(packet.payload, &response); err != nil {
 		return err
 	}
-	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID || !isCanonicalNonZeroUUID(response.ResponseID) {
+	if response.Schema != localSchema || response.Operation != "finishing" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) {
 		return errors.New("finish response invalid")
 	}
 	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
@@ -412,27 +413,21 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 	}
 	defer closeRights(rights)
 	defer packet.Close()
-	var response struct {
-		Schema            string `json:"schema"`
-		Operation         string `json:"operation"`
-		ResponseID        string `json:"response_id"`
-		GrantID           string `json:"grant_id"`
-		OperationID       string `json:"operation_id"`
-		MaterializationID string `json:"materialization_id"`
-		AttemptID         string `json:"attempt_id"`
-		LeaseEpoch        int    `json:"lease_epoch"`
-		Available         bool   `json:"available"`
-	}
-	if err := decodeStrictJSON(packet.payload, &response); err != nil {
-		return nil, false, err
-	}
-	if response.Schema != localSchema || response.Operation != operation || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) {
-		return nil, false, errors.New("secret response invalid")
-	}
-	if materializationID != "" && (response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch) {
-		return nil, false, errors.New("secret response binding invalid")
-	}
-	if len(rights) == 0 && response.Operation == "claim" && !response.Available {
+	if operation == "claim" && len(rights) == 0 {
+		var response struct {
+			Schema      string `json:"schema"`
+			Operation   string `json:"operation"`
+			ResponseID  string `json:"response_id"`
+			GrantID     string `json:"grant_id"`
+			OperationID string `json:"operation_id"`
+			Available   *bool  `json:"available"`
+		}
+		if err := decodeStrictJSON(packet.payload, &response); err != nil {
+			return nil, false, err
+		}
+		if response.Schema != localSchema || response.Operation != "claim" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) || response.Available == nil || *response.Available {
+			return nil, false, errors.New("secret response invalid")
+		}
 		if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
 			return nil, false, err
 		}
@@ -442,12 +437,59 @@ func (c *GuardClient) secretOperation(ctx context.Context, request map[string]an
 	if len(rights) != 1 {
 		return nil, false, errors.New("secret response rights invalid")
 	}
+	var payloadSHA256 string
+	var responseID string
+	switch operation {
+	case "claim":
+		var response struct {
+			Schema        string `json:"schema"`
+			Operation     string `json:"operation"`
+			ResponseID    string `json:"response_id"`
+			GrantID       string `json:"grant_id"`
+			OperationID   string `json:"operation_id"`
+			PayloadSHA256 string `json:"payload_sha256"`
+		}
+		if err := decodeStrictJSON(packet.payload, &response); err != nil {
+			return nil, false, err
+		}
+		if response.Schema != localSchema || response.Operation != "claim" || response.GrantID != grantID || response.OperationID != operationID || !isCanonicalNonZeroUUID(response.ResponseID) || !isDigest(response.PayloadSHA256) {
+			return nil, false, errors.New("secret response invalid")
+		}
+		payloadSHA256 = response.PayloadSHA256
+		responseID = response.ResponseID
+	case "bundle":
+		var response struct {
+			Schema            string `json:"schema"`
+			Operation         string `json:"operation"`
+			ResponseID        string `json:"response_id"`
+			GrantID           string `json:"grant_id"`
+			OperationID       string `json:"operation_id"`
+			MaterializationID string `json:"materialization_id"`
+			AttemptID         string `json:"attempt_id"`
+			LeaseEpoch        int    `json:"lease_epoch"`
+			PayloadSHA256     string `json:"payload_sha256"`
+		}
+		if err := decodeStrictJSON(packet.payload, &response); err != nil {
+			return nil, false, err
+		}
+		if response.Schema != localSchema || response.Operation != "bundle" || response.GrantID != grantID || response.OperationID != operationID || response.MaterializationID != materializationID || response.AttemptID != attemptID || response.LeaseEpoch != leaseEpoch || !isCanonicalNonZeroUUID(response.ResponseID) || !isDigest(response.PayloadSHA256) {
+			return nil, false, errors.New("secret response invalid")
+		}
+		payloadSHA256 = response.PayloadSHA256
+		responseID = response.ResponseID
+	default:
+		return nil, false, errors.New("secret operation invalid")
+	}
 	buffer, err := NewSecretBuffer(rights[0], 8*1024*1024)
 	rights[0] = -1
 	if err != nil {
 		return nil, false, err
 	}
-	if err := c.sendAck(packet.fd, response.ResponseID, packet.deadline); err != nil {
+	if secretSHA256(buffer.data) != payloadSHA256 {
+		buffer.Close()
+		return nil, false, errors.New("secret payload digest mismatch")
+	}
+	if err := c.sendAck(packet.fd, responseID, packet.deadline); err != nil {
 		buffer.Close()
 		return nil, false, err
 	}

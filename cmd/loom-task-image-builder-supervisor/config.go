@@ -330,6 +330,9 @@ func verifyGuardSocketPath(path string) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("guard socket path must be absolute and clean")
 	}
+	if path != compiledGuardSocketPath {
+		return errors.New("guard socket path must match compiled fixed path")
+	}
 	return nil
 }
 

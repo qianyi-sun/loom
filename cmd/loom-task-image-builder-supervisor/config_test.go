@@ -278,15 +278,11 @@ func TestConfigRejectsSymlinkWritableChangedInodeWrongReleaseWrongArchAndNonCont
 	}
 }
 
-func TestConfigAllowsFixedGuardSocketOutsideRelease(t *testing.T) {
+func TestConfigAllowsOnlyCompiledFixedGuardSocketOutsideRelease(t *testing.T) {
 	root := t.TempDir()
 	release := strings.Repeat("2", 64)
 	useTestConfigPolicy(t, root)
 	paths := makeReleaseTree(t, root, release)
-	paths.guardSocket = filepath.Join(root, "var", "run", "loom-task-image-builder", "guard.sock")
-	if err := os.MkdirAll(filepath.Dir(paths.guardSocket), 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(paths.guardSocket), err)
-	}
 	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
 
 	cfg, err := LoadConfig(configPath, release)
@@ -298,12 +294,12 @@ func TestConfigAllowsFixedGuardSocketOutsideRelease(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsRelativeGuardSocketPath(t *testing.T) {
+func TestConfigRejectsGuardSocketPathMismatch(t *testing.T) {
 	root := t.TempDir()
 	release := strings.Repeat("3", 64)
 	useTestConfigPolicy(t, root)
 	paths := makeReleaseTree(t, root, release)
-	paths.guardSocket = "relative/guard.sock"
+	paths.guardSocket = filepath.Join(root, "wrong", "guard.sock")
 	configPath := writeConfigFixture(t, root, release, runtime.GOARCH, paths, nil)
 
 	if _, err := LoadConfig(configPath, release); err == nil {
@@ -382,13 +378,11 @@ func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
 	releaseRoot := filepath.Join(root, "releases", release)
 	binDir := filepath.Join(releaseRoot, "bin")
 	runtimeDir := filepath.Join(releaseRoot, "runtime")
-	runDir := filepath.Join(releaseRoot, "run")
 	for _, dir := range []string{
 		filepath.Join(root, "releases"),
 		releaseRoot,
 		binDir,
 		runtimeDir,
-		runDir,
 	} {
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatalf("Mkdir(%q) error = %v", dir, err)
@@ -398,15 +392,14 @@ func makeReleaseTree(t *testing.T, root string, release string) releasePaths {
 	writeExecutableFixture(t, filepath.Join(binDir, "rootlesskit"), "#!/bin/sh\nexit 0\n")
 	writeExecutableFixture(t, filepath.Join(runtimeDir, "buildctl"), "buildctl\n")
 	writeExecutableFixture(t, filepath.Join(runtimeDir, "buildkitd"), "buildkitd\n")
-	writeExecutableFixture(t, filepath.Join(runDir, "guard.sock"), "socket-placeholder\n")
-	for _, dir := range []string{binDir, runtimeDir, runDir, releaseRoot} {
+	for _, dir := range []string{binDir, runtimeDir, releaseRoot} {
 		if err := os.Chmod(dir, 0o555); err != nil {
 			t.Fatalf("Chmod(%q) error = %v", dir, err)
 		}
 	}
 
 	return releasePaths{
-		guardSocket: filepath.Join(runDir, "guard.sock"),
+		guardSocket: filepath.Join(root, "run", "loom-task-image-builder-guard", "guard.sock"),
 		rootlesskit: filepath.Join(binDir, "rootlesskit"),
 		buildctl:    filepath.Join(runtimeDir, "buildctl"),
 		buildkitd:   filepath.Join(runtimeDir, "buildkitd"),
@@ -464,11 +457,14 @@ func useTestConfigPolicy(t *testing.T, root string) {
 
 	previousUID := requiredOwnerUID
 	previousBase := compiledReleaseBasePath
+	previousGuard := compiledGuardSocketPath
 	requiredOwnerUID = uint32(os.Geteuid())
 	compiledReleaseBasePath = filepath.Join(root, "releases")
+	compiledGuardSocketPath = filepath.Join(root, "run", "loom-task-image-builder-guard", "guard.sock")
 	t.Cleanup(func() {
 		requiredOwnerUID = previousUID
 		compiledReleaseBasePath = previousBase
+		compiledGuardSocketPath = previousGuard
 		loadConfigPreOpenHook = nil
 	})
 }
