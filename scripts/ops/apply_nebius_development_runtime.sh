@@ -168,6 +168,25 @@ lines[matches[0]] = f"          image: {image}{ending}"
 sys.stdout.write("".join(lines))
 PY
 }
+
+render_capacity_collector_manifest() {
+  python3 - "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" \
+    "$execution_actuator_image" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+image = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if line.startswith("              image: ")]
+if len(matches) != 2:
+    raise SystemExit("capacity collector manifest must contain exactly two image fields")
+for index in matches:
+    ending = "\n" if lines[index].endswith("\n") else ""
+    lines[index] = f"              image: {image}{ending}"
+sys.stdout.write("".join(lines))
+PY
+}
 capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
 [[ -s $capacity_policy ]] || {
   echo "Nebius development capacity policy is missing" >&2
@@ -457,7 +476,7 @@ kubectl patch deployment -n loom loom-service --type=merge \
 kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
 render_execution_actuator_manifest | kubectl apply --dry-run=server -f - >/dev/null
-kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
+render_capacity_collector_manifest | kubectl apply --dry-run=server -f - >/dev/null
 
 kubectl create secret generic loom-execution-capacity-collector-nebius \
   -n loom-nebius-development \
@@ -499,7 +518,7 @@ fi
 
 kubectl apply -f "$repo_root/deploy/k8s/network-policies.yaml" >/dev/null
 render_execution_actuator_manifest | kubectl apply -f - >/dev/null
-kubectl apply -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
+render_capacity_collector_manifest | kubectl apply -f - >/dev/null
 kubectl rollout status -n loom-nebius-development deployment/loom-execution-actuator --timeout=180s
 
 deadline=$((SECONDS + 180))
