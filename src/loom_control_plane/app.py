@@ -37,6 +37,10 @@ from loom_control_plane.input_materialization_evidence import (
 )
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
+from loom_control_plane.protected_worker_session import (
+    ProtectedWorkerSessionStore,
+    load_protected_worker_runtime_db_url,
+)
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
 )
@@ -96,6 +100,26 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         admin_secret_verifier = _load_admin_secret_verifier(settings)
 
+        protected_worker_runtime_engine: AsyncEngine | None = None
+        protected_worker_session_store: ProtectedWorkerSessionStore | None = None
+        if settings.protected_worker_runtime_db_url_file is not None:
+            protected_worker_runtime_engine = create_async_engine(
+                load_protected_worker_runtime_db_url(
+                    settings.protected_worker_runtime_db_url_file
+                ),
+                isolation_level="SERIALIZABLE",
+                pool_pre_ping=True,
+                pool_size=5,
+                max_overflow=5,
+                pool_timeout=settings.db_pool_timeout_sec,
+            )
+            protected_worker_session_store = ProtectedWorkerSessionStore(
+                async_sessionmaker(
+                    protected_worker_runtime_engine,
+                    expire_on_commit=False,
+                )
+            )
+
         minio_client = build_s3_client(
             endpoint_url=settings.minio_endpoint,
             auth_kind=settings.storage_auth_kind,
@@ -108,6 +132,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
+        app.state.protected_worker_session_store = protected_worker_session_store
 
         artifact_store = MinioObjectStore(
             endpoint_url=settings.minio_endpoint,
@@ -289,6 +314,8 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 ):
                     await asyncio.wait_for(t, timeout=5.0)
             await engine.dispose()
+            if protected_worker_runtime_engine is not None:
+                await protected_worker_runtime_engine.dispose()
 
     app = FastAPI(
         title="Loom Control Plane",

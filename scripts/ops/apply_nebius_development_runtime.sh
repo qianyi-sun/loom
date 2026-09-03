@@ -2,13 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH --model-provider-api-key-file PATH --service-execution-runtime-profile PATH" >&2
+  echo "usage: $0 --kubeconfig PATH --nebius-credentials PATH [--model-provider-api-key-file PATH] [--image-admission-keyring PATH] --service-execution-runtime-profile PATH" >&2
   exit 2
 }
 
 kubeconfig=
 nebius_credentials=
 model_provider_api_key_file=
+image_admission_keyring=
 service_execution_runtime_profile=
 while (($#)); do
   case "$1" in
@@ -27,6 +28,11 @@ while (($#)); do
       model_provider_api_key_file=$2
       shift 2
       ;;
+    --image-admission-keyring)
+      (($# >= 2)) || usage
+      image_admission_keyring=$2
+      shift 2
+      ;;
     --service-execution-runtime-profile)
       (($# >= 2)) || usage
       service_execution_runtime_profile=$2
@@ -38,8 +44,13 @@ done
 
 [[ -n "$kubeconfig" && -f "$kubeconfig" ]] || usage
 [[ -n "$nebius_credentials" && -f "$nebius_credentials" ]] || usage
-[[ -n "$model_provider_api_key_file" && -s "$model_provider_api_key_file" ]] || usage
 [[ -n "$service_execution_runtime_profile" && -s "$service_execution_runtime_profile" ]] || usage
+if [[ -n $model_provider_api_key_file && ! -s $model_provider_api_key_file ]]; then
+  usage
+fi
+if [[ -n $image_admission_keyring && ! -s $image_admission_keyring ]]; then
+  usage
+fi
 
 python3 - "$nebius_credentials" <<'PY'
 import json
@@ -94,8 +105,81 @@ if not isinstance(rows, list) or {
     raise SystemExit("service execution runtime profile image coverage is invalid")
 PY
 
+if [[ -n $image_admission_keyring ]]; then
+  python3 - "$image_admission_keyring" <<'PY'
+import base64
+import json
+import re
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+keys = payload.get("keys") if isinstance(payload, dict) else None
+if payload.get("schema_version") != 1 or not isinstance(keys, list) or not keys:
+    raise SystemExit("image admission keyring is invalid")
+seen_ids = set()
+seen_keys = set()
+for row in keys:
+    if not isinstance(row, dict) or set(row) != {"signing_key_id", "public_key_base64"}:
+        raise SystemExit("image admission keyring entry is invalid")
+    key_id = row["signing_key_id"]
+    encoded = row["public_key_base64"]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError):
+        raise SystemExit("image admission public key is invalid") from None
+    if (
+        not isinstance(key_id, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", key_id) is None
+        or len(raw) != 32
+        or key_id in seen_ids
+        or raw in seen_keys
+    ):
+        raise SystemExit("image admission key binding is invalid")
+    seen_ids.add(key_id)
+    seen_keys.add(raw)
+PY
+fi
+
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 export KUBECONFIG=$kubeconfig
+capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
+[[ -s $capacity_policy ]] || {
+  echo "Nebius development capacity policy is missing" >&2
+  exit 1
+}
+
+read -r capacity_policy_target capacity_policy_request < <(
+  python3 - "$capacity_policy" <<'PY'
+import base64
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if document.get("schema_version") != "loom.nebius-development-capacity.v1":
+    raise SystemExit("Nebius development capacity policy schema is invalid")
+target_id = document.get("target_id")
+policy = document.get("policy")
+if target_id != "nebius-eu-north1-development" or not isinstance(policy, dict):
+    raise SystemExit("Nebius development capacity policy target is invalid")
+if (
+    document.get("provider_required_quota_vcpu_millis") != 512_000
+    or document.get("target_concurrency") != 200
+    or document.get("target_execution_max_nodes") != 10
+    or document.get("provider_current_quota_vcpu_millis") != 200_000
+    or document.get("accepted_concurrency") != 80
+    or document.get("task_cpu_millis") != 2_000
+    or policy.get("max_nodes") != 4
+    or policy.get("node_cpu_millis") != 48_000
+):
+    raise SystemExit("Nebius development capacity policy does not cover the current 80-task and target 200-task envelopes")
+encoded = base64.b64encode(
+    json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).decode("ascii")
+print(target_id, encoded)
+PY
+)
 
 if ! credential_mode=$(stat -c '%a' "$nebius_credentials" 2>/dev/null); then
   credential_mode=$(stat -f '%Lp' "$nebius_credentials")
@@ -104,33 +188,61 @@ if ((10#$credential_mode % 100 != 0)); then
   echo "Nebius credential file must not be group/world accessible" >&2
   exit 1
 fi
-if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
-  provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+if [[ -n $model_provider_api_key_file ]]; then
+  if ! provider_key_mode=$(stat -c '%a' "$model_provider_api_key_file" 2>/dev/null); then
+    provider_key_mode=$(stat -f '%Lp' "$model_provider_api_key_file")
+  fi
+  if ((10#$provider_key_mode % 100 != 0)); then
+    echo "Model provider API key file must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
-if ((10#$provider_key_mode % 100 != 0)); then
-  echo "Model provider API key file must not be group/world accessible" >&2
-  exit 1
+if [[ -n $image_admission_keyring ]]; then
+  if ! keyring_mode=$(stat -c '%a' "$image_admission_keyring" 2>/dev/null); then
+    keyring_mode=$(stat -f '%Lp' "$image_admission_keyring")
+  fi
+  if ((10#$keyring_mode % 100 != 0)); then
+    echo "Image admission keyring must not be group/world accessible" >&2
+    exit 1
+  fi
 fi
 
-normalized_provider_key=$(mktemp)
+normalized_provider_key=
 token_file=
 # shellcheck disable=SC2329  # invoked by the EXIT trap below
 cleanup() {
-  rm -f "$normalized_provider_key"
+  [[ -z $normalized_provider_key ]] || rm -f "$normalized_provider_key"
   [[ -z "$token_file" ]] || rm -f "$token_file"
 }
 trap cleanup EXIT
-chmod 600 "$normalized_provider_key"
-python3 "$repo_root/scripts/ops/normalize_secret_file.py" \
-  "$model_provider_api_key_file" "$normalized_provider_key"
-provider_key_sha256=$(python3 - "$normalized_provider_key" <<'PY'
+if [[ -n $model_provider_api_key_file ]]; then
+  normalized_provider_key=$(mktemp)
+  chmod 600 "$normalized_provider_key"
+  python3 "$repo_root/scripts/ops/normalize_secret_file.py" \
+    "$model_provider_api_key_file" "$normalized_provider_key"
+  provider_key_sha256=$(python3 - "$normalized_provider_key" <<'PY'
 from hashlib import sha256
 from pathlib import Path
 import sys
 
 print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
-)
+  )
+else
+  kubectl get secret -n loom loom-nebius-model-provider >/dev/null
+  provider_key_sha256=$(kubectl get secret -n loom loom-nebius-model-provider -o json | python3 -c '
+import base64
+import hashlib
+import json
+import sys
+
+payload = json.load(sys.stdin)
+encoded = payload.get("data", {}).get("api-key")
+if not isinstance(encoded, str):
+    raise SystemExit("existing model-provider Secret is missing api-key")
+print(hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest())
+')
+fi
 runtime_profile_sha256=$(python3 - "$service_execution_runtime_profile" <<'PY'
 from hashlib import sha256
 from pathlib import Path
@@ -139,6 +251,30 @@ import sys
 print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )
+if [[ -n $image_admission_keyring ]]; then
+  image_admission_keyring_sha256=$(python3 - "$image_admission_keyring" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+print(sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  )
+else
+  kubectl get secret -n loom loom-image-admission >/dev/null
+  image_admission_keyring_sha256=$(kubectl get secret -n loom loom-image-admission -o json | python3 -c '
+import base64
+import hashlib
+import json
+import sys
+
+payload = json.load(sys.stdin)
+encoded = payload.get("data", {}).get("keyring-json")
+if not isinstance(encoded, str):
+    raise SystemExit("existing image-admission Secret is missing keyring-json")
+print(hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest())
+')
+fi
 profile_task_image=$(python3 - "$service_execution_runtime_profile" <<'PY'
 import json
 from pathlib import Path
@@ -159,10 +295,19 @@ if [[ $deployed_service_image != "$profile_task_image" ]]; then
   exit 1
 fi
 
-kubectl create secret generic loom-nebius-model-provider \
-  -n loom \
-  --from-file=api-key="$normalized_provider_key" \
-  --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if [[ -n $normalized_provider_key ]]; then
+  kubectl create secret generic loom-nebius-model-provider \
+    -n loom \
+    --from-file=api-key="$normalized_provider_key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+
+if [[ -n $image_admission_keyring ]]; then
+  kubectl create secret generic loom-image-admission \
+    -n loom \
+    --from-file=keyring-json="$image_admission_keyring" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
 
 kubectl create secret generic loom-service-execution-runtime-profile \
   -n loom \
@@ -178,7 +323,56 @@ kubectl rollout status -n loom deployment/loom-llm-gateway --timeout=180s
 
 kubectl patch deployment -n loom loom-control-plane --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-control-plane-development-patch.yaml" >/dev/null
+kubectl patch deployment -n loom loom-control-plane --type=merge \
+  --patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"loom.ca/image-admission-keyring-sha256\":\"$image_admission_keyring_sha256\"}}}}}" \
+  >/dev/null
 kubectl rollout status -n loom deployment/loom-control-plane --timeout=180s
+
+# Capacity policy is repository-owned and converged on every deployment. The
+# admin token remains inside the control-plane Pod and is never copied to the
+# gateway or operator host.
+kubectl exec -n loom deploy/loom-control-plane -- python -c '
+import base64
+import json
+import sys
+import tomllib
+import urllib.parse
+import urllib.request
+
+target_id = sys.argv[1]
+request_body = base64.b64decode(sys.argv[2], validate=True)
+expected = json.loads(request_body)
+with open("/var/run/loom/admin/secrets.toml", "rb") as handle:
+    admin_token = tomllib.load(handle)["admin"]["token"]
+request = urllib.request.Request(
+    "http://127.0.0.1:8080/admin/execution-capacity-policies/"
+    + urllib.parse.quote(target_id, safe=""),
+    data=request_body,
+    headers={
+        "Authorization": f"Bearer {admin_token}",
+        "Content-Type": "application/json",
+    },
+    method="PUT",
+)
+with urllib.request.urlopen(request, timeout=15) as response:
+    observed = json.load(response)
+for name, value in expected.items():
+    if observed.get(name) != value:
+        raise SystemExit(f"capacity policy readback mismatch for {name}")
+print(
+    json.dumps(
+        {
+            "target_id": observed["target_id"],
+            "enabled": observed["enabled"],
+            "max_nodes": observed["max_nodes"],
+            "max_vcpu_millis": observed["max_vcpu_millis"],
+            "version": observed["version"],
+        },
+        sort_keys=True,
+    )
+)
+' "$capacity_policy_target" "$capacity_policy_request"
+
 kubectl patch deployment -n loom loom-service --type=strategic \
   --patch-file "$repo_root/deploy/k8s/nebius-service-development-patch.yaml" >/dev/null
 kubectl patch deployment -n loom loom-service --type=merge \

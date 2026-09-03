@@ -97,6 +97,7 @@ def test_setgid_private_destination_is_rejected_on_identical_replay(
         ("activation-public", "public-key"),
         ("activation-private", "private-key"),
         ("native-builder-public", "public-key"),
+        ("protected-worker-runtime", "database-url"),
     ],
 )
 def test_single_key_profiles_copy_only_their_authorized_key(

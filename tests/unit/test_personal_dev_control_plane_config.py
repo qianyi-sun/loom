@@ -102,6 +102,26 @@ def _write_profile(tmp_path: Path, transform: Callable[[str], str]) -> Path:
     return path
 
 
+def test_profile_expected_sha256_binds_exact_file_bytes(tmp_path: Path) -> None:
+    payload = _PROFILE.read_bytes()
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+    path = tmp_path / "profile.toml"
+    path.write_bytes(payload)
+
+    profile = load_personal_dev_control_plane_profile(
+        path,
+        expected_sha256=expected_sha256,
+    )
+
+    assert profile.namespace == "loom-dev"
+    path.write_bytes(payload + b"\n")
+    with pytest.raises(ValueError, match="control-plane profile is invalid"):
+        load_personal_dev_control_plane_profile(
+            path,
+            expected_sha256=expected_sha256,
+        )
+
+
 def _profile_schema(
     text: str,
     schema_version: int,

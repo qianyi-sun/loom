@@ -181,6 +181,12 @@ python_type = "Path"
 # no required, no default → `Path | None = None`
 # k8s templates inject a template-local literal after the env_block macro
 
+[service_config.protected_worker_runtime_db_url_file]
+used_by     = ["control-plane"]
+python_type = "Path"
+# no required, no default → `Path | None = None`
+description = "Owner-only file containing the least-privileged PostgreSQL URL used to register and validate protected staging worker sessions. When configured, worker mutation routes require the protected worker credential header."
+
 [service_config.log_level]
 used_by     = ["control-plane", "llm-gateway", "loom-service", "worker"]
 python_type = "LogLevel"
@@ -1310,6 +1316,12 @@ python_type = "SecretStr"
 required    = true
 secret      = { key = "worker-token" }
 description = "Worker bearer token, minted by `loom admin tokens worker mint`."
+
+[service_config.executor_worker_credential]
+used_by      = ["worker"]
+python_type  = "SecretStr"
+env_override = { worker = "LOOM_EXECUTOR_WORKER_CREDENTIAL" }
+description  = "Optional launcher-provided credential binding an executable worker to its pre-registered protected identity. It is transmitted only in a dedicated header on worker Control Plane requests."
 
 [service_config.max_concurrent]
 used_by     = ["worker"]

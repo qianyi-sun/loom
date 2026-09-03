@@ -67,6 +67,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     agent_role = f"loom_guard_agent_test_{suffix}"
     executor_role = f"loom_guard_executor_test_{suffix}"
     observer_role = f"loom_guard_observer_test_{suffix}"
+    runtime_role = f"loom_guard_runtime_test_{suffix}"
     # The literal percent becomes ``%25`` in the URL and exercises Alembic's
     # ConfigParser interpolation boundary on every protected migration test.
     migrator_password = f"guard-test-%-{uuid4().hex}"
@@ -80,6 +81,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     agent_password = f"guard-agent-test-{uuid4().hex}"
     executor_password = f"guard-executor-test-{uuid4().hex}"
     observer_password = f"guard-observer-test-{uuid4().hex}"
+    runtime_password = f"guard-runtime-test-{uuid4().hex}"
     agent_url = source_url.set(
         database=database_name,
         username=agent_role,
@@ -95,6 +97,11 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         username=observer_role,
         password=observer_password,
     )
+    runtime_url = source_url.set(
+        database=database_name,
+        username=runtime_role,
+        password=runtime_password,
+    )
     admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
     preparer = admin_engine.dialect.identifier_preparer
     quoted_database = preparer.quote(database_name)
@@ -103,6 +110,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     quoted_agent = preparer.quote(agent_role)
     quoted_executor = preparer.quote(executor_role)
     quoted_observer = preparer.quote(observer_role)
+    quoted_runtime = preparer.quote(runtime_role)
     repo_root = Path(__file__).resolve().parents[2]
     created_database = False
     created_owner = False
@@ -110,6 +118,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     created_agent = False
     created_executor = False
     created_observer = False
+    created_runtime = False
 
     try:
         with admin_engine.connect() as connection:
@@ -142,6 +151,12 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 f"PASSWORD '{observer_password}'"
             )
             created_observer = True
+            connection.exec_driver_sql(
+                f"CREATE ROLE {quoted_runtime} LOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS "
+                f"PASSWORD '{runtime_password}'"
+            )
+            created_runtime = True
             connection.exec_driver_sql(f"GRANT {quoted_owner} TO {quoted_migrator}")
             connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
             created_database = True
@@ -164,14 +179,21 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
-                    "GRANT SELECT (id, state, requires_caps, cancellation_requested_at, "
-                    "next_attempt_at, autoscaler_pool_name, worker_id, attempt_count, "
-                    "submit_priority, submitted_at) "
+                    "GRANT SELECT (id, team_id, task_id, config, state, requires_caps, "
+                    "submit_priority, batch_id, idempotency_key, sample_idx, combination_idx, "
+                    "provider_connection_id, provider_model_id, submitted_by_user_id, "
+                    "usage_attributed_user_id, usage_attributed_actor, family_key, "
+                    "lifecycle_authority_id, submitted_at, started_at, "
+                    "cancellation_requested_at, next_attempt_at, autoscaler_pool_name, "
+                    "worker_id, attempt_count, "
+                    "execution_route_json) "
                     f"ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
-                    "GRANT SELECT (lifecycle_authority_id), "
-                    "UPDATE (lifecycle_authority_id, state) ON TABLE public.trials "
+                    "GRANT UPDATE (lifecycle_authority_id, state, requires_caps, worker_id, "
+                    "claimed_at, pre_start_heartbeat_at, failure_reason, failure_message, "
+                    "attempt_count, next_attempt_at) "
+                    "ON TABLE public.trials "
                     f"TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
@@ -195,6 +217,159 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     "GRANT REFERENCES (id) ON TABLE public.data_lifecycle_authorities "
                     f"TO {quoted_owner}"
                 )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, checksum, config, source, source_provenance) "
+                    f"ON TABLE public.tasks TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, materialization_key, task_id, task_checksum, cpu_arch, "
+                    "task_config, task_source, task_source_provenance, state, registry_images) "
+                    f"ON TABLE public.task_image_materializations TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (trial_id, materialization_id) "
+                    "ON TABLE public.trial_task_image_materializations "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (state) ON TABLE public.task_image_materializations "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, trial_id, combination_idx, mix_mode, k1, k2, "
+                    "teacher_episodes, beta, seed, prng_version, student_model_snapshot, "
+                    "teacher_model_snapshot, provider_connection_id, pricing_snapshot, "
+                    "capability_snapshot, inherited_from_plan_id, created_at) "
+                    f"ON TABLE public.model_switch_plans TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, hostname, version, capabilities, supported_work_kinds, "
+                    "capability_snapshot_digest, capability_snapshot_json, "
+                    "slurm_gpu_allocation_evidence_json, "
+                    "slurm_gpu_allocation_evidence_digest, auth_token_hash, max_concurrent, "
+                    "pool_name, input_cache_capacity_bytes, input_cache_reserved_bytes, "
+                    "input_cache_ready_bytes, status, drain_state) ON TABLE public.workers "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT INSERT (id, hostname, version, capabilities, supported_work_kinds, "
+                    "capability_snapshot_digest, capability_snapshot_json, "
+                    "slurm_gpu_allocation_evidence_json, "
+                    "slurm_gpu_allocation_evidence_digest, auth_token_hash, max_concurrent, "
+                    "pool_name, input_cache_capacity_bytes, input_cache_reserved_bytes, "
+                    "input_cache_ready_bytes, registered_at, last_seen_at, status) "
+                    f"ON TABLE public.workers TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT UPDATE (status) ON TABLE public.workers TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id, slurm_cluster_id, environment, pool_name, nodelist, "
+                    "requested_cpus, requested_memory_mib, requested_pids, "
+                    "requested_gpu_tres, requested_gpus, "
+                    "requested_concurrency, sandbox_identity, candidate_sha, compose_project, "
+                    "job_id, slurm_state, state, worker_id) ON TABLE public.slurm_worker_jobs "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT INSERT (id, slurm_cluster_id, environment, pool_name, nodelist, "
+                    "requested_cpus, requested_memory_mib, requested_gpu_tres, requested_gpus, "
+                    "requested_concurrency, sandbox_identity, candidate_sha, compose_project, "
+                    "job_id, slurm_state, state, submitted_at, started_at, last_reconciled_at) "
+                    "ON TABLE public.slurm_worker_jobs "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs "
+                    f"TO {quoted_owner}"
+                )
+                claim_select_columns = {
+                    "execution_attempts": ("worker_id", "state"),
+                    "worker_pool_autoscaler_policies": (
+                        "id",
+                        "pool_name",
+                        "actuator",
+                        "actuator_config",
+                        "enabled",
+                        "prod_pressure_state",
+                        "updated_at",
+                    ),
+                    "pipeline_acceptance_preflight_prerequisites": (
+                        "worker_id",
+                        "fence_state",
+                    ),
+                    "team_quotas": (
+                        "team_id",
+                        "in_flight_count",
+                        "fair_share_weight",
+                        "max_attempts_ceiling",
+                    ),
+                    "batch_family_state": (
+                        "batch_id",
+                        "family_key",
+                        "state",
+                        "task_sequence",
+                        "current_index",
+                        "state_uri",
+                    ),
+                    "batches": ("id", "family_run_spec"),
+                    "execution_admission_policies": (
+                        "scope_kind",
+                        "scope_key",
+                        "max_concurrent",
+                        "active_count",
+                        "enabled",
+                    ),
+                    "execution_admission_reservations": (
+                        "id",
+                        "trial_id",
+                        "attempt",
+                        "execution_role",
+                        "team_id",
+                        "batch_id",
+                        "environment",
+                        "region",
+                        "execution_class_id",
+                        "pool_id",
+                        "owner_kind",
+                        "state",
+                    ),
+                }
+                for table, columns in claim_select_columns.items():
+                    connection.exec_driver_sql(
+                        f"GRANT SELECT ({', '.join(columns)}) ON TABLE public.{table} "
+                        f"TO {quoted_owner}"
+                    )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (state, updated_at) ON TABLE public.batch_family_state "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT UPDATE (id) ON TABLE public.batches TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    f"GRANT UPDATE (id) ON TABLE public.model_switch_plans TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (active_count, counter_updated_at) "
+                    "ON TABLE public.execution_admission_policies "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT INSERT (trial_id, attempt, execution_role, team_id, batch_id, "
+                    "environment, region, execution_class_id, pool_id, owner_kind, owner_id, "
+                    "acquired_at) ON TABLE public.execution_admission_reservations "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT UPDATE (state, released_at, release_reason) "
+                    "ON TABLE public.execution_admission_reservations "
+                    f"TO {quoted_owner}"
+                )
                 public_tables_before = frozenset(
                     inspect(connection).get_table_names(schema="public")
                 )
@@ -208,6 +383,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         previous_agent = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE")
         previous_executor = os.environ.get("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE")
         previous_observer = os.environ.get("LOOM_CAPACITY_GUARD_OBSERVER_ROLE")
+        previous_runtime = os.environ.get("LOOM_CAPACITY_GUARD_RUNTIME_ROLE")
         os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = migrator_url.render_as_string(
             hide_password=False
         )
@@ -215,6 +391,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = agent_role
         os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = executor_role
         os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = observer_role
+        os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = runtime_role
         try:
             command.upgrade(guard_cfg, "head")
         finally:
@@ -238,6 +415,10 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 os.environ.pop("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", None)
             else:
                 os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = previous_observer
+            if previous_runtime is None:
+                os.environ.pop("LOOM_CAPACITY_GUARD_RUNTIME_ROLE", None)
+            else:
+                os.environ["LOOM_CAPACITY_GUARD_RUNTIME_ROLE"] = previous_runtime
 
         yield {
             "admin_url": environment_admin_url.render_as_string(hide_password=False),
@@ -250,6 +431,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
             "observer_password": observer_password,
             "observer_role": observer_role,
             "observer_url": observer_url.render_as_string(hide_password=False),
+            "runtime_password": runtime_password,
+            "runtime_role": runtime_role,
+            "runtime_url": runtime_url.render_as_string(hide_password=False),
             "cluster_admin_url": admin_url.render_as_string(hide_password=False),
             "database_name": database_name,
             "migrator_url": migrator_url.render_as_string(hide_password=False),
@@ -276,6 +460,8 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_executor}")
             if created_observer:
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_observer}")
+            if created_runtime:
+                connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_runtime}")
             if created_migrator:
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_migrator}")
             if created_owner:
@@ -302,6 +488,7 @@ def capacity_guard_database(
     agent_url = make_url(required_string("agent_url")).set(database=database_name)
     executor_url = make_url(required_string("executor_url")).set(database=database_name)
     observer_url = make_url(required_string("observer_url")).set(database=database_name)
+    runtime_url = make_url(required_string("runtime_url")).set(database=database_name)
     engine = create_engine(cluster_admin_url, isolation_level="AUTOCOMMIT")
     preparer = engine.dialect.identifier_preparer
     quoted_database = preparer.quote(database_name)
@@ -320,12 +507,16 @@ def capacity_guard_database(
             "admin_url": admin_url.render_as_string(hide_password=False),
             "executor_url": executor_url.render_as_string(hide_password=False),
             "observer_url": observer_url.render_as_string(hide_password=False),
+            "runtime_url": runtime_url.render_as_string(hide_password=False),
             "agent_url": agent_url.render_as_string(hide_password=False),
             "database_name": database_name,
             "migrator_url": migrator_url.render_as_string(hide_password=False),
         }
     finally:
         with engine.connect() as connection:
+            connection.exec_driver_sql(
+                f"ALTER DATABASE {quoted_database} WITH ALLOW_CONNECTIONS false"
+            )
             connection.execute(
                 text(
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "

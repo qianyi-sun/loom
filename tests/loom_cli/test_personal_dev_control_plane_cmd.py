@@ -230,9 +230,9 @@ def _acceptance_plan(
         "postgres": {
             "dump_sha256": "b" * 64,
             "image": release.images.postgres,
-            "restored_schema_head": "0125",
+            "restored_schema_head": "0128",
             "restored_state_sha256": "c" * 64,
-            "source_schema_head": "0125",
+            "source_schema_head": "0128",
             "source_state_sha256": "c" * 64,
         },
         "release_sha256": release_digest,
@@ -333,7 +333,7 @@ def _acceptance_plan(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": hashlib.sha256(backup_payload).hexdigest(),
-            "schema_head": "0125",
+            "schema_head": "0128",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -1403,7 +1403,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0125",
+            "0128",
         ]
     )
 
@@ -1414,7 +1414,7 @@ def test_render_schema_transition_emits_exact_job_and_canonical_plan(
     assert captured_inputs["backup_evidence_sha256"] == "a" * 64
     assert captured_inputs["predecessor_shadow_sha256"] == "b" * 64
     assert captured_inputs["expected_predecessor_head"] == "0112"
-    assert captured_inputs["expected_target_head"] == "0125"
+    assert captured_inputs["expected_target_head"] == "0128"
     assert source_validation_count == 2
 
 
@@ -1507,7 +1507,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         "--expected-predecessor-schema-head",
         "0112",
         "--expected-target-schema-head",
-        "0125",
+        "0128",
     ]
     program = (
         "import json, sys\n"
@@ -1535,7 +1535,7 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
     assert job["metadata"]["namespace"] == "loom-dev"
     assert plan["schema"] == "loom-personal-dev-schema-transition-plan-v1"
     assert plan["predecessor"]["schema_head"] == "0112"
-    assert plan["target"]["schema_head"] == "0125"
+    assert plan["target"]["schema_head"] == "0128"
     assert plan["target"]["source_commit"] == source_sha
     assert plan["target"]["source_tree"] == source_tree
     assert plan["capacity"]["executable_new_capacity_ceiling"] == 0
@@ -1562,9 +1562,27 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
 
     outside_profile = tmp_path / "outside-profile.toml"
     shutil.copy2(profile, outside_profile)
+    outside_profile.chmod(0o600)
+    outside_profile_sha256 = hashlib.sha256(outside_profile.read_bytes()).hexdigest()
     outside_profile_arguments = list(arguments)
     profile_index = outside_profile_arguments.index("--file") + 1
     outside_profile_arguments[profile_index] = str(outside_profile)
+    unbound_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unbound_outside_profile_result.returncode == 2
+    assert unbound_outside_profile_result.stdout == ""
+    assert unbound_outside_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+    outside_profile_arguments.extend(
+        ["--profile-sha256", outside_profile_sha256]
+    )
     outside_profile_result = subprocess.run(
         [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
         cwd=checkout,
@@ -1573,11 +1591,42 @@ def test_render_schema_transition_real_cli_binds_exact_checkout_and_inputs(
         capture_output=True,
         text=True,
     )
-    assert outside_profile_result.returncode == 2
-    assert outside_profile_result.stdout == ""
-    assert outside_profile_result.stderr == (
+    assert outside_profile_result.returncode == 0, outside_profile_result.stderr
+    assert json.loads(outside_profile_result.stdout)["kind"] == "Job"
+    assert json.loads(outside_profile_result.stderr)["target"]["source_commit"] == source_sha
+
+    outside_profile.chmod(0o644)
+    public_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert public_outside_profile_result.returncode == 2
+    assert public_outside_profile_result.stdout == ""
+    assert public_outside_profile_result.stderr == (
         "error: personal-dev schema transition inputs are invalid\n"
     )
+    outside_profile.chmod(0o600)
+
+    outside_profile.write_bytes(outside_profile.read_bytes() + b"\n")
+    changed_outside_profile_result = subprocess.run(
+        [sys.executable, "-c", program, json.dumps(outside_profile_arguments)],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert changed_outside_profile_result.returncode == 2
+    assert changed_outside_profile_result.stdout == ""
+    assert changed_outside_profile_result.stderr == (
+        "error: personal-dev schema transition inputs are invalid\n"
+    )
+    shutil.copy2(profile, outside_profile)
+    outside_profile.chmod(0o600)
 
     profile.unlink()
     profile.symlink_to(outside_profile)
@@ -1672,7 +1721,7 @@ def test_render_schema_transition_has_a_specific_fail_closed_error(
             "--expected-predecessor-schema-head",
             "0112",
             "--expected-target-schema-head",
-            "0125",
+            "0128",
         ]
     )
 

@@ -43,6 +43,7 @@ class ControlPlaneSettings(BaseSettings):
     minio_endpoint: str = "http://loom-minio:9000"
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    protected_worker_runtime_db_url_file: Path | None = None
     service_execution_scheduler_enabled: bool = False
     service_execution_scheduler_environment: str = "development"
     service_execution_scheduler_interval_sec: float = 2.0

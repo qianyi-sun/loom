@@ -91,26 +91,54 @@ def test_capacity_agent_has_no_pool_mutation_or_candidate_runtime_wiring() -> No
                     isinstance(target, ast.Attribute) and target.attr.lower() in ROUTE_DECORATORS
                 ), path
 
-    # The trusted lifecycle authority intentionally installs the separately
-    # fenced reporter.  Keep that orchestration out of the untrusted candidate
-    # build/activation boundary instead of banning all service-owned wiring.
+    # Trusted lifecycle and control-plane authorities intentionally consume the
+    # separately fenced agent contracts and stores.  Keep that wiring out of
+    # the untrusted candidate build/activation boundary, and pin each trusted
+    # caller to the exact agent modules it is allowed to consume.
     runtime_roots = (
         Path("src/loom"),
         Path("src/loom_cli"),
         Path("src/loom_control_plane"),
         Path("src/loom_service"),
     )
-    wired = {
-        path
+    expected_imports = {
+        Path("src/loom/personal_dev_capacity.py"): {
+            "loom_capacity_agent.client",
+        },
+        Path("src/loom/personal_dev_capacity_runtime.py"): {
+            "loom_capacity_agent.admission",
+            "loom_capacity_agent.client",
+            "loom_capacity_agent.contracts",
+            "loom_capacity_agent.store",
+        },
+        Path("src/loom_control_plane/protected_worker_session.py"): {
+            "loom_capacity_agent.contracts",
+            "loom_capacity_agent.submission_store",
+        },
+        Path("src/loom_control_plane/routes/trials.py"): {
+            "loom_capacity_agent.contracts",
+        },
+        Path("src/loom_service/personal_dev_lifecycle.py"): {
+            "loom_capacity_agent.client",
+        },
+    }
+    wired_sources = {
+        path: path.read_text(encoding="utf-8")
         for root in runtime_roots
         for path in root.rglob("*.py")
         if "loom_capacity_agent" in path.read_text(encoding="utf-8")
     }
-    assert wired == {
-        Path("src/loom/personal_dev_capacity.py"),
-        Path("src/loom/personal_dev_capacity_runtime.py"),
-        Path("src/loom_service/personal_dev_lifecycle.py"),
+    assert set(wired_sources) == set(expected_imports)
+    actual_imports = {
+        path: {
+            imported
+            for imported in _import_names(ast.parse(source, filename=str(path)))
+            if imported == "loom_capacity_agent"
+            or imported.startswith("loom_capacity_agent.")
+        }
+        for path, source in wired_sources.items()
     }
+    assert actual_imports == expected_imports
 
 
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:

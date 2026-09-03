@@ -13,6 +13,7 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.dev_instance import DevInstanceIdentity
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
+from loom.personal_dev_capacity_identity import PROTECTED_WORKER_RUNTIME_SECRET_NAME
 
 _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
@@ -215,8 +216,13 @@ def _deployment(
     identity: DevInstanceIdentity,
     config: DevInstanceManifestConfig,
     admin_mount_path: str,
+    init_containers: list[dict[str, Any]] | None = None,
+    extra_mounts: list[dict[str, Any]] | None = None,
+    extra_volumes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     mounts, volumes = _admin_volume(admin_mount_path)
+    mounts.extend(extra_mounts or ())
+    volumes.extend(extra_volumes or ())
     labels = {
         "app": name,
         "loom.dev/instance": identity.name,
@@ -242,6 +248,7 @@ def _deployment(
                         "fsGroup": 65532,
                         "seccompProfile": {"type": "RuntimeDefault"},
                     },
+                    **({"initContainers": init_containers} if init_containers else {}),
                     "containers": [
                         {
                             "name": container_name,
@@ -572,6 +579,78 @@ def dev_instance_manifest_documents(
         _literal_env("LOOM_CP_ADMIN_SECRET_FILE", "/var/run/loom/admin/secrets.toml"),
         *common,
     ]
+    protected_runtime_init: list[dict[str, Any]] | None = None
+    protected_runtime_mounts: list[dict[str, Any]] | None = None
+    protected_runtime_volumes: list[dict[str, Any]] | None = None
+    if personal_candidate:
+        cp_env.insert(
+            -len(common),
+            _literal_env(
+                "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
+                "/run/loom/protected-worker-runtime/files/database-url",
+            ),
+        )
+        protected_runtime_init = [
+            {
+                "name": "protected-worker-runtime-init",
+                "image": config.image("control-plane"),
+                "imagePullPolicy": config.image_pull_policy,
+                "command": [
+                    "/bin/sh",
+                    "-euc",
+                    "install -d -m 0700 /run/loom/protected-worker-runtime; "
+                    "chmod 0700 /run/loom/protected-worker-runtime; "
+                    "chmod g-s /run/loom/protected-worker-runtime; "
+                    "exec python -m loom.personal_dev_secret_init "
+                    "--profile protected-worker-runtime "
+                    "--source /var/run/loom/protected-worker-runtime-projected "
+                    "--destination /run/loom/protected-worker-runtime/files",
+                ],
+                "resources": {
+                    "requests": {"cpu": "10m", "memory": "16Mi"},
+                    "limits": {"cpu": "100m", "memory": "64Mi"},
+                },
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"]},
+                    "readOnlyRootFilesystem": True,
+                    "runAsNonRoot": True,
+                    "runAsUser": 65532,
+                },
+                "volumeMounts": [
+                    {
+                        "name": "protected-worker-runtime-projected",
+                        "mountPath": "/var/run/loom/protected-worker-runtime-projected",
+                        "readOnly": True,
+                    },
+                    {
+                        "name": "protected-worker-runtime",
+                        "mountPath": "/run/loom/protected-worker-runtime",
+                    },
+                ],
+            }
+        ]
+        protected_runtime_mounts = [
+            {
+                "name": "protected-worker-runtime",
+                "mountPath": "/run/loom/protected-worker-runtime",
+                "readOnly": True,
+            }
+        ]
+        protected_runtime_volumes = [
+            {
+                "name": "protected-worker-runtime-projected",
+                "secret": {
+                    "secretName": PROTECTED_WORKER_RUNTIME_SECRET_NAME,
+                    "defaultMode": 0o440,
+                    "items": [{"key": "database-url", "path": "database-url"}],
+                },
+            },
+            {
+                "name": "protected-worker-runtime",
+                "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
+            },
+        ]
     gw_env = [
         _secret_env("LOOM_GW_DB_URL", "gw-db-url"),
         _secret_env("LOOM_GW_STEP_JWT_SIGNING_KEY", "step-jwt-signing-key"),
@@ -670,6 +749,9 @@ def dev_instance_manifest_documents(
         identity=identity,
         config=config,
         admin_mount_path="/var/run/loom/admin",
+        init_containers=protected_runtime_init,
+        extra_mounts=protected_runtime_mounts,
+        extra_volumes=protected_runtime_volumes,
     )
     gateway = _deployment(
         name=gateway_name,

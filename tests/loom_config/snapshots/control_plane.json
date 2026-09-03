@@ -114,6 +114,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "protected_worker_runtime_db_url_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "service_execution_scheduler_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",

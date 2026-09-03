@@ -35,6 +35,7 @@ class WorkerSettings(BaseSettings):
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
     enable_worker_vllm: bool = False
+    executor_worker_credential: SecretStr | None = Field(default=None, validation_alias="LOOM_EXECUTOR_WORKER_CREDENTIAL")
     family_state_download_timeout_sec: float = 120.0
     fixtures_root: Path | None = None
     gateway_url: HttpUrl = cast(HttpUrl, "http://loom-llm-gateway:9100")

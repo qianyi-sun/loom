@@ -231,11 +231,12 @@ async def _initialize_manager_bound_admission_agent(
     binding: ExecutableIntentBindingV2,
     reporter_incarnation: UUID,
     protected_admission_sha256: str,
+    environment_id: str = "dev-e2e",
 ) -> tuple[AgentRegistrationV1, ReporterConfigurationV1]:
     """Create a real guard authority bound to one manager-owned subject."""
 
     fence = GuardFenceV1(
-        environment_id="dev-e2e",
+        environment_id=environment_id,
         subject_id=binding.subject_id,
         subject_incarnation=binding.subject_incarnation,
         authority_incarnation=UUID(int=701),
@@ -2176,6 +2177,10 @@ def _guard_downgrade_config(
         "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
         _value(database, "observer_role"),
     )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_RUNTIME_ROLE",
+        _value(database, "runtime_role"),
+    )
     return config
 
 
@@ -2518,7 +2523,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0021"
+    assert version == "guard_0026"
     assert evidence == 1
 
 

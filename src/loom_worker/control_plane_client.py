@@ -24,6 +24,8 @@ import httpx
 from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
 
+EXECUTOR_WORKER_CREDENTIAL_HEADER = "X-Loom-Executor-Worker-Credential"
+
 
 class StepTokenClient(Protocol):
     async def mint_step_token(
@@ -142,6 +144,7 @@ class HttpControlPlaneClient:
     token: str
     timeout_sec: float = 30.0
     _client: httpx.AsyncClient | None = None
+    executor_worker_credential: str | None = None
 
     def _http(self) -> tuple[httpx.AsyncClient, bool]:
         """Return (client, owned). owned=True means caller must close it."""
@@ -156,8 +159,17 @@ class HttpControlPlaneClient:
         )
 
     @property
+    def request_headers(self) -> dict[str, str]:
+        """Return a fresh header set for this worker's authenticated session."""
+
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if self.executor_worker_credential is not None:
+            headers[EXECUTOR_WORKER_CREDENTIAL_HEADER] = self.executor_worker_credential
+        return headers
+
+    @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.token}"}
+        return self.request_headers
 
     async def register(
         self,
@@ -178,6 +190,7 @@ class HttpControlPlaneClient:
         candidate_sha: str | None = None,
         slurm_job_id: str | None = None,
         compose_project: str | None = None,
+        executor_worker_credential: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "hostname": hostname,
@@ -226,6 +239,13 @@ class HttpControlPlaneClient:
             )
         client, owned = self._http()
         try:
+            if executor_worker_credential is not None:
+                if (
+                    self.executor_worker_credential is not None
+                    and self.executor_worker_credential != executor_worker_credential
+                ):
+                    raise ValueError("executor worker credential cannot change after client creation")
+                self.executor_worker_credential = executor_worker_credential
             r = await client.post(
                 "/workers/register",
                 headers=self._headers,

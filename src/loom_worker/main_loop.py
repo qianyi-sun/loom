@@ -599,12 +599,11 @@ async def run_worker(
             base_url=str(settings.control_plane_url),
             timeout=5.0,
         )
-        token_value = settings.token.get_secret_value()
 
         def _hb_tick() -> None:
             sync_http.post(
                 f"/workers/{worker_id}/heartbeat",
-                headers={"Authorization": f"Bearer {token_value}"},
+                headers=cp_client.request_headers,
             )
 
         hb = HeartbeatThread(
@@ -751,6 +750,10 @@ async def _register_worker_with_retry(
         if not all(slurm_provenance.values()):
             raise ValueError("Slurm registration provenance fields must be supplied together")
         register_kwargs.update(slurm_provenance)
+    if settings.executor_worker_credential is not None:
+        register_kwargs["executor_worker_credential"] = (
+            settings.executor_worker_credential.get_secret_value()
+        )
     if pipeline_enabled:
         register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
         registration = (
