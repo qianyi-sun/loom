@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import stat
@@ -1451,6 +1452,101 @@ def test_native_builder_acceptance_canonicalizes_loader_inputs_without_newlines(
     assert raw_status < canonical_status < verification
     assert 'assert_canonical_json "$rollback_status"' in runbook
     assert 'assert_canonical_json_line "$acceptance_verification"' in runbook
+
+
+@pytest.mark.parametrize("previous_is_available", (True, False), ids=("upgrade", "first-install"))
+def test_native_builder_runtime_rollback_observes_matching_release(
+    tmp_path: Path, previous_is_available: bool
+) -> None:
+    """Catches rollback status validation against a removed or absent release."""
+    rollback_section = _read(RUNTIME).split("## Rollback to the exact inert shadow", maxsplit=1)[1]
+    rollback_shell = _shell(rollback_section)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    rollback_shadow = tmp_path / "rollback-shadow.yaml"
+    rollback_shadow.write_text("apiVersion: v1\nkind: List\nitems: []\n", encoding="utf-8")
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("reviewed-kubeconfig", encoding="utf-8")
+    current_release = tmp_path / "current-release.json"
+    current_release.write_text("current", encoding="utf-8")
+    previous_release = tmp_path / "previous-release.json"
+    previous_release.write_text("previous", encoding="utf-8")
+    current_release_sha256 = "a" * 64
+    previous_release_sha256 = "b" * 64
+    previous_release_argument = str(previous_release) if previous_is_available else ""
+    previous_release_sha256_argument = previous_release_sha256 if previous_is_available else ""
+    expected_release = previous_release if previous_is_available else current_release
+    expected_release_sha256 = (
+        previous_release_sha256 if previous_is_available else current_release_sha256
+    )
+    loom_cli_args = tmp_path / "loom-cli.args"
+
+    behavior = subprocess.run(
+        [
+            "bash",
+            "-seu",
+            "--",
+            str(evidence_dir),
+            str(rollback_shadow),
+            str(kubeconfig),
+            str(current_release),
+            current_release_sha256,
+            previous_release_argument,
+            previous_release_sha256_argument,
+            str(loom_cli_args),
+            hashlib.sha256(rollback_shadow.read_bytes()).hexdigest(),
+        ],
+        input=(
+            'evidence_dir="$1"\n'
+            'rollback_shadow_manifest="$2"\n'
+            'kubeconfig="$3"\n'
+            'trusted_release="$4"\n'
+            'trusted_release_sha256="$5"\n'
+            'previous_trusted_release="$6"\n'
+            'previous_trusted_release_sha256="$7"\n'
+            'LOOM_CLI_ARGS="$8"\n'
+            'rollback_shadow_sha256="$9"\n'
+            "capture_database_counts() {\n"
+            "  printf '%s\\n' '{\"active_native_grants\":0}' > \"$1\"\n"
+            "}\n"
+            "capture_namespaces() { printf '%s\\n' '[]' > \"$1\"; }\n"
+            "kubectl() { return 0; }\n"
+            "capture_host() {\n"
+            '  printf \'%s\\n\' \'{"state_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}\' > "$1"\n'
+            "}\n"
+            "new_native_authority_request_id() {\n"
+            "  printf '%s\\n' '123e4567-e89b-42d3-a456-426614174000'\n"
+            "}\n"
+            "native_authority_request() {\n"
+            '  printf \'%s\\n\' \'{"agent_service":"inactive","dockerd_service":"inactive","managed_containers":0,"managed_networks":null,"nft_table":"absent","phase":"inert","state":null,"state_sha256":""}\' > "$3"\n'
+            "}\n"
+            "loom_cli() {\n"
+            '  printf \'%s\\n\' "$@" > "$LOOM_CLI_ARGS"\n'
+            "  printf '%s\\n' '{\"schema\":\"loom-personal-dev-control-plane-status-v1\"}'\n"
+            "}\n" + rollback_shell
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        cwd=ROOT,
+    )
+
+    assert behavior.returncode == 0, behavior.stderr
+    assert loom_cli_args.read_text(encoding="utf-8").splitlines() == [
+        "admin",
+        "personal-dev-control-plane",
+        "status",
+        "--namespace",
+        "loom-dev",
+        "--kubeconfig",
+        str(kubeconfig),
+        "--file",
+        "deploy/dev-fleet/personal-dev-control-plane.toml",
+        "--trusted-release-file",
+        str(expected_release),
+        "--trusted-release-sha256",
+        expected_release_sha256,
+    ]
 
 
 def test_native_builder_runbooks_seal_sanitized_evidence_and_exact_rollback() -> None:
