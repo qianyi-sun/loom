@@ -1332,12 +1332,50 @@ async def record_execution_event(
             payload.get("resource_version"), 128, "resource_version"
         )
         lease.node_name = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
-        lease.pod_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
-        lease.pod_started_at = _optional_datetime(payload.get("started_at"), "started_at")
-        lease.pod_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
+        incoming_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
+        incoming_started_at = _optional_datetime(payload.get("started_at"), "started_at")
+        incoming_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
+        if incoming_scheduled_at is not None:
+            lease.pod_scheduled_at = (
+                min(lease.pod_scheduled_at, incoming_scheduled_at)
+                if lease.pod_scheduled_at is not None
+                else incoming_scheduled_at
+            )
+        if incoming_started_at is not None:
+            lease.pod_started_at = (
+                min(lease.pod_started_at, incoming_started_at)
+                if lease.pod_started_at is not None
+                else incoming_started_at
+            )
+        if incoming_terminated_at is not None:
+            lease.pod_terminated_at = (
+                max(lease.pod_terminated_at, incoming_terminated_at)
+                if lease.pod_terminated_at is not None
+                else incoming_terminated_at
+            )
+        if (
+            lease.pod_scheduled_at is not None
+            and lease.pod_started_at is not None
+            and lease.pod_scheduled_at > lease.pod_started_at
+        ):
+            lease.pod_scheduled_at = lease.pod_started_at
+        if (
+            lease.pod_started_at is not None
+            and lease.pod_terminated_at is not None
+            and lease.pod_started_at > lease.pod_terminated_at
+        ):
+            lease.pod_terminated_at = lease.pod_started_at
         lease.last_reconciled_at = observed_at
-        lease.observed_state = observed_states[normalized_state]
-        if normalized_state in {
+        projected_state = observed_states[normalized_state]
+        if lease.finalized_at is not None:
+            if lease.observed_state == "deleted" or normalized_state == "deleted":
+                projected_state = "deleted"
+            elif lease.observed_state == "delete_pending" or normalized_state == "terminating":
+                projected_state = "delete_pending"
+            else:
+                projected_state = "finalized"
+        lease.observed_state = projected_state
+        if lease.finalized_at is None and normalized_state in {
             "unschedulable",
             "missing",
             "image_pull_backoff",
@@ -1354,7 +1392,7 @@ async def record_execution_event(
             )
             lease.error_code = normalized_state
             lease.error_message = _bounded_optional_text(payload.get("message"), 2000, "message")
-        else:
+        elif lease.finalized_at is None:
             lease.error_class = None
             lease.error_code = None
             lease.error_message = None

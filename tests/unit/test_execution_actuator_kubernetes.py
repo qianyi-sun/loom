@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -194,6 +194,26 @@ def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
     assert observation.normalized_state is NormalizedJobState.UNSCHEDULABLE
     assert observation.scheduled_at is None
     assert observation.started_at == job_started
+
+
+def test_scheduled_transition_is_clamped_to_pod_start_time() -> None:
+    pod_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    pod = _pod(
+        phase="Running",
+        scheduled=_ns(
+            type="PodScheduled",
+            status="True",
+            reason=None,
+            message=None,
+            last_transition_time=pod_started + timedelta(seconds=1),
+        ),
+    )
+    pod.status.start_time = pod_started
+
+    observation = _normalize(_job(), [pod])
+
+    assert observation.scheduled_at == pod_started
+    assert observation.started_at == pod_started
 
 
 def test_termination_summary_is_identity_bound_and_retained() -> None:
