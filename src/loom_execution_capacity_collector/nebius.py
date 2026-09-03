@@ -233,14 +233,23 @@ class NebiusCapacityReader:
             }
         )
         state = _enum_name(status.state)
-        if error_codes:
+        converged = (
+            state == "RUNNING"
+            and not bool(status.reconciling)
+            and node_count == target_count == ready_count
+        )
+        if error_codes and not converged:
             provider_state: Literal["available", "insufficient", "unknown"] = "insufficient"
             provider_reason = "node_group_error:" + ",".join(error_codes[:10])
             autoscaler_state: Literal["ready", "scaling", "stalled", "unknown"] = "stalled"
             autoscaler_reason = provider_reason
         elif state == "RUNNING":
             provider_state = "available"
-            provider_reason = "node_group_running_without_error_events"
+            provider_reason = (
+                "node_group_converged_with_historical_error_events"
+                if error_codes
+                else "node_group_running_without_error_events"
+            )
             if bool(status.reconciling) or ready_count != target_count:
                 autoscaler_state = "scaling"
                 autoscaler_reason = "node_group_reconciling"

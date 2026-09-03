@@ -453,6 +453,79 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "node_count",
+        "target_count",
+        "ready_count",
+        "reconciling",
+        "expected_provider",
+        "expected_autoscaler",
+    ),
+    [
+        (4, 4, 4, False, "available", "ready"),
+        (4, 5, 4, True, "insufficient", "stalled"),
+    ],
+)
+async def test_nebius_reader_ignores_error_events_only_after_node_group_converges(
+    tmp_path: Path,
+    node_count: int,
+    target_count: int,
+    ready_count: int,
+    reconciling: bool,
+    expected_provider: str,
+    expected_autoscaler: str,
+) -> None:
+    gib = 1024**3
+    quotas = [
+        _quota("non-gpu-vms", "count", 20, 4, 1),
+        _quota("non-gpu-vcpu", "vcpu", 200, 68, 2),
+        _quota("non-gpu-memory", "byte", 640 * gib, 256 * gib, 3),
+        _quota("ssd-storage", "byte", 2000 * gib, 300 * gib, 4),
+    ]
+    failed_scale_event = SimpleNamespace(
+        last_occurrence=SimpleNamespace(
+            level=_enum("ERROR"),
+            code="ComputeInstanceOperationFailed",
+        )
+    )
+    reader = NebiusCapacityReader(
+        _settings(tmp_path),
+        sdk=object(),
+        quota_client=SimpleNamespace(
+            list=lambda *_args, **_kwargs: _awaitable(
+                SimpleNamespace(items=quotas, next_page_token="")
+            )
+        ),
+        node_group_client=SimpleNamespace(
+            get=lambda *_args, **_kwargs: _awaitable(
+                SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        id="nodegroup-test",
+                        parent_id="cluster-test",
+                        resource_version=10,
+                    ),
+                    spec=SimpleNamespace(autoscaling=SimpleNamespace(max_node_count=10)),
+                    status=SimpleNamespace(
+                        state=_enum("RUNNING"),
+                        node_count=node_count,
+                        target_node_count=target_count,
+                        ready_node_count=ready_count,
+                        reconciling=reconciling,
+                        events=[failed_scale_event],
+                    ),
+                )
+            )
+        ),
+    )
+
+    snapshot = await reader.capture(await _ControlPlane().fetch_policy(target_id="x", pool_id="y"))
+
+    assert snapshot.provider_capacity_state == expected_provider
+    assert snapshot.autoscaler_state == expected_autoscaler
+
+
+@pytest.mark.asyncio
 async def test_nebius_reader_uses_tenant_quotas_and_derives_unexposed_memory(
     tmp_path: Path,
 ) -> None:
