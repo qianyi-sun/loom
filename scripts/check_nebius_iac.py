@@ -187,9 +187,9 @@ def check_nebius_iac(
         f"{capacity_path}: requested target must retain the 48-vCPU node shape",
     )
     _require(
-        int(capacity.get("accepted_concurrency", 0)) == 80
+        int(capacity.get("accepted_concurrency", 0)) == 56
         and int(capacity.get("task_cpu_millis", 0)) == 2_000,
-        f"{capacity_path}: current-quota acceptance must cover 80 concurrent 2-vCPU tasks",
+        f"{capacity_path}: current inventory must cover 56 concurrent 2-vCPU tasks",
     )
     admission_policies = capacity.get("admission_policies")
     if not isinstance(admission_policies, list):
@@ -200,20 +200,20 @@ def check_nebius_iac(
             {
                 "scope_kind": "global",
                 "scope_key": "*",
-                "max_concurrent": 80,
+                "max_concurrent": 56,
                 "enabled": True,
                 "reason": (
-                    "Current-quota Nebius acceptance permits 80 concurrent "
+                    "Current-inventory Nebius acceptance permits 56 concurrent "
                     "service-execution leases."
                 ),
             },
             {
                 "scope_kind": "pool",
                 "scope_key": "nebius-cpu",
-                "max_concurrent": 80,
+                "max_concurrent": 56,
                 "enabled": True,
                 "reason": (
-                    "Current-quota Nebius CPU pool permits 80 concurrent 2-vCPU tasks."
+                    "Current-inventory Nebius CPU pool permits 56 concurrent 2-vCPU tasks."
                 ),
             },
         ],
@@ -232,8 +232,8 @@ def check_nebius_iac(
     node_memory_mib = int(preset_match.group("memory")) * 1_024
     max_nodes = int(target.get("execution_max_nodes", 0))
     _require(
-        max_nodes == 6 and int(target.get("execution_max_pods", 0)) == 64,
-        f"{path}: current quota requires 6 nodes and 64 Pods per node",
+        max_nodes == 8 and int(target.get("execution_max_pods", 0)) == 64,
+        f"{path}: current inventory requires 8 nodes and 64 Pods per node",
     )
     _require(
         policy.get("enabled") is True
@@ -251,8 +251,8 @@ def check_nebius_iac(
     )
     requested_cpu = int(capacity["accepted_concurrency"]) * int(capacity["task_cpu_millis"])
     _require(
-        int(policy["max_vcpu_millis"]) - requested_cpu >= 32_000,
-        f"{capacity_path}: execution pool must preserve at least 32 aggregate vCPUs for overhead",
+        int(policy["max_vcpu_millis"]) - requested_cpu >= 16_000,
+        f"{capacity_path}: execution pool must preserve at least 2 vCPUs per node for overhead",
     )
     _require(
         int(capacity["provider_current_quota_vcpu_millis"]) - int(policy["max_vcpu_millis"])

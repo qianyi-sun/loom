@@ -105,14 +105,14 @@ def test_execution_nodes_remain_private_with_public_deployment_gateway(tmp_path:
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
-def test_capacity_policy_rejects_less_than_80_two_vcpu_tasks(tmp_path: Path) -> None:
+def test_capacity_policy_rejects_less_than_56_two_vcpu_tasks(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = repo_root / "deploy" / "k8s" / "nebius-development-capacity-policy.json"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["accepted_concurrency"] = 79
+    document["accepted_concurrency"] = 55
     path.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(ContractError, match="80 concurrent 2-vCPU tasks"):
+    with pytest.raises(ContractError, match="56 concurrent 2-vCPU tasks"):
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
@@ -142,7 +142,7 @@ def test_capacity_policy_rejects_terraform_shape_drift(tmp_path: Path) -> None:
     repo_root, nebius_root = _copy_contract(tmp_path)
     path = nebius_root / "targets" / "development-eu-north1.tfvars.json.example"
     document = json.loads(path.read_text(encoding="utf-8"))
-    document["target"]["execution_preset"] = "16vcpu-64gb"
+    document["target"]["execution_preset"] = "8vcpu-32gb"
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ContractError, match="policy node shape must match Terraform"):
