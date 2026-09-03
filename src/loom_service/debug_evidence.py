@@ -31,7 +31,7 @@ from loom_service.usage_accounting import (
     summarize_llm_evidence_for_trials,
 )
 
-_ACTIVE_STATES = {"queued", "claimed", "running", "submitted"}
+_ACTIVE_STATES = {"queued", "claimed", "running", "materializing", "submitted"}
 
 _TRIAL_FAILURE_META: dict[str, tuple[str, str, list[str]]] = {
     "agent_error": (

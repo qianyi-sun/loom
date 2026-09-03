@@ -41,8 +41,10 @@ spec:
         matchLabels:
           app: loom-pipeline-orchestrator
     - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: loom-nebius-development
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [loom-nebius-development, loom-nebius-staging, loom-nebius-production]
       podSelector:
         matchLabels:
           app.kubernetes.io/name: loom-execution-actuator
@@ -153,8 +155,10 @@ spec:
         matchLabels:
           app: loom-worker-router
     - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: loom-nebius-development
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [loom-nebius-development, loom-nebius-staging, loom-nebius-production]
       podSelector:
         matchLabels:
           app.kubernetes.io/name: loom-execution-capacity-collector
@@ -221,8 +225,10 @@ spec:
         matchLabels:
           app: loom-gateway-router
     - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: loom-nebius-development
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [loom-nebius-development, loom-nebius-staging, loom-nebius-production]
       podSelector:
         matchLabels:
           app.kubernetes.io/component: execution-unit

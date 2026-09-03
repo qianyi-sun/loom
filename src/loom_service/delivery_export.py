@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -73,6 +73,10 @@ class UnreadableDeliveryObjectsError(DeliveryExportError):
     code = "delivery_export_objects_unreadable"
 
 
+class CorruptDeliveryObjectsError(DeliveryExportError):
+    code = "delivery_export_objects_corrupt"
+
+
 class UnresolvedDeliveryTrialsError(DeliveryExportError):
     code = "delivery_export_unresolved_trials"
 
@@ -118,6 +122,37 @@ class SelectedTrial:
 
 
 @dataclass(frozen=True)
+class CanonicalTrialBundleFile:
+    relative_path: str
+    ref: ObjectRef
+    size_bytes: int
+    sha256: str
+    media_type: str
+
+
+@dataclass(frozen=True)
+class CanonicalTrialBundle:
+    artifact_id: UUID
+    trial_id: UUID
+    task_id: str
+    attempt: int
+    manifest_sha256: str
+    content_sha256: str
+    files: tuple[CanonicalTrialBundleFile, ...]
+
+
+class CanonicalTrialIdentity(Protocol):
+    @property
+    def id(self) -> UUID: ...
+
+    @property
+    def task_id(self) -> str: ...
+
+    @property
+    def attempt_count(self) -> int: ...
+
+
+@dataclass(frozen=True)
 class ArchiveBuildResult:
     body: Any
     sha256: str
@@ -148,12 +183,21 @@ def _safe_slug(value: str, *, max_len: int = 96) -> str:
 
 
 def _has_traversal(rel: str) -> bool:
-    parts = Path(rel).parts
+    parts = Path(rel.replace("\\", "/")).parts
     if not parts:
         return False
     if parts[0] in ("/", "\\") or (len(parts[0]) == 2 and parts[0][1] == ":"):
         return True
     return ".." in parts
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
 
 
 def _task_archive_relpath(source_key: str, prefix: str) -> str | None:
@@ -462,6 +506,170 @@ async def _resource_usage_for_selected(
     return out
 
 
+def canonical_bundle_from_artifact(
+    artifact: Artifact,
+    *,
+    trial: CanonicalTrialIdentity,
+) -> CanonicalTrialBundle | None:
+    if artifact.trial_id != trial.id:
+        return None
+    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
+    if storage.get("schema_version") != "loom.canonical-trial-bundle-storage.v1":
+        return None
+    attempt = storage.get("attempt")
+    if attempt != trial.attempt_count:
+        return None
+    raw_files = storage.get("files")
+    raw_source_evidence = storage.get("source_evidence")
+    manifest_sha256 = artifact.manifest_sha256
+    if not _is_sha256(manifest_sha256) and isinstance(raw_source_evidence, list):
+        source_manifest = next(
+            (
+                raw.get("sha256")
+                for raw in raw_source_evidence
+                if isinstance(raw, dict)
+                and raw.get("relative_path") == "source/_manifest.json"
+            ),
+            None,
+        )
+        manifest_sha256 = source_manifest if isinstance(source_manifest, str) else None
+    if not _is_sha256(manifest_sha256) or not _is_sha256(artifact.content_hash):
+        raise InvalidDeliveryBatchFamilyError(
+            {"message": "canonical Trial bundle digest identity is invalid"}
+        )
+    if not isinstance(raw_files, list) or not isinstance(raw_source_evidence, list):
+        raise InvalidDeliveryBatchFamilyError(
+            {"message": "canonical Trial bundle inventory is incomplete"}
+        )
+    files: list[CanonicalTrialBundleFile] = []
+    archive_paths: set[str] = set()
+    for raw, prefix in (
+        *((record, "files/") for record in raw_files),
+        *((record, "") for record in raw_source_evidence),
+    ):
+        if not isinstance(raw, dict):
+            raise InvalidDeliveryBatchFamilyError(
+                {"message": "canonical Trial bundle file is invalid"}
+            )
+        source_path = raw.get("relative_path")
+        relative_path = prefix + source_path if isinstance(source_path, str) else ""
+        bucket = raw.get("bucket")
+        key = raw.get("key")
+        size_bytes = raw.get("size_bytes")
+        sha256 = raw.get("sha256")
+        media_type = raw.get("media_type")
+        if (
+            not relative_path
+            or _has_traversal(relative_path)
+            or relative_path in archive_paths
+            or not isinstance(bucket, str)
+            or not bucket
+            or not isinstance(key, str)
+            or not key
+            or isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or size_bytes < 0
+            or not _is_sha256(sha256)
+            or not isinstance(media_type, str)
+            or not media_type
+        ):
+            raise InvalidDeliveryBatchFamilyError(
+                {"message": "canonical Trial bundle file identity is invalid"}
+            )
+        archive_paths.add(relative_path)
+        files.append(
+            CanonicalTrialBundleFile(
+                relative_path=relative_path,
+                ref=ObjectRef(
+                    kind="trial_bundle",
+                    trial_id=trial.id,
+                    bucket=bucket,
+                    key=key,
+                ),
+                size_bytes=size_bytes,
+                sha256=cast(str, sha256),
+                media_type=media_type,
+            )
+        )
+    return CanonicalTrialBundle(
+        artifact_id=artifact.id,
+        trial_id=trial.id,
+        task_id=trial.task_id,
+        attempt=attempt,
+        manifest_sha256=cast(str, manifest_sha256),
+        content_sha256=str(artifact.content_hash or ""),
+        files=tuple(files),
+    )
+
+
+async def canonical_bundle_for_trial(
+    session: Any,
+    *,
+    trial: Trial,
+) -> CanonicalTrialBundle | None:
+    artifacts = list(
+        (
+            await session.execute(
+                select(Artifact)
+                .where(
+                    Artifact.trial_id == trial.id,
+                    Artifact.control_producer_kind == "service_execution",
+                )
+                .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    bundles = [
+        bundle
+        for artifact in artifacts
+        if (bundle := canonical_bundle_from_artifact(artifact, trial=trial)) is not None
+    ]
+    if len(bundles) > 1:
+        raise InvalidDeliveryBatchFamilyError(
+            {"message": "multiple canonical Trial bundles match one selected attempt"}
+        )
+    return bundles[0] if bundles else None
+
+
+async def _canonical_bundles_for_selected(
+    session: Any,
+    selected: list[SelectedTrial],
+) -> dict[UUID, CanonicalTrialBundle]:
+    selected_by_id = {item.trial.id: item for item in selected}
+    if not selected_by_id:
+        return {}
+    artifacts = list(
+        (
+            await session.execute(
+                select(Artifact)
+                .where(
+                    Artifact.trial_id.in_(selected_by_id),
+                    Artifact.control_producer_kind == "service_execution",
+                )
+                .order_by(Artifact.trial_id.asc(), Artifact.created_at.asc()),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    bundles: dict[UUID, CanonicalTrialBundle] = {}
+    for artifact in artifacts:
+        if artifact.trial_id is None:
+            continue
+        item = selected_by_id[artifact.trial_id]
+        bundle = canonical_bundle_from_artifact(artifact, trial=item.trial)
+        if bundle is None:
+            continue
+        if artifact.trial_id in bundles:
+            raise InvalidDeliveryBatchFamilyError(
+                {"message": "multiple canonical Trial bundles match one selected attempt"}
+            )
+        bundles[artifact.trial_id] = bundle
+    return bundles
+
+
 def _select_trials(
     *,
     main: Batch,
@@ -543,12 +751,18 @@ def _select_trials(
     ]
 
 
-def _head_delivery_objects(client: Any, selected: list[SelectedTrial]) -> dict[str, Any]:
+def _head_delivery_objects(
+    client: Any,
+    selected: list[SelectedTrial],
+    canonical_bundles: dict[UUID, CanonicalTrialBundle] | None = None,
+) -> dict[str, Any]:
     missing: list[dict[str, str]] = []
     unreadable: list[dict[str, str]] = []
     checked = 0
     for item in selected:
-        for ref in (item.trajectory, item.atif):
+        bundle = (canonical_bundles or {}).get(item.trial.id)
+        bundle_refs = tuple(file.ref for file in bundle.files) if bundle is not None else ()
+        for ref in (item.trajectory, item.atif, *bundle_refs):
             checked += 1
             try:
                 client.head_object(Bucket=ref.bucket, Key=ref.key)
@@ -1432,6 +1646,7 @@ def _build_archive(
     tasks_by_id: dict[str, Task] | None = None,
     llm_calls_by_trial: dict[UUID, list[LlmCall]] | None = None,
     resource_usage_by_trial: dict[UUID, list[TrialResourceUsage]] | None = None,
+    canonical_bundles: dict[UUID, CanonicalTrialBundle] | None = None,
     artifacts_bucket: str = "artifacts",
     spool_max_bytes: int = DEFAULT_ARCHIVE_SPOOL_MAX_BYTES,
 ) -> ArchiveBuildResult:
@@ -1445,6 +1660,32 @@ def _build_archive(
     def add_ref(tar: tarfile.TarFile, name: str, ref: ObjectRef) -> None:
         body, size = _get_object_stream(client, ref)
         checksums.append((name, _add_tar_stream(tar, name, body, size)))
+
+    def add_bundle_file(
+        tar: tarfile.TarFile,
+        name: str,
+        file: CanonicalTrialBundleFile,
+    ) -> None:
+        body, size = _get_object_stream(client, file.ref)
+        if size != file.size_bytes:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+            raise CorruptDeliveryObjectsError(
+                {
+                    "message": "canonical Trial bundle size changed before export",
+                    "object": file.ref.as_dict(),
+                }
+            )
+        digest = _add_tar_stream(tar, name, body, size)
+        if digest != file.sha256.removeprefix("sha256:"):
+            raise CorruptDeliveryObjectsError(
+                {
+                    "message": "canonical Trial bundle digest changed before export",
+                    "object": file.ref.as_dict(),
+                }
+            )
+        checksums.append((name, digest))
 
     with gzip.GzipFile(fileobj=hashing_spool, mode="wb", mtime=0, filename="") as gz:
         with tarfile.open(fileobj=gz, mode="w") as tar:
@@ -1465,6 +1706,42 @@ def _build_archive(
             for row, item in zip(rows, selected, strict=True):
                 add_ref(tar, str(row["trajectory_file"]), item.trajectory)
                 add_ref(tar, str(row["atif_file"]), item.atif)
+                bundle = (canonical_bundles or {}).get(item.trial.id)
+                if bundle is None:
+                    continue
+                bundle_prefix = (
+                    f"trial_bundles/{_safe_slug(bundle.task_id)}/{bundle.trial_id}"
+                )
+                add_bytes(
+                    tar,
+                    f"{bundle_prefix}/bundle.json",
+                    _public_json_bytes(
+                        {
+                            "schema_version": "loom.canonical-trial-bundle-export.v1",
+                            "artifact_id": str(bundle.artifact_id),
+                            "trial_id": str(bundle.trial_id),
+                            "task_id": bundle.task_id,
+                            "attempt": bundle.attempt,
+                            "manifest_sha256": bundle.manifest_sha256,
+                            "content_sha256": bundle.content_sha256,
+                            "files": [
+                                {
+                                    "relative_path": file.relative_path,
+                                    "size_bytes": file.size_bytes,
+                                    "sha256": file.sha256,
+                                    "media_type": file.media_type,
+                                }
+                                for file in bundle.files
+                            ],
+                        }
+                    ),
+                )
+                for file in bundle.files:
+                    add_bundle_file(
+                        tar,
+                        f"{bundle_prefix}/{file.relative_path}",
+                        file,
+                    )
             if _is_raw_harbor_mode(mode):
                 _add_raw_harbor_entries(
                     tar=tar,
@@ -1479,6 +1756,82 @@ def _build_archive(
                     artifacts_bucket=artifacts_bucket,
                 )
             add_bytes(tar, PAYLOAD_CHECKSUMS_FILE, _payload_checksums_from_entries(checksums))
+    size_bytes = int(spool.tell())
+    spool.seek(0)
+    return ArchiveBuildResult(
+        body=spool,
+        sha256=hashing_spool.sha256.hexdigest(),
+        size_bytes=size_bytes,
+    )
+
+
+def canonical_trial_bundle_manifest(bundle: CanonicalTrialBundle) -> dict[str, Any]:
+    return {
+        "schema_version": "loom.canonical-trial-bundle-export.v1",
+        "artifact_id": str(bundle.artifact_id),
+        "trial_id": str(bundle.trial_id),
+        "task_id": bundle.task_id,
+        "attempt": bundle.attempt,
+        "manifest_sha256": bundle.manifest_sha256,
+        "content_sha256": bundle.content_sha256,
+        "files": [
+            {
+                "relative_path": file.relative_path,
+                "size_bytes": file.size_bytes,
+                "sha256": file.sha256,
+                "media_type": file.media_type,
+            }
+            for file in bundle.files
+        ],
+    }
+
+
+def build_canonical_trial_bundle_archive(
+    *,
+    client: Any,
+    bundle: CanonicalTrialBundle,
+    spool_max_bytes: int = DEFAULT_ARCHIVE_SPOOL_MAX_BYTES,
+) -> ArchiveBuildResult:
+    spool = tempfile.SpooledTemporaryFile(max_size=spool_max_bytes, mode="w+b")
+    hashing_spool = _HashingWriter(spool)
+    checksums: list[tuple[str, str]] = []
+
+    try:
+        with gzip.GzipFile(fileobj=hashing_spool, mode="wb", mtime=0, filename="") as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                manifest_bytes = _public_json_bytes(canonical_trial_bundle_manifest(bundle))
+                checksums.append(
+                    ("bundle.json", _add_tar_bytes(tar, "bundle.json", manifest_bytes))
+                )
+                for file in bundle.files:
+                    body, size = _get_object_stream(client, file.ref)
+                    if size != file.size_bytes:
+                        close = getattr(body, "close", None)
+                        if callable(close):
+                            close()
+                        raise CorruptDeliveryObjectsError(
+                            {
+                                "message": "canonical Trial bundle size changed before download",
+                                "object": file.ref.as_dict(),
+                            }
+                        )
+                    digest = _add_tar_stream(tar, file.relative_path, body, size)
+                    if digest != file.sha256.removeprefix("sha256:"):
+                        raise CorruptDeliveryObjectsError(
+                            {
+                                "message": "canonical Trial bundle digest changed before download",
+                                "object": file.ref.as_dict(),
+                            }
+                        )
+                    checksums.append((file.relative_path, digest))
+                _add_tar_bytes(
+                    tar,
+                    PAYLOAD_CHECKSUMS_FILE,
+                    _payload_checksums_from_entries(checksums),
+                )
+    except Exception:
+        spool.close()
+        raise
     size_bytes = int(spool.tell())
     spool.seek(0)
     return ArchiveBuildResult(
@@ -1934,18 +2287,34 @@ async def create_delivery_export(
         trials_by_batch=trials_by_batch,
         trajectories_bucket=settings.trajectories_bucket,
     )
-    object_validation = _head_delivery_objects(minio_client, selected)
+    canonical_bundles = await _canonical_bundles_for_selected(session, selected)
+    object_validation = _head_delivery_objects(
+        minio_client,
+        selected,
+        canonical_bundles,
+    )
     tasks_by_id: dict[str, Task] = {}
     llm_calls_by_trial: dict[UUID, list[LlmCall]] = {}
     resource_usage_by_trial = await _resource_usage_for_selected(session, selected)
     extra_object_counts: dict[str, int] = {}
+    if canonical_bundles:
+        extra_object_counts.update(
+            {
+                "trial_bundles": len(canonical_bundles),
+                "trial_bundle_files": sum(
+                    len(bundle.files) for bundle in canonical_bundles.values()
+                ),
+            }
+        )
     if _is_raw_harbor_mode(mode):
         tasks_by_id = await _tasks_for_selected(session, selected)
         llm_calls_by_trial = await _llm_calls_for_selected(session, selected)
-        extra_object_counts = _raw_harbor_object_counts(
-            client=minio_client,
-            tasks_by_id=tasks_by_id,
-            llm_calls_by_trial=llm_calls_by_trial,
+        extra_object_counts.update(
+            _raw_harbor_object_counts(
+                client=minio_client,
+                tasks_by_id=tasks_by_id,
+                llm_calls_by_trial=llm_calls_by_trial,
+            )
         )
     rows = _ledger_rows(selected)
     summary = _summary(
@@ -1972,6 +2341,7 @@ async def create_delivery_export(
         tasks_by_id=tasks_by_id,
         llm_calls_by_trial=llm_calls_by_trial,
         resource_usage_by_trial=resource_usage_by_trial,
+        canonical_bundles=canonical_bundles,
         artifacts_bucket=settings.artifacts_bucket,
     )
     sha256 = archive.sha256

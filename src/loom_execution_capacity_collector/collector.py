@@ -11,6 +11,7 @@ from loom_execution_capacity_collector.config import ExecutionCapacityCollectorS
 from loom_execution_capacity_collector.contracts import (
     CapacityObservationReceipt,
     CapacityObservationV1,
+    NodeStateCounts,
 )
 from loom_execution_capacity_collector.control_plane import CapacityControlPlaneClient
 from loom_execution_capacity_collector.kubernetes import InClusterKubernetesCapacityReader
@@ -86,6 +87,28 @@ async def collect_capacity_observation(
             provider_snapshot.target_node_count,
         )
         missing_nodes = max(0, active_nodes - kubernetes_snapshot.active_nodes)
+        deleting_nodes = max(
+            0,
+            kubernetes_snapshot.active_nodes - provider_snapshot.target_node_count,
+        )
+        non_ready_nodes = max(
+            0,
+            kubernetes_snapshot.active_nodes
+            - kubernetes_snapshot.ready_nodes
+            - deleting_nodes,
+        )
+        missing_desired_nodes = max(
+            0,
+            provider_snapshot.target_node_count - kubernetes_snapshot.active_nodes,
+        )
+        stalled = provider_snapshot.autoscaler_state == "stalled"
+        node_states = NodeStateCounts(
+            desired=provider_snapshot.target_node_count,
+            creating=missing_desired_nodes + (0 if stalled else non_ready_nodes),
+            ready=kubernetes_snapshot.ready_nodes,
+            failed=non_ready_nodes if stalled else 0,
+            deleting=deleting_nodes,
+        )
         provisioned_cpu = (
             kubernetes_snapshot.provisioned.cpu_millis + missing_nodes * policy.node_cpu_millis
         )
@@ -121,6 +144,7 @@ async def collect_capacity_observation(
             provider_used_memory_mib=provider_used_memory_mib,
             provider_used_storage_mib=provider_used_storage_mib,
             active_nodes=active_nodes,
+            node_states=node_states,
             provisioned_vcpu_millis=provisioned_cpu,
             provisioned_memory_mib=provisioned_memory,
             provisioned_storage_mib=provisioned_storage,

@@ -207,9 +207,10 @@ Gateway, Postgres, MinIO, or worker routes.
   validates agents locally when the local catalog is complete, and otherwise
   resolves the deployed service's `/api/v1/agents` catalog so service-mode
   submissions do not require `loom-launcher` installed in the operator venv.
-- `loom eval trial download TRIAL_ID --kind atif|trajectory|artifact` downloads
+- `loom eval trial download TRIAL_ID --kind bundle|atif|trajectory|artifact` downloads
   through service-proxied `/api/v1/trials/...` routes. The CLI does not print
-  raw MinIO/S3 signed URLs; `trial show` prints download commands.
+  raw MinIO/S3 signed URLs; `trial show` prints download commands. `bundle`
+  retrieves the integrity-checked complete canonical Trial package.
 
 All server-talking commands share the same not-logged-in and 401/403 handling:
 the message points back to Team access token setup and redacts bearer tokens,

@@ -83,3 +83,55 @@ def test_direct_completion_uses_provider_native_model_and_writes_artifact(
     assert usage["call_count"] == 1
     assert usage["totals"]["input_tokens"] == 4
     assert usage["totals"]["cost_usd"] == 0.01
+
+
+def test_direct_completion_writes_every_declared_artifact(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    (tmp_path / "instruction.md").write_text("End with ACCEPTED", encoding="utf-8")
+    monkeypatch.setenv("LOOM_TASK_INSTRUCTION_FILE", "instruction.md")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", '["answer.txt","nested/reasoning.md"]')
+    monkeypatch.setenv("LOOM_TASK_REQUEST_PARAMS_JSON", "{}")
+    monkeypatch.setenv("LOOM_TASK_MODEL", "openai/gpt-5")
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://gateway-proxy")
+
+    def _urlopen(_request: urllib.request.Request, *, timeout: int) -> _Response:
+        assert timeout == 120
+        return _Response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "evidence ACCEPTED",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "loom": {
+                    "input_tokens": 2,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 2,
+                    "thinking_tokens": 0,
+                    "provider_extras": {},
+                    "cost_usd": 0.01,
+                    "rate_card_hash": "rate-card-1",
+                    "finish_reason": "stop",
+                    "duration_sec": 0.1,
+                    "streamed": False,
+                    "time_to_first_token_sec": None,
+                    "gateway_request_id": "request-1",
+                    "attempt": 1,
+                },
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+    run_direct_completion(workspace=tmp_path)
+
+    assert (tmp_path / "answer.txt").read_text() == "evidence ACCEPTED"
+    assert (tmp_path / "nested/reasoning.md").read_text() == "evidence ACCEPTED"
+    assert (tmp_path / ".loom/agent/trajectory.jsonl").is_file()
+    assert (tmp_path / ".loom/agent/usage.json").is_file()

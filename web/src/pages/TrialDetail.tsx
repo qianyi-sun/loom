@@ -45,6 +45,7 @@ const ACTIVE_TRIAL_STATES = new Set([
   "submitted",
   "claimed",
   "running",
+  "materializing",
 ]);
 
 function artifactLabel(artifact: TrialArtifact): string {
@@ -95,6 +96,13 @@ function trialOutcome(
   trial: components["schemas"]["TrialDetail"],
 ): { label: string; description: string } {
   if (ACTIVE_TRIAL_STATES.has(trial.state)) {
+    if (trial.state === "materializing") {
+      return {
+        label: "Securing complete Trial output",
+        description:
+          "Compute finished. Loom is validating and copying the complete trajectory bundle into canonical storage before success is reported.",
+      };
+    }
     return {
       label: "Trial is active",
       description: "A worker has not produced a final platform outcome yet.",
@@ -124,6 +132,126 @@ function trialOutcome(
     label: "Trial outcome unknown",
     description: "The service returned a state this UI does not yet describe.",
   };
+}
+
+function elapsedSeconds(start: string | null, end: string | null): string {
+  if (!start || !end) return "—";
+  const seconds = Math.max(0, Math.round((Date.parse(end) - Date.parse(start)) / 1000));
+  return Number.isFinite(seconds) ? `${seconds}s` : "—";
+}
+
+function MaterializationCard({
+  trial,
+}: {
+  trial: components["schemas"]["TrialDetail"];
+}): JSX.Element | null {
+  const materialization = trial.materialization;
+  if (!materialization) return null;
+  const bundle = materialization.bundle;
+  const unavailable = materialization.state === "unavailable";
+  return (
+    <Card>
+      <Card.Header
+        title="Nebius execution and complete Trial bundle"
+        description="Compute, canonical transfer, and source cleanup are separate durable lifecycle stages."
+        headingLevel="h2"
+        actions={
+          <StatusPill variant={unavailable ? "failed" : materialization.canonical_ready ? "success" : "running"}>
+            {materialization.state}
+          </StatusPill>
+        }
+      />
+      <Card.Body className="space-y-4">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <StatCard label="Backend" value={materialization.backend} />
+          <StatCard label="Pool" value={materialization.pool_id} />
+          <StatCard label="Execution" value={materialization.execution_state} />
+          <StatCard label="Lifecycle" value={materialization.lifecycle_stage} />
+          <StatCard label="Compute result" value={materialization.compute_state ?? "pending"} />
+          <StatCard label="Output commit" value={materialization.output_commit_state} />
+          <StatCard
+            label="Queue to schedule"
+            value={elapsedSeconds(materialization.submitted_at, materialization.pod_scheduled_at)}
+          />
+          <StatCard
+            label="Pod provisioning"
+            value={elapsedSeconds(materialization.pod_scheduled_at, materialization.pod_started_at)}
+          />
+          <StatCard
+            label="Pod runtime"
+            value={elapsedSeconds(materialization.pod_started_at, materialization.pod_terminated_at)}
+          />
+          <StatCard
+            label="Output verification"
+            value={elapsedSeconds(materialization.pod_terminated_at, materialization.output_committed_at)}
+          />
+          <StatCard
+            label="Canonical transfer"
+            value={elapsedSeconds(materialization.started_at, materialization.committed_at)}
+          />
+          <StatCard label="Transfer attempts" value={materialization.attempts} />
+          <StatCard
+            label="Total to canonical"
+            value={elapsedSeconds(materialization.submitted_at, materialization.committed_at)}
+          />
+        </div>
+        {materialization.source_bundle ? (
+          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-950">
+            <p className="font-semibold">Worker output transfer: {materialization.source_bundle.state}</p>
+            <p className="mt-1 text-xs text-sky-800">
+              {materialization.source_bundle.committed_file_count} / {materialization.source_bundle.required_file_count} files · {formatBytes(materialization.source_bundle.committed_size_bytes)} / {formatBytes(materialization.source_bundle.required_size_bytes)} verified
+            </p>
+          </div>
+        ) : null}
+        {materialization.error ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+            <p className="font-semibold">{materialization.error.code}</p>
+            <p className="mt-1 text-xs text-amber-800">{materialization.error.message}</p>
+            {materialization.next_attempt_at ? (
+              <p className="mt-1 text-xs text-amber-800">
+                Next automatic retry: {formatLocalDateTime(materialization.next_attempt_at)}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+          <p>
+            Source cleanup: <strong>{materialization.source_cleanup_state}</strong>
+            {materialization.source_retain_until
+              ? ` · retained until ${formatLocalDateTime(materialization.source_retain_until)}`
+              : ""}
+          </p>
+          {materialization.source_cleanup_error_message ? (
+            <p className="mt-1 text-xs text-amber-800">
+              {materialization.source_cleanup_error_message}
+            </p>
+          ) : null}
+        </div>
+        {bundle && materialization.canonical_ready ? (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-950">Complete Trial bundle ready</p>
+                <p className="mt-1 text-xs text-emerald-800">
+                  {bundle.file_count} files · {formatBytes(bundle.size_bytes)} · manifest {bundle.manifest_sha256.slice(0, 20)}…
+                </p>
+              </div>
+              <Button
+                title="Download the complete canonical Trial bundle with trajectory, ATIF, artifacts, evidence, manifest, and checksums."
+                onClick={() => void api.downloadTrialBundle(trial.id)}
+              >
+                Download complete Trial bundle
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button disabled variant="secondary" title="The complete bundle becomes available only after canonical integrity checks pass.">
+            Complete Trial bundle pending
+          </Button>
+        )}
+      </Card.Body>
+    </Card>
+  );
 }
 
 function TrialHeader({
@@ -516,6 +644,7 @@ export default function TrialDetail(): JSX.Element {
         </Link>
       </div>
       <TrialHeader trial={trial.data} />
+      <MaterializationCard trial={trial.data} />
       <DiagnosisCard diagnosis={trial.data.diagnosis} />
       <DebugEvidenceCard evidence={trial.data.debug_evidence} />
       <Trajectory trialId={trialId} />

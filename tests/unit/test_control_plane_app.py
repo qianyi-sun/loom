@@ -61,6 +61,11 @@ def test_control_plane_lifespan_configures_db_pool(
         "run_retry_exhausted_sweeper_loop",
         _background_noop,
     )
+    monkeypatch.setattr(
+        control_plane_app,
+        "run_service_execution_materializer_loop",
+        _background_noop,
+    )
 
     app = control_plane_app.create_app(
         ControlPlaneSettings(

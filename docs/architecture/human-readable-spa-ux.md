@@ -47,6 +47,11 @@ Monitor distinguishes planned trials, platform state, and evaluator reward.
 Trial Detail renders a plain-language platform outcome, a humanized failure
 reason plus its stable code, readable artifact/download labels, and summarized
 timeline rows. Raw event objects are available per row under `Raw event data`.
+Nebius service execution has a separate capacity and lifecycle panel: fresh
+executable slots are not conflated with configured scale headroom, and Pod,
+materialization, retry, source-retention, and complete-bundle states remain
+visible without exposing provider target ids or raw internal errors to ordinary
+users.
 
 ### Providers and operator pages
 

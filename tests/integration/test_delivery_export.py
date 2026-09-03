@@ -35,6 +35,13 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.delivery_export import (
+    CanonicalTrialBundle,
+    CanonicalTrialBundleFile,
+    CorruptDeliveryObjectsError,
+    ObjectRef,
+    build_canonical_trial_bundle_archive,
+)
 from loom_service.delivery_export_tb2_v2 import SECRET_PATTERNS
 
 
@@ -97,6 +104,55 @@ class _FakeS3Client:
             data = read()
         self.objects[(Bucket, Key)] = bytes(data)
         return {"ETag": hashlib.md5(bytes(data), usedforsecurity=False).hexdigest()}
+
+
+def test_complete_trial_bundle_archive_is_deterministic_and_integrity_checked() -> None:
+    client = _FakeS3Client()
+    trial_id = uuid4()
+    artifact_id = uuid4()
+    payload = b"complete output\n"
+    client.objects[("artifacts", "canonical/output.txt")] = payload
+    bundle = CanonicalTrialBundle(
+        artifact_id=artifact_id,
+        trial_id=trial_id,
+        task_id="benchmark/task-1",
+        attempt=1,
+        manifest_sha256="sha256:" + "a" * 64,
+        content_sha256="sha256:" + "b" * 64,
+        files=(
+            CanonicalTrialBundleFile(
+                relative_path="files/output.txt",
+                ref=ObjectRef(
+                    kind="trial_bundle",
+                    trial_id=trial_id,
+                    bucket="artifacts",
+                    key="canonical/output.txt",
+                ),
+                size_bytes=len(payload),
+                sha256="sha256:" + hashlib.sha256(payload).hexdigest(),
+                media_type="text/plain",
+            ),
+        ),
+    )
+
+    first = build_canonical_trial_bundle_archive(client=client, bundle=bundle)
+    first_bytes = first.body.read()
+    first.body.close()
+    second = build_canonical_trial_bundle_archive(client=client, bundle=bundle)
+    second_bytes = second.body.read()
+    second.body.close()
+
+    assert first.sha256 == second.sha256
+    assert first_bytes == second_bytes
+    with tarfile.open(fileobj=io.BytesIO(first_bytes), mode="r:gz") as tar:
+        assert tar.extractfile("files/output.txt").read() == payload  # type: ignore[union-attr]
+        manifest = json.load(tar.extractfile("bundle.json"))  # type: ignore[arg-type]
+        assert manifest["trial_id"] == str(trial_id)
+        assert "checksums/SHA256SUMS" in tar.getnames()
+
+    client.objects[("artifacts", "canonical/output.txt")] = b"tampered output\n"
+    with pytest.raises(CorruptDeliveryObjectsError):
+        build_canonical_trial_bundle_archive(client=client, bundle=bundle)
 
 
 @pytest.fixture
@@ -377,6 +433,60 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     selected_trials = delivery_setup["selected_trials"]
     task_ids = delivery_setup["task_ids"]
     fake_s3 = delivery_setup["fake_s3"]
+    bundle_task_id = task_ids[0]  # type: ignore[index]
+    bundle_trial_id = selected_trials[bundle_task_id]  # type: ignore[index]
+    bundle_artifact_id = uuid4()
+    bundle_objects = {
+        (
+            "artifacts",
+            f"trials/{bundle_trial_id}/bundles/{bundle_artifact_id}/files/artifacts/answer.txt",
+        ): b"complete answer\n",
+        (
+            "artifacts",
+            f"trials/{bundle_trial_id}/bundles/{bundle_artifact_id}/source/_manifest.json",
+        ): b'{"schema_version":"loom.artifact-commit.v1"}',
+    }
+    fake_s3.objects.update(bundle_objects)  # type: ignore[attr-defined]
+    sync_engine = create_engine(postgres_url)
+    with sessionmaker(sync_engine)() as s:
+        source_rows = []
+        for index, ((bucket, key), payload) in enumerate(bundle_objects.items()):
+            row = {
+                "relative_path": (
+                    "artifacts/answer.txt" if index == 0 else "source/_manifest.json"
+                ),
+                "size_bytes": len(payload),
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "media_type": "application/json" if index else "text/plain",
+                "bucket": bucket,
+                "key": key,
+            }
+            source_rows.append(row)
+        s.execute(
+            insert(Artifact).values(
+                id=bundle_artifact_id,
+                artifact_type="loom.trial-artifact-bundle.v1",
+                name="trial_bundle",
+                team_id=delivery_setup["team_id"],
+                trial_id=bundle_trial_id,
+                control_producer_kind="service_execution",
+                control_producer_id=uuid4(),
+                content_hash="sha256:" + "1" * 64,
+                storage={
+                    "schema_version": "loom.canonical-trial-bundle-storage.v1",
+                    "attempt": 0,
+                    "files": [source_rows[0]],
+                    "source_evidence": [source_rows[1]],
+                },
+                artifact_metadata={"materialization_state": "committed"},
+                visibility="team",
+                share_status="shared",
+                safety_state="verified_internal",
+                access_class="team_runtime",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
 
     transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
     async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
@@ -390,7 +500,21 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
                 ]
             },
         )
+        bundle_response = await ac.get(
+            f"/api/v1/trials/{bundle_trial_id}/bundle/download",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
     assert response.status_code == 201, response.text
+    assert bundle_response.status_code == 200, bundle_response.text
+    assert bundle_response.headers["content-type"] == "application/gzip"
+    assert bundle_response.headers["cache-control"] == "private, no-store"
+    assert bundle_response.headers["x-content-sha256"] == (
+        "sha256:" + hashlib.sha256(bundle_response.content).hexdigest()
+    )
+    with tarfile.open(fileobj=io.BytesIO(bundle_response.content), mode="r:gz") as tar:
+        assert tar.extractfile("files/artifacts/answer.txt").read() == b"complete answer\n"  # type: ignore[union-attr]
+        assert "source/_manifest.json" in tar.getnames()
+        assert "checksums/SHA256SUMS" in tar.getnames()
     body = response.json()
     assert body["status"] == "ready"
     assert len(body["sha256"]) == 64
@@ -413,12 +537,17 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
     assert body["manifest"]["reward_distribution"] == {"0.0": 2, "1.0": 2}
     assert body["manifest"]["model_provider"] == "yibu"
     assert body["manifest"]["model_name"] == "glm-5.1-thinking"
-    assert body["manifest"]["object_counts"] == {"atif": 4, "trajectory": 4}
+    assert body["manifest"]["object_counts"] == {
+        "atif": 4,
+        "trajectory": 4,
+        "trial_bundles": 1,
+        "trial_bundle_files": 2,
+    }
     assert body["manifest"]["archive_sha256"] == body["sha256"]
 
     # HEAD validation must happen before the export is declared ready.
-    assert len(fake_s3.heads) == 8  # type: ignore[attr-defined]
-    assert body["object_validation"]["checked"] == 8
+    assert len(fake_s3.heads) == 10  # type: ignore[attr-defined]
+    assert body["object_validation"]["checked"] == 10
     assert body["object_validation"]["missing"] == []
 
     archive_key = body["storage"]["key"]
@@ -435,6 +564,20 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
         assert "checksums/SHA256SUMS" in names
         assert sum(name.startswith("trajectories/") for name in names) == 4
         assert sum(name.startswith("atif/") for name in names) == 4
+        bundle_prefix = (
+            f"trial_bundles/source-useful-5003-task-0001/{bundle_trial_id}"
+        )
+        assert tar.extractfile(f"{bundle_prefix}/files/artifacts/answer.txt").read() == (  # type: ignore[union-attr]
+            b"complete answer\n"
+        )
+        bundle_manifest = json.load(  # type: ignore[arg-type]
+            tar.extractfile(f"{bundle_prefix}/bundle.json")
+        )
+        assert bundle_manifest["artifact_id"] == str(bundle_artifact_id)
+        assert [item["relative_path"] for item in bundle_manifest["files"]] == [
+            "files/artifacts/answer.txt",
+            "source/_manifest.json",
+        ]
         manifest = json.load(tar.extractfile("manifest.json"))  # type: ignore[arg-type]
         assert manifest["task_count"] == 4
         assert "archive_sha256" not in manifest

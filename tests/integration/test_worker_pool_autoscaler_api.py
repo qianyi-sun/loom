@@ -561,6 +561,13 @@ def test_execution_finance_admin_round_trip_keeps_bill_overhead_explicit(
         capacity_target = capacity_status.json()["targets"][0]
         assert capacity_target["observation"]["is_fresh"] is True
         assert capacity_target["observation"]["pending_reasons"] == {"autoscaler_delay": 1}
+        assert capacity_target["observation"]["node_states"] == {
+            "desired": 1,
+            "creating": 0,
+            "ready": 1,
+            "failed": 0,
+            "deleting": 0,
+        }
         assert capacity_target["observation"]["provider_quota_nodes_headroom"] == 19
         assert capacity_target["observation"]["allocatable_cpu_millis_free"] == 42_000
         assert capacity_target["command_backlog"] == 0

@@ -630,6 +630,7 @@ class ServiceExecutionOutputRouteService:
                 or upload.state != "committed"
             ):
                 raise ServiceExecutionBrokerError("execution_generation_fenced")
+            output_already_committed = current.output_commit_state == "committed"
             artifact = await session.get(Artifact, record.artifact_id)
             if artifact is None:
                 session.add(
@@ -672,25 +673,39 @@ class ServiceExecutionOutputRouteService:
                 or artifact.manifest_sha256 != record.manifest_sha256
             ):
                 raise ServiceExecutionBrokerError("output_artifact_identity_drift")
-            current.output_commit_state = "committed"
-            current.output_manifest_sha256 = manifest_sha256
-            current.output_marker_sha256 = marker_sha256
-            current.output_committed_at = datetime.now(UTC)
-            current.updated_at = current.output_committed_at
+            if not output_already_committed:
+                current.output_commit_state = "committed"
+                current.output_manifest_sha256 = manifest_sha256
+                current.output_marker_sha256 = marker_sha256
+                current.output_committed_at = datetime.now(UTC)
+                current.updated_at = current.output_committed_at
+                if current.materialization_state != "not_started":
+                    raise ServiceExecutionBrokerError("materialization_identity_drift")
+                current.materialization_state = "pending"
+                current.materialization_next_attempt_at = current.output_committed_at
+            elif (
+                current.output_manifest_sha256 != manifest_sha256
+                or current.output_marker_sha256 != marker_sha256
+                or current.materialization_state not in {"pending", "running", "committed"}
+            ):
+                raise ServiceExecutionBrokerError("materialization_identity_drift")
+            if current.output_committed_at is None:
+                raise ServiceExecutionBrokerError("output_commit_identity_drift")
             trial = await session.get(Trial, current.trial_id, with_for_update=True)
             if trial is None:
                 raise ServiceExecutionBrokerError("trial_identity_drift")
             trajectory_index = {
-                "schema_version": "loom.service-execution-trajectory-index.v1",
+                "schema_version": "loom.service-execution-materialization-source.v1",
                 "artifact_bundle_id": str(record.artifact_id),
                 "upload_session_id": str(session_id),
                 "manifest_sha256": manifest_sha256,
                 "outputs": [item.model_dump(mode="json") for item in runtime_result.outputs],
                 "verifier_rewards": runtime_result.verifier_rewards,
             }
-            if trial.trajectory_index is not None and trial.trajectory_index != trajectory_index:
-                raise ServiceExecutionBrokerError("trajectory_index_identity_drift")
-            trial.trajectory_index = trajectory_index
+            if not output_already_committed:
+                if trial.trajectory_index is not None:
+                    raise ServiceExecutionBrokerError("trajectory_index_identity_drift")
+                trial.trajectory_index = trajectory_index
             await record_committed_runtime_result(
                 session,
                 lease_id=current.id,

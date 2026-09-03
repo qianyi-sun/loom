@@ -4656,6 +4656,83 @@ class ServiceExecutionLease(Base):
             "AND length(output_unavailable_reason) BETWEEN 1 AND 120)",
             name="execution_leases_output_group_check",
         ),
+        CheckConstraint(
+            "materialization_state IN "
+            "('not_started','pending','running','committed','unavailable')",
+            name="execution_leases_materialization_state_check",
+        ),
+        CheckConstraint(
+            "materialization_attempts >= 0",
+            name="execution_leases_materialization_attempts_check",
+        ),
+        CheckConstraint(
+            "(materialization_state='not_started' AND materialization_attempts=0 "
+            "AND materialization_next_attempt_at IS NULL "
+            "AND materialization_claim_id IS NULL "
+            "AND materialization_claim_expires_at IS NULL "
+            "AND materialization_started_at IS NULL "
+            "AND materialization_committed_at IS NULL "
+            "AND materialization_error_code IS NULL "
+            "AND materialization_error_message IS NULL "
+            "AND canonical_trajectory_sha256 IS NULL "
+            "AND canonical_atif_sha256 IS NULL) OR "
+            "(materialization_state='pending' AND output_commit_state='committed' "
+            "AND materialization_next_attempt_at IS NOT NULL "
+            "AND materialization_claim_id IS NULL "
+            "AND materialization_claim_expires_at IS NULL "
+            "AND materialization_committed_at IS NULL "
+            "AND canonical_trajectory_sha256 IS NULL "
+            "AND canonical_atif_sha256 IS NULL) OR "
+            "(materialization_state='running' AND output_commit_state='committed' "
+            "AND materialization_attempts > 0 AND materialization_claim_id IS NOT NULL "
+            "AND materialization_claim_expires_at IS NOT NULL "
+            "AND materialization_started_at IS NOT NULL "
+            "AND materialization_committed_at IS NULL "
+            "AND canonical_trajectory_sha256 IS NULL "
+            "AND canonical_atif_sha256 IS NULL) OR "
+            "(materialization_state='committed' AND output_commit_state='committed' "
+            "AND materialization_attempts > 0 AND materialization_claim_id IS NULL "
+            "AND materialization_claim_expires_at IS NULL "
+            "AND materialization_next_attempt_at IS NULL "
+            "AND materialization_committed_at IS NOT NULL "
+            "AND materialization_error_code IS NULL "
+            "AND materialization_error_message IS NULL "
+            "AND canonical_trajectory_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND canonical_atif_sha256 ~ '^sha256:[0-9a-f]{64}$') OR "
+            "(materialization_state='unavailable' AND output_commit_state='committed' "
+            "AND materialization_claim_id IS NULL "
+            "AND materialization_claim_expires_at IS NULL "
+            "AND materialization_next_attempt_at IS NULL "
+            "AND materialization_committed_at IS NULL "
+            "AND length(materialization_error_code) BETWEEN 1 AND 120 "
+            "AND length(materialization_error_message) BETWEEN 1 AND 2000 "
+            "AND canonical_trajectory_sha256 IS NULL "
+            "AND canonical_atif_sha256 IS NULL)",
+            name="execution_leases_materialization_group_check",
+        ),
+        CheckConstraint(
+            "source_cleanup_state IN ('not_ready','retained','running','complete')",
+            name="execution_leases_source_cleanup_state_check",
+        ),
+        CheckConstraint(
+            "source_cleanup_attempts >= 0 AND ((source_cleanup_state='not_ready' "
+            "AND source_retain_until IS NULL AND source_cleanup_claim_id IS NULL "
+            "AND source_cleanup_claim_expires_at IS NULL "
+            "AND source_cleanup_error_message IS NULL) OR "
+            "(source_cleanup_state='retained' AND materialization_state='committed' "
+            "AND source_retain_until IS NOT NULL AND source_cleanup_claim_id IS NULL "
+            "AND source_cleanup_claim_expires_at IS NULL) OR "
+            "(source_cleanup_state='running' AND materialization_state='committed' "
+            "AND source_retain_until IS NOT NULL AND source_cleanup_attempts > 0 "
+            "AND source_cleanup_claim_id IS NOT NULL "
+            "AND source_cleanup_claim_expires_at IS NOT NULL) OR "
+            "(source_cleanup_state='complete' AND materialization_state='committed' "
+            "AND source_retain_until IS NOT NULL AND source_cleanup_attempts > 0 "
+            "AND source_cleanup_claim_id IS NULL "
+            "AND source_cleanup_claim_expires_at IS NULL "
+            "AND source_cleanup_error_message IS NULL))",
+            name="execution_leases_source_cleanup_group_check",
+        ),
         UniqueConstraint(
             "trial_id",
             "attempt",
@@ -4669,6 +4746,19 @@ class ServiceExecutionLease(Base):
             postgresql_where=text("revoked_at IS NULL AND execution_role = 'attempt'"),
         ),
         Index("execution_leases_team_created_idx", "team_id", "created_at", "id"),
+        Index(
+            "execution_leases_materialization_queue_idx",
+            "materialization_next_attempt_at",
+            "output_committed_at",
+            "id",
+            postgresql_where=text("materialization_state IN ('pending','running')"),
+        ),
+        Index(
+            "execution_leases_source_cleanup_queue_idx",
+            "source_retain_until",
+            "id",
+            postgresql_where=text("source_cleanup_state IN ('retained','running')"),
+        ),
         Index(
             "execution_leases_reconcile_idx",
             "desired_state",
@@ -4751,6 +4841,41 @@ class ServiceExecutionLease(Base):
     output_marker_sha256: Mapped[str | None] = mapped_column(Text)
     output_committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     output_unavailable_reason: Mapped[str | None] = mapped_column(Text)
+    materialization_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'not_started'"), default="not_started"
+    )
+    materialization_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0
+    )
+    materialization_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    materialization_claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    materialization_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    materialization_started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    materialization_committed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    materialization_error_code: Mapped[str | None] = mapped_column(Text)
+    materialization_error_message: Mapped[str | None] = mapped_column(Text)
+    canonical_trajectory_sha256: Mapped[str | None] = mapped_column(Text)
+    canonical_atif_sha256: Mapped[str | None] = mapped_column(Text)
+    source_cleanup_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'not_ready'"), default="not_ready"
+    )
+    source_retain_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    source_cleanup_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0
+    )
+    source_cleanup_claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    source_cleanup_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True)
+    )
+    source_cleanup_error_message: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     error_class: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(Text)

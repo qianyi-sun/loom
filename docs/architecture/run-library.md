@@ -92,6 +92,10 @@ legacy artifact JSON still says `share_status = "shared"`.
   payloads or materialize the full typed-artifact table for large historical
   batches. Legacy `trajectory_index["artifacts"]` metadata remains available
   through the per-trial artifact download/reuse compatibility routes.
+  Owner/admin detail also returns `trial_bundles` for Nebius service-execution
+  trials, including durable materialization state, verified file count/bytes,
+  digests, and the authenticated complete-bundle download URL. Cross-team
+  readers do not receive this owner-only bundle inventory.
 - `GET /api/v1/run-library/artifacts`: list typed artifact metadata under the
   same Run Library read policy and artifact filters.
 - `GET /api/v1/run-library/artifacts/export`: export safe typed artifact
@@ -166,6 +170,10 @@ calls, and token totals. The table distinguishes combinations with no
 materialized trials from combinations that have trials but no scored reward,
 and uses `effective_combination_summary` when shared supplemental reruns have
 replaced failed originals.
+For Nebius runs, a separate Complete Trial bundles section distinguishes
+pending, retrying, unavailable, and committed canonical packages. Download is
+enabled only after the canonical integrity boundary commits; the result is the
+whole trajectory/evidence/output package, not an individual answer artifact.
 
 Existing Batch Detail and Trial Detail pages also show owner team, visibility,
 share status, and provenance when those fields are present, so cloned/reused

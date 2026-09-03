@@ -61,6 +61,36 @@ python_type = "bool"
 default     = false
 description = "Enable normal queued-Trial reservation for tasks carrying an immutable service_execution binding. Disabled environments retain the legacy worker-only claim path."
 
+[service_config.service_execution_materializer_enabled]
+used_by     = ["control-plane"]
+python_type = "bool"
+default     = true
+description = "Continuously materialize committed service-execution bundles into canonical Trial objects and database projections."
+
+[service_config.service_execution_materializer_interval_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 2.0
+description = "Polling interval when no committed service-execution output is ready for canonical materialization."
+
+[service_config.service_execution_materializer_claim_ttl_sec]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 300.0
+description = "Lease duration for one materialization attempt; expired work is reclaimed after process failure."
+
+[service_config.service_execution_materializer_concurrency]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 8
+description = "Concurrent canonical materialization/retention workers per Control Plane process; database claims remain cross-process exclusive."
+
+[service_config.service_execution_source_retention_sec]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 86400
+description = "Recovery window after canonical acknowledgement before the immutable service-execution source spool is deleted."
+
 [service_config.service_execution_scheduler_environment]
 used_by     = ["control-plane"]
 python_type = "str"

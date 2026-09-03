@@ -284,6 +284,7 @@ def compile_service_execution_plan(
     assert task.environment.storage_mb is not None
     step = task.steps[0]
     assert trial.agent_model is not None
+    output_paths = list(dict.fromkeys((*step.artifacts, *step.required_artifacts)))
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
     # the service-execution lease and supports both a JWT-bound provider
     # connection and the platform route, whose model identity is provider/name.
@@ -291,7 +292,7 @@ def compile_service_execution_plan(
     main_environment = {
         "LOOM_TASK_MODEL": model,
         "LOOM_TASK_INSTRUCTION_FILE": str(step.instruction_file),
-        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(step.artifacts, separators=(",", ":")),
+        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(output_paths, separators=(",", ":")),
         "LOOM_TASK_REQUEST_PARAMS_JSON": json.dumps(
             trial.request_params, sort_keys=True, separators=(",", ":")
         ),
@@ -328,7 +329,6 @@ def compile_service_execution_plan(
             "verifier": task.verifier.model_dump(mode="json"),
         }
     )
-    output_paths = list(dict.fromkeys((*step.artifacts, *step.required_artifacts)))
     output_declarations = (
         *(
             RuntimeOutputDeclarationV1(

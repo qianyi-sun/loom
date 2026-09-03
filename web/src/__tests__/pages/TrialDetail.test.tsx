@@ -166,6 +166,9 @@ function fetchSpy(
       if (url.includes(`/trials/${TRIAL_ID}/artifacts/download`)) {
         return Promise.resolve(new Response("artifact", { status: 200 }));
       }
+      if (url.includes(`/trials/${TRIAL_ID}/bundle/download`)) {
+        return Promise.resolve(new Response("complete-bundle", { status: 200 }));
+      }
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
@@ -505,5 +508,73 @@ describe("TrialDetail trajectory section", () => {
     expect(
       screen.queryByRole("button", { name: /Load more/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps a Nebius trial active while materializing and downloads the complete bundle", async () => {
+    const fetchMock = fetchSpy(
+      { ok: true, body: { events: [], next_cursor: null } },
+      {
+        ...TRIAL_BODY,
+        state: "materializing",
+        materialization: {
+          state: "committed",
+          lifecycle_stage: "materializing",
+          compute_state: "succeeded",
+          output_commit_state: "committed",
+          canonical_ready: true,
+          backend: "nebius",
+          pool_id: "nebius-cpu",
+          execution_state: "finalized",
+          submitted_at: "2026-09-03T10:00:00Z",
+          pod_scheduled_at: "2026-09-03T10:00:03Z",
+          pod_started_at: "2026-09-03T10:00:05Z",
+          pod_terminated_at: "2026-09-03T10:01:05Z",
+          output_committed_at: "2026-09-03T10:01:07Z",
+          source_bundle: {
+            state: "committed",
+            required_file_count: 7,
+            required_size_bytes: 4096,
+            committed_file_count: 7,
+            committed_size_bytes: 4096,
+          },
+          attempts: 1,
+          next_attempt_at: null,
+          started_at: "2026-09-03T10:01:07Z",
+          committed_at: "2026-09-03T10:01:10Z",
+          error: null,
+          trajectory_sha256: "sha256:trajectory",
+          atif_sha256: "sha256:atif",
+          source_cleanup_state: "retained",
+          source_cleanup_attempts: 0,
+          source_cleanup_error_message: null,
+          source_retain_until: "2026-09-04T10:01:10Z",
+          bundle: {
+            schema_version: "loom.canonical-trial-bundle-export.v1",
+            artifact_id: "22222222-2222-2222-2222-222222222222",
+            file_count: 7,
+            size_bytes: 4096,
+            manifest_sha256: `sha256:${"a".repeat(64)}`,
+            content_sha256: `sha256:${"b".repeat(64)}`,
+            download_url: `/api/v1/trials/${TRIAL_ID}/bundle/download`,
+          },
+        },
+      },
+    );
+    const { createObjectURL } = stubBlobUrls("blob:complete-bundle");
+    const user = userEvent.setup();
+    renderWithProviders(
+      <Routes>
+        <Route path="/trials/:trialId" element={<TrialDetail />} />
+      </Routes>,
+      { route: `/trials/${TRIAL_ID}` },
+    );
+
+    expect(await screen.findByText("Securing complete Trial output")).toBeInTheDocument();
+    expect(screen.getByText("Complete Trial bundle ready")).toBeInTheDocument();
+    expect(screen.getByText("Worker output transfer: committed")).toBeInTheDocument();
+    expect(screen.getByText(/7 \/ 7 files/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Download complete Trial bundle" }));
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+    expectSessionDownloadCall(fetchMock, `/api/v1/trials/${TRIAL_ID}/bundle/download`);
   });
 });

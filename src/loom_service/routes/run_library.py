@@ -24,6 +24,7 @@ from loom.db.schema import (
     Batch,
     LlmCall,
     PipelineRun,
+    ServiceExecutionLease,
     Team,
     Trial,
 )
@@ -36,6 +37,10 @@ from loom_service.auth_guards import (
 )
 from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
+from loom_service.delivery_export import (
+    DeliveryExportError,
+    canonical_bundle_from_artifact,
+)
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemental
@@ -121,6 +126,7 @@ class _RunLibraryTrialProjection:
     failure_message: str | None
     result: dict[str, Any] | None
     started_at: datetime | None
+    attempt_count: int
     sample_idx: int
     combination_idx: int
     provider_connection_id: UUID | None
@@ -650,11 +656,17 @@ async def _batch_detail_artifact_preview(
     if per_batch_limit == 0:
         return typed_by_trial, summary, True
 
+    trial_ids = [trial.id for trial in trials]
     rows = list(
         (
             await session.execute(
                 select(Artifact)
-                .where(Artifact.batch_id == batch_id)
+                .where(
+                    or_(
+                        Artifact.batch_id == batch_id,
+                        Artifact.trial_id.in_(trial_ids),
+                    )
+                )
                 .order_by(Artifact.created_at.asc(), Artifact.id.asc())
                 .limit(per_batch_limit + 1),
             )
@@ -668,6 +680,106 @@ async def _batch_detail_artifact_preview(
         if artifact.trial_id is not None:
             typed_by_trial.setdefault(artifact.trial_id, []).append(artifact)
     return typed_by_trial, summary, truncated
+
+
+async def _batch_trial_bundles(
+    request: Request,
+    session: Any,
+    trials: Sequence[_RunLibraryTrialProjection],
+) -> list[dict[str, Any]]:
+    if not trials:
+        return []
+    leases = list(
+        (
+            await session.execute(
+                select(ServiceExecutionLease)
+                .where(
+                    ServiceExecutionLease.trial_id.in_([trial.id for trial in trials]),
+                    ServiceExecutionLease.execution_role == "attempt",
+                )
+                .order_by(ServiceExecutionLease.trial_id, ServiceExecutionLease.attempt.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    newest_lease: dict[UUID, ServiceExecutionLease] = {}
+    for lease in leases:
+        newest_lease.setdefault(lease.trial_id, lease)
+    artifacts = list(
+        (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.trial_id.in_([trial.id for trial in trials]),
+                    Artifact.control_producer_kind == "service_execution",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    artifacts_by_trial: dict[UUID, list[Artifact]] = {}
+    for artifact in artifacts:
+        if artifact.trial_id is not None:
+            artifacts_by_trial.setdefault(artifact.trial_id, []).append(artifact)
+    out: list[dict[str, Any]] = []
+    for trial in trials:
+        lease = newest_lease.get(trial.id)
+        if lease is None:
+            continue
+        bundle = None
+        integrity_error = False
+        try:
+            matches = [
+                parsed
+                for artifact in artifacts_by_trial.get(trial.id, [])
+                if (
+                    parsed := canonical_bundle_from_artifact(
+                        artifact,
+                        trial=trial,
+                    )
+                )
+                is not None
+            ]
+            if len(matches) == 1:
+                bundle = matches[0]
+            elif len(matches) > 1:
+                integrity_error = True
+        except DeliveryExportError:
+            integrity_error = True
+        ready = bundle is not None and lease.materialization_state == "committed"
+        out.append(
+            {
+                "trial_id": str(trial.id),
+                "task_id": trial.task_id,
+                "trial_state": trial.state,
+                "materialization_state": (
+                    "invalid_integrity" if integrity_error else lease.materialization_state
+                ),
+                "attempts": lease.materialization_attempts,
+                "canonical_ready": ready,
+                "file_count": len(bundle.files) if ready and bundle else 0,
+                "size_bytes": (
+                    sum(item.size_bytes for item in bundle.files)
+                    if ready and bundle
+                    else 0
+                ),
+                "manifest_sha256": bundle.manifest_sha256 if ready and bundle else None,
+                "content_sha256": bundle.content_sha256 if ready and bundle else None,
+                "download_url": (
+                    str(
+                        public_url_for(
+                            request,
+                            "download_trial_bundle",
+                            trial_id=str(trial.id),
+                        )
+                    )
+                    if ready
+                    else None
+                ),
+            }
+        )
+    return out
 
 
 def _artifact_inventory(
@@ -1103,6 +1215,7 @@ async def _batch_trial_projections_for_batch_ids(
                 Trial.failure_message,
                 Trial.result,
                 Trial.started_at,
+                Trial.attempt_count,
                 Trial.sample_idx,
                 Trial.combination_idx,
                 Trial.provider_connection_id,
@@ -1125,6 +1238,7 @@ async def _batch_trial_projections_for_batch_ids(
             failure_message=row.failure_message,
             result=row.result,
             started_at=row.started_at,
+            attempt_count=row.attempt_count,
             sample_idx=row.sample_idx,
             combination_idx=row.combination_idx,
             provider_connection_id=row.provider_connection_id,
@@ -1303,6 +1417,15 @@ async def _serialize_batch(
             parents_by_artifact,
         )
         out["artifact_inventory_truncated"] = artifact_summary_truncated
+        out["trial_bundles"] = (
+            await _batch_trial_bundles(
+                request,
+                session,
+                trials,
+            )
+            if _is_owner_or_admin(ctx, batch.team_id)
+            else []
+        )
     return out
 
 

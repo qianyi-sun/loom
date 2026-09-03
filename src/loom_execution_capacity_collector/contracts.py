@@ -16,6 +16,18 @@ class ResourceTotals(BaseModel):
     storage_mib: int = Field(ge=0)
 
 
+class NodeStateCounts(BaseModel):
+    """Provider/Kubernetes node lifecycle counts safe for operator projection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    desired: int = Field(ge=0)
+    creating: int = Field(ge=0)
+    ready: int = Field(ge=0)
+    failed: int = Field(ge=0)
+    deleting: int = Field(ge=0)
+
+
 class CapacityPolicyBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -85,6 +97,7 @@ class CapacityObservationV1(BaseModel):
     provider_used_memory_mib: int = Field(ge=0)
     provider_used_storage_mib: int = Field(ge=0)
     active_nodes: int = Field(ge=0)
+    node_states: NodeStateCounts
     provisioned_vcpu_millis: int = Field(ge=0)
     provisioned_memory_mib: int = Field(ge=0)
     provisioned_storage_mib: int = Field(ge=0)
@@ -119,6 +132,7 @@ __all__ = [
     "CapacityObservationV1",
     "CapacityPolicyBinding",
     "KubernetesCapacitySnapshot",
+    "NodeStateCounts",
     "ProviderCapacitySnapshot",
     "ResourceTotals",
 ]

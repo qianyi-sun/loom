@@ -17,9 +17,16 @@ def _copy_contract(tmp_path: Path) -> tuple[Path, Path]:
     shutil.copytree(SOURCE_ROOT, nebius_root, ignore=shutil.ignore_patterns(".terraform"))
     (repo_root / "config").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "config" / "service-execution-topology.json", repo_root / "config")
+    shutil.copy2(
+        REPO_ROOT / "config" / "nebius-runtime-physical-binding.json", repo_root / "config"
+    )
     (repo_root / "deploy" / "k8s").mkdir(parents=True)
     shutil.copy2(
         REPO_ROOT / "deploy" / "k8s" / "nebius-development-capacity-policy.json",
+        repo_root / "deploy" / "k8s",
+    )
+    shutil.copy2(
+        REPO_ROOT / "deploy" / "k8s" / "nebius-capacity-collector.yaml",
         repo_root / "deploy" / "k8s",
     )
     (repo_root / "scripts" / "ops").mkdir(parents=True)
@@ -53,6 +60,17 @@ def test_public_world_control_plane_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps(document), encoding="utf-8")
 
     with pytest.raises(ContractError, match="may never allow"):
+        check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
+
+
+def test_physical_binding_drift_is_rejected(tmp_path: Path) -> None:
+    repo_root, nebius_root = _copy_contract(tmp_path)
+    path = repo_root / "config" / "nebius-runtime-physical-binding.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["execution_node_group_id"] = "mk8snodegroup-wrong"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="source runtime binding"):
         check_nebius_iac(repo_root=repo_root, nebius_root=nebius_root)
 
 
@@ -178,13 +196,15 @@ def test_gateway_runtime_apply_pins_release_actuator_image() -> None:
 
     assert "--execution-actuator-image" in gateway
     assert '--execution-actuator-image "$execution_actuator_image"' in gateway
-    assert "render_execution_actuator_manifest" in inner
-    assert 'lines[matches[0]] = f"          image: {image}{ending}"' in inner
-    assert "render_execution_actuator_manifest | kubectl apply -f -" in inner
-    assert "render_capacity_collector_manifest" in inner
-    assert 'line.startswith("              image: ")' in inner
-    assert "if len(matches) != 2" in inner
-    assert "render_capacity_collector_manifest | kubectl apply -f -" in inner
+    assert "scripts/ops/render_nebius_runtime.py" in inner
+    assert "scripts/ops/render_nebius_runtime.py" in gateway
+    assert "src/loom/nebius_runtime_render.py" in gateway
+    assert "config/service-execution-topology.json" in gateway
+    assert "config/nebius-runtime-physical-binding.json" in gateway
+    assert "--environment development" in inner
+    assert '--image "$execution_actuator_image"' in inner
+    assert 'kubectl apply -f "$execution_actuator_manifest"' in inner
+    assert 'kubectl apply -f "$capacity_collector_manifest"' in inner
 
 
 def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
