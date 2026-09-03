@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Stage a verified node-guard release without activating any runtime surface."""
 
 from __future__ import annotations
 
+# The direct operator entry point establishes trusted checkout imports first.
 import argparse
 import ctypes
 import errno
@@ -12,12 +14,25 @@ import os
 import platform
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
+
+_DIRECT_SCRIPT = Path(__file__).resolve(strict=True)
+_DIRECT_REPOSITORY = _DIRECT_SCRIPT.parents[2]
+if __package__ in {None, ""}:
+    if _DIRECT_SCRIPT != (
+        _DIRECT_REPOSITORY / "scripts/ops/install_task_image_builder_guard.py"
+    ):
+        raise RuntimeError("installer script path is invalid")
+    _DIRECT_IMPORT_ROOTS = (_DIRECT_REPOSITORY, _DIRECT_REPOSITORY / "src")
+    if any(not path.is_dir() for path in _DIRECT_IMPORT_ROOTS):
+        raise RuntimeError("installer import roots are unavailable")
+    sys.path[:0] = [str(path) for path in _DIRECT_IMPORT_ROOTS]
 
 from scripts.ops.task_image_builder_guard_release import (
     Architecture,
@@ -243,24 +258,81 @@ def _receipt_for(release: VerifiedGuardRelease) -> StageReceipt:
     )
 
 
-def _load_existing_receipt(path: Path, expected: StageReceipt) -> StageReceipt | None:
-    if not path.exists() and not path.is_symlink():
-        return None
+def _receipt_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _load_existing_receipt(
+    path: Path,
+    expected: StageReceipt,
+    *,
+    expected_uid: int,
+    expected_gid: int,
+) -> StageReceipt | None:
+    descriptor = -1
     try:
         metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise GuardInstallError("staging receipt is invalid") from exc
+    try:
         if (
             stat.S_ISLNK(metadata.st_mode)
             or not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
+            or metadata.st_uid != expected_uid
+            or metadata.st_gid != expected_gid
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_size <= 0
             or metadata.st_size > 64 * 1024
         ):
             raise GuardInstallError("staging receipt is unsafe")
-        payload = path.read_bytes()
+        identity = _receipt_identity(metadata)
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if _receipt_identity(opened) != identity:
+            raise GuardInstallError("staging receipt changed while opening")
+        chunks: list[bytes] = []
+        remaining = 64 * 1024 + 1
+        while remaining:
+            chunk = os.read(descriptor, min(16 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if (
+            len(payload) != metadata.st_size
+            or len(payload) > 64 * 1024
+            or _receipt_identity(os.fstat(descriptor)) != identity
+            or _receipt_identity(path.lstat()) != identity
+        ):
+            raise GuardInstallError("staging receipt changed while being read")
         value = json.loads(payload)
+    except GuardInstallError:
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise GuardInstallError("staging receipt is invalid") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if payload != _canonical(value) or value != expected.as_dict():
         raise GuardInstallError("staging receipt differs from exact release")
     return expected
@@ -337,7 +409,15 @@ def stage_guard_release(bundle: Path, context: InstallContext) -> StageReceipt:
             expected_gid=expected_gid,
         )
         receipt_path = receipts / f"{release.release_sha256}.json"
-        if _load_existing_receipt(receipt_path, receipt) is None:
+        if (
+            _load_existing_receipt(
+                receipt_path,
+                receipt,
+                expected_uid=expected_uid,
+                expected_gid=expected_gid,
+            )
+            is None
+        ):
             _write_receipt(receipt_path, receipt)
         return receipt
     finally:

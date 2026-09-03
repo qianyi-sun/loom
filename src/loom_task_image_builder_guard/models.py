@@ -29,6 +29,7 @@ class ProtocolConfig:
 @dataclass(frozen=True, slots=True)
 class AuthorityConfig:
     base_url: str
+    connect_ip: str
     ca_path: Path
     cert_path: Path
     key_path: Path
@@ -79,6 +80,7 @@ class ContainmentConfig:
     ledger_root: Path
     bpf_object_path: Path
     network_policy_path: Path
+    device_program_tags: tuple[str, ...]
     pids_max: int
     io_limits: tuple[IoLimit, ...]
     containment_policy_sha256: str

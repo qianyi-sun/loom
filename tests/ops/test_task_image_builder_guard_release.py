@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from scripts.ops import task_image_builder_guard_release as release_module
 from scripts.ops.task_image_builder_guard_release import (
     GuardReleaseError,
     build_release,
@@ -25,6 +27,7 @@ ARTIFACTS = (
     Path("deploy/task-image-builder/guard-network-v1.bpf.o"),
     Path("deploy/task-image-builder/guard-network-v1.bpf.build.json"),
     Path("deploy/task-image-builder/guard-network-map-schema-v1.json"),
+    Path("deploy/task-image-builder/loom-task-image-builder-node-guard.service"),
 )
 
 
@@ -150,6 +153,7 @@ def test_zipapp_has_a_sorted_stored_canonical_archive_and_exact_payload(
         "guard-network-map-schema-v1.json",
         "guard-network-v1.bpf.build.json",
         "guard-network-v1.bpf.o",
+        "loom-task-image-builder-node-guard.service",
         "loom-task-image-builder-guard.pyz",
     ]
     assert [record["mode"] for record in records] == [
@@ -157,8 +161,46 @@ def test_zipapp_has_a_sorted_stored_canonical_archive_and_exact_payload(
         "0444",
         "0444",
         "0444",
+        "0444",
         "0555",
     ]
+    assert (
+        result.directory / "loom-task-image-builder-node-guard.service"
+    ).read_bytes() == (
+        source
+        / "deploy/task-image-builder/loom-task-image-builder-node-guard.service"
+    ).read_bytes()
+
+
+def test_release_rejects_a_weakened_unit_even_if_its_digest_is_rebound(
+    tmp_path: Path,
+) -> None:
+    source = _source_tree(tmp_path)
+    unit = source / "deploy/task-image-builder/loom-task-image-builder-node-guard.service"
+    unit.write_text(
+        unit.read_text(encoding="utf-8").replace(
+            "NoNewPrivileges=yes",
+            "NoNewPrivileges=no",
+        ),
+        encoding="utf-8",
+    )
+    spec_path = source / SPEC
+    spec = json.loads(spec_path.read_bytes())
+    unit_record = next(
+        record
+        for record in spec["artifacts"]
+        if record["path"].endswith("node-guard.service")
+    )
+    unit_record["sha256"] = hashlib.sha256(unit.read_bytes()).hexdigest()
+    spec_path.write_bytes(_canonical(spec))
+
+    with pytest.raises(GuardReleaseError, match="systemd unit"):
+        build_release(
+            source,
+            _elf_bpftool(tmp_path / "bpftool"),
+            tmp_path / "out",
+            "x86_64",
+        )
 
 
 @pytest.mark.parametrize(
@@ -250,3 +292,80 @@ def test_release_publish_never_replaces_an_existing_digest_directory(
         for path in first.directory.iterdir()
     }
     assert after == before
+
+
+def test_release_retry_repairs_a_missing_sidecar_after_directory_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_tree(tmp_path)
+    bpftool = _elf_bpftool(tmp_path / "bpftool")
+    output = tmp_path / "out"
+    original_publish_sidecar = release_module._publish_sidecar
+
+    def fail_sidecar(_path: Path, _payload: bytes) -> None:
+        raise GuardReleaseError("injected sidecar failure")
+
+    monkeypatch.setattr(release_module, "_publish_sidecar", fail_sidecar)
+    with pytest.raises(GuardReleaseError, match="injected sidecar failure"):
+        build_release(source, bpftool, output, "x86_64")
+
+    published = [path for path in output.iterdir() if path.is_dir()]
+    assert len(published) == 1
+    assert not (output / f"{published[0].name}.manifest.json").exists()
+
+    monkeypatch.setattr(release_module, "_publish_sidecar", original_publish_sidecar)
+    repaired = build_release(source, bpftool, output, "x86_64")
+
+    assert repaired.directory == published[0]
+    assert repaired.sidecar_path.read_bytes() == repaired.manifest_path.read_bytes()
+
+
+def test_release_never_exposes_a_partial_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_tree(tmp_path)
+    bpftool = _elf_bpftool(tmp_path / "bpftool")
+    output = tmp_path / "out"
+    original_write = release_module.os.write
+    sidecar_started = False
+
+    def fail_during_sidecar(descriptor: int, payload: bytes) -> int:
+        nonlocal sidecar_started
+        target = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        if target.parent == output:
+            if not sidecar_started:
+                sidecar_started = True
+                return original_write(descriptor, payload[:8])
+            raise OSError(errno.EIO, "injected sidecar write failure")
+        return original_write(descriptor, payload)
+
+    monkeypatch.setattr(release_module.os, "write", fail_during_sidecar)
+
+    with pytest.raises(GuardReleaseError, match="could not be written"):
+        build_release(source, bpftool, output, "x86_64")
+
+    assert not [path for path in output.iterdir() if path.name.endswith(".manifest.json")]
+
+
+def test_release_rejects_a_zero_length_file_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_tree(tmp_path)
+    bpftool = _elf_bpftool(tmp_path / "bpftool")
+    original_write = release_module.os.write
+    first_write = True
+
+    def zero_once(descriptor: int, payload: bytes) -> int:
+        nonlocal first_write
+        if first_write:
+            first_write = False
+            return 0
+        return original_write(descriptor, payload)
+
+    monkeypatch.setattr(release_module.os, "write", zero_once)
+
+    with pytest.raises(GuardReleaseError, match="could not be written"):
+        build_release(source, bpftool, tmp_path / "out", "x86_64")

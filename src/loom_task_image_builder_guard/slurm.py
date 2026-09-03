@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
+import platform
 import re
+import selectors
+import signal
 import stat
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -22,12 +28,44 @@ from loom_task_image_builder_guard.models import (
 _JOB_ID = re.compile(r"^[1-9][0-9]{0,31}$")
 _MEMORY = re.compile(r"^([1-9][0-9]*)([KMGT])$")
 _MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024
+_MAX_PROC_ENTRIES = 1 << 20
+_SYS_PIDFD_SEND_SIGNAL = 424
+_SYS_PIDFD_OPEN = 434
 _ENVIRONMENT = {
     "LANG": "C",
     "LC_ALL": "C",
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     "PYTHONDONTWRITEBYTECODE": "1",
 }
+
+
+def _pidfd_open(pid: int) -> int:
+    native = getattr(os, "pidfd_open", None)
+    if native is not None:
+        return int(native(pid, 0))
+    if platform.machine() not in {"x86_64", "aarch64"}:
+        raise GuardError("command_descendant_check_failed")
+    libc = ctypes.CDLL(None, use_errno=True)
+    descriptor = int(libc.syscall(_SYS_PIDFD_OPEN, pid, 0))
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    os.set_inheritable(descriptor, False)
+    return descriptor
+
+
+def _pidfd_send_signal(descriptor: int, signum: signal.Signals) -> None:
+    native = getattr(signal, "pidfd_send_signal", None)
+    if native is not None:
+        native(descriptor, signum)
+        return
+    if platform.machine() not in {"x86_64", "aarch64"}:
+        raise GuardError("command_descendant_cleanup_failed")
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = int(libc.syscall(_SYS_PIDFD_SEND_SIGNAL, descriptor, int(signum), 0, 0))
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,17 +115,209 @@ class PinnedCommandRunner:
         timeout_seconds: int = 30,
         max_stdout_bytes: int = 1024 * 1024,
         max_stderr_bytes: int = 256 * 1024,
+        progress: Callable[[], None] = lambda: None,
     ) -> None:
         self.trusted_uid = trusted_uid
         self.timeout_seconds = timeout_seconds
         self.max_stdout_bytes = max_stdout_bytes
         self.max_stderr_bytes = max_stderr_bytes
+        self.progress = progress
+
+    @classmethod
+    def _terminate(cls, process: subprocess.Popen[bytes]) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                descendants = cls._session_descendant_pidfds(process.pid)
+                try:
+                    if not descendants:
+                        break
+                    for descriptor in descendants:
+                        try:
+                            _pidfd_send_signal(descriptor, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        except OSError as exc:
+                            raise GuardError(
+                                "command_descendant_cleanup_failed"
+                            ) from exc
+                finally:
+                    for descriptor in descendants:
+                        os.close(descriptor)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GuardError("command_descendant_cleanup_failed")
+                time.sleep(min(0.01, remaining))
+        finally:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    @staticmethod
+    def _session_descendant_pidfds(session_id: int) -> tuple[int, ...]:
+        def process_session(pid: int) -> tuple[bytes, int] | None:
+            try:
+                descriptor = os.open(
+                    f"/proc/{pid}/stat",
+                    os.O_RDONLY
+                    | os.O_CLOEXEC
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                )
+                try:
+                    payload = os.read(descriptor, 4097)
+                finally:
+                    os.close(descriptor)
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            except OSError as exc:
+                raise GuardError("command_descendant_check_failed") from exc
+            marker = payload.rfind(b") ")
+            fields = payload[marker + 2 :].split() if marker >= 0 else []
+            try:
+                return fields[0], int(fields[3])
+            except (IndexError, ValueError):
+                raise GuardError("command_descendant_check_failed") from None
+
+        inspected = 0
+        descendants: list[int] = []
+        try:
+            processes = os.scandir("/proc")
+        except OSError as exc:
+            raise GuardError("command_descendant_check_failed") from exc
+        try:
+            with processes:
+                for process in processes:
+                    if not process.name.isascii() or not process.name.isdigit():
+                        continue
+                    inspected += 1
+                    if inspected > _MAX_PROC_ENTRIES:
+                        raise GuardError("command_descendant_check_failed")
+                    pid = int(process.name)
+                    if pid == session_id:
+                        continue
+                    observed = process_session(pid)
+                    if observed is None or observed[0] == b"Z" or observed[1] != session_id:
+                        continue
+                    try:
+                        descriptor = _pidfd_open(pid)
+                    except (ProcessLookupError, FileNotFoundError):
+                        continue
+                    except OSError as exc:
+                        raise GuardError("command_descendant_check_failed") from exc
+                    confirmed = process_session(pid)
+                    if (
+                        confirmed is None
+                        or confirmed[0] == b"Z"
+                        or confirmed[1] != session_id
+                    ):
+                        os.close(descriptor)
+                        continue
+                    descendants.append(descriptor)
+            return tuple(descendants)
+        except BaseException:
+            for descriptor in descendants:
+                os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _wait_unreaped(process: subprocess.Popen[bytes], deadline: float) -> None:
+        while True:
+            try:
+                status = os.waitid(
+                    os.P_PID,
+                    process.pid,
+                    os.WEXITED | os.WNOHANG | os.WNOWAIT,
+                )
+            except (ChildProcessError, OSError) as exc:
+                raise GuardError("command_wait_invalid") from exc
+            if status is not None:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GuardError("command_timeout")
+            time.sleep(min(0.01, remaining))
+
+    def _bounded_output(
+        self,
+        process: subprocess.Popen[bytes],
+    ) -> tuple[int, bytes, bytes]:
+        if process.stdout is None or process.stderr is None:
+            raise GuardError("command_output_invalid")
+        outputs = {
+            process.stdout.fileno(): bytearray(),
+            process.stderr.fileno(): bytearray(),
+        }
+        limits = {
+            process.stdout.fileno(): self.max_stdout_bytes,
+            process.stderr.fileno(): self.max_stderr_bytes,
+        }
+        selector = selectors.DefaultSelector()
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            for stream in (process.stdout, process.stderr):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GuardError("command_timeout")
+                ready = selector.select(remaining)
+                if not ready:
+                    raise GuardError("command_timeout")
+                for key, _events in ready:
+                    descriptor = key.fd
+                    maximum = limits[descriptor]
+                    budget = maximum + 1 - len(outputs[descriptor])
+                    if budget <= 0:
+                        raise GuardError("command_output_invalid")
+                    chunk = os.read(descriptor, min(64 * 1024, budget))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        self.progress()
+                        continue
+                    outputs[descriptor].extend(chunk)
+                    self.progress()
+                    if len(outputs[descriptor]) > maximum:
+                        raise GuardError("command_output_invalid")
+            self._wait_unreaped(process, deadline)
+            descendants = self._session_descendant_pidfds(process.pid)
+            for descriptor in descendants:
+                os.close(descriptor)
+            if descendants:
+                self._terminate(process)
+                raise GuardError("command_descendants_invalid")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GuardError("command_timeout")
+            try:
+                returncode = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                raise GuardError("command_timeout") from None
+            return (
+                returncode,
+                bytes(outputs[process.stdout.fileno()]),
+                bytes(outputs[process.stderr.fileno()]),
+            )
+        finally:
+            selector.close()
 
     def run(self, command: CommandIdentity, argv: tuple[str, ...]) -> CommandResult:
         if any(not isinstance(item, str) or "\x00" in item for item in argv):
             raise GuardError("command_arguments_invalid")
         descriptor: int | None = None
         try:
+            self.progress()
             lexical = os.lstat(command.path)
             descriptor = os.open(
                 command.path,
@@ -105,35 +335,46 @@ class PinnedCommandRunner:
                 or _hash_descriptor(descriptor) != command.sha256
             ):
                 raise GuardError("command_identity_invalid")
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 (f"/proc/self/fd/{descriptor}", *argv),
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=_ENVIRONMENT,
                 pass_fds=(descriptor,),
+                start_new_session=True,
             )
+            self.progress()
+            try:
+                try:
+                    returncode, stdout_payload, stderr_payload = self._bounded_output(
+                        process
+                    )
+                except BaseException:
+                    self._terminate(process)
+                    raise
+            finally:
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
             final = os.fstat(descriptor)
-            if _file_identity(final) != _file_identity(opened) or (
-                _hash_descriptor(descriptor) != command.sha256
+            self.progress()
+            final_path = os.lstat(command.path)
+            if (
+                _file_identity(final) != _file_identity(opened)
+                or _file_identity(final_path) != _file_identity(opened)
+                or _hash_descriptor(descriptor) != command.sha256
             ):
                 raise GuardError("command_identity_changed")
-            if (
-                len(completed.stdout) > self.max_stdout_bytes
-                or len(completed.stderr) > self.max_stderr_bytes
-            ):
-                raise GuardError("command_output_invalid")
             try:
-                stdout = completed.stdout.decode("utf-8")
-                stderr = completed.stderr.decode("utf-8")
+                stdout = stdout_payload.decode("utf-8")
+                stderr = stderr_payload.decode("utf-8")
             except UnicodeDecodeError:
                 raise GuardError("command_output_invalid") from None
-            return CommandResult(completed.returncode, stdout, stderr)
+            return CommandResult(returncode, stdout, stderr)
         except GuardError:
             raise
-        except subprocess.TimeoutExpired as exc:
-            raise GuardError("command_timeout") from exc
         except OSError as exc:
             raise GuardError("command_identity_invalid") from exc
         finally:

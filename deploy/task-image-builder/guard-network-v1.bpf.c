@@ -269,8 +269,6 @@ int guard_connect4(struct bpf_sock_addr *ctx)
         return 0;
     if (!permit_v4(subject, ctx->user_ip4, ctx->user_port, ctx->protocol))
         return 0;
-    if (ctx->protocol == IPPROTO_TCP)
-        return account_dns(subject, ctx->user_port);
     return 1;
 }
 
@@ -282,8 +280,6 @@ int guard_connect6(struct bpf_sock_addr *ctx)
         return 0;
     if (!permit_v6(subject, ctx->user_ip6, ctx->user_port, ctx->protocol))
         return 0;
-    if (ctx->protocol == IPPROTO_TCP)
-        return account_dns(subject, ctx->user_port);
     return 1;
 }
 
@@ -295,7 +291,7 @@ int guard_sendmsg4(struct bpf_sock_addr *ctx)
         return 0;
     if (!permit_v4(subject, ctx->user_ip4, ctx->user_port, ctx->protocol))
         return 0;
-    return account_dns(subject, ctx->user_port);
+    return 1;
 }
 
 SEC("cgroup/sendmsg6")
@@ -306,7 +302,7 @@ int guard_sendmsg6(struct bpf_sock_addr *ctx)
         return 0;
     if (!permit_v6(subject, ctx->user_ip6, ctx->user_port, ctx->protocol))
         return 0;
-    return account_dns(subject, ctx->user_port);
+    return 1;
 }
 
 SEC("cgroup/sock_create")
@@ -408,6 +404,8 @@ static __always_inline int packet_v4(struct __sk_buff *ctx, void *data,
     address = ingress ? ip->saddr : ip->daddr;
     if (!permit_v4(subject, address, port, ip->protocol))
         return 0;
+    if (!ingress && !account_dns(subject, port))
+        return 0;
     return account_packet(subject, ctx->len, ingress);
 }
 
@@ -437,6 +435,8 @@ static __always_inline int packet_v6(struct __sk_buff *ctx, void *data,
     }
     address = ingress ? ip->saddr.in6_u.u6_addr32 : ip->daddr.in6_u.u6_addr32;
     if (!permit_v6(subject, address, port, ip->nexthdr))
+        return 0;
+    if (!ingress && !account_dns(subject, port))
         return 0;
     return account_packet(subject, ctx->len, ingress);
 }

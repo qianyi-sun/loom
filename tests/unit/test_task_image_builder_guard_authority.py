@@ -4,8 +4,10 @@ import ipaddress
 import json
 import os
 import ssl
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +20,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from loom_task_image_builder_guard import authority as authority_module
 from loom_task_image_builder_guard.authority import AuthorityClient
 from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.models import AuthorityConfig
@@ -203,6 +206,7 @@ class _Server(ThreadingHTTPServer):
         self.socket = context.wrap_socket(self.socket, server_side=True)
         self.responses: dict[str, tuple[int, bytes, dict[str, str]]] = {}
         self.requests: list[tuple[str, dict[str, str], bytes, str | None]] = []
+        self.drip_paths: set[str] = set()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -219,11 +223,25 @@ class _Handler(BaseHTTPRequestHandler):
                 self.connection.version(),  # type: ignore[union-attr]
             )
         )
+        if self.path in self.server.drip_paths:  # type: ignore[attr-defined]
+            try:
+                self.connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 2\r\nX-Drip: "
+                )
+                for character in b"0123456789abcdef":
+                    self.connection.sendall(bytes((character,)))
+                    time.sleep(0.1)
+                self.connection.sendall(b"\r\n\r\n{}")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
         status, payload, headers = self.server.responses[self.path]  # type: ignore[attr-defined]
         self.send_response(status)
         for key, value in headers.items():
             self.send_header(key, value)
-        if "transfer-encoding" not in {key.lower() for key in headers}:
+        response_header_names = {key.lower() for key in headers}
+        if not {"transfer-encoding", "content-length"} & response_header_names:
             self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         if headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -267,6 +285,7 @@ def _authority(tmp_path: Path) -> Iterator[tuple[_Server, AuthorityConfig]]:
     thread.start()
     config = AuthorityConfig(
         base_url=f"https://localhost:{server.server_port}",
+        connect_ip="127.0.0.1",
         ca_path=ca_path,
         cert_path=client_path,
         key_path=client_key_path,
@@ -400,6 +419,14 @@ def test_real_tls13_client_uses_exact_routes_bearer_and_contract_bindings(
         ((200, b"{}", {"Transfer-Encoding": "chunked", "Content-Type": "application/json"}), "authority_response_invalid"),
         ((200, b'{"schema_version":1,"schema_version":1}', {"Content-Type": "application/json"}), "authority_response_invalid"),
         ((200, b"x" * 4097, {"Content-Type": "application/json"}), "authority_response_too_large"),
+        (
+            (
+                200,
+                b"{}",
+                {"Content-Type": "application/json", "Content-Length": "9" * 5000},
+            ),
+            "authority_response_invalid",
+        ),
     ],
 )
 def test_rejects_redirect_chunking_duplicate_json_and_oversized_response(
@@ -427,6 +454,76 @@ def test_rejects_redirect_chunking_duplicate_json_and_oversized_response(
 
         assert caught.value.code == expected_code
         assert "example.invalid" not in repr(caught.value)
+
+
+def test_authority_request_has_one_total_deadline_across_drip_fed_headers(
+    tmp_path: Path,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        path = f"/v1/projections/{GRANT}/challenge"
+        server.drip_paths.add(path)
+        client = AuthorityClient(
+            replace(config, timeout_seconds=1),
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=5),
+        )
+
+        started = time.monotonic()
+        with pytest.raises(GuardError) as caught:
+            client.challenge(
+                GRANT,
+                _request(),
+                containment_policy_sha256=DIGEST_C,
+                resource_profile_sha256=DIGEST_D,
+            )
+        elapsed = time.monotonic() - started
+
+        assert caught.value.code == "authority_deadline_exceeded"
+        assert elapsed < 1.5
+
+
+def test_authority_connects_to_pinned_numeric_address_without_name_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config,
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=5),
+        )
+        request = _request()
+        path = f"/v1/projections/{GRANT}/challenge"
+        server.responses[path] = _json_response(
+            {
+                "schema_version": 1,
+                "request_id": str(REQUEST),
+                "grant_id": str(GRANT),
+                "request_sha256": client.request_sha256(request),
+                "challenge_nonce": str(CHALLENGE),
+                "containment_policy_sha256": DIGEST_C,
+                "resource_profile_sha256": DIGEST_D,
+                "issued_at": _timestamp(NOW + timedelta(seconds=1)),
+                "expires_at": _timestamp(NOW + timedelta(seconds=50)),
+            }
+        )
+
+        def forbid_resolution(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise AssertionError("numeric authority connection performed DNS resolution")
+
+        monkeypatch.setattr(authority_module.socket, "getaddrinfo", forbid_resolution)
+
+        challenge = client.challenge(
+            GRANT,
+            request,
+            containment_policy_sha256=DIGEST_C,
+            resource_profile_sha256=DIGEST_D,
+        )
+
+        assert challenge.grant_id == GRANT
 
 
 def test_rejects_stale_or_mismatched_response_without_reflecting_tokens(
@@ -473,3 +570,37 @@ def test_credential_files_must_be_stable_owned_and_canonical(tmp_path: Path) -> 
             )
 
         assert caught.value.code == "authority_credentials_invalid"
+
+
+def test_certificate_memfd_is_closed_when_private_key_memfd_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _authority(tmp_path) as (_server, config):
+        certificate_fd = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+        calls = 0
+
+        def fail_second_memfd(name: str, payload: bytes, *, maximum: int) -> int:
+            nonlocal calls
+            del name, payload, maximum
+            calls += 1
+            if calls == 1:
+                return certificate_fd
+            raise GuardError("memfd_write_failed")
+
+        monkeypatch.setattr(
+            authority_module,
+            "create_sealed_memfd",
+            fail_second_memfd,
+        )
+
+        with pytest.raises(GuardError) as caught:
+            AuthorityClient(
+                config,
+                trusted_uid=os.geteuid(),
+                trusted_gid=os.getegid(),
+            )
+
+        assert caught.value.code == "authority_credentials_invalid"
+        with pytest.raises(OSError):
+            os.fstat(certificate_fd)

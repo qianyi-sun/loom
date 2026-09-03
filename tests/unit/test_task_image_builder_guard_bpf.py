@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -14,6 +15,8 @@ import pytest
 from loom_task_image_builder_guard.bpf import (
     ATTACHMENTS,
     BPF_LINK_CREATE,
+    BPF_MAP_GET_NEXT_KEY,
+    BPF_MAP_LOOKUP_ELEM,
     BPF_MAP_UPDATE_ELEM,
     BPF_OBJ_GET,
     BPF_OBJ_GET_INFO_BY_FD,
@@ -141,6 +144,45 @@ def test_raw_bpf_syscall_uses_arch_number_zeroed_attrs_and_exact_binary_fields(
     link_attr = raw.calls[3][2]
     assert struct.unpack_from("<IIII", link_attr) == (opened, 17, 10, 0)
     assert not any(link_attr[16:])
+
+
+class _MapReadRaw:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, bytes]] = []
+        self.entry = (b"key1", b"value")
+
+    def __call__(self, number: int, command: int, address: int, size: int) -> int:
+        assert number == 321
+        payload = ctypes.string_at(address, size)
+        self.calls.append((command, payload))
+        descriptor, key_address, output_address = struct.unpack_from(
+            "<I4xQQ", payload
+        )
+        assert descriptor == 17
+        if command == BPF_MAP_GET_NEXT_KEY:
+            if key_address != 0:
+                assert ctypes.string_at(key_address, 4) == self.entry[0]
+                raise OSError(errno.ENOENT, "end")
+            ctypes.memmove(output_address, self.entry[0], 4)
+            return 0
+        assert command == BPF_MAP_LOOKUP_ELEM
+        assert ctypes.string_at(key_address, 4) == self.entry[0]
+        ctypes.memmove(output_address, self.entry[1], 5)
+        return 0
+
+
+def test_raw_bpf_map_readback_enumerates_exact_bounded_entries() -> None:
+    raw = _MapReadRaw()
+    kernel = BpfSyscall(machine="x86_64", syscall=raw)
+
+    entries = kernel.map_items(17, key_size=4, value_size=5, max_entries=2)
+
+    assert entries == ((b"key1", b"value"),)
+    assert [command for command, _payload in raw.calls] == [
+        BPF_MAP_GET_NEXT_KEY,
+        BPF_MAP_LOOKUP_ELEM,
+        BPF_MAP_GET_NEXT_KEY,
+    ]
 
 
 def _limits(value: int) -> TrafficLimits:
@@ -496,6 +538,40 @@ def test_loader_rejects_policy_or_object_identity_before_running_bpftool(tmp_pat
         loader.attach(_tree(), _policy("f" * 64), GRANT)
 
     assert caught.value.code == "bpf_object_identity_invalid"
+    assert runner.calls == []
+    assert kernel.events == []
+
+
+def test_loader_rejects_object_path_replacement_after_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"reviewed-bpf-object"
+    kernel = _Kernel()
+    runner = _Runner()
+    loader = _loader(tmp_path, kernel, runner, object_payload=payload)
+    replacement = tmp_path / "replacement.bpf.o"
+    replacement.write_bytes(b"substituted-bpf-object")
+    replacement.chmod(0o444)
+    original_fstat = os.fstat
+    object_fstats = 0
+
+    def replace_after_final_fstat(descriptor: int) -> os.stat_result:
+        nonlocal object_fstats
+        metadata = original_fstat(descriptor)
+        if Path(os.readlink(f"/proc/self/fd/{descriptor}")) == loader.bpf_object_path:
+            object_fstats += 1
+            if object_fstats == 2:
+                os.replace(replacement, loader.bpf_object_path)
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", replace_after_final_fstat)
+
+    with pytest.raises(GuardError) as caught:
+        loader.attach(_tree(), _policy(hashlib.sha256(payload).hexdigest()), GRANT)
+
+    assert caught.value.code == "bpf_object_identity_invalid"
+    assert object_fstats == 2
     assert runner.calls == []
     assert kernel.events == []
 

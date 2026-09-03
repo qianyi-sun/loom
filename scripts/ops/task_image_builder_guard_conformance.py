@@ -1,21 +1,42 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Verify a staged node-guard release while preserving production inertness."""
 
 from __future__ import annotations
 
+# The direct operator entry point establishes trusted checkout imports first.
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import os
+import platform
+import posixpath
 import re
 import stat
+import struct
 import subprocess
+import sys
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
+from uuid import UUID, uuid4
+
+_DIRECT_SCRIPT = Path(__file__).resolve(strict=True)
+_DIRECT_REPOSITORY = _DIRECT_SCRIPT.parents[2]
+if __package__ in {None, ""}:
+    if _DIRECT_SCRIPT != (
+        _DIRECT_REPOSITORY / "scripts/ops/task_image_builder_guard_conformance.py"
+    ):
+        raise RuntimeError("conformance script path is invalid")
+    _DIRECT_IMPORT_ROOTS = (_DIRECT_REPOSITORY, _DIRECT_REPOSITORY / "src")
+    if any(not path.is_dir() for path in _DIRECT_IMPORT_ROOTS):
+        raise RuntimeError("conformance import roots are unavailable")
+    sys.path[:0] = [str(path) for path in _DIRECT_IMPORT_ROOTS]
 
 from scripts.ops.task_image_builder_guard_release import (
     Architecture,
@@ -23,12 +44,29 @@ from scripts.ops.task_image_builder_guard_release import (
     VerifiedGuardRelease,
     verify_release_directory,
 )
+from scripts.ops.task_image_builder_guard_release import (
+    validate_unit as validate_release_unit,
+)
+
+from loom_task_image_builder_guard.bpf import (
+    ATTACHMENTS,
+    BpfAttachment,
+    BpfLoader,
+    BpfScopeTarget,
+    BpfSyscall,
+    Endpoint,
+    NetworkPolicy,
+    ScopeNetworkPolicy,
+    TrafficLimits,
+)
+from loom_task_image_builder_guard.errors import GuardError
+from loom_task_image_builder_guard.models import CommandIdentity
+from loom_task_image_builder_guard.slurm import PinnedCommandRunner
 
 ROOT = Path(__file__).resolve().parents[2]
 _SCHEMA = "loom.task-image-builder-guard-conformance/v1"
 _BLOCKER = "phase2_guard_provider_release_missing"
 _RELEASE_PREFIX = Path("opt/loom-task-image-builder-guard/releases")
-_UNIT = Path("deploy/task-image-builder/loom-task-image-builder-node-guard.service")
 _SPEC = Path("deploy/task-image-builder/guard-release-v1.json")
 _PREREQUISITES = Path("deploy/task-image-builder/prerequisites-v1.toml")
 _PROVIDERS = Path("deploy/task-image-builder/rootless-provider-v1.toml")
@@ -41,6 +79,76 @@ _SELF_CHECK = (
     b'"status":"ok"}\n'
 )
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_UNIT_NAME = "loom-task-image-builder-node-guard.service"
+_SYSTEMD_ROOTS = (
+    Path("etc/systemd/system.control"),
+    Path("run/systemd/system.control"),
+    Path("run/systemd/transient"),
+    Path("run/systemd/generator.early"),
+    Path("etc/systemd/system"),
+    Path("etc/systemd/system.attached"),
+    Path("run/systemd/system"),
+    Path("run/systemd/system.attached"),
+    Path("run/systemd/generator"),
+    Path("usr/local/lib/systemd/system"),
+    Path("usr/lib/systemd/system"),
+    Path("run/systemd/generator.late"),
+)
+_MAX_SYSTEMD_ENTRIES = 16 * 1024
+_MAX_PROCESSES = 1 << 20
+_MAX_CMDLINE_BYTES = 64 * 1024
+_GUARD_ARCHIVE_ARGUMENT = re.compile(
+    rb"^/opt/loom-task-image-builder-guard/releases/[0-9a-f]{64}/"
+    rb"loom-task-image-builder-guard\.pyz$"
+)
+_REQUIRED_PROGRAM_TYPES = (
+    "have_cgroup_skb_prog_type",
+    "have_cgroup_sock_prog_type",
+    "have_cgroup_sock_addr_prog_type",
+)
+_REQUIRED_MAP_TYPES = (
+    "have_hash_map_type",
+    "have_array_map_type",
+    "have_percpu_array_map_type",
+)
+_REQUIRED_HELPERS = {
+    "cgroup_skb_available_helpers": frozenset(
+        {
+            "bpf_map_lookup_elem",
+            "bpf_ktime_get_ns",
+            "bpf_spin_lock",
+            "bpf_spin_unlock",
+        }
+    ),
+    "cgroup_sock_addr_available_helpers": frozenset(
+        {
+            "bpf_map_lookup_elem",
+            "bpf_ktime_get_ns",
+            "bpf_spin_lock",
+            "bpf_spin_unlock",
+        }
+    ),
+    "cgroup_sock_available_helpers": frozenset(
+        {
+            "bpf_map_lookup_elem",
+            "bpf_map_update_elem",
+            "bpf_map_delete_elem",
+            "bpf_ktime_get_ns",
+            "bpf_get_socket_cookie",
+            "bpf_spin_lock",
+            "bpf_spin_unlock",
+        }
+    ),
+}
+_BPF_LINK_CREATE = 28
+_PROBE_GRANT = UUID("00000000-0000-4000-8000-000000000001")
+
+
+def _is_guard_archive_argument(argument: bytes) -> bool:
+    if not argument.startswith(b"/"):
+        return False
+    normalized = b"/" + posixpath.normpath(argument).lstrip(b"/")
+    return _GUARD_ARCHIVE_ARGUMENT.fullmatch(normalized) is not None
 
 
 class GuardConformanceError(ValueError):
@@ -90,6 +198,387 @@ def _canonical(value: object) -> bytes:
 
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_bpftool_features(payload: bytes) -> None:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> object:
+        raise ValueError("non-finite number")
+
+    try:
+        raw = json.loads(
+            payload,
+            object_pairs_hook=pairs,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise GuardConformanceError("staged bpftool feature probe is invalid") from exc
+    if not isinstance(raw, dict):
+        raise GuardConformanceError("staged bpftool feature probe is invalid")
+    syscall = raw.get("syscall_config")
+    programs = raw.get("program_types")
+    maps = raw.get("map_types")
+    helpers = raw.get("helpers")
+    if (
+        not isinstance(syscall, dict)
+        or syscall.get("have_bpf_syscall") is not True
+        or not isinstance(programs, dict)
+        or any(programs.get(name) is not True for name in _REQUIRED_PROGRAM_TYPES)
+        or not isinstance(maps, dict)
+        or any(maps.get(name) is not True for name in _REQUIRED_MAP_TYPES)
+        or not isinstance(helpers, dict)
+    ):
+        raise GuardConformanceError("staged bpftool feature probe is insufficient")
+    for name, required in _REQUIRED_HELPERS.items():
+        available = helpers.get(name)
+        if (
+            not isinstance(available, list)
+            or any(not isinstance(item, str) for item in available)
+            or len(available) != len(set(available))
+            or not required.issubset(available)
+        ):
+            raise GuardConformanceError("staged bpftool feature probe is insufficient")
+
+
+def _read_virtual_path(path: Path, *, maximum: int, label: str) -> bytes:
+    descriptor = -1
+    try:
+        initial = path.lstat()
+        if stat.S_ISLNK(initial.st_mode) or not stat.S_ISREG(initial.st_mode):
+            raise GuardConformanceError(f"{label} is unsafe")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (initial.st_dev, initial.st_ino, initial.st_mode) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+        ):
+            raise GuardConformanceError(f"{label} changed while opening")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > maximum:
+            raise GuardConformanceError(f"{label} is too large")
+        final = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_mode) != (
+            final.st_dev,
+            final.st_ino,
+            final.st_mode,
+        ):
+            raise GuardConformanceError(f"{label} changed while reading")
+        return b"".join(chunks)
+    except GuardConformanceError:
+        raise
+    except OSError as exc:
+        raise GuardConformanceError(f"{label} is unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_live_mounts(mountinfo: bytes, controllers_payload: bytes) -> bytes:
+    try:
+        controllers_text = controllers_payload.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise GuardConformanceError("live cgroup or bpffs prerequisite is invalid") from exc
+    controllers = controllers_text.split()
+    if (
+        not controllers
+        or len(controllers) != len(set(controllers))
+        or any(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", item) is None for item in controllers)
+        or not {"cpu", "cpuset", "io", "memory", "pids"}.issubset(controllers)
+    ):
+        raise GuardConformanceError("live cgroup or bpffs prerequisite is unavailable")
+    observed: dict[bytes, bytes] = {}
+    lines = mountinfo.splitlines()
+    if not lines or len(lines) > 1 << 16:
+        raise GuardConformanceError("live cgroup or bpffs prerequisite is invalid")
+    for line in lines:
+        left, separator, right = line.partition(b" - ")
+        left_fields = left.split()
+        right_fields = right.split()
+        if not separator or len(left_fields) < 6 or len(right_fields) < 3:
+            raise GuardConformanceError("live cgroup or bpffs prerequisite is invalid")
+        mountpoint = left_fields[4]
+        if mountpoint in {b"/sys/fs/cgroup", b"/sys/fs/bpf"}:
+            if mountpoint in observed:
+                raise GuardConformanceError("live cgroup or bpffs prerequisite is invalid")
+            observed[mountpoint] = right_fields[0]
+    if observed != {
+        b"/sys/fs/cgroup": b"cgroup2",
+        b"/sys/fs/bpf": b"bpf",
+    }:
+        raise GuardConformanceError("live cgroup or bpffs prerequisite is unavailable")
+    return _canonical(
+        {
+            "controllers": sorted(controllers),
+            "mounts": {
+                "/sys/fs/bpf": "bpf",
+                "/sys/fs/cgroup": "cgroup2",
+            },
+        }
+    )
+
+
+def _validate_bpf_link_probe(error_number: int) -> None:
+    if error_number != errno.EBADF:
+        raise GuardConformanceError("live BPF link command is unavailable")
+
+
+def _probe_bpf_link_create() -> bytes:
+    syscall_number = {"x86_64": 321, "aarch64": 280}.get(platform.machine())
+    if syscall_number is None:
+        raise GuardConformanceError("live BPF link command is unavailable")
+    attributes = ctypes.create_string_buffer(48)
+    struct.pack_into("=IIII", attributes, 0, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    result = int(
+        libc.syscall(
+            ctypes.c_long(syscall_number),
+            ctypes.c_uint(_BPF_LINK_CREATE),
+            ctypes.c_void_p(ctypes.addressof(attributes)),
+            ctypes.c_uint(len(attributes)),
+        )
+    )
+    if result >= 0:
+        os.close(result)
+        raise GuardConformanceError("live BPF link probe unexpectedly succeeded")
+    observed_errno = ctypes.get_errno()
+    _validate_bpf_link_probe(observed_errno)
+    return _canonical(
+        {
+            "bpf_command": _BPF_LINK_CREATE,
+            "errno": observed_errno,
+            "machine": platform.machine(),
+        }
+    )
+
+
+def _validate_pinned_link_probe(attachment: BpfAttachment) -> None:
+    if (
+        len(attachment.link_ids) != len(ATTACHMENTS) * 3
+        or len(attachment.program_ids) != len(ATTACHMENTS) * 3
+        or len(attachment.map_ids) != 6 * 3
+        or any(item <= 0 for item in attachment.link_ids)
+        or any(item <= 0 for item in attachment.program_ids)
+        or any(item <= 0 for item in attachment.map_ids)
+        or len(set(attachment.link_ids)) != len(attachment.link_ids)
+        or len(set(attachment.program_ids)) != len(attachment.program_ids)
+        or len(set(attachment.map_ids)) != len(attachment.map_ids)
+    ):
+        raise GuardConformanceError("live pinned BPF link probe is incomplete")
+
+
+def _remove_probe_tree(path: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GuardConformanceError("live pinned BPF link cleanup failed") from exc
+    visited = 0
+
+    def remove(current: Path) -> None:
+        nonlocal visited
+        try:
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise GuardConformanceError("live pinned BPF link cleanup is ambiguous")
+            entries = tuple(sorted(current.iterdir(), key=lambda item: item.name))
+        except GuardConformanceError:
+            raise
+        except OSError as exc:
+            raise GuardConformanceError("live pinned BPF link cleanup failed") from exc
+        visited += len(entries)
+        if visited > 1024:
+            raise GuardConformanceError("live pinned BPF link cleanup is ambiguous")
+        for entry in entries:
+            try:
+                opened = entry.lstat()
+                if stat.S_ISLNK(opened.st_mode):
+                    raise GuardConformanceError(
+                        "live pinned BPF link cleanup is ambiguous"
+                    )
+                if stat.S_ISDIR(opened.st_mode):
+                    remove(entry)
+                    entry.rmdir()
+                else:
+                    entry.unlink()
+            except GuardConformanceError:
+                raise
+            except OSError as exc:
+                raise GuardConformanceError(
+                    "live pinned BPF link cleanup failed"
+                ) from exc
+
+    remove(path)
+
+
+def _probe_network_policy(release: VerifiedGuardRelease) -> NetworkPolicy:
+    members = {name: payload for name, _mode, payload in release.members}
+    trusted_endpoint = Endpoint("192.0.2.1", 443, "tcp")
+    build_endpoint = Endpoint("198.51.100.1", 443, "tcp")
+    limits = TrafficLimits(1, 1, 1, 1, 1, 1, 1)
+    return NetworkPolicy(
+        containment_policy_sha256=_sha(b"live-bpf-probe-policy-v1"),
+        resource_profile_sha256=_sha(b"live-bpf-probe-resources-v1"),
+        bpf_program_sha256=_sha(members["guard-network-v1.bpf.o"]),
+        bpf_map_schema_sha256=_sha(members["guard-network-map-schema-v1.json"]),
+        scopes=(
+            ScopeNetworkPolicy(
+                "root",
+                (trusted_endpoint, build_endpoint),
+                (),
+                limits,
+            ),
+            ScopeNetworkPolicy("trusted-service", (trusted_endpoint,), (), limits),
+            ScopeNetworkPolicy("build-egress", (build_endpoint,), (), limits),
+        ),
+    )
+
+
+def _probe_pinned_bpf_links(release: VerifiedGuardRelease) -> bytes:
+    suffix = uuid4().hex
+    cgroup_root = Path("/sys/fs/cgroup") / f".loom-guard-conformance-{suffix}"
+    bpffs_root = Path("/sys/fs/bpf") / f".loom-guard-conformance-{suffix}"
+    trusted = cgroup_root / "trusted-service"
+    build = cgroup_root / "build-egress"
+    cgroup_descriptors: list[int] = []
+    created_cgroups: list[Path] = []
+    created_bpffs = False
+    error: BaseException | None = None
+    try:
+        cgroup_root.mkdir(mode=0o700)
+        created_cgroups.append(cgroup_root)
+        trusted.mkdir(mode=0o700)
+        created_cgroups.append(trusted)
+        build.mkdir(mode=0o700)
+        created_cgroups.append(build)
+        bpffs_root.mkdir(mode=0o700)
+        created_bpffs = True
+        targets: list[BpfScopeTarget] = []
+        for name, path in (
+            ("root", cgroup_root),
+            ("trusted-service", trusted),
+            ("build-egress", build),
+        ):
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | os.O_CLOEXEC
+                | os.O_DIRECTORY
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            cgroup_descriptors.append(descriptor)
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise GuardConformanceError("live scratch cgroup identity is invalid")
+            targets.append(
+                BpfScopeTarget(
+                    cast(Literal["root", "trusted-service", "build-egress"], name),
+                    descriptor,
+                    metadata.st_ino,
+                )
+            )
+
+        class ProbeTree:
+            def bpf_scope_targets(self) -> tuple[BpfScopeTarget, ...]:
+                return tuple(targets)
+
+        members = {name: payload for name, _mode, payload in release.members}
+        bpftool = release.directory / "bpftool"
+        policy = _probe_network_policy(release)
+        loader = BpfLoader(
+            kernel=BpfSyscall(),
+            runner=PinnedCommandRunner(trusted_uid=0, timeout_seconds=30),
+            bpftool=CommandIdentity(bpftool, _sha(members["bpftool"])),
+            bpf_object_path=release.directory / "guard-network-v1.bpf.o",
+            bpffs_root=bpffs_root,
+            containment_policy_sha256=policy.containment_policy_sha256,
+            resource_profile_sha256=policy.resource_profile_sha256,
+            bpf_map_schema_sha256=policy.bpf_map_schema_sha256,
+            trusted_uid=0,
+            staging_suffix=lambda: "probe",
+        )
+        attachment = loader.attach(ProbeTree(), policy, _PROBE_GRANT)
+        _validate_pinned_link_probe(attachment)
+        return _canonical(
+            {
+                "attach_types": [item[1] for item in ATTACHMENTS],
+                "links": len(attachment.link_ids),
+                "maps": len(attachment.map_ids),
+                "programs": len(attachment.program_ids),
+                "scopes": ["root", "trusted-service", "build-egress"],
+            }
+        )
+    except (GuardError, OSError) as exc:
+        error = exc
+        raise GuardConformanceError("live pinned BPF link probe failed") from exc
+    except GuardConformanceError as exc:
+        error = exc
+        raise
+    finally:
+        cleanup_errors: list[BaseException] = []
+        if created_bpffs:
+            try:
+                _remove_probe_tree(bpffs_root)
+            except (GuardConformanceError, OSError) as cleanup_exc:
+                cleanup_errors.append(cleanup_exc)
+        for descriptor in reversed(cgroup_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as cleanup_exc:
+                cleanup_errors.append(cleanup_exc)
+        for path in reversed(created_cgroups):
+            try:
+                processes = path / "cgroup.procs"
+                if processes.exists() and _read_virtual_path(
+                    processes,
+                    maximum=64 * 1024,
+                    label="live scratch cgroup process inventory",
+                ).strip():
+                    raise GuardConformanceError("live scratch cgroup is not empty")
+                path.rmdir()
+            except (GuardConformanceError, OSError) as cleanup_exc:
+                cleanup_errors.append(cleanup_exc)
+        if created_bpffs:
+            try:
+                bpffs_root.rmdir()
+            except OSError as cleanup_exc:
+                cleanup_errors.append(cleanup_exc)
+        if cleanup_errors:
+            if error is not None:
+                raise GuardConformanceError(
+                    "live pinned BPF link probe and cleanup failed"
+                ) from BaseExceptionGroup(
+                    "live pinned BPF link probe and cleanup failures",
+                    [error, *cleanup_errors],
+                )
+            raise GuardConformanceError(
+                "live pinned BPF link cleanup failed"
+            ) from BaseExceptionGroup(
+                "live pinned BPF link cleanup failures",
+                cleanup_errors,
+            )
 
 
 def _read_regular_path(path: Path, *, maximum: int, label: str) -> bytes:
@@ -173,135 +662,13 @@ def _read_source(root: Path, relative: Path, *, maximum: int = 1024 * 1024) -> b
     )
 
 
-def _unit_values(payload: bytes) -> dict[str, dict[str, tuple[str, ...]]]:
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        raise GuardConformanceError("systemd unit encoding is invalid") from None
-    sections: dict[str, dict[str, list[str]]] = {}
-    section: str | None = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            section = line[1:-1]
-            if section in sections:
-                raise GuardConformanceError("systemd unit section is duplicate")
-            sections[section] = {}
-            continue
-        if section is None or "=" not in line:
-            raise GuardConformanceError("systemd unit syntax is invalid")
-        key, value = line.split("=", 1)
-        if not key or "\x00" in value:
-            raise GuardConformanceError("systemd unit directive is invalid")
-        sections[section].setdefault(key, []).append(value)
-    return {
-        name: {key: tuple(values) for key, values in directives.items()}
-        for name, directives in sections.items()
-    }
-
-
 def validate_unit(payload: bytes) -> str:
     """Reject any unit template that could activate or broaden the guard."""
 
-    values = _unit_values(payload)
-    if set(values) != {"Unit", "Service"}:
-        raise GuardConformanceError("systemd unit activation surface is invalid")
-    unit = values["Unit"]
-    service = values["Service"]
-    required_unit = {
-        "After": ("network-online.target",),
-        "ConditionPathExists": (
-            "/etc/loom/task-image-builder-guard/activation-v1.json",
-        ),
-        "StartLimitBurst": ("3",),
-        "StartLimitIntervalSec": ("300s",),
-        "Wants": ("network-online.target",),
-    }
-    required_service = {
-        "AmbientCapabilities": (
-            "CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_NET_ADMIN CAP_SYS_ADMIN",
-        ),
-        "CapabilityBoundingSet": (
-            "CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_NET_ADMIN CAP_SYS_ADMIN",
-        ),
-        "ExecStart": (
-            "/usr/bin/python3 -I -B /opt/loom-task-image-builder-guard/releases/"
-            "@LOOM_GUARD_RELEASE_SHA256@/loom-task-image-builder-guard.pyz --config "
-            "/etc/loom/task-image-builder-guard/config-v1.json",
-        ),
-        "Group": ("root",),
-        "KillMode": ("control-group",),
-        "LimitNOFILE": ("4096",),
-        "LockPersonality": ("yes",),
-        "MemoryDenyWriteExecute": ("yes",),
-        "MemoryMax": ("512M",),
-        "NoNewPrivileges": ("yes",),
-        "NotifyAccess": ("main",),
-        "OOMPolicy": ("stop",),
-        "PrivateDevices": ("yes",),
-        "PrivateTmp": ("yes",),
-        "ProcSubset": ("all",),
-        "ProtectClock": ("yes",),
-        "ProtectControlGroups": ("no",),
-        "ProtectHome": ("yes",),
-        "ProtectHostname": ("yes",),
-        "ProtectKernelLogs": ("yes",),
-        "ProtectKernelModules": ("yes",),
-        "ProtectKernelTunables": ("yes",),
-        "ProtectProc": ("default",),
-        "ProtectSystem": ("strict",),
-        "ReadOnlyPaths": (
-            "/etc/loom/task-image-builder-guard /opt/loom-task-image-builder-guard/"
-            "releases/@LOOM_GUARD_RELEASE_SHA256@",
-        ),
-        "ReadWritePaths": (
-            "/sys/fs/cgroup /sys/fs/bpf/loom-task-image-builder "
-            "/run/loom-task-image-builder-guard /var/lib/loom-task-image-builder-guard",
-        ),
-        "RemoveIPC": ("yes",),
-        "Restart": ("on-failure",),
-        "RestartSec": ("5s",),
-        "RestrictAddressFamilies": ("AF_UNIX AF_INET AF_INET6",),
-        "RestrictNamespaces": ("yes",),
-        "RestrictRealtime": ("yes",),
-        "RestrictSUIDSGID": ("yes",),
-        "RuntimeDirectory": ("loom-task-image-builder-guard",),
-        "RuntimeDirectoryMode": ("0750",),
-        "StateDirectory": ("loom-task-image-builder-guard",),
-        "StateDirectoryMode": ("0700",),
-        "SystemCallArchitectures": ("native",),
-        "SystemCallErrorNumber": ("EPERM",),
-        "SystemCallFilter": ("@system-service bpf memfd_create pidfd_open",),
-        "TasksMax": ("256",),
-        "TimeoutStartSec": ("60s",),
-        "TimeoutStopSec": ("30s",),
-        "Type": ("notify",),
-        "UMask": ("0077",),
-        "User": ("root",),
-        "WatchdogSec": ("30s",),
-        "WorkingDirectory": ("/",),
-    }
-    if any(unit.get(key) != expected for key, expected in required_unit.items()) or any(
-        service.get(key) != expected for key, expected in required_service.items()
-    ):
-        raise GuardConformanceError("systemd unit hardening is invalid")
-    environment = service.get("Environment")
-    unset = service.get("UnsetEnvironment")
-    if environment != ("LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin") or unset != (
-        "ALL_PROXY CURL_CA_BUNDLE HTTP_PROXY HTTPS_PROXY LD_LIBRARY_PATH LD_PRELOAD "
-        "NO_PROXY PYTHONHOME PYTHONINSPECT PYTHONPATH PYTHONSTARTUP REQUESTS_CA_BUNDLE "
-        "SSL_CERT_DIR SSL_CERT_FILE all_proxy http_proxy https_proxy no_proxy",
-    ):
-        raise GuardConformanceError("systemd unit environment boundary is invalid")
-    if set(unit) != {*required_unit, "Description"} or set(service) != {
-        *required_service,
-        "Environment",
-        "UnsetEnvironment",
-    }:
-        raise GuardConformanceError("systemd unit directive surface is invalid")
-    return _sha(payload)
+    try:
+        return validate_release_unit(payload)
+    except GuardReleaseError as exc:
+        raise GuardConformanceError(str(exc)) from exc
 
 
 def _exists(path: Path) -> bool:
@@ -312,6 +679,100 @@ def _exists(path: Path) -> bool:
         return False
     except OSError as exc:
         raise GuardConformanceError("inert path could not be inspected") from exc
+
+
+def _verify_systemd_inert(root: Path) -> None:
+    inspected = 0
+
+    def walk_error(error: OSError) -> None:
+        raise GuardConformanceError("systemd unit inventory is ambiguous") from error
+
+    for relative in _SYSTEMD_ROOTS:
+        directory = root / relative
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise GuardConformanceError("systemd unit inventory is ambiguous") from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise GuardConformanceError("systemd unit inventory is ambiguous")
+        for current, directories, files in os.walk(
+            directory,
+            topdown=True,
+            onerror=walk_error,
+            followlinks=False,
+        ):
+            entries = tuple(sorted((*directories, *files)))
+            inspected += len(entries)
+            if inspected > _MAX_SYSTEMD_ENTRIES:
+                raise GuardConformanceError("systemd unit inventory is ambiguous")
+            for name in entries:
+                path = Path(current) / name
+                if name == _UNIT_NAME:
+                    raise GuardConformanceError("guard is not inert")
+                if path.is_symlink():
+                    try:
+                        target = os.readlink(path)
+                    except OSError as exc:
+                        raise GuardConformanceError(
+                            "systemd unit inventory is ambiguous"
+                        ) from exc
+                    if name in directories:
+                        raise GuardConformanceError("systemd unit inventory is ambiguous")
+                    if Path(target).name == _UNIT_NAME:
+                        raise GuardConformanceError("guard is not inert")
+
+
+def _verify_processes_inert(root: Path) -> None:
+    proc = root / "proc"
+    try:
+        metadata = proc.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise GuardConformanceError("process inventory is ambiguous") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise GuardConformanceError("process inventory is ambiguous")
+    inspected = 0
+    try:
+        candidates = sorted(proc.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise GuardConformanceError("process inventory is ambiguous") from exc
+    for process in candidates:
+        if not process.name.isascii() or not process.name.isdigit():
+            continue
+        inspected += 1
+        if inspected > _MAX_PROCESSES:
+            raise GuardConformanceError("process inventory is ambiguous")
+        cmdline = process / "cmdline"
+        descriptor = -1
+        try:
+            opened = cmdline.lstat()
+            if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
+                raise GuardConformanceError("process inventory is ambiguous")
+            descriptor = os.open(
+                cmdline,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+            payload = os.read(descriptor, _MAX_CMDLINE_BYTES + 1)
+            if len(payload) > _MAX_CMDLINE_BYTES:
+                raise GuardConformanceError("process inventory is ambiguous")
+        except FileNotFoundError:
+            continue
+        except GuardConformanceError:
+            raise
+        except OSError as exc:
+            raise GuardConformanceError("process inventory is ambiguous") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        arguments = tuple(item for item in payload.split(b"\0") if item)
+        if any(_is_guard_archive_argument(item) for item in arguments):
+            raise GuardConformanceError("guard is not inert")
 
 
 def _verify_inert_paths(root: Path) -> str:
@@ -325,6 +786,8 @@ def _verify_inert_paths(root: Path) -> str:
     )
     if any(_exists(root / relative) for relative in forbidden):
         raise GuardConformanceError("guard is not inert")
+    _verify_systemd_inert(root)
+    _verify_processes_inert(root)
     releases = root / _RELEASE_PREFIX
     if releases.is_dir():
         entries = list(releases.iterdir())
@@ -333,7 +796,16 @@ def _verify_inert_paths(root: Path) -> str:
             for path in entries
         ):
             raise GuardConformanceError("guard release staging is not inert")
-    return _sha(_canonical([path.as_posix() for path in forbidden]))
+    return _sha(
+        _canonical(
+            [
+                *[path.as_posix() for path in forbidden],
+                *[path.as_posix() for path in _SYSTEMD_ROOTS],
+                "proc/<pid>/cmdline",
+                _UNIT_NAME,
+            ]
+        )
+    )
 
 
 def _verify_provider(source_root: Path) -> tuple[str, str]:
@@ -478,8 +950,22 @@ def _live_kernel_checks(release: VerifiedGuardRelease) -> tuple[ConformanceCheck
         raise GuardConformanceError("live conformance requires root authority")
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     bpffs = Path("/sys/fs/bpf")
-    if not controllers.is_file() or not bpffs.is_dir():
+    cgroup = Path("/sys/fs/cgroup")
+    if not controllers.is_file() or not bpffs.is_dir() or not cgroup.is_dir():
         raise GuardConformanceError("live cgroup or bpffs prerequisite is unavailable")
+    mount_evidence = _validate_live_mounts(
+        _read_virtual_path(
+            Path("/proc/self/mountinfo"),
+            maximum=2 * 1024 * 1024,
+            label="live mount inventory",
+        ),
+        _read_virtual_path(
+            controllers,
+            maximum=64 * 1024,
+            label="live cgroup controllers",
+        ),
+    )
+    link_evidence = _probe_bpf_link_create()
     descriptors: list[int] = []
     try:
         descriptors.append(os.pidfd_open(os.getpid(), 0))
@@ -498,7 +984,7 @@ def _live_kernel_checks(release: VerifiedGuardRelease) -> tuple[ConformanceCheck
     bpftool = release.directory / "bpftool"
     try:
         completed = subprocess.run(
-            (str(bpftool), "feature", "probe", "kernel"),
+            (str(bpftool), "-j", "feature", "probe", "kernel"),
             cwd="/",
             env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
             stdin=subprocess.DEVNULL,
@@ -512,10 +998,20 @@ def _live_kernel_checks(release: VerifiedGuardRelease) -> tuple[ConformanceCheck
         completed.returncode != 0
         or not completed.stdout
         or len(completed.stdout) > 1024 * 1024
-        or len(completed.stderr) > 64 * 1024
+        or completed.stderr
     ):
         raise GuardConformanceError("staged bpftool feature probe failed")
-    primitive_evidence = controllers.read_bytes() + b"\0" + str(bpffs.stat().st_dev).encode("ascii")
+    _validate_bpftool_features(completed.stdout)
+    pinned_link_evidence = _probe_pinned_bpf_links(release)
+    primitive_evidence = (
+        mount_evidence
+        + b"\0"
+        + link_evidence
+        + b"\0"
+        + pinned_link_evidence
+        + b"\0"
+        + str(bpffs.stat().st_dev).encode("ascii")
+    )
     return (
         ConformanceCheck("live_kernel_primitives", "pass", _sha(primitive_evidence)),
         ConformanceCheck("staged_bpftool_features", "pass", _sha(completed.stdout)),
@@ -540,7 +1036,8 @@ def conform(
     spec_payload = _read_source(source_root, _SPEC)
     if release.manifest.get("release_spec_sha256") != _sha(spec_payload):
         raise GuardConformanceError("guard release differs from reviewed specification")
-    unit_payload = _read_source(source_root, _UNIT)
+    member_map = {name: payload for name, _mode, payload in release.members}
+    unit_payload = member_map["loom-task-image-builder-node-guard.service"]
     provider_digest, phase1_digest = _verify_provider(source_root)
     checks = [
         ConformanceCheck("authority_inert", "pass", _verify_authority(source_root)),

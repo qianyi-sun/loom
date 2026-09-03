@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
 import ssl
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -24,6 +29,7 @@ _MAX_CREDENTIAL_BYTES = 64 * 1024
 _MAX_BEARER_BYTES = 4096
 _MAX_REQUEST_BYTES = 64 * 1024
 _MAX_FIELDS = 32
+_MAX_CONTENT_LENGTH_DIGITS = 20
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _TOKEN = {
@@ -78,11 +84,24 @@ def _canonical(value: object) -> bytes:
 def _document(payload: bytes) -> dict[str, object]:
     try:
         value = json.loads(payload, object_pairs_hook=_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
         raise GuardError("authority_response_invalid") from None
     if not isinstance(value, dict):
         raise GuardError("authority_response_invalid")
     return cast(dict[str, object], value)
+
+
+def _content_length(value: str, *, maximum: int | None) -> int:
+    if (
+        not value
+        or len(value) > _MAX_CONTENT_LENGTH_DIGITS
+        or any(character < "0" or character > "9" for character in value)
+    ):
+        raise GuardError("authority_response_invalid")
+    declared = int(value)
+    if maximum is not None and declared > maximum:
+        raise GuardError("authority_response_too_large")
+    return declared
 
 
 def _exact(value: object, keys: frozenset[str], *, code: str) -> dict[str, object]:
@@ -220,6 +239,83 @@ class AcceptedAttestation:
     sha256: str
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to one configured IP while retaining the URL host for TLS."""
+
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        connect_ip: str,
+        context: ssl.SSLContext,
+        deadline: float,
+        monotonic: Callable[[], float],
+        expired: threading.Event,
+    ) -> None:
+        super().__init__(hostname, port, timeout=None, context=context)
+        self._connect_ip = connect_ip
+        self._deadline = deadline
+        self._monotonic = monotonic
+        self._expired = expired
+        self._tls_context = context
+
+    def _remaining(self) -> float:
+        remaining = self._deadline - self._monotonic()
+        if self._expired.is_set() or remaining <= 0:
+            raise TimeoutError("authority deadline exceeded")
+        return remaining
+
+    def connect(self) -> None:
+        raw: socket.socket | None = None
+        try:
+            address = ipaddress.ip_address(self._connect_ip)
+            family = socket.AF_INET if address.version == 4 else socket.AF_INET6
+            raw = socket.socket(
+                family,
+                socket.SOCK_STREAM | getattr(socket, "SOCK_CLOEXEC", 0),
+            )
+            raw.settimeout(self._remaining())
+            destination: tuple[object, ...] = (
+                (self._connect_ip, self.port)
+                if family == socket.AF_INET
+                else (self._connect_ip, self.port, 0, 0)
+            )
+            raw.connect(destination)
+            self.sock = raw
+            try:
+                raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError as exc:
+                if exc.errno != errno.ENOPROTOOPT:
+                    raise
+            raw.settimeout(self._remaining())
+            wrapped = self._tls_context.wrap_socket(raw, server_hostname=self.host)
+            self.sock = wrapped
+            raw = None
+            wrapped.settimeout(self._remaining())
+        except Exception:
+            self.abort()
+            if raw is not None:
+                raw.close()
+            raise
+
+    def assert_before_deadline(self) -> None:
+        remaining = self._remaining()
+        if self.sock is not None:
+            self.sock.settimeout(remaining)
+
+    def abort(self) -> None:
+        active = self.sock
+        self.sock = None
+        if active is None:
+            return
+        try:
+            active.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        active.close()
+
+
 class AuthorityClient:
     """TLS-1.3-only node client whose routes cannot be request-selected."""
 
@@ -230,9 +326,13 @@ class AuthorityClient:
         trusted_uid: int = 0,
         trusted_gid: int = 0,
         now_factory: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        progress: Callable[[], None] = lambda: None,
     ) -> None:
         self._config = config
         self._now = now_factory or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic
+        self._progress = progress
         parsed = urlsplit(config.base_url)
         try:
             port = parsed.port or 443
@@ -295,16 +395,20 @@ class AuthorityClient:
             certificate_fd = create_sealed_memfd(
                 "guard-client-certificate", certificate, maximum=_MAX_CREDENTIAL_BYTES
             )
-            key_fd = create_sealed_memfd(
-                "guard-client-private-key", private_key, maximum=_MAX_CREDENTIAL_BYTES
-            )
             try:
-                context.load_cert_chain(
-                    f"/proc/self/fd/{certificate_fd}",
-                    f"/proc/self/fd/{key_fd}",
+                key_fd = create_sealed_memfd(
+                    "guard-client-private-key",
+                    private_key,
+                    maximum=_MAX_CREDENTIAL_BYTES,
                 )
+                try:
+                    context.load_cert_chain(
+                        f"/proc/self/fd/{certificate_fd}",
+                        f"/proc/self/fd/{key_fd}",
+                    )
+                finally:
+                    os.close(key_fd)
             finally:
-                os.close(key_fd)
                 os.close(certificate_fd)
         except Exception:
             raise GuardError("authority_credentials_invalid") from None
@@ -317,13 +421,26 @@ class AuthorityClient:
 
     def _request(self, route: str, body: object, *, expected_status: int) -> bytes:
         payload = _canonical(body)
-        connection = http.client.HTTPSConnection(
+        deadline = self._monotonic() + self._config.timeout_seconds
+        expired = threading.Event()
+        connection = _PinnedHTTPSConnection(
             self._hostname,
             self._port,
-            timeout=self._config.timeout_seconds,
+            connect_ip=self._config.connect_ip,
             context=self._context,
+            deadline=deadline,
+            monotonic=self._monotonic,
+            expired=expired,
         )
+        def expire() -> None:
+            expired.set()
+            connection.abort()
+
+        timer = threading.Timer(self._config.timeout_seconds, expire)
+        timer.daemon = True
+        timer.start()
         try:
+            self._progress()
             connection.request(
                 "PUT",
                 route,
@@ -335,7 +452,11 @@ class AuthorityClient:
                     "Content-Type": "application/json",
                 },
             )
+            self._progress()
+            connection.assert_before_deadline()
             response = connection.getresponse()
+            self._progress()
+            connection.assert_before_deadline()
             if response.status != expected_status:
                 raise GuardError("authority_http_failed")
             transfer = response.headers.get_all("Transfer-Encoding", failobj=[])
@@ -343,20 +464,22 @@ class AuthorityClient:
             if transfer or len(lengths) > 1:
                 raise GuardError("authority_response_invalid")
             if expected_status == 204:
-                if lengths and (not lengths[0].isdigit() or int(lengths[0]) != 0):
+                if lengths and _content_length(lengths[0], maximum=None) != 0:
                     raise GuardError("authority_response_invalid")
                 if response.read(1):
                     raise GuardError("authority_response_invalid")
+                self._progress()
+                connection.assert_before_deadline()
                 return b""
             content_types = response.headers.get_all("Content-Type", failobj=[])
             if content_types != ["application/json"] or len(lengths) != 1:
                 raise GuardError("authority_response_invalid")
-            if not lengths[0].isdigit():
-                raise GuardError("authority_response_invalid")
-            declared = int(lengths[0])
-            if declared > self._config.max_response_bytes:
-                raise GuardError("authority_response_too_large")
+            declared = _content_length(
+                lengths[0], maximum=self._config.max_response_bytes
+            )
             result = response.read(self._config.max_response_bytes + 1)
+            self._progress()
+            connection.assert_before_deadline()
             if len(result) > self._config.max_response_bytes:
                 raise GuardError("authority_response_too_large")
             if len(result) != declared or not result:
@@ -365,9 +488,13 @@ class AuthorityClient:
         except GuardError:
             raise
         except (OSError, ssl.SSLError, http.client.HTTPException):
+            if expired.is_set() or self._monotonic() >= deadline:
+                raise GuardError("authority_deadline_exceeded") from None
             raise GuardError("authority_transport_failed") from None
         finally:
+            timer.cancel()
             connection.close()
+            timer.join()
 
     def _now_utc(self) -> datetime:
         value = self._now()

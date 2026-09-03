@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import ipaddress
 import json
@@ -22,7 +23,9 @@ from loom_task_image_builder_guard.models import CommandIdentity
 from loom_task_image_builder_guard.safeio import read_stable_file
 from loom_task_image_builder_guard.slurm import CommandResult, CommandRunner
 
+BPF_MAP_LOOKUP_ELEM = 1
 BPF_MAP_UPDATE_ELEM = 2
+BPF_MAP_GET_NEXT_KEY = 4
 BPF_OBJ_PIN = 6
 BPF_OBJ_GET = 7
 BPF_OBJ_GET_INFO_BY_FD = 15
@@ -81,6 +84,15 @@ class BpfOperations(Protocol):
     def obj_get(self, path: Path) -> int: ...
 
     def map_update(self, descriptor: int, key: bytes, value: bytes, *, flags: int = 0) -> None: ...
+
+    def map_items(
+        self,
+        descriptor: int,
+        *,
+        key_size: int,
+        value_size: int,
+        max_entries: int,
+    ) -> tuple[tuple[bytes, bytes], ...]: ...
 
     def object_info(
         self, descriptor: int, kind: Literal["program", "map", "link"]
@@ -191,6 +203,81 @@ class BpfSyscall:
         )
         if self._invoke(BPF_MAP_UPDATE_ELEM, attr) != 0:
             raise GuardError("bpf_map_update_invalid")
+
+    def map_items(
+        self,
+        descriptor: int,
+        *,
+        key_size: int,
+        value_size: int,
+        max_entries: int,
+    ) -> tuple[tuple[bytes, bytes], ...]:
+        if (
+            type(descriptor) is not int
+            or descriptor < 0
+            or type(key_size) is not int
+            or not 1 <= key_size <= 4096
+            or type(value_size) is not int
+            or not 1 <= value_size <= 4096
+            or type(max_entries) is not int
+            or not 1 <= max_entries <= 4096
+        ):
+            raise GuardError("bpf_map_readback_invalid")
+        previous: ctypes.Array[ctypes.c_char] | None = None
+        observed: list[tuple[bytes, bytes]] = []
+        seen: set[bytes] = set()
+        for _index in range(max_entries + 1):
+            next_key = ctypes.create_string_buffer(key_size)
+            next_attr = ctypes.create_string_buffer(_BPF_ATTR_SIZE)
+            struct.pack_into(
+                "<I4xQQ",
+                next_attr,
+                0,
+                descriptor,
+                0 if previous is None else ctypes.addressof(previous),
+                ctypes.addressof(next_key),
+            )
+            try:
+                result = self._syscall(
+                    self.number,
+                    BPF_MAP_GET_NEXT_KEY,
+                    ctypes.addressof(next_attr),
+                    len(next_attr),
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return tuple(sorted(observed))
+                raise GuardError("bpf_map_readback_invalid") from exc
+            if result != 0:
+                raise GuardError("bpf_map_readback_invalid")
+            key = bytes(next_key.raw)
+            if key in seen:
+                raise GuardError("bpf_map_readback_invalid")
+            seen.add(key)
+            value = ctypes.create_string_buffer(value_size)
+            lookup_attr = ctypes.create_string_buffer(_BPF_ATTR_SIZE)
+            struct.pack_into(
+                "<I4xQQ",
+                lookup_attr,
+                0,
+                descriptor,
+                ctypes.addressof(next_key),
+                ctypes.addressof(value),
+            )
+            try:
+                result = self._syscall(
+                    self.number,
+                    BPF_MAP_LOOKUP_ELEM,
+                    ctypes.addressof(lookup_attr),
+                    len(lookup_attr),
+                )
+            except OSError as exc:
+                raise GuardError("bpf_map_readback_invalid") from exc
+            if result != 0:
+                raise GuardError("bpf_map_readback_invalid")
+            observed.append((key, bytes(value.raw)))
+            previous = ctypes.create_string_buffer(key, key_size)
+        raise GuardError("bpf_map_readback_invalid")
 
     def object_info(
         self,
@@ -392,7 +479,13 @@ class NetworkPolicy:
                 ).encode("ascii")
                 + b"\n"
             )
-        except (UnicodeDecodeError, UnicodeEncodeError, ValueError, json.JSONDecodeError):
+        except (
+            UnicodeDecodeError,
+            UnicodeEncodeError,
+            ValueError,
+            json.JSONDecodeError,
+            RecursionError,
+        ):
             raise GuardError("bpf_policy_json_invalid") from None
         if canonical != payload:
             raise GuardError("bpf_policy_json_invalid")
@@ -615,7 +708,10 @@ def _stable_object_digest(path: Path, trusted_uid: int) -> str:
                 raise GuardError("bpf_object_identity_invalid")
             digest.update(chunk)
             offset += len(chunk)
-        if _file_identity(os.fstat(descriptor)) != _file_identity(opened):
+        if (
+            _file_identity(os.fstat(descriptor)) != _file_identity(opened)
+            or _file_identity(os.lstat(path)) != _file_identity(opened)
+        ):
             raise GuardError("bpf_object_identity_invalid")
         return digest.hexdigest()
     except GuardError:
@@ -669,6 +765,36 @@ def _limits_payload(limits: TrafficLimits) -> bytes:
 def _endpoint_payload(subject: int, endpoint: Endpoint) -> bytes:
     prefix = struct.pack("<I", subject) + endpoint.ip.packed
     return prefix + struct.pack("!H", endpoint.port) + bytes((endpoint.protocol_number, 0))
+
+
+def static_map_items(
+    policy: ScopeNetworkPolicy,
+) -> dict[str, tuple[tuple[bytes, bytes], ...]]:
+    if not isinstance(policy, ScopeNetworkPolicy):
+        raise GuardError("bpf_policy_scope_invalid")
+    subject = 1
+    return {
+        "scope_subject": ((struct.pack("<I", 0), struct.pack("<I", subject)),),
+        "subject_limits": (
+            (struct.pack("<I", subject), _limits_payload(policy.limits)),
+        ),
+        "allow_v4": tuple(
+            sorted(
+                (
+                    (_endpoint_payload(subject, endpoint), b"\x01")
+                    for endpoint in policy.ipv4
+                ),
+            )
+        ),
+        "allow_v6": tuple(
+            sorted(
+                (
+                    (_endpoint_payload(subject, endpoint), b"\x01")
+                    for endpoint in policy.ipv6
+                ),
+            )
+        ),
+    }
 
 
 class BpfLoader:
@@ -781,28 +907,9 @@ class BpfLoader:
                         pass
 
     def _program_maps(self, loaded: _LoadedScope, policy: ScopeNetworkPolicy) -> None:
-        subject = 1
-        key = struct.pack("<I", 0)
-        self.kernel.map_update(
-            loaded.maps["scope_subject"][0], key, struct.pack("<I", subject)
-        )
-        self.kernel.map_update(
-            loaded.maps["subject_limits"][0],
-            struct.pack("<I", subject),
-            _limits_payload(policy.limits),
-        )
-        for endpoint in policy.ipv4:
-            self.kernel.map_update(
-                loaded.maps["allow_v4"][0],
-                _endpoint_payload(subject, endpoint),
-                b"\x01",
-            )
-        for endpoint in policy.ipv6:
-            self.kernel.map_update(
-                loaded.maps["allow_v6"][0],
-                _endpoint_payload(subject, endpoint),
-                b"\x01",
-            )
+        for name, entries in static_map_items(policy).items():
+            for key, value in entries:
+                self.kernel.map_update(loaded.maps[name][0], key, value)
 
     def _attach_scope(self, loaded: _LoadedScope, root: Path) -> None:
         link_root = root / loaded.target.name / "links"
@@ -928,6 +1035,8 @@ class BpfLoader:
 __all__ = [
     "ATTACHMENTS",
     "BPF_LINK_CREATE",
+    "BPF_MAP_GET_NEXT_KEY",
+    "BPF_MAP_LOOKUP_ELEM",
     "BPF_MAP_UPDATE_ELEM",
     "BPF_OBJ_GET",
     "BPF_OBJ_GET_INFO_BY_FD",
@@ -941,4 +1050,5 @@ __all__ = [
     "NetworkPolicy",
     "ScopeNetworkPolicy",
     "TrafficLimits",
+    "static_map_items",
 ]

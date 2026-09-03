@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,26 @@ from scripts.ops.install_task_image_builder_guard import (
 from scripts.ops.task_image_builder_guard_release import build_release
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_documented_installer_cli_runs_without_ambient_pythonpath() -> None:
+    completed = subprocess.run(
+        (
+            "/usr/bin/python3",
+            "scripts/ops/install_task_image_builder_guard.py",
+            "--help",
+        ),
+        cwd=ROOT,
+        env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    assert completed.stdout.startswith(b"usage:")
+    assert completed.stderr == b""
 
 
 def _bpftool(path: Path) -> Path:
@@ -133,6 +154,40 @@ def test_repeated_byte_identical_staging_is_exactly_idempotent(tmp_path: Path) -
     assert second == first
     assert installed.stat().st_ino == before_inode
     assert receipt_path.read_bytes() == before_receipt
+
+
+def test_idempotent_staging_rejects_receipt_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    context = _context(tmp_path, bundle)
+    receipt = stage_guard_release(bundle, context)
+    receipt_path = (
+        context.root
+        / "var/lib/loom-task-image-builder-guard/staged"
+        / f"{receipt.release_sha256}.json"
+    )
+    replacement = receipt_path.parent / ".replacement"
+    replacement.write_bytes(receipt_path.read_bytes())
+    replacement.chmod(0o600)
+    original_lstat = Path.lstat
+    raced = False
+
+    def replace_after_lstat(path: Path) -> os.stat_result:
+        nonlocal raced
+        metadata = original_lstat(path)
+        if path == receipt_path and not raced:
+            raced = True
+            os.replace(replacement, receipt_path)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", replace_after_lstat)
+
+    with pytest.raises(GuardInstallError, match="receipt"):
+        stage_guard_release(bundle, context)
+
+    assert raced is True
 
 
 def test_live_staging_requires_real_root_and_the_real_filesystem_root(

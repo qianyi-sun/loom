@@ -76,7 +76,14 @@ def read_stable_file(
             total += len(chunk)
         if total > maximum:
             raise GuardError("safe_file_too_large")
-        if _identity(os.fstat(descriptor)) != _identity(opened):
+        try:
+            final_path = os.lstat(path)
+        except OSError as exc:
+            raise GuardError("safe_file_changed") from exc
+        if (
+            _identity(os.fstat(descriptor)) != _identity(opened)
+            or _identity(final_path) != _identity(opened)
+        ):
             raise GuardError("safe_file_changed")
         return b"".join(chunks)
     except GuardError:

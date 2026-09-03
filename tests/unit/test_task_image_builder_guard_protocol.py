@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import socket
+import struct
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -17,9 +18,12 @@ from loom_task_image_builder_guard.protocol import (
     GET_MEMFD_SEALS,
     REQUIRED_MEMFD_SEALS,
     LocalRequest,
+    PeerCredentials,
     create_sealed_memfd,
     parse_local_request,
     read_sealed_memfd,
+    receive_authenticated_packet,
+    receive_authenticated_request,
     receive_request,
     require_ack,
     send_packet,
@@ -29,6 +33,7 @@ GRANT = UUID("11111111-1111-4111-8111-111111111111")
 EXCHANGE = UUID("22222222-2222-4222-8222-222222222222")
 RESPONSE = UUID("33333333-3333-4333-8333-333333333333")
 DIGEST = "a" * 64
+CURRENT_CREDENTIALS = PeerCredentials(os.getpid(), os.geteuid(), os.getegid())
 
 
 def _wire(value: object) -> bytes:
@@ -107,6 +112,15 @@ def test_rejects_broadened_or_incomplete_local_request(document: object) -> None
     assert "loom_tibp_" not in str(caught.value)
 
 
+def test_rejects_deeply_nested_local_request_with_a_typed_error() -> None:
+    payload = b"[" * 2000 + b"0" + b"]" * 2000
+
+    with pytest.raises(GuardError) as caught:
+        parse_local_request(payload)
+
+    assert caught.value.code == "local_request_invalid"
+
+
 def test_sealed_memfd_has_every_required_seal_and_round_trips() -> None:
     descriptor = create_sealed_memfd("loom-guard-projection", b'{"token":"redacted"}', maximum=64)
     try:
@@ -183,6 +197,64 @@ def test_packet_transfers_one_owned_sealed_descriptor() -> None:
         receiver.close()
 
 
+def test_authenticated_receive_identifies_the_process_using_an_inherited_socket() -> None:
+    sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    connected_pid = struct.unpack(
+        "3i",
+        receiver.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
+    )[0]
+    child = os.fork()
+    if child == 0:
+        receiver.close()
+        try:
+            sender.send(b"delegated-request")
+        finally:
+            sender.close()
+        os._exit(0)
+    sender.close()
+    try:
+        packet, descriptor, credentials = receive_authenticated_request(
+            receiver,
+            maximum=64,
+        )
+    finally:
+        receiver.close()
+        _waited, status = os.waitpid(child, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert packet == b"delegated-request"
+    assert descriptor is None
+    assert connected_pid == os.getpid()
+    assert credentials == PeerCredentials(child, os.geteuid(), os.getegid())
+
+
+def test_unfinished_authenticated_packet_closes_every_received_descriptor() -> None:
+    sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    descriptor = create_sealed_memfd("unfinished", b"secret", maximum=64)
+    received: list[int] = []
+    try:
+        send_packet(sender, b"request", descriptor=descriptor)
+        packet = receive_authenticated_packet(receiver, maximum=64)
+        item_size = array.array("i").itemsize
+        for level, kind, data in packet.ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                values = array.array("i")
+                values.frombytes(data[: len(data) - (len(data) % item_size)])
+                received.extend(values)
+
+        packet.close()
+
+        assert len(received) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(received[0])
+        assert closed.value.errno == errno.EBADF
+    finally:
+        os.close(descriptor)
+        sender.close()
+        receiver.close()
+
+
 def test_receive_rejects_multiple_descriptors_and_closes_them() -> None:
     sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     first = create_sealed_memfd("first", b"a", maximum=8)
@@ -214,6 +286,7 @@ def test_receive_rejects_truncated_seqpacket() -> None:
 
 def test_ack_must_bind_the_exact_response_uuid() -> None:
     sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
     try:
         sender.send(
             _wire(
@@ -224,7 +297,13 @@ def test_ack_must_bind_the_exact_response_uuid() -> None:
                 }
             )
         )
-        require_ack(receiver, response_id=RESPONSE, timeout_seconds=1, maximum=1024)
+        require_ack(
+            receiver,
+            response_id=RESPONSE,
+            timeout_seconds=1,
+            maximum=1024,
+            expected_credentials=CURRENT_CREDENTIALS,
+        )
 
         sender.send(
             _wire(
@@ -236,8 +315,55 @@ def test_ack_must_bind_the_exact_response_uuid() -> None:
             )
         )
         with pytest.raises(GuardError) as caught:
-            require_ack(receiver, response_id=RESPONSE, timeout_seconds=1, maximum=1024)
+            require_ack(
+                receiver,
+                response_id=RESPONSE,
+                timeout_seconds=1,
+                maximum=1024,
+                expected_credentials=CURRENT_CREDENTIALS,
+            )
         assert caught.value.code == "local_ack_invalid"
     finally:
         sender.close()
         receiver.close()
+
+
+def test_ack_rejects_a_process_using_an_inherited_socket() -> None:
+    sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    receiver.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    child = os.fork()
+    if child == 0:
+        receiver.close()
+        try:
+            sender.send(
+                _wire(
+                    {
+                        "schema": "loom.task-image-builder-guard-local/v1",
+                        "operation": "ack",
+                        "response_id": str(RESPONSE),
+                    }
+                )
+            )
+        finally:
+            sender.close()
+        os._exit(0)
+    sender.close()
+    try:
+        with pytest.raises(GuardError) as caught:
+            require_ack(
+                receiver,
+                response_id=RESPONSE,
+                timeout_seconds=1,
+                maximum=1024,
+                expected_credentials=PeerCredentials(
+                    os.getpid(),
+                    os.geteuid(),
+                    os.getegid(),
+                ),
+            )
+    finally:
+        receiver.close()
+        _waited, status = os.waitpid(child, 0)
+
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert caught.value.code == "local_peer_credentials_invalid"

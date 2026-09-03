@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -26,6 +27,7 @@ from loom_task_image_builder_guard.slurm import CommandRunner
 _MAX_CONTROL_BYTES = 64 * 1024
 _CONTROL_NAME = re.compile(r"^[a-z][a-z0-9.]{0,63}$")
 _CPU_COMPONENT = re.compile(r"^(0|[1-9][0-9]*)(?:-(0|[1-9][0-9]*))?$")
+_BPF_TAG = re.compile(r"^[0-9a-f]{16}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,15 @@ class CgroupOperations(Protocol):
     def read(self, node: CgroupNode, name: str) -> str: ...
 
     def write(self, node: CgroupNode, name: str, value: str) -> None: ...
+
+    def delegate_process_migration(
+        self,
+        common_ancestor: CgroupNode,
+        destination: CgroupNode,
+        *,
+        uid: int,
+        gid: int,
+    ) -> dict[str, object]: ...
 
     def close(self, descriptor: int) -> None: ...
 
@@ -83,6 +94,7 @@ class CgroupFilesystem:
                 _directory_identity(lexical) != _directory_identity(opened)
                 or not stat.S_ISDIR(opened.st_mode)
                 or opened.st_uid != self.trusted_uid
+                or stat.S_IMODE(opened.st_mode) & 0o022
                 or opened.st_ino != batch.inode
             ):
                 raise GuardError("containment_batch_invalid")
@@ -239,6 +251,77 @@ class CgroupFilesystem:
             if descriptor is not None:
                 os.close(descriptor)
 
+    def _delegate_process_file(
+        self,
+        node: CgroupNode,
+        *,
+        uid: int,
+        gid: int,
+    ) -> dict[str, object]:
+        self.assert_stable(node)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                "cgroup.procs",
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=node.descriptor,
+            )
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_dev != node.device
+                or before.st_uid != self.trusted_uid
+                or stat.S_IMODE(before.st_mode) != 0o644
+            ):
+                raise GuardError("containment_process_delegation_invalid")
+            os.fchown(descriptor, uid, gid)
+            after = os.fstat(descriptor)
+            if (
+                (before.st_dev, before.st_ino, before.st_mode)
+                != (after.st_dev, after.st_ino, after.st_mode)
+                or after.st_uid != uid
+                or after.st_gid != gid
+            ):
+                raise GuardError("containment_process_delegation_invalid")
+            self.assert_stable(node)
+            return {
+                "path": f"{node.authority_path}/cgroup.procs",
+                "uid": after.st_uid,
+                "gid": after.st_gid,
+                "mode": stat.S_IMODE(after.st_mode),
+            }
+        except GuardError:
+            raise
+        except OSError as exc:
+            raise GuardError("containment_process_delegation_invalid") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def delegate_process_migration(
+        self,
+        common_ancestor: CgroupNode,
+        destination: CgroupNode,
+        *,
+        uid: int,
+        gid: int,
+    ) -> dict[str, object]:
+        if (
+            type(uid) is not int
+            or type(gid) is not int
+            or uid <= 0
+            or gid <= 0
+            or destination.authority_path
+            != f"{common_ancestor.authority_path}/build-egress"
+        ):
+            raise GuardError("containment_process_delegation_invalid")
+        common = self._delegate_process_file(common_ancestor, uid=uid, gid=gid)
+        destination_file = self._delegate_process_file(destination, uid=uid, gid=gid)
+        return {
+            "common_ancestor": common,
+            "destination": destination_file,
+        }
+
     @staticmethod
     def close(descriptor: int) -> None:
         os.close(descriptor)
@@ -247,6 +330,7 @@ class CgroupFilesystem:
 @dataclass(frozen=True, slots=True)
 class DeviceProgram:
     program_id: int
+    tag: str
     attach_type: str
     attach_flags: str
     name: str
@@ -255,15 +339,18 @@ class DeviceProgram:
         if (
             type(self.program_id) is not int
             or not 1 <= self.program_id <= (1 << 32) - 1
+            or not isinstance(self.tag, str)
+            or _BPF_TAG.fullmatch(self.tag) is None
+            or self.tag == "0" * 16
             or self.attach_type != "cgroup_device"
             or not all(
                 isinstance(item, str)
-                and item
                 and len(item) <= 64
                 and "\n" not in item
                 and "\r" not in item
                 for item in (self.attach_flags, self.name)
             )
+            or not self.name
         ):
             raise GuardError("containment_device_authority_invalid")
 
@@ -286,10 +373,10 @@ class BpftoolDeviceProbe:
         self.runner = runner
         self.command = command
 
-    def inspect(self, batch: CgroupNode) -> tuple[DeviceProgram, ...]:
+    def inspect_path(self, path: Path) -> tuple[DeviceProgram, ...]:
         result = self.runner.run(
             self.command,
-            ("-j", "cgroup", "show", str(batch.path)),
+            ("-j", "cgroup", "show", str(path), "effective"),
         )
         if (
             result.returncode != 0
@@ -304,42 +391,115 @@ class BpftoolDeviceProbe:
                 raise ValueError("invalid program list")
             programs: list[DeviceProgram] = []
             for item in raw:
-                if not isinstance(item, dict) or set(item) != {
+                required = {
                     "id",
                     "attach_type",
-                    "attach_flags",
                     "name",
-                    "attach_btf_name",
                     "attach_btf_obj_id",
                     "attach_btf_id",
-                }:
-                    raise ValueError("invalid program")
+                }
                 if (
-                    item["attach_btf_name"] != ""
-                    or item["attach_btf_obj_id"] != 0
+                    not isinstance(item, dict)
+                    or set(item)
+                    not in {
+                        frozenset(required),
+                        frozenset((*required, "attach_btf_name")),
+                    }
+                    or type(item["id"]) is not int
+                    or not 1 <= item["id"] <= (1 << 32) - 1
+                    or type(item["attach_btf_obj_id"]) is not int
+                    or not 0 <= item["attach_btf_obj_id"] <= (1 << 32) - 1
+                    or type(item["attach_btf_id"]) is not int
+                    or not 0 <= item["attach_btf_id"] <= (1 << 32) - 1
+                    or not all(
+                        isinstance(item[name], str)
+                        and item[name]
+                        and len(item[name]) <= 64
+                        and "\n" not in item[name]
+                        and "\r" not in item[name]
+                        for name in ("attach_type", "name")
+                    )
+                    or (
+                        "attach_btf_name" in item
+                        and (
+                            not isinstance(item["attach_btf_name"], str)
+                            or not item["attach_btf_name"]
+                            or len(item["attach_btf_name"]) > 128
+                        )
+                    )
+                ):
+                    raise ValueError("invalid program")
+                if item["attach_type"] != "cgroup_device":
+                    continue
+                if (
+                    item["attach_btf_obj_id"] != 0
                     or item["attach_btf_id"] != 0
+                    or "attach_btf_name" in item
                 ):
                     raise ValueError("unexpected BTF attachment")
+                identity = self.runner.run(
+                    self.command,
+                    ("-j", "prog", "show", "id", str(item["id"])),
+                )
+                if (
+                    identity.returncode != 0
+                    or identity.stderr
+                    or not identity.stdout
+                    or len(identity.stdout.encode("utf-8")) > _MAX_CONTROL_BYTES
+                ):
+                    raise ValueError("invalid program identity")
+                program = json.loads(identity.stdout, object_pairs_hook=_pairs)
+                if (
+                    not isinstance(program, dict)
+                    or program.get("id") != item["id"]
+                    or program.get("type") != "cgroup_device"
+                    or program.get("name") != item["name"]
+                    or not isinstance(program.get("tag"), str)
+                    or _BPF_TAG.fullmatch(program["tag"]) is None
+                    or program["tag"] == "0" * 16
+                    or program.get("uid") != 0
+                    or program.get("orphaned") is not False
+                    or type(program.get("bytes_xlated")) is not int
+                    or not 1 <= program["bytes_xlated"] <= _MAX_CONTROL_BYTES
+                    or type(program.get("gpl_compatible")) is not bool
+                    or not isinstance(program.get("map_ids", []), list)
+                    or bool(program.get("map_ids", []))
+                ):
+                    raise ValueError("invalid program identity")
                 programs.append(
                     DeviceProgram(
                         item["id"],
+                        program["tag"],
                         item["attach_type"],
-                        item["attach_flags"],
+                        "",
                         item["name"],
                     )
                 )
-        except (json.JSONDecodeError, TypeError, ValueError, GuardError):
+        except (
+            json.JSONDecodeError,
+            RecursionError,
+            TypeError,
+            ValueError,
+            GuardError,
+        ):
             raise GuardError("containment_device_authority_invalid") from None
-        canonical = tuple(sorted(programs, key=lambda item: item.program_id))
-        if len({item.program_id for item in canonical}) != len(canonical):
+        canonical = tuple(sorted(programs, key=lambda item: (item.tag, item.program_id)))
+        if (
+            len({item.program_id for item in canonical}) != len(canonical)
+            or len({item.tag for item in canonical}) != len(canonical)
+        ):
             raise GuardError("containment_device_authority_invalid")
         return canonical
+
+    def inspect(self, batch: CgroupNode) -> tuple[DeviceProgram, ...]:
+        return self.inspect_path(batch.path)
 
 
 @dataclass(frozen=True, slots=True)
 class GuardPolicy:
     cpus: int
     memory_mib: int
+    device_program_tags: tuple[str, ...]
     pids_max: int
     io_limits: tuple[IoLimit, ...]
     network: NetworkPolicy
@@ -350,6 +510,16 @@ class GuardPolicy:
             or not 1 <= self.cpus <= 65536
             or type(self.memory_mib) is not int
             or self.memory_mib <= 0
+            or not isinstance(self.device_program_tags, tuple)
+            or not self.device_program_tags
+            or self.device_program_tags
+            != tuple(sorted(set(self.device_program_tags)))
+            or any(
+                not isinstance(item, str)
+                or _BPF_TAG.fullmatch(item) is None
+                or item == "0" * 16
+                for item in self.device_program_tags
+            )
             or type(self.pids_max) is not int
             or self.pids_max <= 0
             or not isinstance(self.io_limits, tuple)
@@ -426,10 +596,14 @@ class ContainmentAttachment:
 
 class PeerForContainment(Protocol):
     pid: int
+    uid: int
+    gid: int
 
     def assert_unchanged(self) -> None: ...
 
     def adopt_trusted_service_cgroup(self) -> None: ...
+
+    def containment_hold(self) -> AbstractContextManager[None]: ...
 
 
 def _tokens(value: str) -> tuple[str, ...]:
@@ -447,6 +621,28 @@ def _processes(value: str) -> tuple[int, ...]:
     if any(item <= 0 for item in rows) or len(rows) != len(set(rows)):
         raise GuardError("containment_processes_invalid")
     return rows
+
+
+def _cgroup_stat(value: str) -> tuple[int, int]:
+    rows: dict[str, int] = {}
+    try:
+        for line in value.splitlines():
+            fields = line.split()
+            if (
+                len(fields) != 2
+                or not fields[0].startswith("nr_")
+                or fields[0] in rows
+            ):
+                raise ValueError
+            parsed = int(fields[1])
+            if not 0 <= parsed <= (1 << 63) - 1:
+                raise ValueError
+            rows[fields[0]] = parsed
+    except ValueError:
+        raise GuardError("containment_descendants_invalid") from None
+    if "nr_descendants" not in rows or "nr_dying_descendants" not in rows:
+        raise GuardError("containment_descendants_invalid")
+    return rows["nr_descendants"], rows["nr_dying_descendants"]
 
 
 def _cpu_count(value: str) -> int:
@@ -509,11 +705,10 @@ class ContainmentManager:
             self._read(batch, "cgroup.procs")
         ) != (peer.pid,):
             raise GuardError("containment_processes_invalid")
+        self._verify_descendants(batch, 0)
         controllers = _tokens(self._read(batch, "cgroup.controllers"))
-        delegated = _tokens(self._read(batch, "cgroup.subtree_control"))
-        if not {"io", "pids"}.issubset(controllers) or not {"io", "pids"}.issubset(
-            delegated
-        ):
+        delegated = tuple(self._read(batch, "cgroup.subtree_control").split())
+        if not {"io", "pids"}.issubset(controllers) or delegated:
             raise GuardError("containment_controller_invalid")
         cpu_count = _cpu_count(self._read(batch, "cpuset.cpus.effective"))
         cpu_max = self._read(batch, "cpu.max").split()
@@ -534,7 +729,7 @@ class ContainmentManager:
         ):
             raise GuardError("containment_inherited_resources_invalid")
         device_programs = self.device_probe.inspect(batch)
-        if not device_programs:
+        if tuple(item.tag for item in device_programs) != policy.device_program_tags:
             raise GuardError("containment_device_authority_invalid")
         return {
             "controllers": list(controllers),
@@ -546,6 +741,7 @@ class ContainmentManager:
             "device_programs": [
                 {
                     "id": item.program_id,
+                    "tag": item.tag,
                     "attach_type": item.attach_type,
                     "attach_flags": item.attach_flags,
                     "name": item.name,
@@ -553,6 +749,11 @@ class ContainmentManager:
                 for item in device_programs
             ],
         }
+
+    def _verify_descendants(self, node: CgroupNode, expected: int) -> None:
+        descendants, dying = _cgroup_stat(self._read(node, "cgroup.stat"))
+        if descendants != expected or dying != 0:
+            raise GuardError("containment_descendants_invalid")
 
     def _verify_empty(self, node: CgroupNode) -> None:
         if self._read(node, "cgroup.type").strip() != "domain" or _processes(
@@ -593,55 +794,89 @@ class ContainmentManager:
             raise GuardError("containment_identity_invalid")
         peer.assert_unchanged()
         batch_node = self.filesystem.open_batch(batch)
+        opened_nodes = [batch_node]
         tree: ContainmentTree | None = None
         success = False
         try:
             inherited = self._verify_inheritance(batch_node, peer, policy)
             root = self.filesystem.create_child(batch_node, "loom-builder")
+            opened_nodes.append(root)
             trusted = self.filesystem.create_child(root, "trusted-service")
+            opened_nodes.append(trusted)
             build = self.filesystem.create_child(root, "build-egress")
+            opened_nodes.append(build)
             tree = ContainmentTree(self.filesystem, batch_node, root, trusted, build)
             for node in (root, trusted, build):
                 self._verify_empty(node)
-            peer.assert_unchanged()
-            bpf = self.bpf_loader.attach(tree, policy.network, grant_id)
-            peer.assert_unchanged()
-            self._write(trusted, "cgroup.procs", str(peer.pid))
-            peer.adopt_trusted_service_cgroup()
-            peer.assert_unchanged()
-            if _processes(self._read(batch_node, "cgroup.procs")) or _processes(
-                self._read(root, "cgroup.procs")
-            ):
-                raise GuardError("containment_processes_invalid")
-            if _processes(self._read(trusted, "cgroup.procs")) != (peer.pid,) or _processes(
-                self._read(build, "cgroup.procs")
-            ):
-                raise GuardError("containment_processes_invalid")
-            self._delegate(root)
-            applied = self._apply_limits(root, policy)
-            self._delegate(build)
-            probe: dict[str, object] = {
-                "schema": "loom.task-image-builder-guard-containment-probe/v1",
-                "cgroups": {
-                    "batch": {"path": batch_node.authority_path, "inode": batch_node.inode},
-                    "root": {"path": root.authority_path, "inode": root.inode},
-                    "trusted_service": {
-                        "path": trusted.authority_path,
-                        "inode": trusted.inode,
+            with peer.containment_hold():
+                peer.assert_unchanged()
+                bpf = self.bpf_loader.attach(tree, policy.network, grant_id)
+                peer.assert_unchanged()
+                self._write(trusted, "cgroup.procs", str(peer.pid))
+                peer.adopt_trusted_service_cgroup()
+                peer.assert_unchanged()
+                if _processes(self._read(batch_node, "cgroup.procs")) or _processes(
+                    self._read(root, "cgroup.procs")
+                ):
+                    raise GuardError("containment_processes_invalid")
+                if _processes(
+                    self._read(trusted, "cgroup.procs")
+                ) != (peer.pid,) or _processes(self._read(build, "cgroup.procs")):
+                    raise GuardError("containment_processes_invalid")
+                for node, expected_descendants in (
+                    (batch_node, 3),
+                    (root, 2),
+                    (trusted, 0),
+                    (build, 0),
+                ):
+                    self._verify_descendants(node, expected_descendants)
+                self._delegate(batch_node)
+                self._delegate(root)
+                applied = self._apply_limits(root, policy)
+                if self._read(build, "cgroup.subtree_control").split():
+                    raise GuardError("containment_controller_invalid")
+                process_migration = self.filesystem.delegate_process_migration(
+                    root,
+                    build,
+                    uid=peer.uid,
+                    gid=peer.gid,
+                )
+                probe: dict[str, object] = {
+                    "schema": "loom.task-image-builder-guard-containment-probe/v1",
+                    "cgroups": {
+                        "batch": {
+                            "path": batch_node.authority_path,
+                            "inode": batch_node.inode,
+                        },
+                        "root": {"path": root.authority_path, "inode": root.inode},
+                        "trusted_service": {
+                            "path": trusted.authority_path,
+                            "inode": trusted.inode,
+                        },
+                        "build_egress": {
+                            "path": build.authority_path,
+                            "inode": build.inode,
+                        },
                     },
-                    "build_egress": {"path": build.authority_path, "inode": build.inode},
-                },
-                "inherited": inherited,
-                "applied": applied,
-                "bpf": {
-                    "pin_path": str(bpf.pin_path),
-                    "link_ids": list(bpf.link_ids),
-                    "program_ids": list(bpf.program_ids),
-                    "map_ids": list(bpf.map_ids),
-                },
-            }
-            probe_payload = _canonical(probe)
-            probe_sha256 = hashlib.sha256(probe_payload).hexdigest()
+                    "descendants": {
+                        "batch": 3,
+                        "root": 2,
+                        "trusted_service": 0,
+                        "build_egress": 0,
+                    },
+                    "inherited": inherited,
+                    "applied": applied,
+                    "process_migration": process_migration,
+                    "bpf": {
+                        "pin_path": str(bpf.pin_path),
+                        "link_ids": list(bpf.link_ids),
+                        "program_ids": list(bpf.program_ids),
+                        "map_ids": list(bpf.map_ids),
+                    },
+                }
+                probe_payload = _canonical(probe)
+                probe_sha256 = hashlib.sha256(probe_payload).hexdigest()
+                peer.assert_unchanged()
             success = True
             return ContainmentAttachment(
                 tree=tree,
@@ -664,10 +899,11 @@ class ContainmentManager:
                 if tree is not None:
                     tree.close()
                 else:
-                    try:
-                        self.filesystem.close(batch_node.descriptor)
-                    except OSError:
-                        pass
+                    for node in reversed(opened_nodes):
+                        try:
+                            self.filesystem.close(node.descriptor)
+                        except OSError:
+                            pass
 
 
 __all__ = [

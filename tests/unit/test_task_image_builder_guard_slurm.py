@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from uuid import UUID
 
@@ -42,6 +43,46 @@ def test_pinned_runner_executes_opened_binary_without_shell(tmp_path: Path) -> N
     assert not marker.exists()
 
 
+def test_pinned_runner_reports_main_thread_progress_between_output_chunks(
+    tmp_path: Path,
+) -> None:
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\nprintf first\nsleep 0.05\nprintf second\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    progress: list[float] = []
+    runner = PinnedCommandRunner(
+        trusted_uid=os.geteuid(),
+        timeout_seconds=2,
+        progress=lambda: progress.append(time.monotonic()),
+    )
+
+    result = runner.run(_identity(command), ())
+
+    assert result == CommandResult(0, "firstsecond", "")
+    assert len(progress) >= 2
+    assert progress[-1] - progress[0] >= 0.03
+
+
+def test_pinned_runner_does_not_signal_an_already_reaped_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = tmp_path / "command"
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(trusted_uid=os.geteuid(), timeout_seconds=2)
+
+    def unexpected_killpg(_process_group: int, _signal: int) -> None:
+        raise AssertionError("a reaped child PID must not be signalled")
+
+    monkeypatch.setattr("loom_task_image_builder_guard.slurm.os.killpg", unexpected_killpg)
+
+    assert runner.run(_identity(command), ()) == CommandResult(0, "", "")
+
+
 def test_pinned_runner_rejects_changed_or_writable_command(tmp_path: Path) -> None:
     command = tmp_path / "command"
     command.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
@@ -62,6 +103,127 @@ def test_pinned_runner_rejects_changed_or_writable_command(tmp_path: Path) -> No
     with pytest.raises(GuardError) as caught:
         runner.run(_identity(command), ())
     assert caught.value.code == "command_identity_invalid"
+
+
+def test_pinned_runner_terminates_a_command_at_the_output_limit(tmp_path: Path) -> None:
+    marker = tmp_path / "must-not-be-created"
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\nhead -c 1048576 /dev/zero\ntouch \"$1\"\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(
+        trusted_uid=os.geteuid(),
+        timeout_seconds=5,
+        max_stdout_bytes=1024,
+    )
+
+    with pytest.raises(GuardError) as caught:
+        runner.run(_identity(command), (str(marker),))
+
+    assert caught.value.code == "command_output_invalid"
+    assert not marker.exists()
+
+
+def test_pinned_runner_terminates_descendants_after_the_group_leader_exits(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "must-not-be-created"
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\n"
+        "( sleep 0.2; head -c 1048576 /dev/zero; sleep 0.2; touch \"$1\" ) &\n"
+        "exit 0\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(
+        trusted_uid=os.geteuid(),
+        timeout_seconds=5,
+        max_stdout_bytes=1024,
+    )
+
+    with pytest.raises(GuardError) as caught:
+        runner.run(_identity(command), (str(marker),))
+    time.sleep(0.5)
+
+    assert caught.value.code == "command_output_invalid"
+    assert not marker.exists()
+
+
+def test_pinned_runner_rejects_a_lingering_descendant_that_closed_its_pipes(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "must-not-be-created"
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\n"
+        "( exec </dev/null >/dev/null 2>/dev/null; sleep 0.2; touch \"$1\" ) &\n"
+        "exit 0\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(trusted_uid=os.geteuid(), timeout_seconds=2)
+
+    with pytest.raises(GuardError) as caught:
+        runner.run(_identity(command), (str(marker),))
+    time.sleep(0.3)
+
+    assert caught.value.code == "command_descendants_invalid"
+    assert not marker.exists()
+
+
+def test_pinned_runner_kills_a_same_session_descendant_in_a_new_process_group(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "must-not-be-created"
+    ready = tmp_path / "child-ready"
+    child = tmp_path / "child"
+    child.write_text(
+        "#!/usr/bin/python3\n"
+        "import os, pathlib, sys, time\n"
+        "os.setpgid(0, 0)\n"
+        "pathlib.Path(sys.argv[2]).touch()\n"
+        "time.sleep(0.2)\n"
+        "pathlib.Path(sys.argv[1]).touch()\n",
+        encoding="ascii",
+    )
+    child.chmod(0o555)
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\n"
+        '"$2" "$1" "$3" </dev/null >/dev/null 2>/dev/null &\n'
+        'while [ ! -e "$3" ]; do :; done\n'
+        "exit 0\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(trusted_uid=os.geteuid(), timeout_seconds=2)
+
+    with pytest.raises(GuardError) as caught:
+        runner.run(_identity(command), (str(marker), str(child), str(ready)))
+    time.sleep(0.3)
+
+    assert caught.value.code == "command_descendants_invalid"
+    assert not marker.exists()
+
+
+def test_pinned_runner_rejects_final_pathname_replacement(tmp_path: Path) -> None:
+    command = tmp_path / "command"
+    command.write_text(
+        "#!/bin/sh\ncp \"$1\" \"$1.replacement\"\n"
+        "chmod 0555 \"$1.replacement\"\n"
+        "mv \"$1.replacement\" \"$1\"\n",
+        encoding="ascii",
+    )
+    command.chmod(0o555)
+    runner = PinnedCommandRunner(trusted_uid=os.geteuid(), timeout_seconds=2)
+
+    with pytest.raises(GuardError) as caught:
+        runner.run(_identity(command), (str(command),))
+
+    assert caught.value.code == "command_identity_changed"
 
 
 def _scontrol(**changes: str) -> str:

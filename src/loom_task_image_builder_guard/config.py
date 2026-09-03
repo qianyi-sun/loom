@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -28,6 +29,7 @@ _CONFIG_SCHEMA = "loom.task-image-builder-node-guard-config/v1"
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$")
 _DEVICE = re.compile(r"^(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9})$")
+_BPF_TAG = re.compile(r"^[0-9a-f]{16}$")
 _WALL_TIME = re.compile(r"^[0-9]{2}:[0-5][0-9]:[0-5][0-9]$")
 _MAX_CONFIG_BYTES = 1024 * 1024
 
@@ -103,7 +105,7 @@ class GuardConfig(GuardConfigValue):
         )
         try:
             document = json.loads(payload, object_pairs_hook=_pairs)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
             raise GuardError("config_json_invalid") from None
         raw = _object(
             document,
@@ -215,6 +217,7 @@ class GuardConfig(GuardConfigValue):
             keys=frozenset(
                 {
                     "base_url",
+                    "connect_ip",
                     "ca_path",
                     "cert_path",
                     "key_path",
@@ -227,6 +230,13 @@ class GuardConfig(GuardConfigValue):
         base_url = authority_raw["base_url"]
         if not isinstance(base_url, str):
             raise GuardError("config_authority_invalid")
+        connect_ip = authority_raw["connect_ip"]
+        if not isinstance(connect_ip, str):
+            raise GuardError("config_authority_invalid")
+        try:
+            parsed_connect_ip = ipaddress.ip_address(connect_ip)
+        except (TypeError, ValueError):
+            raise GuardError("config_authority_invalid") from None
         parsed_url = urlsplit(base_url)
         if (
             parsed_url.scheme != "https"
@@ -236,10 +246,12 @@ class GuardConfig(GuardConfigValue):
             or parsed_url.query
             or parsed_url.fragment
             or parsed_url.path not in {"", "/"}
+            or str(parsed_connect_ip) != connect_ip
         ):
             raise GuardError("config_authority_invalid")
         authority = AuthorityConfig(
             base_url=base_url.rstrip("/"),
+            connect_ip=connect_ip,
             ca_path=_path(authority_raw["ca_path"]),
             cert_path=_path(authority_raw["cert_path"]),
             key_path=_path(authority_raw["key_path"]),
@@ -306,6 +318,7 @@ class GuardConfig(GuardConfigValue):
                     "ledger_root",
                     "bpf_object_path",
                     "network_policy_path",
+                    "device_program_tags",
                     "pids_max",
                     "io_limits",
                     "containment_policy_sha256",
@@ -338,12 +351,27 @@ class GuardConfig(GuardConfigValue):
             )
         if [item.device for item in io_limits] != sorted({item.device for item in io_limits}):
             raise GuardError("config_io_invalid")
+        device_tags_raw = containment_raw["device_program_tags"]
+        if (
+            not isinstance(device_tags_raw, list)
+            or not device_tags_raw
+            or len(device_tags_raw) > 64
+            or any(
+                not isinstance(item, str)
+                or _BPF_TAG.fullmatch(item) is None
+                or item == "0" * 16
+                for item in device_tags_raw
+            )
+            or device_tags_raw != sorted(set(device_tags_raw))
+        ):
+            raise GuardError("config_device_authority_invalid")
         containment = ContainmentConfig(
             cgroup_root=_path(containment_raw["cgroup_root"]),
             bpffs_root=_path(containment_raw["bpffs_root"]),
             ledger_root=_path(containment_raw["ledger_root"]),
             bpf_object_path=_path(containment_raw["bpf_object_path"]),
             network_policy_path=_path(containment_raw["network_policy_path"]),
+            device_program_tags=tuple(device_tags_raw),
             pids_max=_integer(containment_raw["pids_max"], minimum=1),
             io_limits=tuple(io_limits),
             containment_policy_sha256=_digest(containment_raw["containment_policy_sha256"]),

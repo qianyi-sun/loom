@@ -27,6 +27,7 @@ _BUNDLE_SCHEMA = "loom.task-image-builder-guard-bundle/v1"
 _PACKAGE_ROOT = PurePosixPath("src/loom_task_image_builder_guard")
 _ARCHIVE = "loom-task-image-builder-guard.pyz"
 _MANIFEST = "release-manifest.json"
+_UNIT = "loom-task-image-builder-node-guard.service"
 _MAX_SPEC_BYTES = 1024 * 1024
 _MAX_SOURCE_BYTES = 4 * 1024 * 1024
 _MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
@@ -310,6 +311,7 @@ def _load_spec(root: Path) -> tuple[bytes, tuple[_Input, ...], tuple[_Input, ...
             "guard-network-map-schema-v1.json",
             "guard-network-v1.bpf.build.json",
             "guard-network-v1.bpf.o",
+            _UNIT,
         )
         or len({item.path for item in artifacts}) != len(artifacts)
     ):
@@ -392,6 +394,142 @@ def _validate_bpftool(payload: bytes, architecture: Architecture) -> None:
         raise GuardReleaseError("bpftool architecture does not match release")
 
 
+def _unit_values(payload: bytes) -> dict[str, dict[str, tuple[str, ...]]]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise GuardReleaseError("systemd unit encoding is invalid") from None
+    sections: dict[str, dict[str, list[str]]] = {}
+    section: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            if section in sections:
+                raise GuardReleaseError("systemd unit section is duplicate")
+            sections[section] = {}
+            continue
+        if section is None or "=" not in line:
+            raise GuardReleaseError("systemd unit syntax is invalid")
+        key, value = line.split("=", 1)
+        if not key or "\x00" in value:
+            raise GuardReleaseError("systemd unit directive is invalid")
+        sections[section].setdefault(key, []).append(value)
+    return {
+        name: {key: tuple(values) for key, values in directives.items()}
+        for name, directives in sections.items()
+    }
+
+
+def validate_unit(payload: bytes) -> str:
+    """Reject any unit template that could activate or broaden the guard."""
+
+    values = _unit_values(payload)
+    if set(values) != {"Unit", "Service"}:
+        raise GuardReleaseError("systemd unit activation surface is invalid")
+    unit = values["Unit"]
+    service = values["Service"]
+    required_unit = {
+        "After": ("network-online.target",),
+        "ConditionPathExists": (
+            "/etc/loom/task-image-builder-guard/activation-v1.json",
+        ),
+        "StartLimitBurst": ("3",),
+        "StartLimitIntervalSec": ("300s",),
+        "Wants": ("network-online.target",),
+    }
+    required_service = {
+        "AmbientCapabilities": (
+            "CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER "
+            "CAP_KILL CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE",
+        ),
+        "CapabilityBoundingSet": (
+            "CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER "
+            "CAP_KILL CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE",
+        ),
+        "ExecStart": (
+            "/usr/bin/python3 -I -B /opt/loom-task-image-builder-guard/releases/"
+            "@LOOM_GUARD_RELEASE_SHA256@/loom-task-image-builder-guard.pyz --config "
+            "/etc/loom/task-image-builder-guard/config-v1.json",
+        ),
+        "Group": ("root",),
+        "KillMode": ("control-group",),
+        "LimitNOFILE": ("4096",),
+        "LockPersonality": ("yes",),
+        "MemoryDenyWriteExecute": ("yes",),
+        "MemoryMax": ("512M",),
+        "NoNewPrivileges": ("yes",),
+        "NotifyAccess": ("main",),
+        "OOMPolicy": ("stop",),
+        "PrivateDevices": ("yes",),
+        "PrivateTmp": ("yes",),
+        "ProcSubset": ("all",),
+        "ProtectClock": ("yes",),
+        "ProtectControlGroups": ("no",),
+        "ProtectHome": ("yes",),
+        "ProtectHostname": ("yes",),
+        "ProtectKernelLogs": ("yes",),
+        "ProtectKernelModules": ("yes",),
+        "ProtectKernelTunables": ("yes",),
+        "ProtectProc": ("default",),
+        "ProtectSystem": ("strict",),
+        "ReadOnlyPaths": (
+            "/etc/loom/task-image-builder-guard /opt/loom-task-image-builder-guard/"
+            "releases/@LOOM_GUARD_RELEASE_SHA256@",
+        ),
+        "ReadWritePaths": (
+            "/sys/fs/cgroup /sys/fs/bpf/loom-task-image-builder "
+            "/run/loom-task-image-builder-guard /var/lib/loom-task-image-builder-guard",
+        ),
+        "RemoveIPC": ("yes",),
+        "Restart": ("on-failure",),
+        "RestartSec": ("5s",),
+        "RestrictAddressFamilies": ("AF_UNIX AF_INET AF_INET6 AF_NETLINK",),
+        "RestrictNamespaces": ("yes",),
+        "RestrictRealtime": ("yes",),
+        "RestrictSUIDSGID": ("yes",),
+        "RuntimeDirectory": ("loom-task-image-builder-guard",),
+        "RuntimeDirectoryMode": ("0711",),
+        "StateDirectory": ("loom-task-image-builder-guard",),
+        "StateDirectoryMode": ("0700",),
+        "SystemCallArchitectures": ("native",),
+        "SystemCallErrorNumber": ("EPERM",),
+        "SystemCallFilter": (
+            "@system-service bpf kcmp memfd_create pidfd_getfd pidfd_open "
+            "pidfd_send_signal",
+        ),
+        "TasksMax": ("256",),
+        "TimeoutStartSec": ("60s",),
+        "TimeoutStopSec": ("30s",),
+        "Type": ("notify",),
+        "UMask": ("0077",),
+        "User": ("root",),
+        "WatchdogSec": ("30s",),
+        "WorkingDirectory": ("/",),
+    }
+    if any(unit.get(key) != expected for key, expected in required_unit.items()) or any(
+        service.get(key) != expected for key, expected in required_service.items()
+    ):
+        raise GuardReleaseError("systemd unit hardening is invalid")
+    environment = service.get("Environment")
+    unset = service.get("UnsetEnvironment")
+    if environment != ("LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin") or unset != (
+        "ALL_PROXY CURL_CA_BUNDLE HTTP_PROXY HTTPS_PROXY LD_LIBRARY_PATH LD_PRELOAD "
+        "NO_PROXY PYTHONHOME PYTHONINSPECT PYTHONPATH PYTHONSTARTUP REQUESTS_CA_BUNDLE "
+        "SSL_CERT_DIR SSL_CERT_FILE all_proxy http_proxy https_proxy no_proxy",
+    ):
+        raise GuardReleaseError("systemd unit environment boundary is invalid")
+    if set(unit) != {*required_unit, "Description"} or set(service) != {
+        *required_service,
+        "Environment",
+        "UnsetEnvironment",
+    }:
+        raise GuardReleaseError("systemd unit directive surface is invalid")
+    return _digest(payload)
+
+
 def _write_file(path: Path, payload: bytes, mode: int) -> None:
     descriptor = -1
     try:
@@ -404,17 +542,60 @@ def _write_file(path: Path, payload: bytes, mode: int) -> None:
             | getattr(os, "O_NOFOLLOW", 0),
             mode,
         )
-        position = 0
-        while position < len(payload):
-            position += os.write(descriptor, payload[position:])
-        os.fsync(descriptor)
-        os.fchmod(descriptor, mode)
-        os.fsync(descriptor)
+        _write_payload(descriptor, payload, mode)
+    except GuardReleaseError:
+        raise
     except OSError as exc:
         raise GuardReleaseError("release output could not be written") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _write_payload(descriptor: int, payload: bytes, mode: int) -> None:
+    try:
+        position = 0
+        while position < len(payload):
+            written = os.write(descriptor, payload[position:])
+            if written <= 0:
+                raise GuardReleaseError("release output could not be written")
+            position += written
+        os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise GuardReleaseError("release output could not be written") from exc
+
+
+def _publish_sidecar(path: Path, payload: bytes) -> None:
+    descriptor = -1
+    candidate: Path | None = None
+    published = False
+    try:
+        descriptor, raw_candidate = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            dir=path.parent,
+        )
+        candidate = Path(raw_candidate)
+        _write_payload(descriptor, payload, 0o444)
+        os.close(descriptor)
+        descriptor = -1
+        _rename_noreplace(candidate, path)
+        published = True
+    except GuardReleaseError:
+        raise
+    except OSError as exc:
+        raise GuardReleaseError("release output could not be written") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if candidate is not None and not published:
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise GuardReleaseError("release output could not be cleaned") from exc
 
 
 def _zipapp(path: Path, sources: tuple[tuple[PurePosixPath, bytes], ...]) -> None:
@@ -548,6 +729,7 @@ def verify_release_directory(
         ("guard-network-map-schema-v1.json", 0o444, _MAX_ARTIFACT_BYTES),
         ("guard-network-v1.bpf.build.json", 0o444, _MAX_ARTIFACT_BYTES),
         ("guard-network-v1.bpf.o", 0o444, _MAX_BPF_OBJECT_BYTES),
+        (_UNIT, 0o444, _MAX_ARTIFACT_BYTES),
         (_ARCHIVE, 0o555, 64 * 1024 * 1024),
     )
     if not isinstance(files, list) or len(files) != len(expected_layout):
@@ -582,6 +764,7 @@ def verify_release_directory(
     member_map = {name: payload for name, _mode, payload in members}
     _validate_bpftool(member_map["bpftool"], expected_architecture)
     _validate_bpf(source=None, artifacts=member_map)
+    validate_unit(member_map[_UNIT])
     if expected_uid is not None and manifest_path.stat().st_uid != expected_uid:
         raise GuardReleaseError("guard release owner is invalid")
     return VerifiedGuardRelease(
@@ -633,6 +816,7 @@ def build_release(
         for item in artifact_records
     }
     _validate_bpf(source=bpf_source, artifacts=artifacts)
+    validate_unit(artifacts[_UNIT])
 
     if not output.is_absolute():
         raise GuardReleaseError("release output must be an absolute path")
@@ -656,6 +840,7 @@ def build_release(
                 ("guard-network-map-schema-v1.json", 0o444),
                 ("guard-network-v1.bpf.build.json", 0o444),
                 ("guard-network-v1.bpf.o", 0o444),
+                (_UNIT, 0o444),
                 (_ARCHIVE, 0o555),
             )
         ]
@@ -677,6 +862,28 @@ def build_release(
         sidecar = output / f"{release_sha256}.manifest.json"
         if (
             release_directory.exists()
+            and not release_directory.is_symlink()
+            and not sidecar.exists()
+            and not sidecar.is_symlink()
+        ):
+            verified = verify_release_directory(
+                release_directory,
+                expected_release_sha256=release_sha256,
+                expected_architecture=architecture,
+            )
+            if verified.manifest_payload != manifest_payload:
+                raise GuardReleaseError("release digest directory already exists")
+            _publish_sidecar(sidecar, manifest_payload)
+            _fsync_directory(output)
+            return GuardRelease(
+                release_sha256=release_sha256,
+                directory=release_directory,
+                manifest_path=release_directory / _MANIFEST,
+                sidecar_path=sidecar,
+                manifest=manifest,
+            )
+        if (
+            release_directory.exists()
             or release_directory.is_symlink()
             or sidecar.exists()
             or sidecar.is_symlink()
@@ -685,7 +892,7 @@ def build_release(
         _rename_noreplace(staging, release_directory)
         published = True
         _fsync_directory(output)
-        _write_file(sidecar, manifest_payload, 0o444)
+        _publish_sidecar(sidecar, manifest_payload)
         _fsync_directory(output)
         return GuardRelease(
             release_sha256=release_sha256,
@@ -731,5 +938,6 @@ __all__ = [
     "VerifiedGuardRelease",
     "build_release",
     "main",
+    "validate_unit",
     "verify_release_directory",
 ]

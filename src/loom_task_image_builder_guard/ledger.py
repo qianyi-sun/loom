@@ -26,7 +26,9 @@ _STAGING = re.compile(
 _STATES = frozenset(
     {
         "intent",
+        "challenge_pending",
         "challenged",
+        "containment_pending",
         "attached",
         "projected",
         "exchanged",
@@ -65,6 +67,8 @@ _FIELDS = frozenset(
         "attestation_generation",
         "attestation_sha256",
         "attestation_expires_at",
+        "pending_attestation",
+        "pending_attestation_sha256",
         "terminal_reason",
         "quarantine_reason",
     }
@@ -198,7 +202,7 @@ class LedgerEntry:
     def document(self) -> dict[str, object]:
         try:
             value = json.loads(self.raw, object_pairs_hook=_pairs)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
             raise GuardError("ledger_document_invalid") from None
         if not isinstance(value, dict):
             raise GuardError("ledger_document_invalid")
@@ -321,7 +325,7 @@ class GuardLedger:
             raise GuardError("ledger_secret_forbidden")
         try:
             value = json.loads(raw, object_pairs_hook=_pairs)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
             raise GuardError("ledger_file_invalid") from None
         if not isinstance(value, dict) or set(value) != _FIELDS:
             raise GuardError("ledger_document_invalid")
@@ -358,8 +362,60 @@ class GuardLedger:
             "attestation_sha256",
         ):
             _digest(document[name], optional=True)
+        for value_name, digest_name in (
+            ("projection_request", "projection_request_sha256"),
+            ("challenge", "challenge_sha256"),
+            ("proof", "proof_sha256"),
+            ("pending_attestation", "pending_attestation_sha256"),
+        ):
+            value = document[value_name]
+            recorded_digest = document[digest_name]
+            if (value is None) != (recorded_digest is None) or (
+                value is not None
+                and (
+                    not isinstance(value, dict)
+                    or hashlib.sha256(_canonical(value)).hexdigest() != recorded_digest
+                )
+            ):
+                raise GuardError("ledger_document_invalid")
         for name in ("link_ids", "program_ids", "map_ids"):
             _ids(document[name])
+        projection = document["projection_request"]
+        challenge = document["challenge"]
+        proof = document["proof"]
+        if projection is not None and (
+            not isinstance(projection, dict)
+            or _uuid(projection.get("grant_id")) != grant
+            or _uuid(projection.get("request_id")) != request
+            or projection.get("slurm_job_id") != job_id
+            or projection.get("supervisor_pid") != peer_pid
+            or projection.get("supervisor_executable_sha256")
+            != document["peer_executable_sha256"]
+        ):
+            raise GuardError("ledger_document_invalid")
+        if challenge is not None and (
+            not isinstance(challenge, dict)
+            or _uuid(challenge.get("grant_id")) != grant
+            or _uuid(challenge.get("request_id")) != request
+            or challenge.get("request_sha256") != document["projection_request_sha256"]
+        ):
+            raise GuardError("ledger_document_invalid")
+        if proof is not None:
+            attachment = proof.get("attachment") if isinstance(proof, dict) else None
+            if (
+                not isinstance(proof, dict)
+                or _uuid(proof.get("grant_id")) != grant
+                or _uuid(proof.get("request_id")) != request
+                or proof.get("request_sha256") != document["projection_request_sha256"]
+                or not isinstance(challenge, dict)
+                or proof.get("challenge_nonce") != challenge.get("challenge_nonce")
+                or not isinstance(attachment, dict)
+                or any(
+                    attachment.get(name) != document[name]
+                    for name in ("link_ids", "program_ids", "map_ids")
+                )
+            ):
+                raise GuardError("ledger_document_invalid")
         if document["pin_path"] is not None:
             _safe_path(document["pin_path"], absolute=True)
         for name in ("exchange_id", "session_id"):
@@ -372,6 +428,49 @@ class GuardLedger:
             type(generation) is not int or not 1 <= generation <= (1 << 63) - 1
         ):
             raise GuardError("ledger_document_invalid")
+        pending = document["pending_attestation"]
+        if pending is not None:
+            pending_keys = {
+                "schema_version",
+                "attestation_id",
+                "grant_id",
+                "generation",
+                "node_name",
+                "node_boot_id",
+                "slurm_cluster_id",
+                "slurm_job_id",
+                "cgroup_path",
+                "cgroup_inode",
+                "attachment",
+                "issued_at",
+                "expires_at",
+            }
+            if (
+                state not in {"projected", "exchanged"}
+                or not isinstance(pending, dict)
+                or set(pending) != pending_keys
+                or pending.get("schema_version") != 1
+                or _uuid(pending.get("attestation_id")) .int == 0
+                or _uuid(pending.get("grant_id")) != grant
+                or type(generation) is not int
+                or pending.get("generation") != generation + 1
+                or not isinstance(proof, dict)
+                or any(
+                    pending.get(name) != proof.get(name)
+                    for name in (
+                        "node_name",
+                        "node_boot_id",
+                        "slurm_cluster_id",
+                        "slurm_job_id",
+                        "cgroup_path",
+                        "cgroup_inode",
+                        "attachment",
+                    )
+                )
+            ):
+                raise GuardError("ledger_document_invalid")
+            _timestamp(pending.get("issued_at"))
+            _timestamp(pending.get("expires_at"))
         for name in ("terminal_reason", "quarantine_reason"):
             reason = document[name]
             if reason is not None and (
@@ -389,7 +488,22 @@ class GuardLedger:
             for name in ("projection_request", "challenge", "proof", "pin_path")
         ):
             raise GuardError("ledger_document_invalid")
-        if state in {"challenged", "attached", "projected", "exchanged"} and (
+        if state == "challenge_pending" and (
+            document["projection_request"] is None
+            or document["projection_request_sha256"] is None
+            or document["challenge"] is not None
+            or document["challenge_sha256"] is not None
+            or document["proof"] is not None
+            or document["pin_path"] is not None
+        ):
+            raise GuardError("ledger_document_invalid")
+        if state in {
+            "challenged",
+            "containment_pending",
+            "attached",
+            "projected",
+            "exchanged",
+        } and (
             document["projection_request"] is None or document["challenge"] is None
         ):
             raise GuardError("ledger_document_invalid")
@@ -552,6 +666,8 @@ class GuardLedger:
             "attestation_generation": None,
             "attestation_sha256": None,
             "attestation_expires_at": None,
+            "pending_attestation": None,
+            "pending_attestation_sha256": None,
             "terminal_reason": None,
             "quarantine_reason": None,
         }
@@ -597,6 +713,36 @@ class GuardLedger:
     def _update(prior: LedgerEntry) -> dict[str, object]:
         return prior.document()
 
+    def record_projection_request(
+        self,
+        grant_id: UUID,
+        *,
+        projection_request: dict[str, object],
+        projection_request_sha256: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None:
+            raise GuardError("ledger_intent_missing")
+        if self.document_sha256(projection_request) != projection_request_sha256:
+            raise GuardError("ledger_digest_invalid")
+        if (
+            _uuid(projection_request.get("grant_id")) != grant_id
+            or _uuid(projection_request.get("request_id")) != prior.request_id
+        ):
+            raise GuardError("ledger_binding_invalid")
+        document = self._update(prior)
+        expected = {
+            "projection_request": projection_request,
+            "projection_request_sha256": projection_request_sha256,
+        }
+        if prior.state != "intent":
+            if all(document[name] == value for name, value in expected.items()):
+                return prior
+            raise GuardError("ledger_replay_conflict")
+        document.update(expected)
+        document["state"] = "challenge_pending"
+        return self._write(document, prior=prior)
+
     def record_challenge(
         self,
         grant_id: UUID,
@@ -628,12 +774,24 @@ class GuardLedger:
             "challenge": challenge,
             "challenge_sha256": challenge_sha256,
         }
-        if prior.state != "intent":
+        if prior.state not in {"intent", "challenge_pending"}:
             if all(document[name] == value for name, value in expected.items()):
                 return prior
             raise GuardError("ledger_replay_conflict")
         document.update(expected)
         document["state"] = "challenged"
+        return self._write(document, prior=prior)
+
+    def record_containment_pending(self, grant_id: UUID) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None:
+            raise GuardError("ledger_intent_missing")
+        if prior.state == "containment_pending":
+            return prior
+        if prior.state != "challenged":
+            raise GuardError("ledger_replay_conflict")
+        document = self._update(prior)
+        document["state"] = "containment_pending"
         return self._write(document, prior=prior)
 
     def record_attachment(
@@ -655,10 +813,20 @@ class GuardLedger:
             raise GuardError("ledger_intent_missing")
         if self.document_sha256(proof) != proof_sha256:
             raise GuardError("ledger_digest_invalid")
+        document = self._update(prior)
+        challenge = document["challenge"]
+        attachment = proof.get("attachment")
         if (
             _uuid(proof.get("grant_id")) != grant_id
             or _uuid(proof.get("request_id")) != prior.request_id
             or _uuid(proof.get("proof_id")) .int == 0
+            or not isinstance(challenge, dict)
+            or proof.get("request_sha256") != document["projection_request_sha256"]
+            or proof.get("challenge_nonce") != challenge.get("challenge_nonce")
+            or not isinstance(attachment, dict)
+            or attachment.get("link_ids") != list(link_ids)
+            or attachment.get("program_ids") != list(program_ids)
+            or attachment.get("map_ids") != list(map_ids)
         ):
             raise GuardError("ledger_binding_invalid")
         safe_pin = _safe_path(pin_path, absolute=True)
@@ -683,8 +851,7 @@ class GuardLedger:
         for name in ("link_ids", "program_ids", "map_ids"):
             if not _ids(expected[name]):
                 raise GuardError("ledger_binding_invalid")
-        document = self._update(prior)
-        if prior.state != "challenged":
+        if prior.state not in {"challenged", "containment_pending"}:
             if all(document[name] == value for name, value in expected.items()):
                 return prior
             raise GuardError("ledger_replay_conflict")
@@ -781,9 +948,51 @@ class GuardLedger:
             raise GuardError("ledger_replay_conflict")
         if type(current) is not int or type(generation) is not int or generation != current + 1:
             raise GuardError("ledger_attestation_invalid")
+        pending = document["pending_attestation"]
+        if pending is not None and (
+            not isinstance(pending, dict)
+            or pending.get("generation") != generation
+            or document["pending_attestation_sha256"] != attestation_sha256
+            or pending.get("expires_at") != expires_at
+        ):
+            raise GuardError("ledger_replay_conflict")
         document["attestation_generation"] = generation
         document["attestation_sha256"] = attestation_sha256
         document["attestation_expires_at"] = expires_at
+        document["pending_attestation"] = None
+        document["pending_attestation_sha256"] = None
+        return self._write(document, prior=prior)
+
+    def record_pending_attestation(
+        self,
+        grant_id: UUID,
+        *,
+        generation: int,
+        attestation: dict[str, object],
+        attestation_sha256: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None or prior.state not in {"projected", "exchanged"}:
+            raise GuardError("ledger_attestation_invalid")
+        if (
+            self.document_sha256(attestation) != attestation_sha256
+            or _uuid(attestation.get("grant_id")) != grant_id
+            or attestation.get("generation") != generation
+        ):
+            raise GuardError("ledger_binding_invalid")
+        document = self._update(prior)
+        current = document["attestation_generation"]
+        if type(current) is not int or type(generation) is not int or generation != current + 1:
+            raise GuardError("ledger_attestation_invalid")
+        expected = {
+            "pending_attestation": attestation,
+            "pending_attestation_sha256": attestation_sha256,
+        }
+        if document["pending_attestation"] is not None:
+            if all(document[name] == value for name, value in expected.items()):
+                return prior
+            raise GuardError("ledger_replay_conflict")
+        document.update(expected)
         return self._write(document, prior=prior)
 
     def quarantine(self, grant_id: UUID, *, reason: str) -> LedgerEntry:
@@ -797,6 +1006,8 @@ class GuardLedger:
             raise GuardError("ledger_replay_conflict")
         document["state"] = "quarantined"
         document["quarantine_reason"] = reason
+        document["pending_attestation"] = None
+        document["pending_attestation_sha256"] = None
         return self._write(document, prior=prior)
 
     def mark_terminal(self, grant_id: UUID, *, reason: str) -> LedgerEntry:
@@ -812,6 +1023,8 @@ class GuardLedger:
             raise GuardError("ledger_replay_conflict")
         document["state"] = "terminal"
         document["terminal_reason"] = reason
+        document["pending_attestation"] = None
+        document["pending_attestation_sha256"] = None
         return self._write(document, prior=prior)
 
     def removable_pin_paths(self, grant_id: UUID) -> tuple[Path, ...]:

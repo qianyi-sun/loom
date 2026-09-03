@@ -21,6 +21,7 @@
   },
   "authority": {
     "base_url": "https://task-image-authority.example.invalid:8445",
+    "connect_ip": "198.51.100.10",
     "ca_path": "/etc/loom/task-image-builder-guard/client-ca.pem",
     "cert_path": "/etc/loom/task-image-builder-guard/client.pem",
     "key_path": "/etc/loom/task-image-builder-guard/client-key.pem",
@@ -59,6 +60,7 @@
     "ledger_root": "/var/lib/loom-task-image-builder-guard/ledger",
     "bpf_object_path": "/opt/loom-task-image-builder-guard/releases/2222222222222222222222222222222222222222222222222222222222222222/guard-network-v1.bpf.o",
     "network_policy_path": "/etc/loom/task-image-builder-guard/network-policy-v1.json",
+    "device_program_tags": ["0123456789abcdef"],
     "pids_max": 4096,
     "io_limits": [
       {
@@ -69,9 +71,9 @@
         "wiops": 10000
       }
     ],
-    "containment_policy_sha256": "e84d34d23dbd72f9a67a455946d2b1767e793a971b81b1dfb2d85b0b58a8ab52",
+    "containment_policy_sha256": "0e6fffdf4a921cf27aa8a3d29e687ba309074a160e34a72c9f3635f4b9a720d2",
     "resource_profile_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "bpf_program_sha256": "3712b357188c2ffb1b37391f6f28fcb17a414a1a331750fc00f2997bafde7b1d",
+    "bpf_program_sha256": "dcec31541f762642b6a5a2211813a67983b25a6315e6993b8b1b3085247d4173",
     "bpf_map_schema_sha256": "272db8ab014f094fa3e1d4364ee94fd0892ad8db4c6422ec6e4409829feb69d4"
   },
   "service": {

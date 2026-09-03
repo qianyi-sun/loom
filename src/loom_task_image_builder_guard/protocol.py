@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import stat
+import struct
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -23,6 +24,7 @@ _MFD_CLOEXEC = 0x0001
 _MFD_ALLOW_SEALING = 0x0002
 _DIGEST_LENGTH = 64
 _MAX_JSON_FIELDS = 5
+_PEER_CREDENTIALS = struct.Struct("3i")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,24 @@ class LocalRequest:
     exchange_id: UUID | None = None
     proof_sha256: str | None = None
     response_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerCredentials:
+    pid: int
+    uid: int
+    gid: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.pid) is not int
+            or self.pid <= 0
+            or type(self.uid) is not int
+            or self.uid < 0
+            or type(self.gid) is not int
+            or self.gid < 0
+        ):
+            raise GuardError("local_peer_credentials_invalid")
 
 
 def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -92,7 +112,13 @@ def parse_local_request(payload: bytes) -> LocalRequest:
             )
         if operation == "ack" and set(document) == {"schema", "operation", "response_id"}:
             return LocalRequest(operation="ack", response_id=_uuid(document["response_id"]))
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
         pass
     raise GuardError("local_request_invalid")
 
@@ -213,7 +239,13 @@ def send_packet(
     _require_seqpacket(connection)
     if not isinstance(payload, bytes) or not payload:
         raise GuardError("local_packet_invalid")
-    ancillary: list[tuple[int, int, bytes | array.array[int]]] = []
+    ancillary: list[tuple[int, int, bytes | array.array[int]]] = [
+        (
+            socket.SOL_SOCKET,
+            socket.SCM_CREDENTIALS,
+            _PEER_CREDENTIALS.pack(os.getpid(), os.geteuid(), os.getegid()),
+        )
+    ]
     if descriptor is not None:
         _validate_sealed_descriptor(descriptor)
         ancillary.append((socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor])))
@@ -225,33 +257,47 @@ def send_packet(
         raise GuardError("local_send_failed")
 
 
-def receive_request(connection: socket.socket, *, maximum: int) -> tuple[bytes, int | None]:
-    """Receive one complete packet and take ownership of at most one FD."""
-
+def _receive_request(
+    connection: socket.socket,
+    *,
+    maximum: int,
+) -> tuple[bytes, int | None, PeerCredentials | None]:
     _require_seqpacket(connection)
     if type(maximum) is not int or maximum <= 0 or maximum > 64 * 1024:
         raise GuardError("local_packet_invalid")
     item_size = array.array("i").itemsize
     received: list[int] = []
+    credentials: PeerCredentials | None = None
     try:
         payload, ancillary, flags, _address = connection.recvmsg(
             maximum,
-            socket.CMSG_SPACE(item_size * 2),
+            socket.CMSG_SPACE(item_size * 2)
+            + socket.CMSG_SPACE(_PEER_CREDENTIALS.size),
+            socket.MSG_CMSG_CLOEXEC,
         )
         for level, kind, data in ancillary:
-            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+            if level != socket.SOL_SOCKET:
                 raise GuardError("local_descriptor_invalid")
-            values = array.array("i")
-            values.frombytes(data[: len(data) - (len(data) % item_size)])
-            received.extend(values.tolist())
+            if kind == socket.SCM_RIGHTS:
+                values = array.array("i")
+                values.frombytes(data[: len(data) - (len(data) % item_size)])
+                received.extend(values.tolist())
+            elif kind == socket.SCM_CREDENTIALS:
+                if credentials is not None or len(data) != _PEER_CREDENTIALS.size:
+                    raise GuardError("local_peer_credentials_invalid")
+                credentials = PeerCredentials(*_PEER_CREDENTIALS.unpack(data))
+            else:
+                raise GuardError("local_descriptor_invalid")
         for received_fd in received:
-            fcntl.fcntl(received_fd, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+            descriptor_flags = fcntl.fcntl(received_fd, fcntl.F_GETFD)
+            if not descriptor_flags & fcntl.FD_CLOEXEC:
+                raise GuardError("local_descriptor_invalid")
         if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or not payload:
             raise GuardError("local_packet_invalid")
         if len(received) > 1:
             raise GuardError("local_descriptor_invalid")
         result_fd = received.pop() if received else None
-        return payload, result_fd
+        return payload, result_fd, credentials
     except GuardError:
         raise
     except OSError as exc:
@@ -264,22 +310,173 @@ def receive_request(connection: socket.socket, *, maximum: int) -> tuple[bytes, 
                 pass
 
 
+def _close_received_rights(ancillary: tuple[tuple[int, int, bytes], ...]) -> None:
+    item_size = array.array("i").itemsize
+    for level, kind, data in ancillary:
+        if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+            continue
+        values = array.array("i")
+        values.frombytes(data[: len(data) - (len(data) % item_size)])
+        for descriptor in values:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+@dataclass(slots=True)
+class AuthenticatedPacket:
+    """Own a raw credentialed packet until peer pidfd capture is complete."""
+
+    payload: bytes
+    ancillary: tuple[tuple[int, int, bytes], ...]
+    flags: int
+    credentials: PeerCredentials
+    _finished: bool = False
+
+    def finish(self) -> tuple[bytes, int | None]:
+        if self._finished:
+            raise GuardError("local_packet_invalid")
+        self._finished = True
+        item_size = array.array("i").itemsize
+        received: list[int] = []
+        observed_credentials: PeerCredentials | None = None
+        try:
+            for level, kind, data in self.ancillary:
+                if level != socket.SOL_SOCKET:
+                    raise GuardError("local_descriptor_invalid")
+                if kind == socket.SCM_RIGHTS:
+                    values = array.array("i")
+                    values.frombytes(data[: len(data) - (len(data) % item_size)])
+                    received.extend(values.tolist())
+                elif kind == socket.SCM_CREDENTIALS:
+                    if (
+                        observed_credentials is not None
+                        or len(data) != _PEER_CREDENTIALS.size
+                    ):
+                        raise GuardError("local_peer_credentials_invalid")
+                    observed_credentials = PeerCredentials(
+                        *_PEER_CREDENTIALS.unpack(data)
+                    )
+                else:
+                    raise GuardError("local_descriptor_invalid")
+            for descriptor in received:
+                descriptor_flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+                if not descriptor_flags & fcntl.FD_CLOEXEC:
+                    raise GuardError("local_descriptor_invalid")
+            if (
+                self.flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+                or not self.payload
+            ):
+                raise GuardError("local_packet_invalid")
+            if len(received) > 1:
+                raise GuardError("local_descriptor_invalid")
+            if observed_credentials != self.credentials:
+                raise GuardError("local_peer_credentials_invalid")
+            result_fd = received.pop() if received else None
+            return self.payload, result_fd
+        except GuardError:
+            raise
+        except OSError as exc:
+            raise GuardError("local_receive_failed") from exc
+        finally:
+            for descriptor in received:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        _close_received_rights(self.ancillary)
+
+
+def receive_authenticated_packet(
+    connection: socket.socket,
+    *,
+    maximum: int,
+) -> AuthenticatedPacket:
+    """Receive raw packet authority while deferring descriptor validation."""
+
+    _require_seqpacket(connection)
+    if type(maximum) is not int or maximum <= 0 or maximum > 64 * 1024:
+        raise GuardError("local_packet_invalid")
+    try:
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    except OSError as exc:
+        raise GuardError("local_peer_credentials_invalid") from exc
+    try:
+        item_size = array.array("i").itemsize
+        payload, raw_ancillary, flags, _address = connection.recvmsg(
+            maximum,
+            socket.CMSG_SPACE(item_size * 2)
+            + socket.CMSG_SPACE(_PEER_CREDENTIALS.size),
+            socket.MSG_CMSG_CLOEXEC,
+        )
+    except OSError as exc:
+        raise GuardError("local_receive_failed") from exc
+    ancillary = tuple(raw_ancillary)
+    credentials: PeerCredentials | None = None
+    try:
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                if credentials is not None or len(data) != _PEER_CREDENTIALS.size:
+                    raise GuardError("local_peer_credentials_invalid")
+                credentials = PeerCredentials(*_PEER_CREDENTIALS.unpack(data))
+        if credentials is None:
+            raise GuardError("local_peer_credentials_invalid")
+        return AuthenticatedPacket(payload, ancillary, flags, credentials)
+    except GuardError:
+        _close_received_rights(ancillary)
+        raise
+
+
+def receive_request(connection: socket.socket, *, maximum: int) -> tuple[bytes, int | None]:
+    """Receive one complete packet and take ownership of at most one FD."""
+
+    payload, descriptor, _credentials = _receive_request(connection, maximum=maximum)
+    return payload, descriptor
+
+
+def receive_authenticated_request(
+    connection: socket.socket,
+    *,
+    maximum: int,
+) -> tuple[bytes, int | None, PeerCredentials]:
+    """Receive one packet and bind it to the kernel's per-message credentials."""
+
+    packet = receive_authenticated_packet(connection, maximum=maximum)
+    try:
+        payload, descriptor = packet.finish()
+        return payload, descriptor, packet.credentials
+    finally:
+        packet.close()
+
+
 def require_ack(
     connection: socket.socket,
     *,
     response_id: UUID,
     timeout_seconds: int,
     maximum: int,
+    expected_credentials: PeerCredentials,
 ) -> None:
     """Require a descriptor-free acknowledgement for one exact response."""
 
     prior_timeout = connection.gettimeout()
     try:
         connection.settimeout(timeout_seconds)
-        payload, descriptor = receive_request(connection, maximum=maximum)
+        payload, descriptor, credentials = receive_authenticated_request(
+            connection,
+            maximum=maximum,
+        )
         if descriptor is not None:
             os.close(descriptor)
             raise GuardError("local_ack_invalid")
+        if credentials != expected_credentials:
+            raise GuardError("local_peer_credentials_invalid")
         request = parse_local_request(payload)
         if request.operation != "ack" or request.response_id != response_id:
             raise GuardError("local_ack_invalid")
@@ -293,10 +490,14 @@ __all__ = [
     "GET_MEMFD_SEALS",
     "LOCAL_SCHEMA",
     "REQUIRED_MEMFD_SEALS",
+    "AuthenticatedPacket",
     "LocalRequest",
+    "PeerCredentials",
     "create_sealed_memfd",
     "parse_local_request",
     "read_sealed_memfd",
+    "receive_authenticated_packet",
+    "receive_authenticated_request",
     "receive_request",
     "require_ack",
     "send_packet",

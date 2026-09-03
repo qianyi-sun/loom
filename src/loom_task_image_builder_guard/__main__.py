@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
@@ -30,6 +31,7 @@ from loom_task_image_builder_guard.service import (
     Batch,
     Containment,
     GuardService,
+    MainLoopProgress,
     NodeReconciler,
     PeerSource,
     ReconciliationProbe,
@@ -67,6 +69,7 @@ class SystemdNotifier:
     def __init__(self, address: str | bytes | None) -> None:
         self._address = address
         self._socket: socket.socket | None = None
+        self._lock = threading.Lock()
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> SystemdNotifier:
@@ -89,18 +92,25 @@ class SystemdNotifier:
     def _send(self, payload: bytes) -> None:
         if self._address is None:
             return
-        try:
-            if self._socket is None:
-                self._socket = socket.socket(
-                    socket.AF_UNIX,
-                    socket.SOCK_DGRAM | socket.SOCK_CLOEXEC,
-                )
-                self._socket.connect(self._address)
-            if self._socket.send(payload) != len(payload):
-                raise OSError("short systemd notification")
-        except OSError as exc:
-            self.close()
-            raise GuardError("service_notify_failed") from exc
+        with self._lock:
+            try:
+                if self._socket is None:
+                    self._socket = socket.socket(
+                        socket.AF_UNIX,
+                        socket.SOCK_DGRAM | socket.SOCK_CLOEXEC,
+                    )
+                    self._socket.settimeout(1.0)
+                    self._socket.connect(self._address)
+                if self._socket.send(payload) != len(payload):
+                    raise OSError("short systemd notification")
+            except OSError as exc:
+                if self._socket is not None:
+                    self._socket.close()
+                    self._socket = None
+                raise GuardError("service_notify_failed") from exc
+
+    def extend_startup(self) -> None:
+        self._send(b"EXTEND_TIMEOUT_USEC=60000000")
 
     def ready(self) -> None:
         self._send(b"READY=1")
@@ -109,9 +119,10 @@ class SystemdNotifier:
         self._send(b"WATCHDOG=1")
 
     def close(self) -> None:
-        if self._socket is not None:
-            self._socket.close()
-            self._socket = None
+        with self._lock:
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
 
 
 def _error(code: str) -> None:
@@ -132,13 +143,15 @@ def _boot_id() -> UUID:
 def build_service(
     config: GuardConfig,
     *,
+    startup: Callable[[], None] = lambda: None,
     ready: Callable[[], None] = lambda: None,
     watchdog: Callable[[], None] = lambda: None,
 ) -> GuardService:
     """Assemble only digest-pinned, locally configured guard dependencies."""
 
-    runner = PinnedCommandRunner()
-    peers = PeerInspector(config.identity)
+    progress = MainLoopProgress()
+    runner = PinnedCommandRunner(progress=progress.mark)
+    peers = PeerInspector(config.identity, progress=progress.mark)
     slurm = SlurmInspector(
         cluster_id=config.cluster_id,
         node_name=config.node_name,
@@ -167,14 +180,16 @@ def build_service(
         resource_profile_sha256=config.containment.resource_profile_sha256,
         bpf_map_schema_sha256=config.containment.bpf_map_schema_sha256,
     )
+    device_probe = BpftoolDeviceProbe(runner, config.commands.bpftool)
     containment = ContainmentManager(
         filesystem=CgroupFilesystem(),
         bpf_loader=loader,
-        device_probe=BpftoolDeviceProbe(runner, config.commands.bpftool),
+        device_probe=device_probe,
     )
     policy = GuardPolicy(
         cpus=config.slurm.cpus,
         memory_mib=config.slurm.memory_mib,
+        device_program_tags=config.containment.device_program_tags,
         pids_max=config.containment.pids_max,
         io_limits=config.containment.io_limits,
         network=network,
@@ -188,13 +203,16 @@ def build_service(
         peers=peers,
         slurm=slurm,
         kernel=kernel,
+        device_probe=device_probe,
+        network_policy=network,
     )
     reconciler = NodeReconciler(
         config.containment.bpffs_root,
         probe=cast(ReconciliationProbe, probe),
         slurm=slurm,
+        progress=progress.mark,
     )
-    authority = AuthorityClient(config.authority)
+    authority = AuthorityClient(config.authority, progress=progress.mark)
     return GuardService(
         config,
         ledger=ledger,
@@ -213,8 +231,10 @@ def build_service(
         authority=authority,
         reconciler=reconciler,
         node_boot_id=_boot_id(),
+        startup=startup,
         ready=ready,
         watchdog=watchdog,
+        progress=progress,
     )
 
 
@@ -248,6 +268,7 @@ def main(
         notifier = SystemdNotifier.from_environment(environment)
         service = build_service(
             config,
+            startup=notifier.extend_startup,
             ready=notifier.ready,
             watchdog=notifier.watchdog,
         )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_task_image_builder_guard import safeio
 from loom_task_image_builder_guard.config import GuardConfig
 from loom_task_image_builder_guard.errors import GuardError
 from loom_task_image_builder_guard.safeio import read_stable_file
@@ -42,6 +43,7 @@ def _document() -> dict[str, object]:
         },
         "authority": {
             "base_url": "https://loom-task-image-authority.loom.svc:8445",
+            "connect_ip": "192.0.2.10",
             "ca_path": "/etc/loom/task-image-builder-guard/client-ca.pem",
             "cert_path": "/etc/loom/task-image-builder-guard/client.pem",
             "key_path": "/etc/loom/task-image-builder-guard/client-key.pem",
@@ -78,6 +80,7 @@ def _document() -> dict[str, object]:
             "network_policy_path": (
                 "/etc/loom/task-image-builder-guard/network-policy-v1.json"
             ),
+            "device_program_tags": ["0123456789abcdef"],
             "pids_max": 4096,
             "io_limits": [
                 {
@@ -123,10 +126,12 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
     )
     assert config.slurm.cluster_name == "trt-oldlab"
     assert config.commands.bpftool.sha256 == SHA_C
+    assert config.authority.connect_ip == "192.0.2.10"
     assert config.containment.io_limits[0].device == "8:1"
     assert config.containment.network_policy_path == Path(
         "/etc/loom/task-image-builder-guard/network-policy-v1.json"
     )
+    assert config.containment.device_program_tags == ("0123456789abcdef",)
     assert config.service.attestation_interval_seconds == 15
 
 
@@ -137,6 +142,12 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
         (
             lambda value: value["authority"].update(  # type: ignore[union-attr]
                 {"base_url": "http://authority.invalid:8445"}
+            ),
+            "config_authority_invalid",
+        ),
+        (
+            lambda value: value["authority"].update(  # type: ignore[union-attr]
+                {"connect_ip": "authority.invalid"}
             ),
             "config_authority_invalid",
         ),
@@ -167,6 +178,12 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
                 {"max_packet_bytes": 0}
             ),
             "config_limit_invalid",
+        ),
+        (
+            lambda value: value["containment"].update(  # type: ignore[union-attr]
+                {"device_program_tags": ["0123456789abcdef", "0123456789abcdef"]}
+            ),
+            "config_device_authority_invalid",
         ),
         (
             lambda value: value["service"].update(  # type: ignore[union-attr]
@@ -243,6 +260,40 @@ def test_stable_file_rejects_payload_over_limit(tmp_path: Path) -> None:
         )
 
     assert caught.value.code == "safe_file_too_large"
+
+
+def test_stable_file_rejects_path_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "credential"
+    path.write_bytes(b"trusted")
+    path.chmod(0o600)
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"hostile")
+    replacement.chmod(0o600)
+    initial = path.stat()
+    changed = replacement.stat()
+    observations = 0
+
+    def changing_lstat(candidate: Path) -> os.stat_result:
+        nonlocal observations
+        assert candidate == path
+        observations += 1
+        return initial if observations == 1 else changed
+
+    monkeypatch.setattr(safeio.os, "lstat", changing_lstat)
+
+    with pytest.raises(GuardError) as caught:
+        read_stable_file(
+            path,
+            uid=os.geteuid(),
+            gid=os.getegid(),
+            mode=0o600,
+            maximum=64,
+        )
+
+    assert caught.value.code == "safe_file_changed"
 
 
 def test_guard_error_never_reflects_secret_or_unbounded_detail() -> None:

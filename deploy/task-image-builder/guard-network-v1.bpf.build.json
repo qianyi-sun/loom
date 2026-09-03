@@ -11,8 +11,8 @@
     "scope_subject",
     "subject_limits"
   ],
-  "object_sha256": "3712b357188c2ffb1b37391f6f28fcb17a414a1a331750fc00f2997bafde7b1d",
-  "object_size": 60992,
+  "object_sha256": "dcec31541f762642b6a5a2211813a67983b25a6315e6993b8b1b3085247d4173",
+  "object_size": 56248,
   "program_sections": [
     ".maps",
     "cgroup/connect4",
@@ -35,6 +35,6 @@
     "guard_sock_release"
   ],
   "schema": "loom.task-image-builder-guard-bpf-build/v1",
-  "source_sha256": "473075a2050b9f8660de675d261c68e8c6e3dda2457eb3f1d47ca883a76fbf60",
+  "source_sha256": "d1a0d3735f643798d741472432e64616643a235cf418c63775a77ae23f36d8ac",
   "target": "bpfel"
 }

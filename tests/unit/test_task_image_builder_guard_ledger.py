@@ -18,6 +18,7 @@ EXCHANGE = UUID("44444444-4444-4444-4444-444444444444")
 SESSION = UUID("55555555-5555-5555-5555-555555555555")
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
+REQUEST_SHA256 = "e5a07b1184d14e7b988f16558813e635ef105d450926cce6707e60353f72da77"
 BATCH = "/slurm/job_12345/step_batch/user/task_0"
 PINS = "/sys/fs/bpf/loom-task-image-builder/11111111-1111-1111-1111-111111111111"
 
@@ -95,7 +96,7 @@ def _proof() -> dict[str, object]:
         "proof_id": str(PROOF),
         "grant_id": str(GRANT),
         "request_id": str(REQUEST),
-        "request_sha256": DIGEST_A,
+        "request_sha256": REQUEST_SHA256,
         "challenge_nonce": "77777777-7777-7777-7777-777777777777",
         "attachment": {
             "link_ids": list(range(101, 125)),
@@ -103,6 +104,46 @@ def _proof() -> dict[str, object]:
             "map_ids": list(range(301, 319)),
         },
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("request-digest", "challenge-nonce", "attachment-ids"),
+)
+def test_attachment_proof_must_bind_the_persisted_request_challenge_and_ids(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _intent(ledger)
+    _record_challenge(ledger)
+    proof = _proof()
+    if mutation == "request-digest":
+        proof["request_sha256"] = DIGEST_A
+    elif mutation == "challenge-nonce":
+        proof["challenge_nonce"] = "99999999-9999-9999-9999-999999999999"
+    else:
+        attachment = proof["attachment"]
+        assert isinstance(attachment, dict)
+        attachment["link_ids"] = list(range(102, 126))
+
+    with pytest.raises(GuardError) as caught:
+        ledger.record_attachment(
+            GRANT,
+            proof=proof,
+            proof_sha256=ledger.document_sha256(proof),
+            pin_path=PINS,
+            link_ids=tuple(range(101, 125)),
+            program_ids=tuple(range(201, 225)),
+            map_ids=tuple(range(301, 319)),
+            attestation_generation=1,
+            attestation_sha256=DIGEST_B,
+            attestation_expires_at="2026-09-02T16:00:50Z",
+        )
+
+    assert caught.value.code == "ledger_binding_invalid"
+    assert ledger.get(GRANT).state == "challenged"  # type: ignore[union-attr]
+    ledger.close()
 
 
 def _record_challenge(ledger: GuardLedger):
@@ -141,6 +182,107 @@ def test_persists_exact_replay_identity_with_atomic_root_owned_file(tmp_path: Pa
     assert path.stat().st_nlink == 1
     assert list((tmp_path / "ledger").iterdir()) == [path]
     assert path.read_bytes().endswith(b"\n")
+    reopened.close()
+
+
+@pytest.mark.parametrize("field", ("projection_request", "challenge", "proof"))
+def test_reload_recomputes_each_persisted_document_digest(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _intent(ledger)
+    _record_challenge(ledger)
+    proof = _proof()
+    ledger.record_attachment(
+        GRANT,
+        proof=proof,
+        proof_sha256=ledger.document_sha256(proof),
+        pin_path=PINS,
+        link_ids=tuple(range(101, 125)),
+        program_ids=tuple(range(201, 225)),
+        map_ids=tuple(range(301, 319)),
+        attestation_generation=1,
+        attestation_sha256=DIGEST_B,
+        attestation_expires_at="2026-09-02T16:00:50Z",
+    )
+    ledger.close()
+    path = tmp_path / "ledger" / f"{GRANT}.json"
+    document = json.loads(path.read_bytes())
+    nested = document[field]
+    assert isinstance(nested, dict)
+    nested["tampered"] = "canonical-but-unbound"
+    path.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+
+    reopened = GuardLedger(
+        root=tmp_path / "ledger",
+        maximum_entries=8,
+        trusted_uid=os.geteuid(),
+        trusted_gid=os.getegid(),
+    )
+    with pytest.raises(GuardError) as caught:
+        reopened.get(GRANT)
+
+    assert caught.value.code == "ledger_document_invalid"
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("request-digest", "challenge-nonce", "attachment-ids"),
+)
+def test_reload_rejects_a_rehashed_proof_that_breaks_persisted_bindings(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _intent(ledger)
+    _record_challenge(ledger)
+    proof = _proof()
+    ledger.record_attachment(
+        GRANT,
+        proof=proof,
+        proof_sha256=ledger.document_sha256(proof),
+        pin_path=PINS,
+        link_ids=tuple(range(101, 125)),
+        program_ids=tuple(range(201, 225)),
+        map_ids=tuple(range(301, 319)),
+        attestation_generation=1,
+        attestation_sha256=DIGEST_B,
+        attestation_expires_at="2026-09-02T16:00:50Z",
+    )
+    ledger.close()
+    path = tmp_path / "ledger" / f"{GRANT}.json"
+    document = json.loads(path.read_bytes())
+    persisted_proof = document["proof"]
+    assert isinstance(persisted_proof, dict)
+    if mutation == "request-digest":
+        persisted_proof["request_sha256"] = DIGEST_A
+    elif mutation == "challenge-nonce":
+        persisted_proof["challenge_nonce"] = "99999999-9999-9999-9999-999999999999"
+    else:
+        attachment = persisted_proof["attachment"]
+        assert isinstance(attachment, dict)
+        attachment["link_ids"] = list(range(102, 126))
+    document["proof_sha256"] = GuardLedger.document_sha256(persisted_proof)
+    path.write_text(
+        json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+
+    reopened = GuardLedger(
+        root=tmp_path / "ledger",
+        maximum_entries=8,
+        trusted_uid=os.geteuid(),
+        trusted_gid=os.getegid(),
+    )
+    with pytest.raises(GuardError) as caught:
+        reopened.get(GRANT)
+
+    assert caught.value.code == "ledger_document_invalid"
     reopened.close()
 
 
