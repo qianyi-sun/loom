@@ -688,8 +688,8 @@ def test_collector_manifest_is_active_configured_and_strictly_read_only() -> Non
     assert cron["spec"]["concurrencyPolicy"] == "Forbid"
     pod = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     assert pod["nodeSelector"] == {"loom.nebius/node-role": "system"}
-    assert pod["initContainers"][0]["image"] == "__EXECUTION_ACTUATOR_IMAGE__"
-    assert pod["containers"][0]["image"] == "__EXECUTION_ACTUATOR_IMAGE__"
+    assert "@sha256:" in pod["initContainers"][0]["image"]
+    assert pod["containers"][0]["image"] == pod["initContainers"][0]["image"]
     assert pod["securityContext"]["runAsUser"] == 65532
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
     assert not {

@@ -177,11 +177,14 @@ import sys
 
 path = Path(sys.argv[1])
 image = sys.argv[2]
-content = path.read_text(encoding="utf-8")
-placeholder = "__EXECUTION_ACTUATOR_IMAGE__"
-if content.count(placeholder) != 2:
-    raise SystemExit("capacity collector manifest must contain exactly two image placeholders")
-sys.stdout.write(content.replace(placeholder, image))
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if line.startswith("              image: ")]
+if len(matches) != 2:
+    raise SystemExit("capacity collector manifest must contain exactly two image fields")
+for index in matches:
+    ending = "\n" if lines[index].endswith("\n") else ""
+    lines[index] = f"              image: {image}{ending}"
+sys.stdout.write("".join(lines))
 PY
 }
 capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
