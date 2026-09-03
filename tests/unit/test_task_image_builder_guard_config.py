@@ -75,6 +75,9 @@ def _document() -> dict[str, object]:
             "bpf_object_path": (
                 "/opt/loom-task-image-builder-guard/release/guard-network-v1.bpf.o"
             ),
+            "network_policy_path": (
+                "/etc/loom/task-image-builder-guard/network-policy-v1.json"
+            ),
             "pids_max": 4096,
             "io_limits": [
                 {
@@ -121,6 +124,9 @@ def test_loads_exact_native_guard_configuration(tmp_path: Path) -> None:
     assert config.slurm.cluster_name == "trt-oldlab"
     assert config.commands.bpftool.sha256 == SHA_C
     assert config.containment.io_limits[0].device == "8:1"
+    assert config.containment.network_policy_path == Path(
+        "/etc/loom/task-image-builder-guard/network-policy-v1.json"
+    )
     assert config.service.attestation_interval_seconds == 15
 
 

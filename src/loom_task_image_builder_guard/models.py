@@ -78,6 +78,7 @@ class ContainmentConfig:
     bpffs_root: Path
     ledger_root: Path
     bpf_object_path: Path
+    network_policy_path: Path
     pids_max: int
     io_limits: tuple[IoLimit, ...]
     containment_policy_sha256: str

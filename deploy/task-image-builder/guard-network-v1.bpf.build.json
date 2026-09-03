@@ -1,0 +1,40 @@
+{
+  "builder_image": "docker.io/silkeh/clang:18-bookworm@sha256:3914c93a02e866795aafc80737488e515b96390eff3d2787cf8c5095997baea9",
+  "builder_platform": "linux/amd64",
+  "clang_version": "Debian clang version 18.1.8 (++20240731024826+3b5b5c1ec4a3-1~exp1~20240731144843.145)",
+  "map_schema_sha256": "272db8ab014f094fa3e1d4364ee94fd0892ad8db4c6422ec6e4409829feb69d4",
+  "map_symbols": [
+    "allow_v4",
+    "allow_v6",
+    "drop_counters",
+    "flow_sockets",
+    "scope_subject",
+    "subject_limits"
+  ],
+  "object_sha256": "3712b357188c2ffb1b37391f6f28fcb17a414a1a331750fc00f2997bafde7b1d",
+  "object_size": 60992,
+  "program_sections": [
+    ".maps",
+    "cgroup/connect4",
+    "cgroup/connect6",
+    "cgroup/sendmsg4",
+    "cgroup/sendmsg6",
+    "cgroup/sock_create",
+    "cgroup/sock_release",
+    "cgroup_skb/egress",
+    "cgroup_skb/ingress"
+  ],
+  "program_symbols": [
+    "guard_connect4",
+    "guard_connect6",
+    "guard_egress",
+    "guard_ingress",
+    "guard_sendmsg4",
+    "guard_sendmsg6",
+    "guard_sock_create",
+    "guard_sock_release"
+  ],
+  "schema": "loom.task-image-builder-guard-bpf-build/v1",
+  "source_sha256": "473075a2050b9f8660de675d261c68e8c6e3dda2457eb3f1d47ca883a76fbf60",
+  "target": "bpfel"
+}

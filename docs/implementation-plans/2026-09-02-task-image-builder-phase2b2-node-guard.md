@@ -256,7 +256,7 @@ as a digest-bound release member, systemd, pytest, Ruff, and strict mypy.
   digests. The object contains no host-architecture machine code.
 - The BPF object exports exactly eight cgroup programs: IPv4/IPv6 connect,
   UDP4/UDP6 sendmsg, inet socket create/release, ingress, and egress. Map schemas
-  bind subject-by-cgroup identity, IPv4/IPv6 endpoint allowlists, traffic
+  bind link-scoped subject identity, IPv4/IPv6 endpoint allowlists, traffic
   limits/state, flow cookies, counters, and drop reasons.
 - Every program rejects a missing subject, policy, limiter state, malformed or
   fragmented packet, raw socket, unauthorized IP/protocol/port, exhausted
@@ -266,6 +266,9 @@ as a digest-bound release member, systemd, pytest, Ruff, and strict mypy.
   `BPF_OBJ_GET_INFO_BY_FD`, `BPF_LINK_CREATE`, and `BPF_OBJ_PIN` for x86_64 and
   aarch64 using zero-initialized `bpf_attr` buffers and checked descriptor
   ownership.
+- `NetworkPolicy.from_file(...)` reads the config-selected root-owned `0444`
+  canonical artifact and binds its exact bytes to the containment, resource,
+  program, and map-schema digests before any map is populated.
 - `BpfLoader.attach(tree: ContainmentTree, policy: NetworkPolicy) ->
   BpfAttachment` runs the pinned `bpftool prog loadall` three times so the root,
   trusted-service, and build-egress scopes own independent maps/state; programs
@@ -465,6 +468,8 @@ as a digest-bound release member, systemd, pytest, Ruff, and strict mypy.
 - Create: `deploy/task-image-builder/guard-release-v1.json`
 - Create: `deploy/task-image-builder/guard-config-oldlab-v1.example.json`
 - Create: `deploy/task-image-builder/guard-config-gb10-v1.example.json`
+- Create: `deploy/task-image-builder/guard-network-policy-oldlab-v1.example.json`
+- Create: `deploy/task-image-builder/guard-network-policy-gb10-v1.example.json`
 - Create: `scripts/ops/task_image_builder_guard_release.py`
 - Test: `tests/ops/test_task_image_builder_guard_release.py`
 - Test: `tests/ops/test_task_image_builder_guard_package_boundary.py`
@@ -675,4 +680,3 @@ as a digest-bound release member, systemd, pytest, Ruff, and strict mypy.
   sealed bootstrap/session consumer, RootlessKit/BuildKit executor, quota-backed
   storage, claim/heartbeat/cleanup, and composite provider release. Do not call
   Phase 2 production-active.
-

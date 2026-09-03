@@ -111,7 +111,7 @@ def _parse_status(payload: bytes, config: IdentityConfig) -> tuple[int, ...]:
     return groups
 
 
-def _parse_cgroup(payload: bytes) -> tuple[PurePosixPath, str]:
+def _unified_cgroup_path(payload: bytes) -> PurePosixPath:
     matches: list[str] = []
     for line in _decode_ascii(payload, code="peer_cgroup_invalid").splitlines():
         hierarchy, separator, remainder = line.partition(":")
@@ -130,6 +130,11 @@ def _parse_cgroup(payload: bytes) -> tuple[PurePosixPath, str]:
         or path.as_posix() != raw
     ):
         raise GuardError("peer_cgroup_invalid")
+    return path
+
+
+def _parse_cgroup(payload: bytes) -> tuple[PurePosixPath, str]:
+    path = _unified_cgroup_path(payload)
     parts = path.parts[1:]
     if len(parts) < 6 or tuple(parts[-3:]) != ("step_batch", "user", "task_0"):
         raise GuardError("peer_cgroup_invalid")
@@ -169,6 +174,7 @@ class PeerHandle:
     executable_device: int
     executable_inode: int
     executable_sha256: str
+    batch_cgroup_relative: PurePosixPath
     cgroup_relative: PurePosixPath
     job_id: str
     _inspector: PeerInspector = field(repr=False)
@@ -178,6 +184,18 @@ class PeerHandle:
         if self._closed:
             raise GuardError("peer_closed")
         self._inspector._assert_unchanged(self)
+
+    def adopt_trusted_service_cgroup(self) -> None:
+        if self._closed or self.cgroup_relative != self.batch_cgroup_relative:
+            raise GuardError("peer_cgroup_transition_invalid")
+        expected = self.batch_cgroup_relative / "loom-builder" / "trusted-service"
+        try:
+            self._inspector._assert_unchanged(self, expected_cgroup=expected)
+        except GuardError as exc:
+            if exc.code == "peer_cgroup_changed":
+                raise GuardError("peer_cgroup_transition_invalid") from None
+            raise
+        self.cgroup_relative = expected
 
     def close(self) -> None:
         if self._closed:
@@ -290,6 +308,7 @@ class PeerInspector:
                 executable_device=metadata.st_dev,
                 executable_inode=metadata.st_ino,
                 executable_sha256=digest,
+                batch_cgroup_relative=cgroup_relative,
                 cgroup_relative=cgroup_relative,
                 job_id=job_id,
                 _inspector=self,
@@ -305,7 +324,12 @@ class PeerInspector:
                 if pidfd is not None:
                     os.close(pidfd)
 
-    def _assert_unchanged(self, peer: PeerHandle) -> None:
+    def _assert_unchanged(
+        self,
+        peer: PeerHandle,
+        *,
+        expected_cgroup: PurePosixPath | None = None,
+    ) -> None:
         if not self._pidfd_alive(peer.pidfd):
             raise GuardError("peer_dead")
         try:
@@ -337,8 +361,10 @@ class PeerInspector:
         status = _read_bounded(self.proc_root / str(peer.pid) / "status")
         if _parse_status(status, self.config) != peer.groups:
             raise GuardError("peer_identity_changed")
-        cgroup, job_id = _parse_cgroup(_read_bounded(self.proc_root / str(peer.pid) / "cgroup"))
-        if cgroup != peer.cgroup_relative or job_id != peer.job_id:
+        cgroup = _unified_cgroup_path(
+            _read_bounded(self.proc_root / str(peer.pid) / "cgroup")
+        )
+        if cgroup != (peer.cgroup_relative if expected_cgroup is None else expected_cgroup):
             raise GuardError("peer_cgroup_changed")
 
 

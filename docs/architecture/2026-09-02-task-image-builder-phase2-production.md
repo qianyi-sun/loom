@@ -264,6 +264,13 @@ and verifies inherited CPU, memory, swap, and device limits. Failure to delegate
 the required controllers removes the node feature and prevents claims.
 
 Network attachment uses pinned cgroup `bpf_link` objects and root-only maps.
+Each independently loaded scope has a singleton subject map; the pinned link
+readback, rather than the currently executing task, binds that map instance to
+the exact attachment cgroup. This keeps ingress attribution and nested
+BuildKit descendants correct.
+The endpoint and limiter inputs come only from a canonical root-owned policy
+artifact whose byte digest is the grant's containment-policy identity; they are
+never supplied by the allocation or an authority response.
 Both IPv4 and IPv6 default deny. Connect, UDP send, socket lifecycle, ingress,
 and egress hooks cover destination policy plus byte, packet, flow, and DNS
 limits. `trusted-service` receives only authority/object-store/registry

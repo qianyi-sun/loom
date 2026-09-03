@@ -5,7 +5,7 @@ import os
 import socket
 import struct
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 import pytest
@@ -182,6 +182,27 @@ def test_peer_revalidation_detects_death_reexec_and_cgroup_drift(tmp_path: Path)
         with pytest.raises(GuardError) as caught:
             peer.assert_unchanged()
         assert caught.value.code == "peer_cgroup_changed"
+    finally:
+        peer.close()
+
+
+def test_peer_adopts_only_exact_trusted_service_cgroup_once(tmp_path: Path) -> None:
+    inspector, _executable, _alive = _fixture(tmp_path)
+    peer = inspector.capture(_Connection())  # type: ignore[arg-type]
+    trusted = PurePosixPath(f"{CGROUP}/loom-builder/trusted-service")
+    cgroup_file = inspector.proc_root / str(PID) / "cgroup"
+    try:
+        cgroup_file.write_text(f"0::{trusted}\n", encoding="ascii")
+        peer.adopt_trusted_service_cgroup()
+        assert peer.cgroup_relative == trusted
+        peer.assert_unchanged()
+
+        cgroup_file.write_text(
+            f"0::{CGROUP}/loom-builder/build-egress\n", encoding="ascii"
+        )
+        with pytest.raises(GuardError) as caught:
+            peer.adopt_trusted_service_cgroup()
+        assert caught.value.code == "peer_cgroup_transition_invalid"
     finally:
         peer.close()
 
