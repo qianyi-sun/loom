@@ -172,6 +172,30 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.resource_version == "42"
 
 
+def test_unschedulable_transition_is_not_reported_as_scheduled() -> None:
+    job_started = datetime(2026, 9, 3, 5, 16, tzinfo=UTC)
+    job = _job()
+    job.status.start_time = job_started
+    observation = _normalize(
+        job,
+        [
+            _pod(
+                scheduled=_ns(
+                    type="PodScheduled",
+                    status="False",
+                    reason="Unschedulable",
+                    message="insufficient cpu",
+                    last_transition_time=datetime(2026, 9, 3, 5, 19, tzinfo=UTC),
+                )
+            )
+        ],
+    )
+
+    assert observation.normalized_state is NormalizedJobState.UNSCHEDULABLE
+    assert observation.scheduled_at is None
+    assert observation.started_at == job_started
+
+
 def test_termination_summary_is_identity_bound_and_retained() -> None:
     job = _job(conditions=[_ns(type="Complete", reason=None, message=None)])
     observation = _normalize(job, [_pod(phase="Succeeded")])
