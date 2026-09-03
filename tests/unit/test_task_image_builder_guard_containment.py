@@ -314,9 +314,14 @@ def _batch(filesystem: _Filesystem) -> BatchCgroup:
     )
 
 
-def test_open_batch_rejects_group_or_other_write_authority(tmp_path: Path) -> None:
+@pytest.mark.parametrize("unsafe_mode", (0o775, 0o757))
+def test_open_batch_rejects_group_or_other_write_authority(
+    tmp_path: Path,
+    unsafe_mode: int,
+) -> None:
     batch_path = tmp_path / "batch"
-    batch_path.mkdir(mode=0o775)
+    batch_path.mkdir()
+    batch_path.chmod(unsafe_mode)
     batch = BatchCgroup(
         path=batch_path,
         relative_path=PurePosixPath("/slurm/job_123/step_batch/user/task_0"),
