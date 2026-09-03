@@ -168,6 +168,25 @@ lines[matches[0]] = f"          image: {image}{ending}"
 sys.stdout.write("".join(lines))
 PY
 }
+
+render_capacity_collector_manifest() {
+  python3 - "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" \
+    "$execution_actuator_image" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+image = sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+matches = [index for index, line in enumerate(lines) if line.startswith("              image: ")]
+if len(matches) != 2:
+    raise SystemExit("capacity collector manifest must contain exactly two image fields")
+for index in matches:
+    ending = "\n" if lines[index].endswith("\n") else ""
+    lines[index] = f"              image: {image}{ending}"
+sys.stdout.write("".join(lines))
+PY
+}
 capacity_policy="$repo_root/deploy/k8s/nebius-development-capacity-policy.json"
 [[ -s $capacity_policy ]] || {
   echo "Nebius development capacity policy is missing" >&2
@@ -192,13 +211,14 @@ if (
     document.get("provider_required_quota_vcpu_millis") != 512_000
     or document.get("target_concurrency") != 200
     or document.get("target_execution_max_nodes") != 10
+    or document.get("target_execution_preset") != "48vcpu-192gb"
     or document.get("provider_current_quota_vcpu_millis") != 200_000
-    or document.get("accepted_concurrency") != 80
+    or document.get("accepted_concurrency") != 56
     or document.get("task_cpu_millis") != 2_000
-    or policy.get("max_nodes") != 4
-    or policy.get("node_cpu_millis") != 48_000
+    or policy.get("max_nodes") != 8
+    or policy.get("node_cpu_millis") != 16_000
 ):
-    raise SystemExit("Nebius development capacity policy does not cover the current 80-task and target 200-task envelopes")
+    raise SystemExit("Nebius development capacity policy does not cover the current 56-task and target 200-task envelopes")
 encoded = base64.b64encode(
     json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).decode("ascii")
@@ -206,10 +226,10 @@ admission_policies = document.get("admission_policies")
 if (
     not isinstance(admission_policies, list)
     or [(row.get("scope_kind"), row.get("scope_key"), row.get("max_concurrent")) for row in admission_policies]
-    != [("global", "*", 80), ("pool", "nebius-cpu", 80)]
+    != [("global", "*", 56), ("pool", "nebius-cpu", 56)]
     or any(row.get("enabled") is not True for row in admission_policies)
 ):
-    raise SystemExit("Nebius execution admission policies must permit exactly 80 leases")
+    raise SystemExit("Nebius execution admission policies must permit exactly 56 leases")
 admission_encoded = base64.b64encode(
     json.dumps(admission_policies, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).decode("ascii")
@@ -456,7 +476,7 @@ kubectl patch deployment -n loom loom-service --type=merge \
 kubectl rollout status -n loom deployment/loom-service --timeout=180s
 
 render_execution_actuator_manifest | kubectl apply --dry-run=server -f - >/dev/null
-kubectl apply --dry-run=server -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
+render_capacity_collector_manifest | kubectl apply --dry-run=server -f - >/dev/null
 
 kubectl create secret generic loom-execution-capacity-collector-nebius \
   -n loom-nebius-development \
@@ -498,7 +518,7 @@ fi
 
 kubectl apply -f "$repo_root/deploy/k8s/network-policies.yaml" >/dev/null
 render_execution_actuator_manifest | kubectl apply -f - >/dev/null
-kubectl apply -f "$repo_root/deploy/k8s/nebius-capacity-collector.yaml" >/dev/null
+render_capacity_collector_manifest | kubectl apply -f - >/dev/null
 kubectl rollout status -n loom-nebius-development deployment/loom-execution-actuator --timeout=180s
 
 deadline=$((SECONDS + 180))

@@ -27,6 +27,7 @@ def _fixed_candidate_time(monkeypatch: pytest.MonkeyPatch) -> None:
         "_candidate_issued_at",
         lambda _: datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
     )
+    monkeypatch.setattr(prepare, "_release_is_ancestor", lambda ancestor, candidate: True)
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -156,4 +157,42 @@ def test_prepare_rejects_mirror_drift(tmp_path: Path) -> None:
     mirror["images"]["service"]["target_ref"] = f"{REGISTRY}/loom-service@sha256:" + "9" * 64
     _write_json(args.mirror_record, mirror)
     with pytest.raises(ValueError, match="source, mirror, and scan differ"):
+        prepare.prepare(args)
+
+
+def test_prepare_accepts_ancestor_service_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _inputs(tmp_path)
+    service = json.loads(args.service_release_record.read_text(encoding="utf-8"))
+    service["release"]["commit"] = "6" * 40
+    _write_json(args.service_release_record, service)
+    result = prepare.prepare(args)
+
+    assert result["component_candidate_shas"] == {
+        "service": "6" * 40,
+        "execution_runtime": SHA,
+    }
+
+
+def test_prepare_rejects_non_ancestor_service_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _inputs(tmp_path)
+    service = json.loads(args.service_release_record.read_text(encoding="utf-8"))
+    service["release"]["commit"] = "6" * 40
+    _write_json(args.service_release_record, service)
+    monkeypatch.setattr(prepare, "_release_is_ancestor", lambda ancestor, candidate: False)
+
+    with pytest.raises(ValueError, match="not an ancestor"):
+        prepare.prepare(args)
+
+
+def test_prepare_requires_exact_execution_runtime_release(tmp_path: Path) -> None:
+    args = _inputs(tmp_path)
+    runtime = json.loads(args.execution_runtime_release_record.read_text(encoding="utf-8"))
+    runtime["release"]["commit"] = "6" * 40
+    _write_json(args.execution_runtime_release_record, runtime)
+
+    with pytest.raises(ValueError, match="must match the profile candidate"):
         prepare.prepare(args)

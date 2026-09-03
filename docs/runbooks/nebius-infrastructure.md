@@ -87,12 +87,15 @@ Copy the sole shared-cluster input and its existing backend anchor to a protecte
 directory. Replace the placeholder tenant, project, globally unique bucket
 name, and state bucket; do not change topology fields without changing and
 reviewing the canonical topology contract. While the 512-vCPU request is
-pending, the committed active target is `0..4` regular `48vcpu-192gb` execution
-nodes with 64 Pods per node. Its 192-vCPU execution envelope supports eighty
-2-vCPU tasks while preserving 8 vCPUs and 32 GiB per node for platform
-overhead. The requested target remains `0..10` and 200 concurrent tasks; move
-the committed active target only after the provider quota readback reaches 512
-non-GPU vCPUs and 16 VM slots.
+pending, the committed active target is `0..8` regular `16vcpu-64gb` execution
+nodes with 64 Pods per node. Its 128-vCPU execution envelope supports 56
+concurrent 2-vCPU tasks while preserving 2 vCPUs and 8 GiB per node for
+platform overhead. This smaller node shape avoids depending on currently
+unavailable 32- and 48-vCPU regional inventory and consumes at most eight of
+the twelve existing VM slots. The requested target remains `0..10` at
+`48vcpu-192gb` and 200 concurrent tasks; move the committed active target only
+after the provider quota readback reaches 512 non-GPU vCPUs and 16 VM slots and
+the requested shape has regional inventory.
 
 ```bash
 export LOOM_NB_TARGET=development-eu-north1
@@ -167,10 +170,11 @@ kubectl --kubeconfig "$LOOM_NB_KUBECONFIG" get pods -A
 Run live acceptance in this order; stop and clean up at the first failed gate.
 
 1. Apply only `development-eu-north1` with the committed execution bounds, the
-   pinned `48vcpu-192gb` shape, and 64 Pods per node. The current-quota profile
-   is `0..4` and requires readback of at least 200 non-GPU vCPUs and 12 VM
-   slots. The requested 200-task profile is `0..10` and may be committed only
-   after readback reaches 512 non-GPU vCPUs and 16 VM slots.
+   pinned `16vcpu-64gb` shape, and 64 Pods per node. The current-inventory
+   profile is `0..8` and requires readback of at least 200 non-GPU vCPUs and 12
+   VM slots. The requested 200-task profile is `0..10` at `48vcpu-192gb` and may
+   be committed only after readback reaches 512 non-GPU vCPUs, 16 VM slots,
+   and regional inventory for that shape.
 2. Prove Terraform convergence and cloud-side Ready/readback.
 3. Create only the development binding namespace with its canonical topology
    labels and install only its environment-local identities/policies.
@@ -186,7 +190,7 @@ Run live acceptance in this order; stop and clean up at the first failed gate.
    A manually created Pod or manually patched Task binding is not evidence for
    this gate.
 7. Run staged true-overlap acceptance up to the capacity declared by
-   `accepted_concurrency`; for the current quota use 1, 20, 50, then 80 active
+   `accepted_concurrency`; for the current inventory use 1, 20, 40, then 56 active
    execution units. After the quota-backed target changes to 200, use 1, 20,
    50, 100, 150, then 200 active execution units. At every stage prove the
    persisted concurrency seats,
@@ -285,8 +289,8 @@ the same merged candidate is idempotent.
 
 Every runtime apply also converges the repository-owned execution-capacity and
 execution-admission policies. For the current provider quota, both the global
-and `nebius-cpu` admission ceilings are 80 leases; this must match the 80-job
-pending/create limits and the four-node execution envelope rather than retain a
+and `nebius-cpu` admission ceilings are 56 leases; this must match the 56-job
+pending/create limits and the eight-node execution envelope rather than retain a
 bootstrap single-trial ceiling.
 
 The evidence collector uses checksum-pinned Trivy and `crane` binaries on the
@@ -297,7 +301,11 @@ profile helper binds those results to the mirrored images and protected amd64
 release records, then signs the immutable profile with a persistent Ed25519
 key. Add `--create-signing-key` only for the first bootstrap; later releases
 reuse the same owner-only key. Admission metadata does not expire at runtime;
-removing or replacing the public key is the explicit revocation mechanism.
+removing or replacing the public key is the explicit revocation mechanism. The
+execution-runtime release must exactly match the profile candidate. An
+unchanged service image may retain a protected `dev` release record only when
+that release is a Git ancestor of the profile candidate, so path-scoped trusted
+publication remains deployable without fabricating a new service release.
 
 The helper accepts only digest-pinned platform images, transfers only the
 reviewed runtime manifests plus the capacity observer credential into a

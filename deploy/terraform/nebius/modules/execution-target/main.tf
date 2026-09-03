@@ -434,10 +434,9 @@ resource "nebius_mk8s_v1_node_group" "execution" {
   strategy = {
     drain_timeout = "20m"
     max_surge = {
-      # The 512-vCPU provider envelope is sized for the complete 9-node
-      # execution pool plus persistent infrastructure, not a tenth 48-vCPU
-      # replacement node. Replace one drained node at a time without exceeding
-      # the provider quota.
+      # The provider envelope is sized for the complete execution pool plus
+      # persistent infrastructure, not an extra replacement node. Replace one
+      # drained node at a time without exceeding provider quota.
       count = 0
     }
     max_unavailable = {
