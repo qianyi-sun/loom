@@ -207,6 +207,55 @@ def test_peer_adopts_only_exact_trusted_service_cgroup_once(tmp_path: Path) -> N
         peer.close()
 
 
+def test_capture_after_guard_restart_recovers_exact_trusted_service_membership(
+    tmp_path: Path,
+) -> None:
+    inspector, _executable, _alive = _fixture(tmp_path)
+    trusted = PurePosixPath(f"{CGROUP}/loom-builder/trusted-service")
+    (inspector.proc_root / str(PID) / "cgroup").write_text(
+        f"0::{trusted}\n", encoding="ascii"
+    )
+
+    peer = inspector.capture(_Connection())  # type: ignore[arg-type]
+    try:
+        assert peer.batch_cgroup_relative == PurePosixPath(CGROUP)
+        assert peer.cgroup_relative == trusted
+        assert peer.job_id == "123"
+        peer.assert_unchanged()
+        cgroup_root = tmp_path / "cgroup"
+        batch_path = cgroup_root / CGROUP.removeprefix("/")
+        trusted_path = batch_path / "loom-builder" / "trusted-service"
+        trusted_path.mkdir(parents=True)
+        (batch_path / "cgroup.type").write_text("domain\n", encoding="ascii")
+        (batch_path / "cgroup.procs").write_text("", encoding="ascii")
+        (trusted_path / "cgroup.type").write_text("domain\n", encoding="ascii")
+        (trusted_path / "cgroup.procs").write_text(f"{PID}\n", encoding="ascii")
+        batch = derive_batch_cgroup(peer, job_id="123", cgroup_root=cgroup_root)
+        assert batch.path == batch_path
+        with pytest.raises(GuardError) as caught:
+            peer.adopt_trusted_service_cgroup()
+        assert caught.value.code == "peer_cgroup_transition_invalid"
+    finally:
+        peer.close()
+
+
+def test_recapture_pid_uses_persisted_uid_gid_boundary_without_a_socket(
+    tmp_path: Path,
+) -> None:
+    inspector, _executable, _alive = _fixture(tmp_path)
+
+    peer = inspector.capture_pid(PID, expected_uid=UID, expected_gid=GID)
+    try:
+        assert (peer.pid, peer.uid, peer.gid, peer.job_id) == (PID, UID, GID, "123")
+        peer.assert_unchanged()
+    finally:
+        peer.close()
+
+    with pytest.raises(GuardError) as caught:
+        inspector.capture_pid(PID, expected_uid=0, expected_gid=GID)
+    assert caught.value.code == "peer_credentials_invalid"
+
+
 def test_derive_batch_cgroup_requires_exact_single_process_task(tmp_path: Path) -> None:
     inspector, _executable, _alive = _fixture(tmp_path)
     peer = inspector.capture(_Connection())  # type: ignore[arg-type]

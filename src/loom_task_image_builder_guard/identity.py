@@ -133,21 +133,28 @@ def _unified_cgroup_path(payload: bytes) -> PurePosixPath:
     return path
 
 
-def _parse_cgroup(payload: bytes) -> tuple[PurePosixPath, str]:
+def _parse_cgroup(payload: bytes) -> tuple[PurePosixPath, PurePosixPath, str]:
     path = _unified_cgroup_path(payload)
     parts = path.parts[1:]
-    if len(parts) < 6 or tuple(parts[-3:]) != ("step_batch", "user", "task_0"):
+    trusted_suffix = ("step_batch", "user", "task_0", "loom-builder", "trusted-service")
+    if len(parts) >= 8 and tuple(parts[-5:]) == trusted_suffix:
+        batch = PurePosixPath(*path.parts[:-2])
+        batch_parts = parts[:-2]
+    elif len(parts) >= 6 and tuple(parts[-3:]) == ("step_batch", "user", "task_0"):
+        batch = path
+        batch_parts = parts
+    else:
         raise GuardError("peer_cgroup_invalid")
-    job_index = len(parts) - 4
-    matched = _JOB_COMPONENT.fullmatch(parts[job_index])
+    job_index = len(batch_parts) - 4
+    matched = _JOB_COMPONENT.fullmatch(batch_parts[job_index])
     if matched is None or not any(
         part == "slurm" or part == "slurmstepd.scope" or part.endswith("_slurmstepd.scope")
-        for part in parts[:job_index]
+        for part in batch_parts[:job_index]
     ):
         raise GuardError("peer_cgroup_invalid")
-    if any(_JOB_COMPONENT.fullmatch(part) for part in parts[:job_index]):
+    if any(_JOB_COMPONENT.fullmatch(part) for part in batch_parts[:job_index]):
         raise GuardError("peer_cgroup_invalid")
-    return path, matched.group(1)
+    return batch, path, matched.group(1)
 
 
 def _hash_open_file(descriptor: int, *, maximum: int = 128 * 1024 * 1024) -> str:
@@ -265,16 +272,34 @@ class PeerInspector:
     def capture(self, connection: socket.socket) -> PeerHandle:
         if connection.family != socket.AF_UNIX:
             raise GuardError("peer_socket_invalid")
-        pidfd: int | None = None
-        executable_fd: int | None = None
-        complete = False
         try:
             credentials = connection.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, _PEER_CREDENTIALS.size
             )
-            if not isinstance(credentials, bytes) or len(credentials) != _PEER_CREDENTIALS.size:
-                raise GuardError("peer_credentials_invalid")
-            pid, uid, gid = _PEER_CREDENTIALS.unpack(credentials)
+        except OSError as exc:
+            raise GuardError("peer_inspection_failed") from exc
+        if not isinstance(credentials, bytes) or len(credentials) != _PEER_CREDENTIALS.size:
+            raise GuardError("peer_credentials_invalid")
+        pid, uid, gid = _PEER_CREDENTIALS.unpack(credentials)
+        return self._capture_identity(pid, uid, gid)
+
+    def capture_pid(self, pid: int, *, expected_uid: int, expected_gid: int) -> PeerHandle:
+        """Re-establish a pidfd-backed handle from one trusted ledger identity."""
+
+        if (
+            type(pid) is not int
+            or pid <= 0
+            or expected_uid != self.config.uid
+            or expected_gid != self.config.gid
+        ):
+            raise GuardError("peer_credentials_invalid")
+        return self._capture_identity(pid, expected_uid, expected_gid)
+
+    def _capture_identity(self, pid: int, uid: int, gid: int) -> PeerHandle:
+        pidfd: int | None = None
+        executable_fd: int | None = None
+        complete = False
+        try:
             if pid <= 0 or uid != self.config.uid or gid != self.config.gid:
                 raise GuardError("peer_credentials_invalid")
             pidfd = self._pidfd_open(pid)
@@ -292,7 +317,7 @@ class PeerInspector:
             )
             if pid_row.split()[1:] != [str(pid)]:
                 raise GuardError("peer_status_invalid")
-            cgroup_relative, job_id = _parse_cgroup(
+            batch_cgroup_relative, cgroup_relative, job_id = _parse_cgroup(
                 _read_bounded(self.proc_root / str(pid) / "cgroup")
             )
             executable_fd, executable_path, metadata, digest = self._open_executable(pid)
@@ -308,7 +333,7 @@ class PeerInspector:
                 executable_device=metadata.st_dev,
                 executable_inode=metadata.st_ino,
                 executable_sha256=digest,
-                batch_cgroup_relative=cgroup_relative,
+                batch_cgroup_relative=batch_cgroup_relative,
                 cgroup_relative=cgroup_relative,
                 job_id=job_id,
                 _inspector=self,
@@ -391,33 +416,60 @@ def derive_batch_cgroup(
     peer.assert_unchanged()
     if peer.job_id != job_id:
         raise GuardError("batch_cgroup_job_invalid")
-    expected = cgroup_root.joinpath(*peer.cgroup_relative.parts[1:])
+    expected = cgroup_root.joinpath(*peer.batch_cgroup_relative.parts[1:])
+    resident = cgroup_root.joinpath(*peer.cgroup_relative.parts[1:])
     try:
         root = cgroup_root.resolve(strict=True)
         resolved = expected.resolve(strict=True)
+        resident_resolved = resident.resolve(strict=True)
         resolved.relative_to(root)
-        if resolved != expected or not resolved.is_dir():
+        resident_resolved.relative_to(root)
+        if (
+            resolved != expected
+            or resident_resolved != resident
+            or not resolved.is_dir()
+            or not resident_resolved.is_dir()
+        ):
             raise GuardError("batch_cgroup_path_invalid")
         metadata = resolved.stat()
         cgroup_type = _decode_ascii(
             _read_bounded(resolved / "cgroup.type"), code="batch_cgroup_type_invalid"
         ).strip()
-        process_rows = _decode_ascii(
+        batch_process_rows = _decode_ascii(
             _read_bounded(resolved / "cgroup.procs"), code="batch_cgroup_processes_invalid"
+        ).split()
+        resident_type = _decode_ascii(
+            _read_bounded(resident_resolved / "cgroup.type"),
+            code="batch_cgroup_type_invalid",
+        ).strip()
+        resident_process_rows = _decode_ascii(
+            _read_bounded(resident_resolved / "cgroup.procs"),
+            code="batch_cgroup_processes_invalid",
         ).split()
     except GuardError:
         raise
     except (OSError, ValueError) as exc:
         raise GuardError("batch_cgroup_path_invalid") from exc
-    if cgroup_type != "domain":
+    if cgroup_type != "domain" or resident_type != "domain":
         raise GuardError("batch_cgroup_type_invalid")
-    if process_rows != [str(peer.pid)]:
+    expected_batch_processes = (
+        [str(peer.pid)] if peer.cgroup_relative == peer.batch_cgroup_relative else []
+    )
+    if (
+        batch_process_rows != expected_batch_processes
+        or resident_process_rows != [str(peer.pid)]
+    ):
         raise GuardError("batch_cgroup_processes_invalid")
     peer.assert_unchanged()
     final = resolved.stat()
     if (final.st_dev, final.st_ino) != (metadata.st_dev, metadata.st_ino):
         raise GuardError("batch_cgroup_changed")
-    return BatchCgroup(resolved, peer.cgroup_relative, metadata.st_ino, peer.pid)
+    return BatchCgroup(
+        resolved,
+        peer.batch_cgroup_relative,
+        metadata.st_ino,
+        peer.pid,
+    )
 
 
 def _timestamp(value: datetime) -> str:
