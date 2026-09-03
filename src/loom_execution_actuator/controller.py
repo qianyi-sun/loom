@@ -470,14 +470,17 @@ class ExecutionActuator:
                 continue
         KUBERNETES_ORPHAN_COUNT.set(drift)
         KUBERNETES_RECONCILE_CONVERGED.set(1 if drift == 0 else 0)
-        if drift == 0:
-            async with self._sessions() as session:
-                await refresh_execution_target_health(
-                    session,
-                    target_id=self._target.target_id,
-                    observed_at=current_time,
-                )
-                await session.commit()
+        # A successful namespace list proves that the target remains reachable
+        # even while expected create/delete convergence is still in progress.
+        # Coupling health freshness to zero drift makes a slow scale-from-zero
+        # batch expire its own broker eligibility before its Pods can start.
+        async with self._sessions() as session:
+            await refresh_execution_target_health(
+                session,
+                target_id=self._target.target_id,
+                observed_at=current_time,
+            )
+            await session.commit()
         return drift
 
     async def watch_once(self, *, timeout_seconds: int = 15) -> int:

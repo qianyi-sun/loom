@@ -280,8 +280,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
-                    "GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs "
-                    f"TO {quoted_owner}"
+                    f"GRANT UPDATE (worker_id) ON TABLE public.slurm_worker_jobs TO {quoted_owner}"
                 )
                 claim_select_columns = {
                     "execution_attempts": ("worker_id", "state"),
@@ -345,8 +344,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                     f"TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
-                    "GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas "
-                    f"TO {quoted_owner}"
+                    f"GRANT UPDATE (in_flight_count) ON TABLE public.team_quotas TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     f"GRANT UPDATE (id) ON TABLE public.batches TO {quoted_owner}"
@@ -524,7 +522,7 @@ def capacity_guard_database(
                 ),
                 {"database_name": database_name},
             )
-            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database} WITH (FORCE)")
         engine.dispose()
 
 
