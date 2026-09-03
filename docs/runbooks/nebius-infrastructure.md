@@ -301,7 +301,11 @@ profile helper binds those results to the mirrored images and protected amd64
 release records, then signs the immutable profile with a persistent Ed25519
 key. Add `--create-signing-key` only for the first bootstrap; later releases
 reuse the same owner-only key. Admission metadata does not expire at runtime;
-removing or replacing the public key is the explicit revocation mechanism.
+removing or replacing the public key is the explicit revocation mechanism. The
+execution-runtime release must exactly match the profile candidate. An
+unchanged service image may retain a protected `dev` release record only when
+that release is a Git ancestor of the profile candidate, so path-scoped trusted
+publication remains deployable without fabricating a new service release.
 
 The helper accepts only digest-pinned platform images, transfers only the
 reviewed runtime manifests plus the capacity observer credential into a
