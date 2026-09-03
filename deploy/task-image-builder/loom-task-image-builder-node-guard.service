@@ -1,0 +1,61 @@
+[Unit]
+Description=Loom task-image builder node guard
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/loom/task-image-builder-guard/activation-v1.json
+StartLimitIntervalSec=300s
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+Group=root
+WorkingDirectory=/
+UMask=0077
+Environment=LANG=C
+Environment=LC_ALL=C
+Environment=PATH=/usr/bin:/bin
+UnsetEnvironment=ALL_PROXY CURL_CA_BUNDLE HTTP_PROXY HTTPS_PROXY LD_LIBRARY_PATH LD_PRELOAD NO_PROXY PYTHONHOME PYTHONINSPECT PYTHONPATH PYTHONSTARTUP REQUESTS_CA_BUNDLE SSL_CERT_DIR SSL_CERT_FILE all_proxy http_proxy https_proxy no_proxy
+ExecStart=/usr/bin/python3 -I -B /opt/loom-task-image-builder-guard/releases/@LOOM_GUARD_RELEASE_SHA256@/loom-task-image-builder-guard.pyz --config /etc/loom/task-image-builder-guard/config-v1.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+WatchdogSec=30s
+KillMode=control-group
+OOMPolicy=stop
+MemoryMax=512M
+TasksMax=256
+LimitNOFILE=4096
+RuntimeDirectory=loom-task-image-builder-guard
+RuntimeDirectoryMode=0750
+StateDirectory=loom-task-image-builder-guard
+StateDirectoryMode=0700
+CapabilityBoundingSet=CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_NET_ADMIN CAP_SYS_ADMIN
+AmbientCapabilities=CAP_BPF CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_NET_ADMIN CAP_SYS_ADMIN
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=no
+ProtectProc=default
+ProcSubset=all
+ReadOnlyPaths=/etc/loom/task-image-builder-guard /opt/loom-task-image-builder-guard/releases/@LOOM_GUARD_RELEASE_SHA256@
+ReadWritePaths=/sys/fs/cgroup /sys/fs/bpf/loom-task-image-builder /run/loom-task-image-builder-guard /var/lib/loom-task-image-builder-guard
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service bpf memfd_create pidfd_open
+SystemCallErrorNumber=EPERM

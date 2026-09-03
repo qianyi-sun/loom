@@ -8,7 +8,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/__main__.py",
-      "sha256": "5078fad9e0d1dd3eafb78399128260f1f4bfc96cb2b150debc8d9c086d75e61b"
+      "sha256": "f79884bffe691ff685e1404eff683a7bd3700479684d584a19e6ed8da9baa848"
     },
     {
       "path": "src/loom_task_image_builder_guard/authority.py",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/service.py",
-      "sha256": "9a1465c7db87d4e70417a265d16fe898340c4f952799d926abad20ff8228ed51"
+      "sha256": "303ea6d11e44aa7b4a4eb433c32f50cfe8b6983698f314ee3f65d6c0dac26ccf"
     },
     {
       "path": "src/loom_task_image_builder_guard/slurm.py",

@@ -58,6 +58,18 @@ class GuardRelease:
 
 
 @dataclass(frozen=True, slots=True)
+class VerifiedGuardRelease:
+    """A stable, byte-verified release suitable for transactional copying."""
+
+    release_sha256: str
+    architecture: Architecture
+    directory: Path
+    manifest_payload: bytes
+    manifest: dict[str, object]
+    members: tuple[tuple[str, int, bytes], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Input:
     path: PurePosixPath
     sha256: str
@@ -106,7 +118,11 @@ def _validate_root(path: Path, label: str) -> Path:
         metadata = path.lstat()
     except OSError as exc:
         raise GuardReleaseError(f"{label} is unavailable") from exc
-    if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise GuardReleaseError(f"{label} is unavailable") from exc
+    if path.is_symlink() or resolved != path or not stat.S_ISDIR(metadata.st_mode):
         raise GuardReleaseError(f"{label} must be a non-symlink directory")
     return path
 
@@ -303,7 +319,7 @@ def _load_spec(root: Path) -> tuple[bytes, tuple[_Input, ...], tuple[_Input, ...
 
 def _validate_bpf(
     *,
-    source: bytes,
+    source: bytes | None,
     artifacts: dict[str, bytes],
 ) -> None:
     object_payload = artifacts["guard-network-v1.bpf.o"]
@@ -342,7 +358,17 @@ def _validate_bpf(
         or provenance.get("builder_platform") != "linux/amd64"
         or not isinstance(provenance.get("builder_image"), str)
         or "@sha256:" not in cast(str, provenance["builder_image"])
-        or provenance.get("source_sha256") != _digest(source)
+        or (
+            source is not None
+            and provenance.get("source_sha256") != _digest(source)
+        )
+        or (
+            source is None
+            and (
+                not isinstance(provenance.get("source_sha256"), str)
+                or len(cast(str, provenance["source_sha256"])) != 64
+            )
+        )
         or provenance.get("object_sha256") != _digest(object_payload)
         or provenance.get("object_size") != len(object_payload)
         or provenance.get("map_schema_sha256") != _digest(schema_payload)
@@ -457,6 +483,115 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def verify_release_directory(
+    directory: Path,
+    *,
+    expected_release_sha256: str,
+    expected_architecture: Architecture,
+    expected_uid: int | None = None,
+) -> VerifiedGuardRelease:
+    """Open and verify every byte and mode in an already assembled release."""
+
+    root = _validate_root(directory, "guard release directory")
+    root_metadata = root.stat()
+    if (
+        root.name != expected_release_sha256
+        or len(expected_release_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_release_sha256)
+        or expected_architecture not in _MACHINES
+        or stat.S_IMODE(root_metadata.st_mode) != 0o555
+        or (expected_uid is not None and root_metadata.st_uid != expected_uid)
+    ):
+        raise GuardReleaseError("guard release directory identity is invalid")
+    manifest_path = root / _MANIFEST
+    manifest_payload = _read_regular(manifest_path, maximum=_MAX_SPEC_BYTES)
+    if stat.S_IMODE(manifest_path.stat().st_mode) != 0o444:
+        raise GuardReleaseError("guard release manifest mode is invalid")
+    try:
+        raw = json.loads(manifest_payload, object_pairs_hook=_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise GuardReleaseError("guard release manifest is not valid JSON") from None
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {
+            "architecture",
+            "files",
+            "interpreter",
+            "release_sha256",
+            "release_spec_sha256",
+            "schema",
+        }
+        or _canonical(raw) != manifest_payload
+        or raw.get("schema") != _BUNDLE_SCHEMA
+        or raw.get("architecture") != expected_architecture
+        or raw.get("interpreter") != "/usr/bin/python3 -I -B"
+        or raw.get("release_sha256") != expected_release_sha256
+    ):
+        raise GuardReleaseError("guard release manifest identity is invalid")
+    release_spec_sha256 = raw.get("release_spec_sha256")
+    if (
+        not isinstance(release_spec_sha256, str)
+        or len(release_spec_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in release_spec_sha256)
+    ):
+        raise GuardReleaseError("guard release specification identity is invalid")
+    identity = dict(raw)
+    del identity["release_sha256"]
+    if _digest(_canonical(identity)) != expected_release_sha256:
+        raise GuardReleaseError("guard release digest is invalid")
+    files = raw.get("files")
+    expected_layout = (
+        ("bpftool", 0o555, _MAX_BPFTOOL_BYTES),
+        ("guard-network-map-schema-v1.json", 0o444, _MAX_ARTIFACT_BYTES),
+        ("guard-network-v1.bpf.build.json", 0o444, _MAX_ARTIFACT_BYTES),
+        ("guard-network-v1.bpf.o", 0o444, _MAX_BPF_OBJECT_BYTES),
+        (_ARCHIVE, 0o555, 64 * 1024 * 1024),
+    )
+    if not isinstance(files, list) or len(files) != len(expected_layout):
+        raise GuardReleaseError("guard release file manifest is invalid")
+    members: list[tuple[str, int, bytes]] = []
+    for value, (name, mode, maximum) in zip(files, expected_layout, strict=True):
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"mode", "path", "sha256", "size"}
+            or value.get("path") != name
+            or value.get("mode") != f"{mode:04o}"
+            or type(value.get("size")) is not int
+            or not 1 <= cast(int, value["size"]) <= maximum
+            or not isinstance(value.get("sha256"), str)
+        ):
+            raise GuardReleaseError("guard release file manifest is invalid")
+        member_path = root / name
+        payload = _read_regular(member_path, maximum=maximum, executable=mode == 0o555)
+        metadata = member_path.stat()
+        if (
+            stat.S_IMODE(metadata.st_mode) != mode
+            or (expected_uid is not None and metadata.st_uid != expected_uid)
+            or len(payload) != value["size"]
+            or _digest(payload) != value["sha256"]
+        ):
+            raise GuardReleaseError("guard release member differs from manifest")
+        members.append((name, mode, payload))
+    actual_names = tuple(sorted(path.name for path in root.iterdir()))
+    expected_names = tuple(sorted((*[item[0] for item in expected_layout], _MANIFEST)))
+    if actual_names != expected_names:
+        raise GuardReleaseError("guard release contains an unexpected member")
+    member_map = {name: payload for name, _mode, payload in members}
+    _validate_bpftool(member_map["bpftool"], expected_architecture)
+    _validate_bpf(source=None, artifacts=member_map)
+    if expected_uid is not None and manifest_path.stat().st_uid != expected_uid:
+        raise GuardReleaseError("guard release owner is invalid")
+    return VerifiedGuardRelease(
+        release_sha256=expected_release_sha256,
+        architecture=expected_architecture,
+        directory=root,
+        manifest_payload=manifest_payload,
+        manifest=cast(dict[str, object], raw),
+        members=tuple(members),
+    )
 
 
 def build_release(
@@ -589,4 +724,12 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["GuardRelease", "GuardReleaseError", "build_release", "main"]
+__all__ = [
+    "Architecture",
+    "GuardRelease",
+    "GuardReleaseError",
+    "VerifiedGuardRelease",
+    "build_release",
+    "main",
+    "verify_release_directory",
+]

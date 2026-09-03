@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -60,6 +61,59 @@ _UNSAFE_ENVIRONMENT = frozenset(
 )
 
 
+class SystemdNotifier:
+    """Send only fixed readiness/watchdog messages to systemd's notify socket."""
+
+    def __init__(self, address: str | bytes | None) -> None:
+        self._address = address
+        self._socket: socket.socket | None = None
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str]) -> SystemdNotifier:
+        value = environment.get("NOTIFY_SOCKET")
+        if value is None:
+            return cls(None)
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            or value[0] not in {"/", "@"}
+        ):
+            raise GuardError("service_notify_socket_invalid")
+        encoded = os.fsencode(value)
+        address: str | bytes = b"\0" + encoded[1:] if value.startswith("@") else value
+        if len(os.fsencode(address)) > 107:
+            raise GuardError("service_notify_socket_invalid")
+        return cls(address)
+
+    def _send(self, payload: bytes) -> None:
+        if self._address is None:
+            return
+        try:
+            if self._socket is None:
+                self._socket = socket.socket(
+                    socket.AF_UNIX,
+                    socket.SOCK_DGRAM | socket.SOCK_CLOEXEC,
+                )
+                self._socket.connect(self._address)
+            if self._socket.send(payload) != len(payload):
+                raise OSError("short systemd notification")
+        except OSError as exc:
+            self.close()
+            raise GuardError("service_notify_failed") from exc
+
+    def ready(self) -> None:
+        self._send(b"READY=1")
+
+    def watchdog(self) -> None:
+        self._send(b"WATCHDOG=1")
+
+    def close(self) -> None:
+        if self._socket is not None:
+            self._socket.close()
+            self._socket = None
+
+
 def _error(code: str) -> None:
     sys.stderr.write(f"loom_task_image_builder_guard error={code}\n")
 
@@ -75,7 +129,12 @@ def _boot_id() -> UUID:
     return result
 
 
-def build_service(config: GuardConfig) -> GuardService:
+def build_service(
+    config: GuardConfig,
+    *,
+    ready: Callable[[], None] = lambda: None,
+    watchdog: Callable[[], None] = lambda: None,
+) -> GuardService:
     """Assemble only digest-pinned, locally configured guard dependencies."""
 
     runner = PinnedCommandRunner()
@@ -154,6 +213,8 @@ def build_service(config: GuardConfig) -> GuardService:
         authority=authority,
         reconciler=reconciler,
         node_boot_id=_boot_id(),
+        ready=ready,
+        watchdog=watchdog,
     )
 
 
@@ -181,9 +242,15 @@ def main(
         _error("cli_arguments_invalid")
         return 2
     service: GuardService | None = None
+    notifier: SystemdNotifier | None = None
     try:
         config = GuardConfig.from_file(config_path)
-        service = build_service(config)
+        notifier = SystemdNotifier.from_environment(environment)
+        service = build_service(
+            config,
+            ready=notifier.ready,
+            watchdog=notifier.watchdog,
+        )
         service.start()
         return 0
     except GuardError as exc:
@@ -196,10 +263,12 @@ def main(
         if service is not None:
             service.close()
             service.ledger.close()
+        if notifier is not None:
+            notifier.close()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["build_service", "main"]
+__all__ = ["SystemdNotifier", "build_service", "main"]

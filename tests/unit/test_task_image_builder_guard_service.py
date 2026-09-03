@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import socket
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,7 @@ from uuid import UUID
 
 import pytest
 
-from loom_task_image_builder_guard.__main__ import main
+from loom_task_image_builder_guard.__main__ import SystemdNotifier, main
 from loom_task_image_builder_guard.authority import (
     AcceptedAttestation,
     BuildSession,
@@ -389,7 +390,13 @@ class _Probe:
         self.cleaned.append(grant_id)
 
 
-def _service(tmp_path: Path, *, monotonic: object | None = None):
+def _service(
+    tmp_path: Path,
+    *,
+    monotonic: object | None = None,
+    ready: object | None = None,
+    watchdog: object | None = None,
+):
     config = _config(tmp_path)
     config.containment.ledger_root.mkdir(mode=0o700)
     config.containment.bpffs_root.mkdir(mode=0o700)
@@ -422,6 +429,8 @@ def _service(tmp_path: Path, *, monotonic: object | None = None):
         monotonic=monotonic_factory,  # type: ignore[arg-type]
         trusted_uid=os.geteuid(),
         trusted_gid=os.getegid(),
+        ready=(lambda: None) if ready is None else ready,  # type: ignore[arg-type]
+        watchdog=(lambda: None) if watchdog is None else watchdog,  # type: ignore[arg-type]
     )
     return service, ledger, peer, slurm, events
 
@@ -860,3 +869,48 @@ def test_cli_is_self_check_or_one_absolute_config_without_ambient_injection(
     output = capfd.readouterr()
     assert output.err == "loom_task_image_builder_guard error=unsafe_environment\n"
     assert "/tmp/injected" not in output.err
+
+
+def test_service_signals_ready_only_after_binding_and_feeds_watchdog(
+    tmp_path: Path,
+) -> None:
+    notifications: list[str] = []
+    service, ledger, _peer, _slurm, events = _service(
+        tmp_path,
+        ready=lambda: notifications.append("ready"),
+        watchdog=lambda: notifications.append("watchdog"),
+    )
+    thread = Thread(target=service.start)
+    thread.start()
+    deadline = time.monotonic() + 3
+    while not service.config.protocol.socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    service.stop()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert events[0] == "reconcile"
+    assert notifications[0] == "ready"
+    assert "watchdog" in notifications
+    assert not service.config.protocol.socket_path.exists()
+    ledger.close()
+
+
+def test_systemd_notifier_uses_only_the_validated_notify_socket(tmp_path: Path) -> None:
+    path = tmp_path / "notify.sock"
+    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    receiver.bind(str(path))
+    receiver.settimeout(2)
+    notifier = SystemdNotifier.from_environment({"NOTIFY_SOCKET": str(path)})
+    try:
+        notifier.ready()
+        notifier.watchdog()
+        assert receiver.recv(64) == b"READY=1"
+        assert receiver.recv(64) == b"WATCHDOG=1"
+    finally:
+        notifier.close()
+        receiver.close()
+
+    with pytest.raises(GuardError) as caught:
+        SystemdNotifier.from_environment({"NOTIFY_SOCKET": "relative.sock"})
+    assert caught.value.code == "service_notify_socket_invalid"

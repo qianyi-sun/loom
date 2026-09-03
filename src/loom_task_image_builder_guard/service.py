@@ -707,6 +707,8 @@ class GuardService:
         monotonic: Callable[[], float] = time.monotonic,
         trusted_uid: int = 0,
         trusted_gid: int = 0,
+        ready: Callable[[], None] = lambda: None,
+        watchdog: Callable[[], None] = lambda: None,
     ) -> None:
         if not isinstance(node_boot_id, UUID) or node_boot_id.int == 0:
             raise GuardError("service_boot_identity_invalid")
@@ -725,6 +727,8 @@ class GuardService:
         self._monotonic = monotonic
         self._trusted_uid = trusted_uid
         self._trusted_gid = trusted_gid
+        self._ready = ready
+        self._watchdog = watchdog
         self._stop = threading.Event()
         self._listener: socket.socket | None = None
         self._runtime_fd: int | None = None
@@ -857,7 +861,9 @@ class GuardService:
         listener = self._bind_listener()
         self._listener = listener
         try:
+            self._ready()
             while not self._stop.is_set():
+                self._watchdog()
                 self.run_attestations_once()
                 try:
                     connection, _address = listener.accept()
