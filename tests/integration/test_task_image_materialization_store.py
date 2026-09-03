@@ -60,8 +60,7 @@ async def materialization_session(
             await session.execute(delete(TaskImageMaterialization))
             await session.execute(
                 delete(Task).where(
-                    Task.source_provenance["fixture"].astext
-                    == "task-image-materialization-test"
+                    Task.source_provenance["fixture"].astext == "task-image-materialization-test"
                 )
             )
             await session.commit()
@@ -74,7 +73,9 @@ async def test_ensure_enqueues_idempotent_architecture_snapshots(
     task_id = f"materialization/{uuid4()}"
     checksum = "1" * 64
     async with materialization_session() as session:
-        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum=checksum)))
+        await session.execute(
+            insert(Task).values(**_task_values(task_id=task_id, checksum=checksum))
+        )
         await session.commit()
         task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
 
@@ -103,7 +104,9 @@ async def test_publication_evidence_retains_identical_digest_across_attempt_leas
     checksum = "9" * 64
     registry_image = "registry.example/loom/task@sha256:" + "a" * 64
     async with materialization_session() as session:
-        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum=checksum)))
+        await session.execute(
+            insert(Task).values(**_task_values(task_id=task_id, checksum=checksum))
+        )
         await session.commit()
         task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
         await ensure_task_image_materializations(session, task_row=task)
@@ -180,6 +183,16 @@ async def test_publication_evidence_retains_identical_digest_across_attempt_leas
             (1, 1, "builder:first"),
             (1, 3, "builder:second"),
         ]
+        assert all(
+            (
+                row.grant_id,
+                row.session_id,
+                row.session_generation,
+                row.claim_id,
+            )
+            == (None, None, None, None)
+            for row in attempts
+        )
         assert [
             (row.attempt_number, row.lease_epoch, row.builder_id, row.registry_image)
             for row in evidence

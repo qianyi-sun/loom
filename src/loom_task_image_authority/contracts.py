@@ -471,6 +471,33 @@ class TaskImageSessionRenewalV1(_SecretBearingAuthorityModel):
         return payload
 
 
+class _TaskImageCurrentSessionRequestV1(_SecretBearingAuthorityModel):
+    """Short-lived session possession common to materialization requests."""
+
+    grant_id: NonzeroUUID
+    session_id: NonzeroUUID
+    session_generation: PositiveSignedBigint
+    session_token: Annotated[
+        str,
+        Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$", repr=False),
+    ]
+
+
+class TaskImageMaterializationClaimRequestV1(_TaskImageCurrentSessionRequestV1):
+    claim_id: NonzeroUUID
+
+
+class TaskImageMaterializationOperationRequestV1(_TaskImageCurrentSessionRequestV1):
+    operation_id: NonzeroUUID
+    materialization_id: NonzeroUUID
+    attempt_id: NonzeroUUID
+    lease_epoch: PositiveSignedBigint
+
+
+class TaskImageMaterializationFailureRequestV1(TaskImageMaterializationOperationRequestV1):
+    failure_kind: Literal["deterministic", "containment"]
+
+
 def canonical_authority_bytes(model: StrictTaskImageAuthorityModel) -> bytes:
     """Encode one nonsecret authority model as bounded RFC 8785 JSON."""
 
@@ -539,6 +566,9 @@ __all__ = [
     "TaskImageContainmentAttachmentV1",
     "TaskImageContainmentAttestationV1",
     "TaskImageGuardPrincipalV1",
+    "TaskImageMaterializationClaimRequestV1",
+    "TaskImageMaterializationFailureRequestV1",
+    "TaskImageMaterializationOperationRequestV1",
     "TaskImageProjectionChallengeV1",
     "TaskImageProjectionReceiptV1",
     "TaskImageProjectionRequestV1",

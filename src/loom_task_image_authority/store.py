@@ -1842,6 +1842,41 @@ async def authorize_task_image_build_session(
     )
 
 
+async def authorize_task_image_guard_session(
+    session: AsyncSession,
+    *,
+    principal: TaskImageGuardPrincipalV1,
+    grant_id: UUID,
+    session_id: UUID,
+    session_generation: int,
+    raw_session_token: str,
+    now: datetime,
+) -> TaskImageBuildSessionAuthorization:
+    """Authorize a current session and its exact projected guard identity."""
+
+    principal = _validated_principal(principal)
+    authorization = await authorize_task_image_build_session(
+        session,
+        grant_id=grant_id,
+        session_id=session_id,
+        session_generation=session_generation,
+        raw_session_token=raw_session_token,
+        now=now,
+    )
+    projection = await _locked_projection(session, grant_id=grant_id)
+    if projection is None or projection.state != "exchanged":
+        raise TaskImageProjectionAuthorizationError("task-image build session is unavailable")
+    _require_principal(
+        principal,
+        cluster=projection.slurm_cluster_id,
+        node_name=projection.node_name,
+        principal_id=projection.principal_id,
+        principal_sha256=projection.principal_sha256,
+        required_scope=_PROJECT_SCOPE,
+    )
+    return authorization
+
+
 async def revoke_task_image_projection(
     session: AsyncSession,
     *,
@@ -1988,6 +2023,7 @@ __all__ = [
     "TaskImageProjectionEquivocationError",
     "TaskImageProjectionExpiredError",
     "authorize_task_image_build_session",
+    "authorize_task_image_guard_session",
     "complete_task_image_projection",
     "exchange_task_image_bootstrap",
     "expire_task_image_projection",

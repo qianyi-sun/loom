@@ -404,3 +404,249 @@ def test_0129_aborts_instead_of_inventing_a_contradictory_legacy_session(
             command.upgrade(config, "0129")
     finally:
         engine.dispose()
+
+
+def test_0129_adds_legacy_compatible_session_attempt_and_operation_authority(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config = _config(isolated_migration_postgres_url)
+    command.downgrade(config, "0128")
+    engine = create_engine(isolated_migration_postgres_url)
+    materialization_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    legacy_attempt_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    bound_attempt_id = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+    operation_id = UUID("dddddddd-dddd-dddd-dddd-dddddddddddd")
+    try:
+        with engine.begin() as connection:
+            _insert_exchanged_projection(connection, authority_version=2)
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO task_image_materializations (
+                        id, materialization_key, task_id, task_checksum,
+                        cpu_arch, task_config
+                    ) VALUES (
+                        :id, :key, 'phase2c-migration', :checksum,
+                        'arm64', '{}'::jsonb
+                    )
+                    """
+                ),
+                {"id": materialization_id, "key": "8" * 64, "checksum": "9" * 64},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO task_image_materialization_attempts (
+                        id, materialization_id, attempt_number, lease_epoch,
+                        builder_id, claimed_at
+                    ) VALUES (
+                        :id, :materialization_id, 1, 1, 'legacy-builder', :now
+                    )
+                    """
+                ),
+                {
+                    "id": legacy_attempt_id,
+                    "materialization_id": materialization_id,
+                    "now": NOW,
+                },
+            )
+
+        command.upgrade(config, "0129")
+
+        with engine.begin() as connection:
+            connection.execute(
+                    text(
+                        """
+                        INSERT INTO task_image_materialization_attempts (
+                            id, materialization_id, attempt_number, lease_epoch,
+                            builder_id, claimed_at, grant_id, session_id,
+                            session_generation, claim_id,
+                            claim_deterministic_failure_count,
+                            claim_lease_expires_at, claim_plan_json,
+                            claim_plan_sha256
+                        ) VALUES (
+                            :attempt_id, :materialization_id, 2, 2,
+                            'rootless:' || replace(CAST(:session_id AS text), '-', ''),
+                            :now, :grant_id, :session_id, 1, :claim_id,
+                            0, :lease_expires_at, CAST(:plan_json AS jsonb), :plan_sha256
+                        )
+                        """
+                    ),
+                    {
+                        "attempt_id": bound_attempt_id,
+                        "materialization_id": materialization_id,
+                        "now": NOW,
+                        "grant_id": GRANT_ID,
+                        "session_id": SESSION_ID,
+                        "claim_id": UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
+                        "lease_expires_at": NOW + timedelta(minutes=1),
+                        "plan_json": json.dumps({"plan": True}),
+                        "plan_sha256": "f" * 64,
+                    },
+            )
+
+        with pytest.raises(IntegrityError, match="task_image_materialization_operation_events_secret_check"):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO task_image_materialization_operation_events (
+                            operation_id, operation_type,
+                            materialization_attempt_id, materialization_id,
+                            attempt_number, lease_epoch, builder_id, grant_id,
+                            session_id, session_generation, result_state,
+                            result_attempt_count, result_lease_expires_at,
+                            secret_response_ref, secret_response_sha256,
+                            recorded_at
+                        ) VALUES (
+                            :operation_id, 'bundle', :attempt_id, :materialization_id,
+                            2, 2,
+                            'rootless:' || replace(CAST(:session_id AS text), '-', ''),
+                            :grant_id, :session_id, 1, 'running', 2,
+                            :lease_expires_at,
+                            'loom://task-image-bundle-capability/capability-one',
+                            :secret_sha256, :recorded_at
+                        )
+                        """
+                    ),
+                    {
+                        "operation_id": operation_id,
+                        "attempt_id": bound_attempt_id,
+                        "materialization_id": materialization_id,
+                        "grant_id": GRANT_ID,
+                        "session_id": SESSION_ID,
+                        "lease_expires_at": NOW + timedelta(minutes=1),
+                        "secret_sha256": "a" * 64,
+                        "recorded_at": NOW,
+                    },
+                )
+
+        inspector = inspect(engine)
+        attempt_columns = {
+            item["name"] for item in inspector.get_columns("task_image_materialization_attempts")
+        }
+        assert {
+            "grant_id",
+            "session_id",
+            "session_generation",
+            "claim_id",
+            "claim_deterministic_failure_count",
+            "claim_lease_expires_at",
+            "claim_plan_json",
+            "claim_plan_sha256",
+        } <= attempt_columns
+        attempt_checks = {
+            item["name"]
+            for item in inspector.get_check_constraints("task_image_materialization_attempts")
+        }
+        assert {
+            "task_image_materialization_attempts_session_fields_check",
+            "task_image_materialization_attempts_claim_id_check",
+        } <= attempt_checks
+        attempt_foreign_keys = {
+            item["name"]: item
+            for item in inspector.get_foreign_keys("task_image_materialization_attempts")
+        }
+        session_binding = attempt_foreign_keys["task_image_materialization_attempts_session_fkey"]
+        assert session_binding["constrained_columns"] == [
+            "grant_id",
+            "session_generation",
+            "session_id",
+        ]
+        assert session_binding["referred_columns"] == [
+            "grant_id",
+            "generation",
+            "session_id",
+        ]
+        assert session_binding["options"]["ondelete"] == "RESTRICT"
+
+        assert "task_image_materialization_operation_events" in set(inspector.get_table_names())
+        operation_uniques = {
+            item["name"]: tuple(item["column_names"])
+            for item in inspector.get_unique_constraints(
+                "task_image_materialization_operation_events"
+            )
+        }
+        assert operation_uniques["task_image_materialization_operation_events_operation_uidx"] == (
+            "operation_id",
+        )
+
+        with engine.connect() as connection:
+            legacy = (
+                connection.execute(
+                    text(
+                        """
+                        SELECT grant_id, session_id, session_generation, claim_id,
+                               claim_deterministic_failure_count,
+                               claim_lease_expires_at, claim_plan_json,
+                               claim_plan_sha256
+                          FROM task_image_materialization_attempts
+                         WHERE id = :id
+                        """
+                    ),
+                    {"id": legacy_attempt_id},
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(legacy) == {
+            "grant_id": None,
+            "session_id": None,
+            "session_generation": None,
+            "claim_id": None,
+            "claim_deterministic_failure_count": None,
+            "claim_lease_expires_at": None,
+            "claim_plan_json": None,
+            "claim_plan_sha256": None,
+        }
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE task_image_materialization_attempts
+                           SET grant_id = :grant_id
+                         WHERE id = :id
+                        """
+                    ),
+                    {"grant_id": GRANT_ID, "id": legacy_attempt_id},
+                )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE task_image_materialization_attempts
+                           SET grant_id = :grant_id,
+                               session_id = :session_id,
+                               session_generation = 1,
+                               claim_id = '00000000-0000-0000-0000-000000000000'
+                         WHERE id = :id
+                        """
+                    ),
+                    {
+                        "grant_id": GRANT_ID,
+                        "session_id": SESSION_ID,
+                        "id": legacy_attempt_id,
+                    },
+                )
+
+        command.downgrade(config, "0128")
+        downgraded = inspect(engine)
+        assert "task_image_materialization_operation_events" not in set(
+            downgraded.get_table_names()
+        )
+        assert not {
+            "grant_id",
+            "session_id",
+            "session_generation",
+            "claim_id",
+            "claim_deterministic_failure_count",
+            "claim_lease_expires_at",
+            "claim_plan_json",
+            "claim_plan_sha256",
+        } & {item["name"] for item in downgraded.get_columns("task_image_materialization_attempts")}
+    finally:
+        engine.dispose()

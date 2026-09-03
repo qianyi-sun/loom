@@ -200,6 +200,136 @@ def upgrade() -> None:
             REFERENCES task_image_build_session_generations(
               grant_id, generation, session_id
             ) ON DELETE RESTRICT;
+
+        ALTER TABLE task_image_materialization_attempts
+          ADD COLUMN grant_id UUID,
+          ADD COLUMN session_id UUID,
+          ADD COLUMN session_generation BIGINT,
+          ADD COLUMN claim_id UUID,
+          ADD COLUMN claim_deterministic_failure_count INTEGER,
+          ADD COLUMN claim_lease_expires_at TIMESTAMPTZ,
+          ADD COLUMN claim_plan_json JSONB,
+          ADD COLUMN claim_plan_sha256 VARCHAR(64),
+          ADD CONSTRAINT task_image_materialization_attempts_session_fields_check
+            CHECK (num_nonnulls(
+              grant_id, session_id, session_generation, claim_id,
+              claim_deterministic_failure_count, claim_lease_expires_at,
+              claim_plan_json, claim_plan_sha256
+            ) IN (0, 8)),
+          ADD CONSTRAINT task_image_materialization_attempts_claim_id_check
+            CHECK (
+              claim_id IS NULL OR (
+                claim_id <> '00000000-0000-0000-0000-000000000000'::uuid
+                AND session_generation > 0
+                AND builder_id = 'rootless:' || replace(session_id::text, '-', '')
+                AND claim_deterministic_failure_count >= 0
+                AND claimed_at < claim_lease_expires_at
+                AND jsonb_typeof(claim_plan_json) = 'object'
+                AND claim_plan_sha256 ~ '^[0-9a-f]{64}$'
+                AND claim_plan_sha256 <> repeat('0', 64)
+              )
+            ),
+          ADD CONSTRAINT task_image_materialization_attempts_session_fkey
+            FOREIGN KEY (grant_id, session_generation, session_id)
+            REFERENCES task_image_build_session_generations(
+              grant_id, generation, session_id
+            ) ON DELETE RESTRICT,
+          ADD CONSTRAINT task_image_materialization_attempts_claim_uidx
+            UNIQUE (claim_id),
+          ADD CONSTRAINT task_image_materialization_attempts_operation_binding_uidx
+            UNIQUE (
+              id, materialization_id, attempt_number, lease_epoch,
+              builder_id, grant_id
+            );
+
+        CREATE TABLE task_image_materialization_operation_events (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          operation_id UUID NOT NULL,
+          operation_type VARCHAR(32) NOT NULL,
+          materialization_attempt_id UUID NOT NULL,
+          materialization_id UUID NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          lease_epoch BIGINT NOT NULL,
+          builder_id VARCHAR(128) NOT NULL,
+          grant_id UUID NOT NULL,
+          session_id UUID NOT NULL,
+          session_generation BIGINT NOT NULL,
+          result_state VARCHAR(16) NOT NULL,
+          result_attempt_count INTEGER NOT NULL,
+          result_lease_expires_at TIMESTAMPTZ,
+          secret_response_ref TEXT,
+          secret_response_sha256 VARCHAR(64),
+          secret_response_expires_at TIMESTAMPTZ,
+          recorded_at TIMESTAMPTZ NOT NULL,
+          CONSTRAINT task_image_materialization_operation_events_operation_uidx
+            UNIQUE (operation_id),
+          CONSTRAINT task_image_materialization_operation_events_attempt_fkey
+            FOREIGN KEY (
+              materialization_attempt_id, materialization_id,
+              attempt_number, lease_epoch, builder_id, grant_id
+            ) REFERENCES task_image_materialization_attempts (
+              id, materialization_id, attempt_number,
+              lease_epoch, builder_id, grant_id
+            ) ON DELETE RESTRICT,
+          CONSTRAINT task_image_materialization_operation_events_session_fkey
+            FOREIGN KEY (grant_id, session_generation, session_id)
+            REFERENCES task_image_build_session_generations(
+              grant_id, generation, session_id
+            ) ON DELETE RESTRICT,
+          CONSTRAINT task_image_materialization_operation_events_identity_check
+            CHECK (
+              id <> '00000000-0000-0000-0000-000000000000'::uuid
+              AND operation_id <>
+                '00000000-0000-0000-0000-000000000000'::uuid
+              AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid
+              AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid
+              AND attempt_number > 0 AND lease_epoch > 0
+              AND session_generation > 0 AND result_attempt_count >= 0
+            ),
+          CONSTRAINT task_image_materialization_operation_events_type_check
+            CHECK (operation_type IN (
+              'start', 'heartbeat', 'bundle', 'release',
+              'containment_release', 'deterministic_fail'
+            )),
+          CONSTRAINT task_image_materialization_operation_events_result_check
+            CHECK (
+              (operation_type IN ('start', 'heartbeat', 'bundle')
+                AND result_state IN ('claimed', 'running')
+                AND result_lease_expires_at IS NOT NULL)
+              OR
+              (operation_type IN (
+                  'release', 'containment_release', 'deterministic_fail'
+                )
+                AND result_state IN ('queued', 'failed')
+                AND result_lease_expires_at IS NULL)
+            ),
+          CONSTRAINT task_image_materialization_operation_events_secret_check
+            CHECK (
+              (operation_type <> 'bundle'
+                AND secret_response_ref IS NULL
+                AND secret_response_sha256 IS NULL
+                AND secret_response_expires_at IS NULL)
+              OR
+              (operation_type = 'bundle'
+                AND num_nonnulls(
+                  secret_response_ref,
+                  secret_response_sha256,
+                  secret_response_expires_at
+                ) = 3
+                AND secret_response_ref ~
+                  '^loom://task-image-bundle-capability/[A-Za-z0-9._/-]+$'
+                AND octet_length(secret_response_ref) BETWEEN
+                  octet_length('loom://task-image-bundle-capability/') + 1
+                  AND octet_length('loom://task-image-bundle-capability/') + 512
+                AND secret_response_sha256 ~ '^[0-9a-f]{64}$'
+                AND secret_response_sha256 <> repeat('0', 64)
+                AND recorded_at < secret_response_expires_at)
+            )
+        );
+        CREATE INDEX task_image_materialization_operation_events_attempt_idx
+          ON task_image_materialization_operation_events (
+            materialization_id, lease_epoch, recorded_at
+          );
         """
     )
 
@@ -207,6 +337,21 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         """
+        DROP TABLE task_image_materialization_operation_events;
+        ALTER TABLE task_image_materialization_attempts
+          DROP CONSTRAINT task_image_materialization_attempts_operation_binding_uidx,
+          DROP CONSTRAINT task_image_materialization_attempts_claim_uidx,
+          DROP CONSTRAINT task_image_materialization_attempts_session_fkey,
+          DROP CONSTRAINT task_image_materialization_attempts_claim_id_check,
+          DROP CONSTRAINT task_image_materialization_attempts_session_fields_check,
+          DROP COLUMN claim_plan_sha256,
+          DROP COLUMN claim_plan_json,
+          DROP COLUMN claim_lease_expires_at,
+          DROP COLUMN claim_deterministic_failure_count,
+          DROP COLUMN claim_id,
+          DROP COLUMN session_generation,
+          DROP COLUMN session_id,
+          DROP COLUMN grant_id;
         ALTER TABLE task_image_build_projections
           DROP CONSTRAINT task_image_build_projections_current_session_fkey,
           DROP CONSTRAINT task_image_build_projections_session_generation_check,

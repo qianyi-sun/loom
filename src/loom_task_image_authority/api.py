@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -25,11 +26,21 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from loom.db.schema import (
+    TaskImageMaterializationAttempt,
+    TaskImageMaterializationOperationEvent,
+)
 from loom.db.schema_startup import assert_schema_at_head
 from loom.security.secret_store import LocalEncryptedSecretStore
 from loom_task_image_authority.auth import (
     TaskImageAuthorityAuthorizationError,
     TaskImagePrincipalVerifier,
+)
+from loom_task_image_authority.bundle_capability import (
+    MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
+    TaskImageBundleCapabilityError,
+    TaskImageBundleCapabilityProvider,
+    TaskImageBundleCapabilityV1,
 )
 from loom_task_image_authority.config import (
     TaskImageAuthoritySettings,
@@ -44,18 +55,41 @@ from loom_task_image_authority.contracts import (
     TaskImageBootstrapExchangeV1,
     TaskImageContainmentAttestationV1,
     TaskImageGuardPrincipalV1,
+    TaskImageMaterializationClaimRequestV1,
+    TaskImageMaterializationFailureRequestV1,
+    TaskImageMaterializationOperationRequestV1,
     TaskImageProjectionRequestV1,
     TaskImageProjectionRevocationV1,
+    TaskImageSessionRenewalV1,
     new_bootstrap_token,
     new_session_token,
 )
+from loom_task_image_authority.http_contracts import (
+    TaskImageMaterializationClaimResponseV1,
+    TaskImageMaterializationOperationResponseV1,
+)
+from loom_task_image_authority.materializations import (
+    DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
+    TaskImageSessionMaterializationAuthorizationError,
+    TaskImageSessionMaterializationConflictError,
+    claim_session_materialization,
+    fail_session_materialization,
+    heartbeat_session_materialization,
+    issue_session_materialization_bundle,
+    release_containment_failed_session_materialization,
+    release_session_materialization,
+    start_session_materialization,
+)
 from loom_task_image_authority.store import (
+    TaskImageBuildSessionAuthorization,
     TaskImageProjectionAuthorizationError,
     TaskImageProjectionConflictError,
     TaskImageProjectionEquivocationError,
+    authorize_task_image_guard_session,
     complete_task_image_projection,
     exchange_task_image_bootstrap,
     record_task_image_containment_attestation,
+    renew_task_image_build_session,
     request_task_image_projection,
     revoke_task_image_projection,
 )
@@ -240,10 +274,8 @@ class AuthorityMetricsMiddleware:
             return "healthz"
         if method == "GET" and path == "/metrics":
             return "metrics"
-        if method != "PUT":
-            return None
         parts = path.strip("/").split("/")
-        if len(parts) == 4 and parts[:2] == ["v1", "projections"]:
+        if method == "PUT" and len(parts) == 4 and parts[:2] == ["v1", "projections"]:
             return {
                 "challenge": "challenge",
                 "attachment": "attachment",
@@ -251,11 +283,40 @@ class AuthorityMetricsMiddleware:
                 "revocation": "revocation",
             }.get(parts[3])
         if (
-            len(parts) == 5
+            method == "PUT"
+            and len(parts) == 5
             and parts[:2] == ["v1", "projections"]
             and parts[3] == "attestations"
         ):
             return "attestation"
+        if (
+            method == "PUT"
+            and len(parts) == 6
+            and parts[:2] == ["v1", "projections"]
+            and parts[3] == "sessions"
+            and parts[5] == "renew"
+        ):
+            return "renew"
+        if (
+            method == "POST"
+            and len(parts) == 5
+            and parts[:2] == ["v1", "projections"]
+            and parts[3:] == ["materializations", "claim"]
+        ):
+            return "claim"
+        if (
+            method == "PUT"
+            and len(parts) == 6
+            and parts[:2] == ["v1", "projections"]
+            and parts[3] == "materializations"
+        ):
+            return {
+                "start": "materialization_start",
+                "heartbeat": "materialization_heartbeat",
+                "release": "materialization_release",
+                "fail": "materialization_fail",
+                "bundle": "materialization_bundle",
+            }.get(parts[5])
         return None
 
     @staticmethod
@@ -305,16 +366,18 @@ def create_app(
     challenge_nonce_factory: Callable[[], UUID] | None = None,
     bootstrap_token_factory: Callable[[], str] | None = None,
     session_token_factory: Callable[[], str] | None = None,
+    session_id_factory: Callable[[], UUID] | None = None,
+    bundle_capability_provider: TaskImageBundleCapabilityProvider | None = None,
 ) -> FastAPI:
     """Create the independent projection service; it owns no Slurm client."""
 
-    resolved_verifier = verifier or TaskImagePrincipalVerifier.from_file(
-        settings.principals_file
-    )
+    resolved_verifier = verifier or TaskImagePrincipalVerifier.from_file(settings.principals_file)
     resolved_now = now_factory or (lambda: datetime.now(UTC))
     resolved_challenge_nonce = challenge_nonce_factory or uuid4
     resolved_bootstrap_token = bootstrap_token_factory or new_bootstrap_token
     resolved_session_token = session_token_factory or new_session_token
+    resolved_session_id = session_id_factory or uuid4
+    resolved_bundle_capability_provider = bundle_capability_provider
     metrics = TaskImageAuthorityMetrics()
 
     @asynccontextmanager
@@ -387,9 +450,7 @@ def create_app(
     ) -> TaskImageGuardPrincipalV1:
         ready(request)
         authorization_values = request.headers.getlist("authorization")
-        authorization = (
-            authorization_values[0] if len(authorization_values) == 1 else None
-        )
+        authorization = authorization_values[0] if len(authorization_values) == 1 else None
         try:
             return resolved_verifier.verify_bearer(authorization)
         except TaskImageAuthorityAuthorizationError:
@@ -434,6 +495,10 @@ def create_app(
     exchange_body = contract_body(TaskImageBootstrapExchangeV1)
     attestation_body = contract_body(TaskImageContainmentAttestationV1)
     revocation_body = contract_body(TaskImageProjectionRevocationV1)
+    renewal_body = contract_body(TaskImageSessionRenewalV1)
+    claim_body = contract_body(TaskImageMaterializationClaimRequestV1)
+    operation_body = contract_body(TaskImageMaterializationOperationRequestV1)
+    failure_body = contract_body(TaskImageMaterializationFailureRequestV1)
 
     async def transition(
         operation: Callable[
@@ -474,11 +539,29 @@ def create_app(
                     status_code=409,
                     detail="task-image authority conflict",
                 ) from None
+            except TaskImageSessionMaterializationConflictError:
+                await session.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="task-image authority conflict",
+                ) from None
             except TaskImageProjectionAuthorizationError:
                 await session.rollback()
                 raise HTTPException(
                     status_code=403,
                     detail="task-image authority rejected",
+                ) from None
+            except TaskImageSessionMaterializationAuthorizationError:
+                await session.rollback()
+                raise HTTPException(
+                    status_code=403,
+                    detail="task-image authority rejected",
+                ) from None
+            except TaskImageBundleCapabilityError:
+                await session.rollback()
+                raise HTTPException(
+                    status_code=503,
+                    detail="task-image authority unavailable",
                 ) from None
             except Exception:
                 await session.rollback()
@@ -487,6 +570,19 @@ def create_app(
                     detail="task-image authority unavailable",
                 ) from None
         return result
+
+    def bounded_response(
+        model: BaseModel,
+        *,
+        maximum_bytes: int = MAX_CONTRACT_BYTES,
+    ) -> Response:
+        payload = model.model_dump_json().encode("utf-8")
+        if len(payload) > maximum_bytes:
+            raise HTTPException(
+                status_code=503,
+                detail="task-image authority unavailable",
+            )
+        return Response(content=payload, media_type="application/json")
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict[str, str]:
@@ -577,6 +673,344 @@ def create_app(
             ),
         )
         return JSONResponse(content=jsonable_encoder(result))
+
+    @app.put("/v1/projections/{grant_id}/sessions/{generation}/renew")
+    async def renew_session(
+        grant_id: UUID,
+        generation: int,
+        guard: TaskImageGuardPrincipalV1 = Depends(attest_principal),
+        body: TaskImageSessionRenewalV1 = Depends(renewal_body),
+    ) -> Response:
+        if grant_id != body.grant_id or generation != body.session_generation or generation <= 0:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        result = await transition(
+            lambda session, secret_store: renew_task_image_build_session(
+                session,
+                principal=guard,
+                request=body,
+                now=resolved_now(),
+                secret_store=secret_store,
+                session_token_factory=resolved_session_token,
+                session_id_factory=resolved_session_id,
+            )
+        )
+        return bounded_response(result)
+
+    async def authorize_materialization_request(
+        session: AsyncSession,
+        *,
+        guard: TaskImageGuardPrincipalV1,
+        body: TaskImageMaterializationClaimRequestV1 | TaskImageMaterializationOperationRequestV1,
+        now: datetime,
+    ) -> TaskImageBuildSessionAuthorization:
+        return await authorize_task_image_guard_session(
+            session,
+            principal=guard,
+            grant_id=body.grant_id,
+            session_id=body.session_id,
+            session_generation=body.session_generation,
+            raw_session_token=body.session_token,
+            now=now,
+        )
+
+    @app.post("/v1/projections/{grant_id}/materializations/claim")
+    async def claim_materialization(
+        grant_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationClaimRequestV1 = Depends(claim_body),
+    ) -> Response:
+        if grant_id != body.grant_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+        request_now = resolved_now()
+
+        async def claim_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImageMaterializationClaimResponseV1 | None:
+            del secret_store
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=request_now,
+            )
+            result = await claim_session_materialization(
+                session,
+                authorization=authorization,
+                claim_id=body.claim_id,
+                now=request_now,
+                lease_seconds=DEFAULT_SESSION_MATERIALIZATION_LEASE_SECONDS,
+            )
+            if result is None:
+                return None
+            row, plan = result
+            attempt = await session.scalar(
+                select(TaskImageMaterializationAttempt).where(
+                    TaskImageMaterializationAttempt.claim_id == body.claim_id
+                )
+            )
+            if (
+                attempt is None
+                or attempt.materialization_id != row.id
+                or attempt.claim_deterministic_failure_count is None
+                or attempt.claim_lease_expires_at is None
+            ):
+                raise TaskImageSessionMaterializationAuthorizationError(
+                    "task-image claim receipt is unavailable"
+                )
+            response = TaskImageMaterializationClaimResponseV1(
+                claim_id=body.claim_id,
+                materialization_id=row.id,
+                attempt_id=attempt.id,
+                lease_epoch=attempt.lease_epoch,
+                state="claimed",
+                deterministic_failure_count=attempt.claim_deterministic_failure_count,
+                lease_expires_at=attempt.claim_lease_expires_at,
+                plan=plan,
+            )
+            if len(response.model_dump_json().encode("utf-8")) > MAX_CONTRACT_BYTES:
+                raise ValueError("task-image claim receipt exceeds response limit")
+            return response
+
+        result = await transition(claim_transition)
+        if result is None:
+            return Response(status_code=204)
+        return bounded_response(result)
+
+    async def perform_materialization_operation(
+        *,
+        guard: TaskImageGuardPrincipalV1,
+        body: TaskImageMaterializationOperationRequestV1,
+        operation: Literal[
+            "start",
+            "heartbeat",
+            "release",
+            "containment_release",
+            "deterministic_fail",
+        ],
+    ) -> TaskImageMaterializationOperationResponseV1:
+        request_now = resolved_now()
+
+        async def operation_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImageMaterializationOperationResponseV1:
+            del secret_store
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=request_now,
+            )
+            if operation == "start":
+                await start_session_materialization(
+                    session,
+                    authorization=authorization,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    operation_id=body.operation_id,
+                    now=request_now,
+                )
+            elif operation == "heartbeat":
+                await heartbeat_session_materialization(
+                    session,
+                    authorization=authorization,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    operation_id=body.operation_id,
+                    now=request_now,
+                )
+            elif operation == "release":
+                await release_session_materialization(
+                    session,
+                    authorization=authorization,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    operation_id=body.operation_id,
+                    now=request_now,
+                )
+            elif operation == "containment_release":
+                await release_containment_failed_session_materialization(
+                    session,
+                    authorization=authorization,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    operation_id=body.operation_id,
+                    now=request_now,
+                )
+            else:
+                await fail_session_materialization(
+                    session,
+                    authorization=authorization,
+                    materialization_id=body.materialization_id,
+                    attempt_id=body.attempt_id,
+                    lease_epoch=body.lease_epoch,
+                    operation_id=body.operation_id,
+                    now=request_now,
+                )
+            event = await session.scalar(
+                select(TaskImageMaterializationOperationEvent).where(
+                    TaskImageMaterializationOperationEvent.operation_id == body.operation_id
+                )
+            )
+            if event is None or event.operation_type != operation:
+                raise TaskImageSessionMaterializationAuthorizationError(
+                    "task-image operation receipt is unavailable"
+                )
+            return TaskImageMaterializationOperationResponseV1(
+                operation=operation,
+                operation_id=body.operation_id,
+                materialization_id=body.materialization_id,
+                attempt_id=body.attempt_id,
+                lease_epoch=body.lease_epoch,
+                state=cast(
+                    Literal["claimed", "running", "queued", "failed"],
+                    event.result_state,
+                ),
+                deterministic_failure_count=event.result_attempt_count,
+                lease_expires_at=event.result_lease_expires_at,
+            )
+
+        return await transition(operation_transition)
+
+    def require_operation_path(
+        *,
+        grant_id: UUID,
+        materialization_id: UUID,
+        body: TaskImageMaterializationOperationRequestV1,
+    ) -> None:
+        if grant_id != body.grant_id or materialization_id != body.materialization_id:
+            raise HTTPException(status_code=409, detail="task-image authority conflict")
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/start")
+    async def start_materialization(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        result = await perform_materialization_operation(
+            guard=guard,
+            body=body,
+            operation="start",
+        )
+        return bounded_response(result)
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/heartbeat")
+    async def heartbeat_materialization(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        result = await perform_materialization_operation(
+            guard=guard,
+            body=body,
+            operation="heartbeat",
+        )
+        return bounded_response(result)
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/release")
+    async def release_materialization(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        result = await perform_materialization_operation(
+            guard=guard,
+            body=body,
+            operation="release",
+        )
+        return bounded_response(result)
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/fail")
+    async def fail_materialization(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationFailureRequestV1 = Depends(failure_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        operation: Literal["containment_release", "deterministic_fail"] = (
+            "containment_release" if body.failure_kind == "containment" else "deterministic_fail"
+        )
+        result = await perform_materialization_operation(
+            guard=guard,
+            body=body,
+            operation=operation,
+        )
+        return bounded_response(result)
+
+    @app.put("/v1/projections/{grant_id}/materializations/{materialization_id}/bundle")
+    async def bundle_materialization(
+        grant_id: UUID,
+        materialization_id: UUID,
+        guard: TaskImageGuardPrincipalV1 = Depends(project_principal),
+        body: TaskImageMaterializationOperationRequestV1 = Depends(operation_body),
+    ) -> Response:
+        require_operation_path(
+            grant_id=grant_id,
+            materialization_id=materialization_id,
+            body=body,
+        )
+        if resolved_bundle_capability_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail="task-image authority unavailable",
+            )
+        request_now = resolved_now()
+
+        async def bundle_transition(
+            session: AsyncSession,
+            secret_store: LocalEncryptedSecretStore,
+        ) -> TaskImageBundleCapabilityV1:
+            authorization = await authorize_materialization_request(
+                session,
+                guard=guard,
+                body=body,
+                now=request_now,
+            )
+            return await issue_session_materialization_bundle(
+                session,
+                authorization=authorization,
+                materialization_id=body.materialization_id,
+                attempt_id=body.attempt_id,
+                lease_epoch=body.lease_epoch,
+                operation_id=body.operation_id,
+                now=request_now,
+                provider=resolved_bundle_capability_provider,
+                secret_store=secret_store,
+            )
+
+        result = await transition(bundle_transition)
+        return bounded_response(
+            result,
+            maximum_bytes=MAX_TASK_IMAGE_BUNDLE_CAPABILITY_BYTES,
+        )
 
     @app.put("/v1/projections/{grant_id}/revocation", status_code=204)
     async def revocation(

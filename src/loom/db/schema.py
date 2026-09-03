@@ -2950,6 +2950,34 @@ class TaskImageMaterializationAttempt(Base):
             "attempt_number > 0 AND lease_epoch > 0",
             name="task_image_materialization_attempts_counters_check",
         ),
+        CheckConstraint(
+            "num_nonnulls(grant_id, session_id, session_generation, claim_id, "
+            "claim_deterministic_failure_count, claim_lease_expires_at, "
+            "claim_plan_json, claim_plan_sha256) IN (0, 8)",
+            name="task_image_materialization_attempts_session_fields_check",
+        ),
+        CheckConstraint(
+            "claim_id IS NULL OR ("
+            "claim_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_generation > 0 "
+            "AND builder_id = 'rootless:' || replace(session_id::text, '-', '') "
+            "AND claim_deterministic_failure_count >= 0 "
+            "AND claimed_at < claim_lease_expires_at "
+            "AND jsonb_typeof(claim_plan_json) = 'object' "
+            "AND claim_plan_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND claim_plan_sha256 <> repeat('0', 64))",
+            name="task_image_materialization_attempts_claim_id_check",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_materialization_attempts_session_fkey",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "materialization_id",
             "lease_epoch",
@@ -2962,6 +2990,19 @@ class TaskImageMaterializationAttempt(Base):
             "lease_epoch",
             "builder_id",
             name="task_image_materialization_attempts_binding_uidx",
+        ),
+        UniqueConstraint(
+            "claim_id",
+            name="task_image_materialization_attempts_claim_uidx",
+        ),
+        UniqueConstraint(
+            "id",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+            "grant_id",
+            name="task_image_materialization_attempts_operation_binding_uidx",
         ),
         Index(
             "task_image_materialization_attempts_lookup_idx",
@@ -2980,10 +3021,134 @@ class TaskImageMaterializationAttempt(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    session_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    claim_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    claim_deterministic_failure_count: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    claim_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    claim_plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    claim_plan_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     claimed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class TaskImageMaterializationOperationEvent(Base):
+    """One bounded idempotent transition result for a session-owned lease."""
+
+    __tablename__ = "task_image_materialization_operation_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+                "grant_id",
+            ],
+            [
+                "task_image_materialization_attempts.id",
+                "task_image_materialization_attempts.materialization_id",
+                "task_image_materialization_attempts.attempt_number",
+                "task_image_materialization_attempts.lease_epoch",
+                "task_image_materialization_attempts.builder_id",
+                "task_image_materialization_attempts.grant_id",
+            ],
+            name="task_image_materialization_operation_events_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["grant_id", "session_generation", "session_id"],
+            [
+                "task_image_build_session_generations.grant_id",
+                "task_image_build_session_generations.generation",
+                "task_image_build_session_generations.session_id",
+            ],
+            name="task_image_materialization_operation_events_session_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "operation_id",
+            name="task_image_materialization_operation_events_operation_uidx",
+        ),
+        CheckConstraint(
+            "id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND operation_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND grant_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND session_id <> '00000000-0000-0000-0000-000000000000'::uuid "
+            "AND attempt_number > 0 AND lease_epoch > 0 "
+            "AND session_generation > 0 AND result_attempt_count >= 0",
+            name="task_image_materialization_operation_events_identity_check",
+        ),
+        CheckConstraint(
+            "operation_type IN ('start','heartbeat','bundle','release',"
+            "'containment_release','deterministic_fail')",
+            name="task_image_materialization_operation_events_type_check",
+        ),
+        CheckConstraint(
+            "(operation_type IN ('start','heartbeat','bundle') "
+            "AND result_state IN ('claimed','running') "
+            "AND result_lease_expires_at IS NOT NULL) OR "
+            "(operation_type IN ('release','containment_release','deterministic_fail') "
+            "AND result_state IN ('queued','failed') "
+            "AND result_lease_expires_at IS NULL)",
+            name="task_image_materialization_operation_events_result_check",
+        ),
+        CheckConstraint(
+            "(operation_type <> 'bundle' "
+            "AND secret_response_ref IS NULL "
+            "AND secret_response_sha256 IS NULL "
+            "AND secret_response_expires_at IS NULL) OR "
+            "(operation_type = 'bundle' "
+            "AND num_nonnulls(secret_response_ref, secret_response_sha256, "
+            "secret_response_expires_at) = 3 "
+            "AND secret_response_ref ~ "
+            "'^loom://task-image-bundle-capability/[A-Za-z0-9._/-]+$' "
+            "AND octet_length(secret_response_ref) BETWEEN "
+            "octet_length('loom://task-image-bundle-capability/') + 1 AND "
+            "octet_length('loom://task-image-bundle-capability/') + 512 "
+            "AND secret_response_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND secret_response_sha256 <> repeat('0', 64) "
+            "AND recorded_at < secret_response_expires_at)",
+            name="task_image_materialization_operation_events_secret_check",
+        ),
+        Index(
+            "task_image_materialization_operation_events_attempt_idx",
+            "materialization_id",
+            "lease_epoch",
+            "recorded_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    operation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    grant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    session_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    result_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    result_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    secret_response_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_response_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    secret_response_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class TaskImagePublicationEvidence(Base):
