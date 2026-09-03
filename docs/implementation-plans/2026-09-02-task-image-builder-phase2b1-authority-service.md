@@ -19,7 +19,9 @@
 - Request bodies are at most `MAX_CONTRACT_BYTES == 65536`; OpenAPI, Swagger, and ReDoc remain disabled.
 - Authorization and expiry failures share one bounded HTTP response; no response reveals whether a grant, token, principal, or projection exists.
 - Raw bearer, bootstrap, session, database, and keyring secrets never enter logs, metrics, URLs, response errors, checked-in manifests, or deployment examples.
-- Service startup validates application Alembic head `0125` and fails closed on unsafe principal/keyring files or database drift.
+- Service startup validates the current single application Alembic head and
+  fails closed on unsafe principal/keyring files or database drift (`0125` was
+  the head when implementation began; upstream reconciliation may extend it).
 - No authority route claims materializations, invokes Slurm, starts a supervisor, loads BPF, pushes an image, signs a publication, or authorizes trial execution.
 - Do not modify `docs/superpowers/**` or `.superpowers/**`; use only this repository-owned implementation-plan path.
 
@@ -358,4 +360,4 @@
 
 - [ ] **Step 7: Verify post-merge inert state**
 
-  Fetch `origin/dev`, verify the PR's squash commit is an ancestor and has the same tested tree, require one Alembic `0125` head, confirm the authority Deployment still has zero replicas and default-deny policy, confirm the two rootless policies remain disabled with all blockers, confirm staging/Phase 1 files have no diff, and start Phase 2B2 from that exact merge.
+  Fetch `origin/dev`, verify the PR's squash commit is an ancestor and has the same tested tree, require one current Alembic head, confirm the authority Deployment still has zero replicas and default-deny policy, confirm the two rootless policies remain disabled with all blockers, confirm staging/Phase 1 files have no diff, and start Phase 2B2 from that exact merge.
