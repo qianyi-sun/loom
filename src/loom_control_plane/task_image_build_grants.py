@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.db.schema import TaskImageBuildGrant, TaskImageBuildGrantEvent
 from loom_control_plane.task_image_build_environment import (
     SlurmBuildGrantV1,
+    SlurmBuildGrantV2,
     SlurmBuildInventoryV1,
     SlurmBuildJobObservationV1,
 )
@@ -32,7 +33,7 @@ class TaskImageBuildInventoryDecision:
 
 
 def _observation_matches_grant(
-    grant: SlurmBuildGrantV1,
+    grant: SlurmBuildGrantV1 | SlurmBuildGrantV2,
     observation: SlurmBuildJobObservationV1,
 ) -> bool:
     return (
@@ -43,7 +44,7 @@ def _observation_matches_grant(
 
 
 def classify_task_image_build_inventory(
-    grant: SlurmBuildGrantV1,
+    grant: SlurmBuildGrantV1 | SlurmBuildGrantV2,
     inventory: SlurmBuildInventoryV1,
     *,
     invocation_started_at: datetime,
@@ -91,11 +92,7 @@ def classify_task_image_build_inventory(
                 action="revoke",
                 reason="terminal_submission_observed",
             )
-        if (
-            job.state == "pending"
-            and job.held
-            and _observation_matches_grant(grant, job)
-        ):
+        if job.state == "pending" and job.held and _observation_matches_grant(grant, job):
             return TaskImageBuildInventoryDecision(
                 action="bind",
                 reason="one_exact_held_submission",
@@ -169,9 +166,7 @@ async def _locked_grant(
     grant_id: UUID,
 ) -> TaskImageBuildGrant:
     row = await session.scalar(
-        select(TaskImageBuildGrant)
-        .where(TaskImageBuildGrant.id == grant_id)
-        .with_for_update()
+        select(TaskImageBuildGrant).where(TaskImageBuildGrant.id == grant_id).with_for_update()
     )
     if row is None:
         raise TaskImageBuildGrantConflictError(f"task-image build grant {grant_id} not found")
@@ -198,10 +193,20 @@ def _append_event(
     )
 
 
-def _stored_grant(row: TaskImageBuildGrant) -> SlurmBuildGrantV1:
-    grant = SlurmBuildGrantV1.model_validate(
+def _stored_grant(row: TaskImageBuildGrant) -> SlurmBuildGrantV1 | SlurmBuildGrantV2:
+    authority_version = (
+        row.authority_spec.get("schema_version") if isinstance(row.authority_spec, dict) else None
+    )
+    model: type[SlurmBuildGrantV1] | type[SlurmBuildGrantV2]
+    model = SlurmBuildGrantV2 if authority_version == 2 else SlurmBuildGrantV1
+    schema = (
+        "loom.task-image-build-grant/v2"
+        if authority_version == 2
+        else "loom.task-image-build-grant/v1"
+    )
+    grant = model.model_validate(
         {
-            "schema": "loom.task-image-build-grant/v1",
+            "schema": schema,
             "grant_id": row.id,
             "request": row.request_spec,
             "request_sha256": row.request_sha256,
@@ -229,12 +234,14 @@ def _stored_grant(row: TaskImageBuildGrant) -> SlurmBuildGrantV1:
     return grant
 
 
-def _require_live_grant(row: TaskImageBuildGrant, *, now: datetime) -> SlurmBuildGrantV1:
+def _require_live_grant(
+    row: TaskImageBuildGrant,
+    *,
+    now: datetime,
+) -> SlurmBuildGrantV1 | SlurmBuildGrantV2:
     grant = _stored_grant(row)
     if now >= grant.authority.expires_at:
-        raise TaskImageBuildGrantConflictError(
-            f"task-image build grant {row.id} authority expired"
-        )
+        raise TaskImageBuildGrantConflictError(f"task-image build grant {row.id} authority expired")
     return grant
 
 
@@ -242,12 +249,12 @@ async def issue_task_image_build_grant(
     session: AsyncSession,
     *,
     environment: str,
-    grant: SlurmBuildGrantV1,
+    grant: SlurmBuildGrantV2,
     ambiguity_settle_seconds: int,
     now: datetime,
 ) -> TaskImageBuildGrant:
     """Persist a new grant and its first journal record atomically."""
-    grant = SlurmBuildGrantV1.model_validate(grant.model_dump(mode="python"))
+    grant = SlurmBuildGrantV2.model_validate(grant.model_dump(mode="python"))
     if ambiguity_settle_seconds <= 0:
         raise ValueError("ambiguity settle duration must be positive")
     authority = grant.authority

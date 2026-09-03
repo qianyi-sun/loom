@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from loom_control_plane.elastic_slurm_worker_controller import SbatchRequest
 from loom_task_image_authority.contracts import (
     TaskImageBuildGrantAuthorityV1,
+    TaskImageBuildGrantAuthorityV2,
     canonical_authority_sha256,
 )
 
@@ -107,9 +108,7 @@ class SlurmBuildRequestIdentityV1(_StrictFrozenModel):
 
 
 class SlurmBuildEnvironmentPolicyV1(_StrictFrozenModel):
-    schema_version: Literal["loom.task-image-build-environment-policy/v1"] = Field(
-        alias="schema"
-    )
+    schema_version: Literal["loom.task-image-build-environment-policy/v1"] = Field(alias="schema")
     enabled: bool
     activation_blockers: tuple[str, ...]
     slurm_cluster_id: Literal["oldlab", "gb10"]
@@ -198,15 +197,26 @@ class SlurmBuildGrantV1(_StrictFrozenModel):
         return self
 
 
+class SlurmBuildGrantV2(SlurmBuildGrantV1):
+    """Pre-activation grant with separate provider-release and ELF identity."""
+
+    schema_version: Literal["loom.task-image-build-grant/v2"] = Field(  # type: ignore[assignment]
+        alias="schema"
+    )
+    authority: TaskImageBuildGrantAuthorityV2
+
+
 def issue_slurm_build_grant(
     policy: SlurmBuildEnvironmentPolicyV1,
     *,
     grant_id: UUID,
     authority: TaskImageBuildGrantAuthorityV1,
-) -> SlurmBuildGrantV1:
+) -> SlurmBuildGrantV2:
+    if not isinstance(authority, TaskImageBuildGrantAuthorityV2):
+        raise ValueError("rootless builder issuance requires V2 release authority")
     request = policy.request_identity()
-    return SlurmBuildGrantV1(
-        schema_version="loom.task-image-build-grant/v1",
+    return SlurmBuildGrantV2(
+        schema_version="loom.task-image-build-grant/v2",
         grant_id=grant_id,
         request=request,
         request_sha256=canonical_request_sha256(request),
@@ -253,7 +263,7 @@ class SlurmBuildInventoryV1(_StrictFrozenModel):
 class SlurmBuildEnvironmentRunner(Protocol):
     async def submit(self, request: SbatchRequest) -> str: ...
 
-    async def inventory(self, grant: SlurmBuildGrantV1) -> SlurmBuildInventoryV1: ...
+    async def inventory(self, grant: SlurmBuildGrantV2) -> SlurmBuildInventoryV1: ...
 
     async def cancel(self, job_id: str) -> None: ...
 
@@ -261,11 +271,11 @@ class SlurmBuildEnvironmentRunner(Protocol):
 
 
 class BuildEnvironmentProvider(Protocol):
-    def render_submission(self, grant: SlurmBuildGrantV1) -> SbatchRequest: ...
+    def render_submission(self, grant: SlurmBuildGrantV2) -> SbatchRequest: ...
 
-    async def submit_once(self, grant: SlurmBuildGrantV1) -> str: ...
+    async def submit_once(self, grant: SlurmBuildGrantV2) -> str: ...
 
-    async def inventory(self, grant: SlurmBuildGrantV1) -> SlurmBuildInventoryV1: ...
+    async def inventory(self, grant: SlurmBuildGrantV2) -> SlurmBuildInventoryV1: ...
 
     async def cancel(self, job_id: str) -> None: ...
 
@@ -278,7 +288,7 @@ class BuildEnvironmentDisabledError(RuntimeError):
 
 def _validate_grant_policy(
     policy: SlurmBuildEnvironmentPolicyV1,
-    grant: SlurmBuildGrantV1,
+    grant: SlurmBuildGrantV2,
 ) -> None:
     if grant.request != policy.request_identity():
         raise ValueError("rootless builder grant differs from provider policy")
@@ -286,7 +296,7 @@ def _validate_grant_policy(
 
 def render_rootless_builder_sbatch_request(
     policy: SlurmBuildEnvironmentPolicyV1,
-    grant: SlurmBuildGrantV1,
+    grant: SlurmBuildGrantV2,
 ) -> SbatchRequest:
     _validate_grant_policy(policy, grant)
     request = grant.request
@@ -325,15 +335,15 @@ class SlurmBuildEnvironmentProvider:
         self.policy = policy
         self.runner = runner
 
-    def render_submission(self, grant: SlurmBuildGrantV1) -> SbatchRequest:
+    def render_submission(self, grant: SlurmBuildGrantV2) -> SbatchRequest:
         return render_rootless_builder_sbatch_request(self.policy, grant)
 
-    async def submit_once(self, grant: SlurmBuildGrantV1) -> str:
+    async def submit_once(self, grant: SlurmBuildGrantV2) -> str:
         if not self.policy.enabled or self.policy.activation_blockers:
             raise BuildEnvironmentDisabledError("rootless builder provider is disabled")
         return await self.runner.submit(self.render_submission(grant))
 
-    async def inventory(self, grant: SlurmBuildGrantV1) -> SlurmBuildInventoryV1:
+    async def inventory(self, grant: SlurmBuildGrantV2) -> SlurmBuildInventoryV1:
         _validate_grant_policy(self.policy, grant)
         return await self.runner.inventory(grant)
 
@@ -352,6 +362,7 @@ __all__ = [
     "SlurmBuildEnvironmentProvider",
     "SlurmBuildEnvironmentRunner",
     "SlurmBuildGrantV1",
+    "SlurmBuildGrantV2",
     "SlurmBuildInventoryV1",
     "SlurmBuildJobObservationV1",
     "SlurmBuildRequestIdentityV1",

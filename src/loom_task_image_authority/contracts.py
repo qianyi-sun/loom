@@ -100,9 +100,7 @@ class StrictTaskImageAuthorityModel(BaseModel):
         for name, item in normalized.items():
             if isinstance(item, list):
                 normalized[name] = tuple(item)
-            elif isinstance(item, str) and (
-                name.endswith("_at") or name.endswith("_expires_at")
-            ):
+            elif isinstance(item, str) and (name.endswith("_at") or name.endswith("_expires_at")):
                 normalized[name] = _parse_timestamp(item)
         return normalized
 
@@ -160,6 +158,13 @@ class TaskImageBuildGrantAuthorityV1(StrictTaskImageAuthorityModel):
             label="grant",
         )
         return self
+
+
+class TaskImageBuildGrantAuthorityV2(TaskImageBuildGrantAuthorityV1):
+    """Composite provider-release identity with a distinct native ELF binding."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    supervisor_executable_sha256: Digest
 
 
 class TaskImageGuardPrincipalV1(StrictTaskImageAuthorityModel):
@@ -228,9 +233,7 @@ class TaskImageContainmentAttachmentV1(StrictTaskImageAuthorityModel):
     resource_limits_sha256: Digest
     probe_sha256: Digest
     link_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
-    program_ids: Annotated[
-        tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)
-    ]
+    program_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
     map_ids: Annotated[tuple[PositiveSignedBigint, ...], Field(min_length=1, max_length=32)]
 
     @field_validator("link_ids", "program_ids", "map_ids")
@@ -402,6 +405,13 @@ class TaskImageBuildSessionV1(_SecretBearingAuthorityModel):
         return payload
 
 
+class TaskImageBuildSessionV2(TaskImageBuildSessionV1):
+    """One immutable generation of a renewable build session."""
+
+    schema_version: Literal[2] = 2  # type: ignore[assignment]
+    generation: PositiveSignedBigint
+
+
 class TaskImageContainmentAttestationV1(StrictTaskImageAuthorityModel):
     attestation_id: NonzeroUUID
     grant_id: NonzeroUUID
@@ -432,6 +442,35 @@ class TaskImageContainmentAttestationV1(StrictTaskImageAuthorityModel):
         return self
 
 
+class TaskImageSessionRenewalV1(_SecretBearingAuthorityModel):
+    """Current-session possession and the guard's complete next attestation."""
+
+    renewal_id: NonzeroUUID
+    grant_id: NonzeroUUID
+    session_id: NonzeroUUID
+    session_generation: PositiveSignedBigint
+    session_token: Annotated[str, Field(pattern=r"^loom_tibs_[A-Za-z0-9_-]{64,128}$")]
+    attestation: TaskImageContainmentAttestationV1
+    observed_at: datetime
+
+    @model_validator(mode="after")
+    def _renewal_is_exact(self) -> TaskImageSessionRenewalV1:
+        if self.attestation.grant_id != self.grant_id:
+            raise ValueError("authority renewal grant changed")
+        if self.attestation.generation != self.session_generation + 1:
+            raise ValueError("authority renewal attestation is not the next generation")
+        if self.observed_at != self.attestation.issued_at:
+            raise ValueError("authority renewal observation differs from attestation issue time")
+        return self
+
+    def public_binding(self) -> dict[str, Any]:
+        payload = self.model_dump(mode="json", exclude={"session_token"})
+        payload["session_token_sha256"] = hashlib.sha256(
+            self.session_token.encode("utf-8")
+        ).hexdigest()
+        return payload
+
+
 def canonical_authority_bytes(model: StrictTaskImageAuthorityModel) -> bytes:
     """Encode one nonsecret authority model as bounded RFC 8785 JSON."""
 
@@ -452,7 +491,9 @@ def canonical_authority_sha256(model: StrictTaskImageAuthorityModel) -> str:
 def canonical_public_binding_sha256(
     model: TaskImageProjectionReceiptV1
     | TaskImageBootstrapExchangeV1
-    | TaskImageBuildSessionV1,
+    | TaskImageBuildSessionV1
+    | TaskImageBuildSessionV2
+    | TaskImageSessionRenewalV1,
 ) -> str:
     """Hash the canonical nonsecret binding of a secret-bearing contract."""
 
@@ -492,7 +533,9 @@ __all__ = [
     "TaskImageAttachmentProofV1",
     "TaskImageBootstrapExchangeV1",
     "TaskImageBuildGrantAuthorityV1",
+    "TaskImageBuildGrantAuthorityV2",
     "TaskImageBuildSessionV1",
+    "TaskImageBuildSessionV2",
     "TaskImageContainmentAttachmentV1",
     "TaskImageContainmentAttestationV1",
     "TaskImageGuardPrincipalV1",
@@ -500,6 +543,7 @@ __all__ = [
     "TaskImageProjectionReceiptV1",
     "TaskImageProjectionRequestV1",
     "TaskImageProjectionRevocationV1",
+    "TaskImageSessionRenewalV1",
     "canonical_authority_bytes",
     "canonical_authority_sha256",
     "canonical_public_binding_sha256",
