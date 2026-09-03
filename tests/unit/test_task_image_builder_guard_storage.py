@@ -543,3 +543,39 @@ def test_recover_reopens_only_the_exact_durable_storage_identity(tmp_path: Path)
     with pytest.raises(GuardError) as caught:
         manager.recover(document)
     assert caught.value.code == "storage_recovery_ambiguous"
+
+
+def test_live_validation_anchors_the_retained_descriptor_to_the_durable_path(
+    tmp_path: Path,
+) -> None:
+    manager, fake, _root, job = _prepared(tmp_path)
+    fake.quota = QuotaRecord(BYTE_LIMIT, INODE_LIMIT, 0, 1)
+
+    manager.assert_live(job)
+    displaced = job.path.with_name("displaced")
+    job.path.rename(displaced)
+    job.path.mkdir(mode=0o700)
+
+    with pytest.raises(GuardError) as caught:
+        manager.assert_live(job)
+
+    assert caught.value.code == "storage_live_ambiguous"
+    job.close()
+
+
+def test_cleanup_resume_accepts_only_the_proven_absent_root_and_clears_quota(
+    tmp_path: Path,
+) -> None:
+    manager, fake, root, job = _prepared(tmp_path)
+    document = job.document()
+    fake.quota = QuotaRecord(BYTE_LIMIT, INODE_LIMIT, 0, 1)
+    job.close()
+    job.path.rmdir()
+    fake.quota = QuotaRecord(BYTE_LIMIT, INODE_LIMIT, 0, 0)
+
+    manager.resume_cleanup(document)
+    manager.resume_cleanup(document)
+
+    assert list((root / "jobs").iterdir()) == []
+    assert fake.quota == QuotaRecord(0, 0, 0, 0)
+    assert fake.set_quota_calls[-1] == (PROJECT_ID, 0, 0)

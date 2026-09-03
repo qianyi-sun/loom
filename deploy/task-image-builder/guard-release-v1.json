@@ -12,7 +12,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/authority.py",
-      "sha256": "e98dd0ba41e59143d6b0a3bacb1f560ffd3da45536f2a8a7d5543c7048d39e7b"
+      "sha256": "7e538bc7780a25e70648ab6b8a45f439b35828b2a64fdb03f4771a53e0f7216f"
     },
     {
       "path": "src/loom_task_image_builder_guard/bpf.py",
@@ -36,7 +36,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/ledger.py",
-      "sha256": "955df2a22098ff614a7ccc76925f55a9bfc016e3fef373aeb19d1d14075b98d7"
+      "sha256": "be20322d4c245017be62118e8ec1b0d5bcd74bc1c242f562b0e201b3473fc0c6"
     },
     {
       "path": "src/loom_task_image_builder_guard/models.py",
@@ -52,7 +52,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/service.py",
-      "sha256": "8802c5c150b14bf8a56baf1c0839a82f7cac0406315e894821a02fb96c6e5f93"
+      "sha256": "73638656f7ce843496ad66528977817101d39e4473a06f61560f252726ce84a9"
     },
     {
       "path": "src/loom_task_image_builder_guard/slurm.py",
@@ -60,7 +60,7 @@
     },
     {
       "path": "src/loom_task_image_builder_guard/storage.py",
-      "sha256": "990541c754f7e432ed3fe69df09a74f96acdbc909c738cf5b77227e2c61bf54a"
+      "sha256": "c63fad03f28f8a1a71908daab6f809f303864bd8e3c43dca0aced28eb7e9a6ae"
     }
   ],
   "bpf_source": {

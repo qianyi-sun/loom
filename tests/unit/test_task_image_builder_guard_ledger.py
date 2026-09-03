@@ -683,6 +683,50 @@ def test_finish_persists_typed_nonsecret_cleanup_and_moves_to_finishing(
     ledger.close()
 
 
+def test_terminal_cleanup_phases_are_durable_ordered_and_replay_safe(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    _exchange(ledger)
+    cleanup = {
+        "descendant_processes": 0,
+        "mounts": 0,
+        "sockets": 0,
+        "open_files": 0,
+    }
+    ledger.record_finish(
+        GRANT,
+        operation_id=RENEWAL,
+        cleanup=cleanup,
+        cleanup_sha256=ledger.document_sha256(cleanup),
+    )
+    ledger.mark_terminal(GRANT, reason="slurm_completed")
+    assert ledger.removable_pin_paths(GRANT) == ()
+    with pytest.raises(GuardError) as caught:
+        ledger.remove_terminal(GRANT, allocation_empty=True)
+    assert caught.value.code == "ledger_not_terminal"
+
+    storage = ledger.record_storage_cleanup_pending(GRANT)
+    assert storage.state == "cleanup_storage_pending"
+    assert ledger.record_storage_cleanup_pending(GRANT).raw == storage.raw
+    with pytest.raises(GuardError) as caught:
+        ledger.record_cgroup_cleanup_pending(GRANT)
+    assert caught.value.code == "ledger_cleanup_invalid"
+
+    pins = ledger.record_pin_cleanup_pending(GRANT)
+    assert pins.state == "cleanup_pins_pending"
+    assert ledger.removable_pin_paths(GRANT) == (Path(PINS),)
+    assert ledger.record_pin_cleanup_pending(GRANT).raw == pins.raw
+    cgroups = ledger.record_cgroup_cleanup_pending(GRANT)
+    assert cgroups.state == "cleanup_cgroups_pending"
+    assert ledger.removable_pin_paths(GRANT) == ()
+    assert ledger.record_cgroup_cleanup_pending(GRANT).raw == cgroups.raw
+
+    ledger.remove_terminal(GRANT, allocation_empty=True)
+    assert ledger.get(GRANT) is None
+    ledger.close()
+
+
 def test_exchanged_session_cannot_advance_an_attestation_without_renewal(
     tmp_path: Path,
 ) -> None:
@@ -872,6 +916,9 @@ def test_quarantine_preserves_attachment_and_remove_requires_terminal_empty(
         ledger.remove_terminal(terminal_grant, allocation_empty=False)
     assert caught.value.code == "ledger_allocation_not_empty"
     assert ledger.get(terminal_grant) is not None
+    ledger.record_storage_cleanup_pending(terminal_grant)
+    ledger.record_pin_cleanup_pending(terminal_grant)
+    ledger.record_cgroup_cleanup_pending(terminal_grant)
     ledger.remove_terminal(terminal_grant, allocation_empty=True)
     assert ledger.get(terminal_grant) is None
     ledger.close()

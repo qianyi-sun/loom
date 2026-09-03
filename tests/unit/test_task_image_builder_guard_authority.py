@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -570,6 +571,41 @@ def test_fixed_session_and_materialization_routes_keep_capabilities_sealed(
             f"{materialization_base}/bundle",
         ]
         assert server.methods == ["PUT", "POST", "PUT", "PUT", "PUT", "PUT", "PUT"]
+
+
+def test_claim_immediately_seals_an_opaque_success_body_without_deserializing_it(
+    tmp_path: Path,
+) -> None:
+    with _authority(tmp_path) as (server, config):
+        client = AuthorityClient(
+            config,
+            trusted_uid=os.geteuid(),
+            trusted_gid=os.getegid(),
+            now_factory=lambda: NOW + timedelta(seconds=6),
+        )
+        opaque = b"\x00opaque-claim\xffnot-a-json-document"
+        route = f"/v1/projections/{GRANT}/materializations/claim"
+        server.responses = {
+            route: (200, opaque, {"Content-Type": "application/json"})
+        }
+        request = {
+            "schema_version": 1,
+            "grant_id": str(GRANT),
+            "session_id": str(SESSION),
+            "session_generation": 1,
+            "session_token": SESSION_TOKEN,
+            "claim_id": str(OPERATION),
+        }
+
+        claimed = client.claim(GRANT, request)
+
+        assert claimed is not None
+        try:
+            assert read_sealed_memfd(claimed.descriptor, maximum=4096) == opaque
+            assert claimed.sha256 == hashlib.sha256(opaque).hexdigest()
+        finally:
+            claimed.close()
+        assert [item[0] for item in server.requests] == [route]
 
 
 @pytest.mark.parametrize(

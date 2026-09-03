@@ -12,7 +12,7 @@ import stat
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -181,7 +181,23 @@ class Storage(Protocol):
 
     def recover(self, document: dict[str, object]) -> JobStorage: ...
 
+    def assert_live(self, job: JobStorage) -> None: ...
+
     def cleanup(self, job: JobStorage) -> None: ...
+
+    def resume_cleanup(
+        self,
+        document: dict[str, object],
+        *,
+        retained: JobStorage | None = None,
+    ) -> None: ...
+
+
+class RetainedAllocation(Protocol):
+    storage: JobStorage
+    build_egress_descriptor: int
+    build_egress_device: int
+    build_egress_inode: int
 
 
 class Authority(Protocol):
@@ -262,7 +278,12 @@ class Authority(Protocol):
 
 
 class Reconciler(Protocol):
-    def reconcile(self, ledger: GuardLedger) -> None: ...
+    def reconcile(
+        self,
+        ledger: GuardLedger,
+        *,
+        retained: Mapping[UUID, RetainedAllocation] | None = None,
+    ) -> None: ...
 
     def assert_live(self, entry: LedgerEntry) -> None: ...
 
@@ -380,9 +401,39 @@ class NodeReconciler:
         except OSError as exc:
             raise GuardError("reconciliation_pin_root_invalid") from exc
 
-    def reconcile(self, ledger: GuardLedger) -> None:
+    def _assert_retained(
+        self,
+        entry: LedgerEntry,
+        allocation: RetainedAllocation,
+    ) -> None:
+        if entry.state in {"finishing", "terminal", "cleanup_storage_pending"}:
+            self.storage.assert_live(allocation.storage)
+        try:
+            metadata = os.fstat(allocation.build_egress_descriptor)
+        except OSError as exc:
+            raise GuardError("reconciliation_cleanup_ambiguous") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino)
+            != (allocation.build_egress_device, allocation.build_egress_inode)
+        ):
+            raise GuardError("reconciliation_cleanup_ambiguous")
+
+    def reconcile(
+        self,
+        ledger: GuardLedger,
+        *,
+        retained: Mapping[UUID, RetainedAllocation] | None = None,
+    ) -> None:
         recoverable: list[LedgerEntry] = []
         withdrawal_attempted = False
+        retained_allocations = {} if retained is None else retained
+        cleanup_states = {
+            "terminal",
+            "cleanup_storage_pending",
+            "cleanup_pins_pending",
+            "cleanup_cgroups_pending",
+        }
         try:
             entries = ledger.load_all()
             self._progress()
@@ -407,19 +458,31 @@ class NodeReconciler:
                     continue
                 pin_path = document["pin_path"]
                 if pin_path is not None:
-                    expected.add(entry.grant_id)
                     if pin_path != str(self.pin_root / str(entry.grant_id)):
                         ambiguous = True
                         ledger.quarantine(
                             entry.grant_id, reason="pin_identity_ambiguous"
                         )
                         continue
-                    if entry.grant_id not in published:
+                    pin_present = entry.grant_id in published
+                    if entry.state == "cleanup_cgroups_pending":
+                        if pin_present:
+                            ambiguous = True
+                            ledger.quarantine(
+                                entry.grant_id, reason="pin_inventory_ambiguous"
+                            )
+                            continue
+                    elif entry.state == "cleanup_pins_pending":
+                        if pin_present:
+                            expected.add(entry.grant_id)
+                    elif not pin_present:
                         ambiguous = True
                         ledger.quarantine(
                             entry.grant_id, reason="pin_inventory_ambiguous"
                         )
                         continue
+                    else:
+                        expected.add(entry.grant_id)
                 elif entry.grant_id in published:
                     ambiguous = True
                     ledger.quarantine(
@@ -431,7 +494,7 @@ class NodeReconciler:
                     ambiguous = True
                     ledger.quarantine(entry.grant_id, reason="pin_staging_ambiguous")
                     continue
-                if entry.state in {"finishing", "terminal"}:
+                if entry.state == "finishing" or entry.state in cleanup_states:
                     try:
                         self.slurm.observe_terminal(
                             job_id=entry.job_id,
@@ -452,6 +515,9 @@ class NodeReconciler:
                         )
                         continue
                 try:
+                    retained_allocation = retained_allocations.get(entry.grant_id)
+                    if retained_allocation is not None:
+                        self._assert_retained(entry, retained_allocation)
                     classification = self.probe.classify(entry)
                 except GuardError:
                     classification = "ambiguous"
@@ -471,33 +537,42 @@ class NodeReconciler:
                             entry.grant_id, reason="runtime_identity_ambiguous"
                         )
                     continue
-                if classification == "terminal_empty" and entry.state == "terminal":
-                    job_storage: JobStorage | None = None
+                if classification == "terminal_empty" and entry.state in cleanup_states:
                     try:
                         storage_value = document["storage"]
                         if not isinstance(storage_value, dict):
                             raise GuardError("reconciliation_cleanup_ambiguous")
-                        job_storage = self.storage.recover(
-                            cast(dict[str, object], storage_value)
-                        )
-                        self.storage.cleanup(job_storage)
-                        job_storage = None
-                        self._progress()
-                        self.probe.cleanup_pins(entry)
-                        self._progress()
-                        if entry.grant_id in published and (
-                            self.pin_root / str(entry.grant_id)
-                        ).exists():
-                            raise GuardError("reconciliation_cleanup_ambiguous")
-                        self.probe.cleanup_cgroups(entry)
-                        self._progress()
+                        if entry.state == "terminal":
+                            entry = ledger.record_storage_cleanup_pending(
+                                entry.grant_id
+                            )
+                        if entry.state == "cleanup_storage_pending":
+                            self.storage.resume_cleanup(
+                                cast(dict[str, object], storage_value),
+                                retained=(
+                                    None
+                                    if retained_allocation is None
+                                    else retained_allocation.storage
+                                ),
+                            )
+                            self._progress()
+                            entry = ledger.record_pin_cleanup_pending(entry.grant_id)
+                        if entry.state == "cleanup_pins_pending":
+                            self.probe.cleanup_pins(entry)
+                            self._progress()
+                            if (self.pin_root / str(entry.grant_id)).exists():
+                                raise GuardError("reconciliation_cleanup_ambiguous")
+                            entry = ledger.record_cgroup_cleanup_pending(
+                                entry.grant_id
+                            )
+                        if entry.state == "cleanup_cgroups_pending":
+                            self.probe.cleanup_cgroups(entry)
+                            self._progress()
                         ledger.remove_terminal(
                             entry.grant_id,
                             allocation_empty=True,
                         )
                     except GuardError:
-                        if job_storage is not None:
-                            job_storage.close()
                         ambiguous = True
                         ledger.quarantine(
                             entry.grant_id,
@@ -1322,6 +1397,84 @@ class SystemReconciliationProbe:
         self._terminal_cgroups_empty(entry)
         self._verify_pin_tree(entry)
 
+    def _terminal_cgroups_cleanup_pending(self, entry: LedgerEntry) -> None:
+        document = entry.document()
+        request = document["projection_request"]
+        if not isinstance(request, dict):
+            raise GuardError("reconciliation_terminal_identity_invalid")
+        cgroup_path = request.get("cgroup_path")
+        cgroup_inode = request.get("cgroup_inode")
+        if not isinstance(cgroup_path, str) or type(cgroup_inode) is not int:
+            raise GuardError("reconciliation_terminal_identity_invalid")
+        batch = Path(cgroup_path)
+        root = batch / "loom-builder"
+        try:
+            batch.relative_to(self.config.containment.cgroup_root)
+            batch_metadata = os.lstat(batch)
+            if (
+                batch.resolve(strict=True) != batch
+                or not stat.S_ISDIR(batch_metadata.st_mode)
+                or batch_metadata.st_ino != cgroup_inode
+                or self._read_control(batch, "cgroup.procs", allow_empty=True).split()
+            ):
+                raise GuardError("reconciliation_terminal_identity_invalid")
+            try:
+                root_metadata = os.lstat(root)
+            except FileNotFoundError:
+                return
+            if (
+                stat.S_ISLNK(root_metadata.st_mode)
+                or not stat.S_ISDIR(root_metadata.st_mode)
+                or root.resolve(strict=True) != root
+            ):
+                raise GuardError("reconciliation_terminal_identity_invalid")
+            children: set[str] = set()
+            for child in root.iterdir():
+                child_metadata = os.lstat(child)
+                if stat.S_ISLNK(child_metadata.st_mode):
+                    raise GuardError("reconciliation_terminal_identity_invalid")
+                if stat.S_ISDIR(child_metadata.st_mode):
+                    children.add(child.name)
+            if not children.issubset({"trusted-service", "build-egress"}):
+                raise GuardError("reconciliation_terminal_identity_invalid")
+            for directory in (root, root / "trusted-service", root / "build-egress"):
+                try:
+                    metadata = os.lstat(directory)
+                except FileNotFoundError:
+                    continue
+                if (
+                    stat.S_ISLNK(metadata.st_mode)
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or self._read_control(
+                        directory,
+                        "cgroup.procs",
+                        allow_empty=True,
+                    ).split()
+                ):
+                    raise GuardError("reconciliation_terminal_identity_invalid")
+                for child in directory.iterdir():
+                    child_metadata = os.lstat(child)
+                    if stat.S_ISLNK(child_metadata.st_mode) or (
+                        directory != root and stat.S_ISDIR(child_metadata.st_mode)
+                    ):
+                        raise GuardError("reconciliation_terminal_identity_invalid")
+        except GuardError:
+            raise
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise GuardError("reconciliation_terminal_identity_invalid") from exc
+
+    def _pin_absent_or_exact(self, entry: LedgerEntry) -> None:
+        pin_path = entry.document()["pin_path"]
+        if not isinstance(pin_path, str):
+            raise GuardError("reconciliation_pin_identity_invalid")
+        try:
+            os.lstat(pin_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GuardError("reconciliation_pin_identity_invalid") from exc
+        self._verify_pin_tree(entry)
+
     @staticmethod
     def _assert_peer_dead(entry: LedgerEntry) -> None:
         descriptor: int | None = None
@@ -1340,9 +1493,31 @@ class SystemReconciliationProbe:
                 os.close(descriptor)
 
     def classify(self, entry: LedgerEntry) -> str:
-        if entry.state == "terminal":
+        if entry.state in {
+            "terminal",
+            "cleanup_storage_pending",
+            "cleanup_pins_pending",
+            "cleanup_cgroups_pending",
+        }:
             self._assert_peer_dead(entry)
-            self._terminal_empty(entry)
+            if entry.state == "cleanup_cgroups_pending":
+                self._terminal_cgroups_cleanup_pending(entry)
+                pin_path = entry.document()["pin_path"]
+                if not isinstance(pin_path, str):
+                    raise GuardError("reconciliation_pin_identity_invalid")
+                try:
+                    os.lstat(pin_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise GuardError("reconciliation_pin_identity_invalid") from exc
+                else:
+                    raise GuardError("reconciliation_pin_identity_invalid")
+            elif entry.state == "cleanup_pins_pending":
+                self._terminal_cgroups_empty(entry)
+                self._pin_absent_or_exact(entry)
+            else:
+                self._terminal_empty(entry)
             return "terminal_empty"
         peer = self._live_peer(entry)
         peer.close()
@@ -1371,21 +1546,34 @@ class SystemReconciliationProbe:
         path.rmdir()
 
     def cleanup_pins(self, entry: LedgerEntry) -> None:
-        self._terminal_empty(entry)
+        self._terminal_cgroups_empty(entry)
         document = entry.document()
         pin_path = document["pin_path"]
-        if pin_path is not None:
-            self._remove_tree(Path(cast(str, pin_path)))
+        if not isinstance(pin_path, str):
+            raise GuardError("reconciliation_cleanup_ambiguous")
+        try:
+            os.lstat(pin_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise GuardError("reconciliation_cleanup_ambiguous") from exc
+        self._verify_pin_tree(entry)
+        self._remove_tree(Path(pin_path))
 
     def cleanup_cgroups(self, entry: LedgerEntry) -> None:
-        self._terminal_cgroups_empty(entry)
+        if entry.state == "cleanup_cgroups_pending":
+            self._terminal_cgroups_cleanup_pending(entry)
+        else:
+            self._terminal_cgroups_empty(entry)
         document = entry.document()
         request = cast(dict[str, object], document["projection_request"])
         root = Path(cast(str, request["cgroup_path"])) / "loom-builder"
         try:
-            (root / "build-egress").rmdir()
-            (root / "trusted-service").rmdir()
-            root.rmdir()
+            for directory in (root / "build-egress", root / "trusted-service", root):
+                try:
+                    directory.rmdir()
+                except FileNotFoundError:
+                    pass
         except OSError as exc:
             raise GuardError("reconciliation_cleanup_ambiguous") from exc
 
@@ -1752,6 +1940,26 @@ class GuardService:
             raise GuardError("service_clock_invalid")
         return value.astimezone(UTC)
 
+    def _durable_expiry_deadline(self, *values: object) -> float:
+        expiries: list[datetime] = []
+        try:
+            for value in values:
+                if isinstance(value, datetime):
+                    parsed = value
+                elif isinstance(value, str) and value.endswith("Z"):
+                    parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+                else:
+                    raise ValueError
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError
+                expiries.append(parsed.astimezone(UTC))
+        except (ValueError, OverflowError):
+            raise GuardError("service_deadline_invalid") from None
+        if not expiries:
+            raise GuardError("service_deadline_invalid")
+        remaining = (min(expiries) - self._now_utc()).total_seconds()
+        return self._monotonic() + max(0.0, remaining)
+
     def _quarantine_unrecorded_mutation(self, grant_id: UUID) -> None:
         try:
             observed_at = _timestamp(self._now_utc())
@@ -1927,7 +2135,14 @@ class GuardService:
                         build_descriptor,
                         build_device,
                         build_inode,
-                        self._monotonic(),
+                        (
+                            self._monotonic()
+                            if entry.state == "projected"
+                            else self._durable_expiry_deadline(
+                                document["session_expires_at"],
+                                document["attestation_expires_at"],
+                            )
+                        ),
                     )
                     self._mark_progress()
             except GuardError:
@@ -2588,6 +2803,10 @@ class GuardService:
             self.slurm.observe(job_id=peer.job_id, grant_id=grant_id)
             self._mark_progress()
             peer.assert_unchanged()
+            live = self._live.get(grant_id)
+            if live is None:
+                raise GuardError("local_exchange_peer_invalid")
+            self._assert_live_descriptors(live)
             self.reconciler.assert_live(entry)
             self._mark_progress()
             session = self.authority.exchange(grant_id, exchange)
@@ -2622,6 +2841,10 @@ class GuardService:
                 session_expires_at=_timestamp(session.expires_at),
             )
             self._mark_progress()
+            live.next_attestation = self._durable_expiry_deadline(
+                session.expires_at,
+                document["attestation_expires_at"],
+            )
             response_id = self._new_uuid()
             response = _json(
                 {
@@ -2654,6 +2877,19 @@ class GuardService:
         finally:
             peer.close()
 
+    def _assert_live_descriptors(self, live: _LiveAllocation) -> None:
+        self.storage.assert_live(live.storage)
+        try:
+            metadata = os.fstat(live.build_egress_descriptor)
+        except OSError as exc:
+            raise GuardError("service_build_egress_identity_invalid") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino)
+            != (live.build_egress_device, live.build_egress_inode)
+        ):
+            raise GuardError("service_build_egress_identity_invalid")
+
     def _assert_allocation_peer(
         self,
         entry: LedgerEntry,
@@ -2672,6 +2908,7 @@ class GuardService:
         self.slurm.observe(job_id=peer.job_id, grant_id=entry.grant_id)
         self._mark_progress()
         peer.assert_unchanged()
+        self._assert_live_descriptors(live)
         self.reconciler.assert_live(entry)
         self._mark_progress()
         return live
@@ -2876,11 +3113,15 @@ class GuardService:
         renewal_request = dict(public_renewal)
         renewal_request.pop("session_token_sha256", None)
         renewal_request["session_token"] = current.session_token
-        renewed = self.authority.renew(
-            grant_id,
-            current.generation,
-            renewal_request,
-        )
+        try:
+            renewed = self.authority.renew(
+                grant_id,
+                current.generation,
+                renewal_request,
+            )
+        except GuardError as exc:
+            self._fail_live(grant_id, reason=exc.code)
+            raise
         self._mark_progress()
         attestation_value = public_renewal.get("attestation")
         if not isinstance(attestation_value, dict):
@@ -2916,9 +3157,9 @@ class GuardService:
                 attestation_expires_at=cast(str, attestation["expires_at"]),
             )
         self._mark_progress()
-        live.next_attestation = (
-            self._monotonic()
-            + self.config.service.attestation_interval_seconds
+        live.next_attestation = self._durable_expiry_deadline(
+            renewed.expires_at,
+            attestation["expires_at"],
         )
         response_id = self._new_uuid()
         response = {
@@ -3075,7 +3316,7 @@ class GuardService:
         entry = self.ledger.get(grant_id)
         if entry is None or entry.state not in {"exchanged", "finishing"}:
             raise GuardError("local_finish_unavailable")
-        self._assert_allocation_peer(entry, peer)
+        live = self._assert_allocation_peer(entry, peer)
         cleanup_document = cast(dict[str, object], dict(cleanup))
         self.ledger.record_finish(
             grant_id,
@@ -3084,6 +3325,10 @@ class GuardService:
             cleanup_sha256=self.ledger.document_sha256(cleanup_document),
         )
         self._mark_progress()
+        live.next_attestation = (
+            self._monotonic()
+            + self.config.service.attestation_interval_seconds
+        )
         response_id = self._new_uuid()
         self._send_local_response(
             connection,
@@ -3114,11 +3359,14 @@ class GuardService:
                     try:
                         live.peer.assert_unchanged()
                     except GuardError:
+                        self.reconciler.reconcile(
+                            self.ledger,
+                            retained={grant_id: live},
+                        )
+                        self._mark_progress()
                         completed = self._live.pop(grant_id, None)
                         if completed is not None:
                             completed.close()
-                        self.reconciler.reconcile(self.ledger)
-                        self._mark_progress()
                         reconciled = self.ledger.get(grant_id)
                         if reconciled is not None and reconciled.state != "quarantined":
                             raise GuardError(
@@ -3139,6 +3387,7 @@ class GuardService:
                 self.slurm.observe(job_id=entry.job_id, grant_id=grant_id)
                 self._mark_progress()
                 live.peer.assert_unchanged()
+                self._assert_live_descriptors(live)
                 self.reconciler.assert_live(entry)
                 self._mark_progress()
                 generation_value = document["attestation_generation"]

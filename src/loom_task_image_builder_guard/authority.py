@@ -842,7 +842,7 @@ class AuthorityClient:
         request: dict[str, object],
     ) -> SealedAuthorityPayload | None:
         grant = self._grant(grant_id)
-        claim_id = _uuid(request.get("claim_id"), code="authority_lease_invalid")
+        _uuid(request.get("claim_id"), code="authority_lease_invalid")
         if _uuid(request.get("grant_id"), code="authority_lease_invalid") != grant:
             raise GuardError("authority_lease_invalid")
         raw = self._request(
@@ -853,29 +853,6 @@ class AuthorityClient:
         )
         if not raw:
             return None
-        value = _exact(
-            _document(raw),
-            frozenset(
-                {
-                    "schema_version",
-                    "claim_id",
-                    "materialization_id",
-                    "attempt_id",
-                    "lease_epoch",
-                    "state",
-                    "deterministic_failure_count",
-                    "lease_expires_at",
-                    "plan",
-                }
-            ),
-            code="authority_lease_invalid",
-        )
-        if (
-            value["schema_version"] != "loom.task-image-materialization-claim.v1"
-            or _uuid(value["claim_id"], code="authority_lease_invalid") != claim_id
-            or value["state"] not in {"claimed", "running"}
-        ):
-            raise GuardError("authority_lease_invalid")
         return self._seal_response("guard-claim", raw)
 
     def _lease_operation(

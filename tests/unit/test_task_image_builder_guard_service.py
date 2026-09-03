@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -562,10 +563,41 @@ class _Storage:
             raise GuardError("storage_recovery_ambiguous")
         return job
 
+    def assert_live(self, job: JobStorage) -> None:
+        self.events.append("storage_assert_live")
+        try:
+            metadata = os.fstat(job.descriptor)
+        except OSError as exc:
+            raise GuardError("storage_live_ambiguous") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != (job.device, job.inode)
+            or job.path != self.root / job.path.name
+            or not job.path.is_dir()
+            or job.path.stat().st_ino != job.inode
+        ):
+            raise GuardError("storage_live_ambiguous")
+
     def cleanup(self, job: JobStorage) -> None:
         self.events.append("storage_cleanup")
         job.close()
         job.path.rmdir()
+
+    def resume_cleanup(
+        self,
+        document: dict[str, object],
+        *,
+        retained: JobStorage | None = None,
+    ) -> None:
+        path = Path(str(document["path"]))
+        if path.exists():
+            job = retained if retained is not None else self.recover(document)
+            self.assert_live(job)
+            self.cleanup(job)
+        elif path != self.root / path.name:
+            raise GuardError("storage_cleanup_ambiguous")
+        else:
+            self.events.append("storage_cleanup")
 
 
 class _Authority:
@@ -829,8 +861,13 @@ class _Reconciler:
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    def reconcile(self, ledger: GuardLedger) -> None:
-        del ledger
+    def reconcile(
+        self,
+        ledger: GuardLedger,
+        *,
+        retained: dict[UUID, object] | None = None,
+    ) -> None:
+        del ledger, retained
         self.events.append("reconcile")
 
     def assert_live(self, entry: object) -> None:
@@ -2069,6 +2106,308 @@ def test_renew_requires_current_session_and_atomically_returns_next_generation(
     ledger.close()
 
 
+def test_exchange_and_renewal_fences_follow_the_earliest_durable_expiry(
+    tmp_path: Path,
+) -> None:
+    monotonic = [100.0]
+    service, ledger, _peer, _slurm, _events = _service(
+        tmp_path,
+        monotonic=lambda: monotonic[0],
+    )
+    current_wire = _establish_session(service, ledger)
+
+    # The attestation expires 60 seconds after the service's wall clock.  The
+    # guard fence must remain later than the supervisor's one-third/15-second
+    # renewal schedule instead of retaining the projection's 15-second timer.
+    assert service._live[GRANT].next_attestation == pytest.approx(160.0)
+
+    service._uuid = iter(
+        (
+            UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+            UUID("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+        )
+    ).__next__
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "renew",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(RENEWAL),
+                }
+            ),
+            descriptor=current_fd,
+        )
+        os.close(current_fd)
+        response_payload, descriptor = receive_request(client, maximum=4096)
+        assert descriptor is not None
+        os.close(descriptor)
+        response = json.loads(response_payload)
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "ack",
+                    "response_id": response["response_id"],
+                }
+            ),
+        )
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    assert service._live[GRANT].next_attestation == pytest.approx(160.0)
+    service.close()
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("wall_offset", "expected_state", "revocations"),
+    [(30, "exchanged", 0), (64, "quarantined", 1)],
+)
+def test_recovered_exchange_uses_durable_expiry_instead_of_immediate_revocation(
+    tmp_path: Path,
+    wall_offset: int,
+    expected_state: str,
+    revocations: int,
+) -> None:
+    first, ledger, _peer, _slurm, _events = _service(tmp_path)
+    _establish_session(first, ledger)
+    first.close()
+    entry = ledger.get(GRANT)
+    assert entry is not None
+
+    events: list[str] = []
+    peer = _Peer(events)
+    peer.adopted = True
+    peer.cgroup_relative = (
+        peer.batch_cgroup_relative / "loom-builder" / "trusted-service"
+    )
+
+    class RecoveringReconciler(_Reconciler):
+        def recover_live(self) -> tuple[tuple[object, object], ...]:
+            return ((entry, peer),)
+
+    restarted: GuardService
+
+    def ready() -> None:
+        events.append("ready")
+        restarted.stop()
+
+    restarted = GuardService(
+        first.config,
+        ledger=ledger,
+        peers=_Peers(peer, events),
+        slurm=_Slurm(ledger, events),
+        derive_batch=lambda value, job_id: _Batch(),
+        containment=_Containment(
+            ledger,
+            peer,
+            events,
+            tmp_path / "fake-build-egress",
+        ),
+        storage=first.storage,
+        policy=object(),
+        authority=_Authority(ledger, peer, events),
+        reconciler=RecoveringReconciler(events),
+        node_boot_id=BOOT,
+        now_factory=lambda: NOW + timedelta(seconds=wall_offset),
+        monotonic=lambda: 100.0,
+        trusted_uid=os.geteuid(),
+        trusted_gid=os.getegid(),
+        ready=ready,
+    )
+
+    restarted.start()
+
+    recovered_entry = ledger.get(GRANT)
+    assert recovered_entry is not None
+    assert recovered_entry.state == expected_state
+    assert events.count("authority_revoke") == revocations
+    assert "authority_attest" not in events
+    restarted.close()
+    ledger.close()
+
+
+def test_failed_renewal_fences_the_predecessor_before_any_later_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, ledger, _peer, slurm, events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    service._uuid = iter(
+        (UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),)
+    ).__next__
+
+    def fail_renewal(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        events.append("authority_renew_failed")
+        raise GuardError("authority_transport_failed")
+
+    monkeypatch.setattr(service.authority, "renew", fail_renewal)
+    current_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "renew",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(RENEWAL),
+                }
+            ),
+            descriptor=current_fd,
+        )
+        os.close(current_fd)
+        failure_payload, failure_fd = receive_request(client, maximum=4096)
+        assert failure_fd is None
+        assert json.loads(failure_payload)["code"] == "authority_transport_failed"
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    assert ledger.get(GRANT).state == "quarantined"  # type: ignore[union-attr]
+    assert GRANT not in service._live
+    assert events.count("authority_revoke") == 1
+    assert slurm.quarantines == 1
+
+    claim_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "claim",
+                    "grant_id": str(GRANT),
+                    "operation_id": str(LEASE_OPERATION),
+                }
+            ),
+            descriptor=claim_fd,
+        )
+        os.close(claim_fd)
+        failure_payload, failure_fd = receive_request(client, maximum=4096)
+        assert failure_fd is None
+        assert json.loads(failure_payload)["code"] == "local_session_unavailable"
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    assert "authority_claim" not in events
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("descriptor_kind", "expected_code"),
+    [
+        ("storage", "storage_live_ambiguous"),
+        ("build_egress", "service_build_egress_identity_invalid"),
+    ],
+)
+def test_session_operations_are_anchored_to_retained_directory_descriptors(
+    tmp_path: Path,
+    descriptor_kind: str,
+    expected_code: str,
+) -> None:
+    service, ledger, peer, _slurm, events = _service(tmp_path)
+    current_wire = _establish_session(service, ledger)
+    live = service._live[GRANT]
+    replacement = tmp_path / f"replacement-{descriptor_kind}"
+    replacement.mkdir()
+    replacement_fd = os.open(replacement, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    target_fd = (
+        live.storage.descriptor
+        if descriptor_kind == "storage"
+        else live.build_egress_descriptor
+    )
+    os.dup2(replacement_fd, target_fd)
+    os.close(replacement_fd)
+    session_fd = create_sealed_memfd("session", current_wire, maximum=65536)
+    try:
+        with pytest.raises(GuardError) as caught:
+            service._current_session(GRANT, session_fd, peer)
+    finally:
+        os.close(session_fd)
+
+    assert caught.value.code == expected_code
+    assert "authority_claim" not in events
+    service.close()
+    ledger.close()
+
+
+def test_projected_attestation_fences_retained_storage_descriptor_drift(
+    tmp_path: Path,
+) -> None:
+    monotonic = [0.0]
+    service, ledger, peer, slurm, events = _service(
+        tmp_path,
+        monotonic=lambda: monotonic[0],
+    )
+    server, client = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = _run_connection(service, server)
+    try:
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "project",
+                    "grant_id": str(GRANT),
+                }
+            ),
+        )
+        response_payload, descriptor = _receive_projected_secret(client)
+        assert descriptor is not None
+        os.close(descriptor)
+        response = json.loads(response_payload)
+        send_packet(
+            client,
+            _json(
+                {
+                    "schema": LOCAL_SCHEMA,
+                    "operation": "ack",
+                    "response_id": response["response_id"],
+                }
+            ),
+        )
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    finally:
+        client.close()
+
+    live = service._live[GRANT]
+    replacement = tmp_path / "replacement-attestation-storage"
+    replacement.mkdir()
+    replacement_fd = os.open(replacement, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    os.dup2(replacement_fd, live.storage.descriptor)
+    os.close(replacement_fd)
+    monotonic[0] = 15.0
+
+    service.run_attestations_once()
+
+    assert "authority_attest" not in events
+    assert events.count("authority_revoke") == 1
+    assert ledger.get(GRANT).state == "quarantined"  # type: ignore[union-attr]
+    assert GRANT not in service._live
+    assert slurm.quarantines == 1
+    assert peer.closed is True
+    ledger.close()
+
+
 def test_renew_replays_after_new_generation_commit_before_local_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2329,15 +2668,17 @@ def test_finished_session_reconciles_after_peer_death_without_guard_restart(
     )
     events.clear()
     peer.alive = False
-    monotonic[0] = 15.0
+    monotonic[0] = 60.0
 
     service.run_attestations_once()
 
     assert ledger.get(GRANT) is None
-    assert events.index("peer_close") < events.index("storage_cleanup")
     assert events.index("slurm_terminal") < events.index("storage_cleanup")
+    assert events.index("storage_assert_live") < events.index("storage_cleanup")
+    assert "storage_recover" not in events
     assert events.index("storage_cleanup") < events.index("pin_cleanup")
     assert events.index("pin_cleanup") < events.index("cgroup_cleanup")
+    assert events.index("cgroup_cleanup") < events.index("peer_close")
     assert GRANT not in service._live
     assert peer.closed is True
     service.close()
@@ -2358,7 +2699,7 @@ def test_missed_post_exchange_renewal_revokes_without_autonomous_attestation(
         raise AssertionError("post-exchange attestation must require session possession")
 
     service._uuid = autonomous_attestation_id
-    monotonic[0] = 15.0
+    monotonic[0] = 60.0
 
     service.run_attestations_once()
 
@@ -3361,6 +3702,108 @@ def test_finishing_reconciliation_observes_terminal_then_cleans_storage_pins_cgr
     assert events.index("slurm_terminal") < events.index("storage_cleanup")
     assert events.index("storage_cleanup") < events.index("pin_cleanup")
     assert events.index("pin_cleanup") < events.index("cgroup_cleanup")
+    assert not pin_path.exists()
+    assert not (service.storage.root / str(GRANT)).exists()  # type: ignore[attr-defined]
+    assert slurm.quarantines == 0
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("crash_boundary", "pending_state"),
+    [
+        ("storage_marker", "cleanup_storage_pending"),
+        ("storage_delete", "cleanup_storage_pending"),
+        ("pin_marker", "cleanup_pins_pending"),
+        ("pin_delete", "cleanup_pins_pending"),
+        ("cgroup_marker", "cleanup_cgroups_pending"),
+        ("cgroup_delete", "cleanup_cgroups_pending"),
+    ],
+)
+def test_terminal_cleanup_resumes_after_each_durable_or_destructive_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_boundary: str,
+    pending_state: str,
+) -> None:
+    service, ledger, _peer, slurm, events = _service(tmp_path)
+    _establish_session(service, ledger)
+    cleanup: dict[str, object] = {
+        "descendant_processes": 0,
+        "mounts": 0,
+        "sockets": 0,
+        "open_files": 0,
+    }
+    ledger.record_finish(
+        GRANT,
+        operation_id=LEASE_OPERATION,
+        cleanup=cleanup,
+        cleanup_sha256=ledger.document_sha256(cleanup),
+    )
+    pin_path = service.config.containment.bpffs_root / str(GRANT)
+    pin_path.mkdir(mode=0o700)
+    service.close()
+    events.clear()
+    probe = _Probe(
+        service.config.containment.bpffs_root,
+        "terminal_empty",
+        events,
+    )
+    reconciler = NodeReconciler(
+        service.config.containment.bpffs_root,
+        probe=probe,
+        slurm=slurm,
+        storage=service.storage,
+        trusted_uid=os.geteuid(),
+        trusted_gid=os.getegid(),
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after(method: object):
+        def crashing(*args: object, **kwargs: object) -> object:
+            method(*args, **kwargs)  # type: ignore[operator]
+            raise SimulatedCrash
+
+        return crashing
+
+    targets: dict[str, tuple[object, str]] = {
+        "storage_marker": (ledger, "record_storage_cleanup_pending"),
+        "storage_delete": (service.storage, "resume_cleanup"),
+        "pin_marker": (ledger, "record_pin_cleanup_pending"),
+        "pin_delete": (probe, "cleanup_pins"),
+        "cgroup_marker": (ledger, "record_cgroup_cleanup_pending"),
+        "cgroup_delete": (probe, "cleanup_cgroups"),
+    }
+    target, name = targets[crash_boundary]
+    original = getattr(target, name)
+    monkeypatch.setattr(target, name, crash_after(original))
+
+    with pytest.raises(SimulatedCrash):
+        reconciler.reconcile(ledger)
+
+    interrupted = ledger.get(GRANT)
+    assert interrupted is not None
+    assert interrupted.state == pending_state
+    monkeypatch.setattr(target, name, original)
+
+    resumed_probe = _Probe(
+        service.config.containment.bpffs_root,
+        "terminal_empty",
+        events,
+    )
+    resumed = NodeReconciler(
+        service.config.containment.bpffs_root,
+        probe=resumed_probe,
+        slurm=slurm,
+        storage=service.storage,
+        trusted_uid=os.geteuid(),
+        trusted_gid=os.getegid(),
+    )
+
+    resumed.reconcile(ledger)
+
+    assert ledger.get(GRANT) is None
     assert not pin_path.exists()
     assert not (service.storage.root / str(GRANT)).exists()  # type: ignore[attr-defined]
     assert slurm.quarantines == 0

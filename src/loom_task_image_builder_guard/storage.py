@@ -471,9 +471,12 @@ class ProjectQuotaStorage:
             os.close(jobs_fd)
             os.close(root_fd)
 
-    def recover(self, document: dict[str, object]) -> JobStorage:
-        """Reopen the one durable job directory without weakening its identity."""
-
+    def _document_identity(
+        self,
+        document: dict[str, object],
+        *,
+        code: str,
+    ) -> tuple[Path, str, str]:
         expected_keys = {
             "schema_version",
             "path",
@@ -491,7 +494,7 @@ class ProjectQuotaStorage:
             path = Path(path_value) if isinstance(path_value, str) else Path()
             name = self._grant_name_from_path(path)
         except (GuardError, TypeError, ValueError):
-            raise GuardError("storage_recovery_ambiguous") from None
+            raise GuardError(code) from None
         scalar_values = (
             document.get("device"),
             document.get("inode"),
@@ -508,7 +511,7 @@ class ProjectQuotaStorage:
                 )
             ).hexdigest()
         except (TypeError, ValueError, UnicodeEncodeError):
-            raise GuardError("storage_recovery_ambiguous") from None
+            raise GuardError(code) from None
         if (
             document.get("schema_version") != 1
             or path != self.config.root / "jobs" / name
@@ -518,7 +521,16 @@ class ProjectQuotaStorage:
             or document.get("inode_limit") != self.config.inode_limit
             or quota_sha256 != proof_sha256
         ):
-            raise GuardError("storage_recovery_ambiguous")
+            raise GuardError(code)
+        return path, name, proof_sha256
+
+    def recover(self, document: dict[str, object]) -> JobStorage:
+        """Reopen the one durable job directory without weakening its identity."""
+
+        path, name, proof_sha256 = self._document_identity(
+            document,
+            code="storage_recovery_ambiguous",
+        )
         root_fd: int | None = None
         jobs_fd: int | None = None
         job_fd: int | None = None
@@ -565,6 +577,114 @@ class ProjectQuotaStorage:
             raise GuardError("storage_recovery_ambiguous") from exc
         finally:
             for descriptor in (job_fd, jobs_fd, root_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
+
+    def assert_live(self, job: JobStorage) -> None:
+        """Revalidate the retained capability against its durable path and quota."""
+
+        if not isinstance(job, JobStorage):
+            raise GuardError("storage_live_ambiguous")
+        try:
+            path, name, proof_sha256 = self._document_identity(
+                job.document(),
+                code="storage_live_ambiguous",
+            )
+            root_fd, jobs_fd = self._open_roots()
+        except GuardError:
+            raise GuardError("storage_live_ambiguous") from None
+        try:
+            if os.listdir(jobs_fd) != [name]:
+                raise GuardError("storage_live_ambiguous")
+            before = os.stat(name, dir_fd=jobs_fd, follow_symlinks=False)
+            opened = os.fstat(job.descriptor)
+            project_id, flags = self._syscalls.get_project(job.descriptor)
+            quota = self._syscalls.get_quota(self.config.root, self.config.project_id)
+            if (
+                path != job.path
+                or proof_sha256 != job.quota_sha256
+                or not stat.S_ISDIR(opened.st_mode)
+                or _directory_identity(before) != _directory_identity(opened)
+                or (opened.st_dev, opened.st_ino) != (job.device, job.inode)
+                or (opened.st_uid, opened.st_gid) != (self._uid, self._gid)
+                or stat.S_IMODE(opened.st_mode) != 0o700
+                or project_id != job.project_id
+                or not flags & FS_XFLAG_PROJINHERIT
+                or quota.byte_hard_limit != job.byte_limit
+                or quota.inode_hard_limit != job.inode_limit
+                or not 0 <= quota.used_bytes <= job.byte_limit
+                or not 1 <= quota.used_inodes <= job.inode_limit
+                or self._has_mount_at_or_below(job.path)
+            ):
+                raise GuardError("storage_live_ambiguous")
+        except GuardError:
+            raise
+        except OSError as exc:
+            raise GuardError("storage_live_ambiguous") from exc
+        finally:
+            os.close(jobs_fd)
+            os.close(root_fd)
+
+    def resume_cleanup(
+        self,
+        document: dict[str, object],
+        *,
+        retained: JobStorage | None = None,
+    ) -> None:
+        """Resume cleanup after its durable write-ahead marker."""
+
+        path, name, _proof_sha256 = self._document_identity(
+            document,
+            code="storage_cleanup_ambiguous",
+        )
+        root_fd: int | None = None
+        jobs_fd: int | None = None
+        try:
+            root_fd, jobs_fd = self._open_roots()
+            names = os.listdir(jobs_fd)
+            if names == [name]:
+                job = retained
+                if job is None:
+                    os.close(jobs_fd)
+                    jobs_fd = None
+                    os.close(root_fd)
+                    root_fd = None
+                    job = self.recover(document)
+                elif job.document() != document:
+                    raise GuardError("storage_cleanup_ambiguous")
+                self.assert_live(job)
+                self.cleanup(job)
+                return
+            if names or path.exists() or self._has_mount_at_or_below(path):
+                raise GuardError("storage_cleanup_ambiguous")
+            quota = self._syscalls.get_quota(self.config.root, self.config.project_id)
+            exact_zero_usage = quota == QuotaRecord(
+                self.config.byte_limit,
+                self.config.inode_limit,
+                0,
+                0,
+            )
+            if quota.is_clear():
+                return
+            if not exact_zero_usage:
+                raise GuardError("storage_cleanup_ambiguous")
+            self._syscalls.set_quota(
+                self.config.root,
+                self.config.project_id,
+                byte_limit=0,
+                inode_limit=0,
+            )
+            if not self._syscalls.get_quota(
+                self.config.root,
+                self.config.project_id,
+            ).is_clear():
+                raise GuardError("storage_cleanup_ambiguous")
+        except GuardError:
+            raise
+        except OSError as exc:
+            raise GuardError("storage_cleanup_ambiguous") from exc
+        finally:
+            for descriptor in (jobs_fd, root_fd):
                 if descriptor is not None:
                     os.close(descriptor)
 

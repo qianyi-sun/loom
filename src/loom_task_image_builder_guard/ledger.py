@@ -36,6 +36,9 @@ _STATES = frozenset(
         "exchanged",
         "finishing",
         "terminal",
+        "cleanup_storage_pending",
+        "cleanup_pins_pending",
+        "cleanup_cgroups_pending",
         "quarantined",
     }
 )
@@ -642,7 +645,12 @@ class GuardLedger:
             document["finish_operation_id"] is None or document["cleanup"] is None
         ):
             raise GuardError("ledger_document_invalid")
-        if state == "terminal" and document["terminal_reason"] is None:
+        if state in {
+            "terminal",
+            "cleanup_storage_pending",
+            "cleanup_pins_pending",
+            "cleanup_cgroups_pending",
+        } and document["terminal_reason"] is None:
             raise GuardError("ledger_document_invalid")
         if state == "quarantined" and document["quarantine_reason"] is None:
             raise GuardError("ledger_document_invalid")
@@ -1364,19 +1372,58 @@ class GuardLedger:
         document["pending_renewal_public_sha256"] = None
         return self._write(document, prior=prior)
 
+    def _record_cleanup_pending(
+        self,
+        grant_id: UUID,
+        *,
+        prior_state: str,
+        next_state: str,
+    ) -> LedgerEntry:
+        prior = self.get(grant_id)
+        if prior is None:
+            raise GuardError("ledger_cleanup_invalid")
+        if prior.state == next_state:
+            return prior
+        if prior.state != prior_state:
+            raise GuardError("ledger_cleanup_invalid")
+        document = self._update(prior)
+        document["state"] = next_state
+        return self._write(document, prior=prior)
+
+    def record_storage_cleanup_pending(self, grant_id: UUID) -> LedgerEntry:
+        return self._record_cleanup_pending(
+            grant_id,
+            prior_state="terminal",
+            next_state="cleanup_storage_pending",
+        )
+
+    def record_pin_cleanup_pending(self, grant_id: UUID) -> LedgerEntry:
+        return self._record_cleanup_pending(
+            grant_id,
+            prior_state="cleanup_storage_pending",
+            next_state="cleanup_pins_pending",
+        )
+
+    def record_cgroup_cleanup_pending(self, grant_id: UUID) -> LedgerEntry:
+        return self._record_cleanup_pending(
+            grant_id,
+            prior_state="cleanup_pins_pending",
+            next_state="cleanup_cgroups_pending",
+        )
+
     def removable_pin_paths(self, grant_id: UUID) -> tuple[Path, ...]:
         entry = self.get(grant_id)
-        if entry is None or entry.state != "terminal":
+        if entry is None or entry.state != "cleanup_pins_pending":
             return ()
         pin_path = entry.document()["pin_path"]
         return () if pin_path is None else (Path(cast(str, pin_path)),)
 
     def remove_terminal(self, grant_id: UUID, *, allocation_empty: bool) -> None:
         entry = self.get(grant_id)
-        if entry is None or entry.state != "terminal":
-            raise GuardError("ledger_not_terminal")
         if allocation_empty is not True:
             raise GuardError("ledger_allocation_not_empty")
+        if entry is None or entry.state != "cleanup_cgroups_pending":
+            raise GuardError("ledger_not_terminal")
         filename = self._filename(grant_id)
         try:
             os.unlink(filename, dir_fd=self._descriptor)
