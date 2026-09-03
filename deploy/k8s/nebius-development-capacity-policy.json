@@ -6,6 +6,7 @@
   "provider_required_quota_nodes": 16,
   "provider_required_quota_vcpu_millis": 512000,
   "target_execution_max_nodes": 10,
+  "target_execution_preset": "48vcpu-192gb",
   "target_concurrency": 200,
   "accepted_concurrency": 80,
   "task_cpu_millis": 2000,
@@ -27,18 +28,18 @@
   ],
   "policy": {
     "enabled": true,
-    "max_nodes": 4,
+    "max_nodes": 6,
     "max_vcpu_millis": 192000,
     "max_memory_mib": 786432,
-    "max_storage_mib": 262144,
-    "node_cpu_millis": 48000,
-    "node_memory_mib": 196608,
+    "max_storage_mib": 393216,
+    "node_cpu_millis": 32000,
+    "node_memory_mib": 131072,
     "node_storage_mib": 65536,
     "max_pending_jobs": 80,
     "max_unschedulable_jobs": 80,
     "max_image_pull_backoff_jobs": 0,
     "max_create_per_minute": 80,
     "observation_max_age_seconds": 300,
-    "reason": "Current-quota deployment: four 48-vCPU execution nodes support 80 concurrent 2-vCPU tasks with per-node overhead; scale-to-zero remains enabled while the 512-vCPU quota request for the 200-task target is pending."
+    "reason": "Current-quota deployment: six 32-vCPU execution nodes support 80 concurrent 2-vCPU tasks with aggregate CPU and memory overhead; scale-to-zero remains enabled while the 512-vCPU quota request for the 200-task 48-vCPU target is pending."
   }
 }

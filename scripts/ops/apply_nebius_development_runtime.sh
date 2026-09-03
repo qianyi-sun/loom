@@ -192,11 +192,12 @@ if (
     document.get("provider_required_quota_vcpu_millis") != 512_000
     or document.get("target_concurrency") != 200
     or document.get("target_execution_max_nodes") != 10
+    or document.get("target_execution_preset") != "48vcpu-192gb"
     or document.get("provider_current_quota_vcpu_millis") != 200_000
     or document.get("accepted_concurrency") != 80
     or document.get("task_cpu_millis") != 2_000
-    or policy.get("max_nodes") != 4
-    or policy.get("node_cpu_millis") != 48_000
+    or policy.get("max_nodes") != 6
+    or policy.get("node_cpu_millis") != 32_000
 ):
     raise SystemExit("Nebius development capacity policy does not cover the current 80-task and target 200-task envelopes")
 encoded = base64.b64encode(
