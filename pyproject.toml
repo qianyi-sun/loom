@@ -213,7 +213,7 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 python_version = "3.11"
 strict = true
 mypy_path = ["packages/loom-bundle-checksum"]
-files = ["packages/loom-bundle-checksum/loom_bundle_checksum", "src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_task_image_authority", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent", "src/loom_capacity_manager", "src/loom_capacity_executor", "src/loom_capacity_pool_controller", "src/loom_capacity_pool_executor", "src/loom_execution_actuator", "src/loom_execution_capacity_collector"]
+files = ["packages/loom-bundle-checksum/loom_bundle_checksum", "src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_task_image_authority", "src/loom_task_image_builder_guard", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent", "src/loom_capacity_manager", "src/loom_capacity_executor", "src/loom_capacity_pool_controller", "src/loom_capacity_pool_executor", "src/loom_execution_actuator", "src/loom_execution_capacity_collector"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package

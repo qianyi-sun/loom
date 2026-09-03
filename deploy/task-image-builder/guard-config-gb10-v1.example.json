@@ -1,0 +1,82 @@
+{
+  "schema": "loom.task-image-builder-node-guard-config/v1",
+  "cluster_id": "gb10",
+  "cpu_arch": "arm64",
+  "node_name": "trt-gb10-example",
+  "identity": {
+    "uid": 993,
+    "gid": 980,
+    "forbidden_supplementary_gids": [0, 27, 128],
+    "supervisor_path": "/usr/local/libexec/loom-task-builder-supervisor",
+    "supervisor_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "protocol": {
+    "socket_path": "/run/loom-task-image-builder-guard/guard.sock",
+    "socket_mode": 432,
+    "socket_gid": 980,
+    "max_packet_bytes": 4096,
+    "max_pending_peers": 16,
+    "requests_per_second": 32,
+    "ack_timeout_seconds": 5
+  },
+  "authority": {
+    "base_url": "https://task-image-authority.example.invalid:8445",
+    "ca_path": "/etc/loom/task-image-builder-guard/client-ca.pem",
+    "cert_path": "/etc/loom/task-image-builder-guard/client.pem",
+    "key_path": "/etc/loom/task-image-builder-guard/client-key.pem",
+    "bearer_path": "/etc/loom/task-image-builder-guard/node-bearer",
+    "timeout_seconds": 10,
+    "max_response_bytes": 65536
+  },
+  "commands": {
+    "scontrol": {
+      "path": "/usr/bin/scontrol",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "sacct": {
+      "path": "/usr/bin/sacct",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "bpftool": {
+      "path": "/opt/loom-task-image-builder-guard/releases/2222222222222222222222222222222222222222222222222222222222222222/bpftool",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "slurm": {
+    "cluster_name": "trt-gb10",
+    "request_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "account": "loom-task-builder",
+    "partition": "loom-task-builder",
+    "qos": "loom-task-image-builder-rootless-gb10",
+    "feature": "loom_rootless_buildkit",
+    "cpus": 8,
+    "memory_mib": 32768,
+    "wall_time": "02:00:00"
+  },
+  "containment": {
+    "cgroup_root": "/sys/fs/cgroup",
+    "bpffs_root": "/sys/fs/bpf/loom-task-image-builder",
+    "ledger_root": "/var/lib/loom-task-image-builder-guard/ledger",
+    "bpf_object_path": "/opt/loom-task-image-builder-guard/releases/2222222222222222222222222222222222222222222222222222222222222222/guard-network-v1.bpf.o",
+    "network_policy_path": "/etc/loom/task-image-builder-guard/network-policy-v1.json",
+    "pids_max": 4096,
+    "io_limits": [
+      {
+        "device": "259:1",
+        "rbps": 104857600,
+        "wbps": 104857600,
+        "riops": 10000,
+        "wiops": 10000
+      }
+    ],
+    "containment_policy_sha256": "e84d34d23dbd72f9a67a455946d2b1767e793a971b81b1dfb2d85b0b58a8ab52",
+    "resource_profile_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "bpf_program_sha256": "3712b357188c2ffb1b37391f6f28fcb17a414a1a331750fc00f2997bafde7b1d",
+    "bpf_map_schema_sha256": "272db8ab014f094fa3e1d4364ee94fd0892ad8db4c6422ec6e4409829feb69d4"
+  },
+  "service": {
+    "attestation_interval_seconds": 15,
+    "attestation_lifetime_seconds": 60,
+    "max_ledger_entries": 128
+  }
+}
