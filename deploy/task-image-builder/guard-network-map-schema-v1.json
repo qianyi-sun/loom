@@ -1,0 +1,41 @@
+{
+  "maps": {
+    "allow_v4": {
+      "key_size": 12,
+      "max_entries": 4096,
+      "type": "hash",
+      "value_size": 1
+    },
+    "allow_v6": {
+      "key_size": 24,
+      "max_entries": 4096,
+      "type": "hash",
+      "value_size": 1
+    },
+    "drop_counters": {
+      "key_size": 4,
+      "max_entries": 16,
+      "type": "percpu_array",
+      "value_size": 8
+    },
+    "flow_sockets": {
+      "key_size": 8,
+      "max_entries": 4096,
+      "type": "hash",
+      "value_size": 8
+    },
+    "scope_subject": {
+      "key_size": 4,
+      "max_entries": 1,
+      "type": "array",
+      "value_size": 4
+    },
+    "subject_limits": {
+      "key_size": 4,
+      "max_entries": 16,
+      "type": "hash",
+      "value_size": 120
+    }
+  },
+  "schema": "loom.task-image-builder-guard-bpf-maps/v1"
+}
